@@ -598,6 +598,44 @@ export type CycleResult = {
   previews: { created: number; ineligible: number; failed: number; skippedReason: string | null };
 };
 
+const NO_PREVIEWS = {
+  created: 0,
+  ineligible: 0,
+  failed: 0,
+  skippedReason: null as string | null,
+};
+
+/**
+ * Order-preview generation is best-effort: a Polymarket US outage must never
+ * break autonomous public-wallet ingestion.
+ */
+async function generatePreviewsSafely(experimentId: string): Promise<typeof NO_PREVIEWS> {
+  try {
+    const { generatePendingPreviews } = await import("./pmus/previews.server");
+    const result = await generatePendingPreviews(experimentId);
+    return {
+      created: result.created,
+      ineligible: result.ineligible,
+      failed: result.failed,
+      skippedReason: result.skippedReason,
+    };
+  } catch {
+    return { ...NO_PREVIEWS, skippedReason: "Order-preview generation was skipped after an error." };
+  }
+}
+
+type UnusedCycleResultShape = {
+  ranAt: string;
+  skipped: string | null;
+  newEvents: number;
+  pagesFetched: number;
+  process: ProcessResult;
+  marks: { updated: number; failed: number };
+  reconciliation: { ok: boolean; mismatches: number } | null;
+  lagSeconds: number | null;
+  previews: { created: number; ineligible: number; failed: number; skippedReason: string | null };
+};
+
 export async function runIngestCycle(workerId: string): Promise<CycleResult> {
   const ranAt = new Date().toISOString();
   const experiment = await getExperiment();
