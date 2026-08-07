@@ -2,12 +2,30 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 
 import { Panel, EmptyState } from "@/components/mirror/panels";
-import { formatShares, formatTime, formatUsd } from "@/lib/mirror-trader";
+import { formatShares, formatUsd } from "@/lib/mirror-trader";
 import {
   decidePmusPreview,
   getPmusPanel,
   verifyPmusConnectionFn,
 } from "@/lib/pmus.functions";
+
+function usd(v: number | null): string {
+  return v === null ? "Unavailable" : formatUsd(v);
+}
+
+function shares(v: number | null): string {
+  return v === null ? "—" : formatShares(v);
+}
+
+function stamp(iso: string | null): string {
+  if (!iso) return "never";
+  return new Date(iso).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 function Badge({ tone, children }: { tone: "ok" | "warn" | "bad" | "muted"; children: string }) {
   const cls =
@@ -58,7 +76,7 @@ export function PmusSection() {
                 {conn.connected ? "Connection verified" : "Connection not verified"}
               </Badge>
               <Badge tone="muted">{`Last verified: ${
-                conn.lastVerifiedAt ? formatTime(conn.lastVerifiedAt) : "never"
+                stamp(conn.lastVerifiedAt)
               }`}</Badge>
             </div>
 
@@ -68,15 +86,15 @@ export function PmusSection() {
               <dl className="grid grid-cols-2 gap-3 rounded-md border border-border p-3 text-xs sm:grid-cols-4">
                 <div>
                   <dt className="text-muted-foreground">Buying power</dt>
-                  <dd className="font-medium">{formatUsd(conn.accountSummary.buyingPower)}</dd>
+                  <dd className="font-medium">{usd(conn.accountSummary.buyingPower)}</dd>
                 </div>
                 <div>
                   <dt className="text-muted-foreground">Balance</dt>
-                  <dd className="font-medium">{formatUsd(conn.accountSummary.currentBalance)}</dd>
+                  <dd className="font-medium">{usd(conn.accountSummary.currentBalance)}</dd>
                 </div>
                 <div>
                   <dt className="text-muted-foreground">Asset notional</dt>
-                  <dd className="font-medium">{formatUsd(conn.accountSummary.assetNotional)}</dd>
+                  <dd className="font-medium">{usd(conn.accountSummary.assetNotional)}</dd>
                 </div>
                 <div>
                   <dt className="text-muted-foreground">Open positions</dt>
@@ -107,11 +125,10 @@ export function PmusSection() {
           <p className="text-sm text-destructive">Could not load the approval queue.</p>
         ) : data.pending.length === 0 ? (
           <EmptyState
-            title="No previews awaiting approval"
-            detail={
+            message={
               conn?.configured
-                ? "Previews appear when the follower detects a compatible trade with an exact Polymarket US market match."
-                : "Add Polymarket US credentials to generate order previews."
+                ? "No previews awaiting approval. Previews appear when the follower detects a compatible trade with an exact Polymarket US market match."
+                : "No previews awaiting approval. Add Polymarket US credentials to generate order previews."
             }
           />
         ) : (
@@ -124,15 +141,15 @@ export function PmusSection() {
                 </div>
                 <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
                   <Field label="Source action" value={`${card.sourceSide} ${card.outcome ?? ""}`} />
-                  <Field label="Source price" value={formatUsd(card.sourcePrice)} />
-                  <Field label="Candidate size" value={`${formatShares(card.candidateShares)} sh`} />
-                  <Field label="Candidate notional" value={formatUsd(card.candidateNotional)} />
+                  <Field label="Source price" value={usd(card.sourcePrice)} />
+                  <Field label="Candidate size" value={`${shares(card.candidateShares)} sh`} />
+                  <Field label="Candidate notional" value={usd(card.candidateNotional)} />
                   <Field label="Preview side" value={card.previewSide ?? "—"} />
-                  <Field label="Preview price" value={formatUsd(card.previewPrice)} />
-                  <Field label="Preview qty" value={formatShares(card.previewQuantity ?? 0)} />
-                  <Field label="Est. cost" value={formatUsd(card.previewEstimatedCost)} />
-                  <Field label="Available balance" value={formatUsd(card.availableBalance)} />
-                  <Field label="Detected" value={formatTime(card.createdAt)} />
+                  <Field label="Preview price" value={usd(card.previewPrice)} />
+                  <Field label="Preview qty" value={shares(card.previewQuantity)} />
+                  <Field label="Est. cost" value={usd(card.previewEstimatedCost)} />
+                  <Field label="Available balance" value={usd(card.availableBalance)} />
+                  <Field label="Detected" value={stamp(card.createdAt)} />
                 </div>
                 <div className="mt-3 flex gap-2">
                   <button
