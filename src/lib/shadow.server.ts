@@ -35,6 +35,8 @@ const PAGE_SIZE = 250;
 const LIVE_PAGES = 2; // bounded incremental window per poll
 const BOOTSTRAP_PAGES = 4;
 const LEASE_SECONDS = 180;
+/** Exposed for the lease regression tests only. */
+export const LEASE_SECONDS_FOR_TEST = LEASE_SECONDS;
 const MAX_MARK_REFRESH = 20;
 const PROCESS_BATCH = 300;
 
@@ -101,32 +103,21 @@ export async function raiseAlert(
 
 export type Lease = { fence: number; workerId: string };
 
+/**
+ * Atomic lease acquisition. One SQL statement decides ownership and bumps the
+ * fence; there is no read-then-decide window, so two overlapping cycles can
+ * never both believe they hold the lease. Returns null when the lease is held
+ * by a different, still-live worker.
+ */
 export async function acquireLease(workerId: string): Promise<Lease | null> {
-  const { data: current } = await supabaseAdmin
-    .from("worker_status")
-    .select("*")
-    .eq("id", WORKER_ID)
-    .maybeSingle();
-
-  const now = Date.now();
-  const leaseExpires = current?.lease_expires_at ? new Date(current.lease_expires_at).getTime() : 0;
-  const heldByOther = current?.worker_id && current.worker_id !== workerId && leaseExpires > now;
-  if (heldByOther) return null;
-
-  const fence = (current?.fence ?? 0) + 1;
-  const { error } = await supabaseAdmin
-    .from("worker_status")
-    .upsert({
-      id: WORKER_ID,
-      worker_id: workerId,
-      fence,
-      state: "running",
-      heartbeat_at: new Date(now).toISOString(),
-      lease_expires_at: new Date(now + LEASE_SECONDS * 1000).toISOString(),
-      updated_at: new Date(now).toISOString(),
-    })
-    .select();
+  const { data, error } = await supabaseAdmin.rpc("acquire_worker_lease", {
+    p_id: WORKER_ID,
+    p_worker_id: workerId,
+    p_lease_seconds: LEASE_SECONDS,
+  });
   if (error) throw new Error(error.message);
+  const fence = typeof data === "number" ? data : null;
+  if (fence === null) return null;
   return { fence, workerId };
 }
 
@@ -152,8 +143,13 @@ async function releaseLease(
       updated_at: new Date().toISOString(),
     })
     .eq("id", WORKER_ID)
-    .eq("fence", lease.fence);
+    .eq("fence", lease.fence)
+    // A stale owner must not be able to clobber the worker that took over.
+    .eq("worker_id", lease.workerId);
 }
+
+/** Test-only alias so the lease fencing rules can be asserted directly. */
+export const releaseLeaseForTest = releaseLease;
 
 /* ------------------------------------------------------------------ */
 /* Experiment / config                                                 */
@@ -189,12 +185,22 @@ export async function getExperiment(): Promise<Experiment> {
 /* Ingestion                                                          */
 /* ------------------------------------------------------------------ */
 
+/**
+ * takerOnly=false is explicit: the endpoint default omits a large share of this
+ * wallet's activity (maker-side fills), so relying on the default would leave
+ * the source history materially incomplete.
+ */
+export const TAKER_ONLY_PARAM = "takerOnly=false";
+
+export function buildTradesUrl(limit: number, offset: number): string {
+  return `${DATA_API}/trades?user=${TARGET_WALLET}&${TAKER_ONLY_PARAM}&limit=${limit}&offset=${offset}`;
+}
+
 async function fetchSourceWindow(pages: number): Promise<{ raw: Json[]; pagesFetched: number }> {
-  const base = `${DATA_API}/trades?user=${TARGET_WALLET}`;
   const raw: Json[] = [];
   let pagesFetched = 0;
   for (let p = 0; p < pages; p += 1) {
-    const page = await getArray(`${base}&limit=${PAGE_SIZE}&offset=${p * PAGE_SIZE}`);
+    const page = await getArray(buildTradesUrl(PAGE_SIZE, p * PAGE_SIZE));
     pagesFetched += 1;
     raw.push(...page);
     if (page.length < PAGE_SIZE) break;
@@ -762,6 +768,22 @@ export async function loadDashboard() {
         .eq("wallet", TARGET_WALLET),
     ]);
 
+  const status = statusRes.data;
+
+  // Lifetime + last-poll counts both come from source_events (the source of
+  // truth). The hand-maintained worker_status.events_ingested counter is not
+  // presented as authoritative.
+  const totalEventsPersisted = countsRes.count ?? 0;
+  let lastPollEventsInserted: number | null = null;
+  if (status?.last_poll_at) {
+    const { count } = await supabaseAdmin
+      .from("source_events")
+      .select("*", { count: "exact", head: true })
+      .eq("wallet", TARGET_WALLET)
+      .gte("first_seen_at", status.last_poll_at);
+    lastPollEventsInserted = count ?? 0;
+  }
+
   const positions = positionsRes.data ?? [];
   const open: DashboardOpenPosition[] = positions
     .filter((p) => Number(p.shares) > 0)
@@ -802,7 +824,6 @@ export async function loadDashboard() {
     ? roundUsd(open.reduce((s, p) => s + p.shares * (p.mark as number), 0))
     : null;
 
-  const status = statusRes.data;
   const heartbeatAgeSeconds = status?.heartbeat_at
     ? Math.round((nowMs - new Date(status.heartbeat_at).getTime()) / 1000)
     : null;
@@ -831,14 +852,15 @@ export async function loadDashboard() {
       lastPollAt: status?.last_poll_at ?? null,
       lastError: status?.last_error ?? null,
       pollFailures: status?.poll_failures ?? 0,
-      eventsIngested: status?.events_ingested ?? 0,
       lagSeconds: status?.lag_seconds ?? null,
       fence: status?.fence ?? 0,
       bootstrapComplete: checkpointRes.data?.bootstrap_complete ?? false,
       lastSourceTs: checkpointRes.data?.last_source_ts ?? 0,
     },
     totals: {
-      persistedEvents: countsRes.count ?? 0,
+      totalEventsPersisted,
+      lastPollEventsInserted,
+      persistedEvents: totalEventsPersisted,
       openPositions: open.length,
       openCostBasis,
       markedValue,
@@ -890,6 +912,10 @@ export async function loadDashboard() {
       acknowledged: a.acknowledged,
     })),
     degradedIdentityCount: (eventsRes.data ?? []).filter((e) => e.identity_degraded).length,
+    sourceCompleteness: {
+      status: "COMPLETE AS AVAILABLE FROM PUBLIC API" as const,
+      detail: `Public trade history requested with ${TAKER_ONLY_PARAM}, which returns maker and taker fills.`,
+    },
   };
 }
 
