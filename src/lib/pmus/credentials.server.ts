@@ -11,13 +11,21 @@ export type PmusCredentials = {
 };
 
 export function isPmusConfigured(): boolean {
-  return Boolean(process.env["POLYMARKET_KEY_ID"] && process.env["POLYMARKET_SECRET_KEY"]);
+  return loadPmusCredentials() !== null;
+}
+
+/**
+ * Removes copy/paste artefacts only: leading/trailing whitespace and any CR/LF
+ * characters. The Base64 payload itself is never otherwise modified.
+ */
+export function normalizeSecretValue(value: string): string {
+  return value.replace(/[\r\n]/g, "").trim();
 }
 
 /** Returns credentials or null when not configured. Server-only. */
 export function loadPmusCredentials(): PmusCredentials | null {
-  const keyId = process.env["POLYMARKET_KEY_ID"];
-  const secretKey = process.env["POLYMARKET_SECRET_KEY"];
+  const keyId = normalizeSecretValue(process.env["POLYMARKET_KEY_ID"] ?? "");
+  const secretKey = normalizeSecretValue(process.env["POLYMARKET_SECRET_KEY"] ?? "");
   if (!keyId || !secretKey) return null;
   return { keyId, secretKey };
 }

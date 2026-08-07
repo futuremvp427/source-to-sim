@@ -27,8 +27,10 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 async function importSigningKey(secretKeyBase64: string): Promise<CryptoKey> {
-  const raw = base64ToBytes(secretKeyBase64);
+  const raw = base64ToBytes(secretKeyBase64.replace(/[\r\n]/g, "").trim());
   if (raw.length < 32) throw new Error("Polymarket US secret key is malformed.");
+  // Official SDK behaviour: a 64-byte value is seed||publicKey, so the private
+  // key is always the FIRST 32 decoded bytes. Never sign with the Base64 text.
   const seed = raw.slice(0, 32);
   const pkcs8 = new Uint8Array(PKCS8_ED25519_PREFIX.length + 32);
   pkcs8.set(PKCS8_ED25519_PREFIX, 0);
