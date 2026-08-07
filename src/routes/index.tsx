@@ -8,11 +8,13 @@ import { getMirrorSnapshot } from "@/lib/mirror-trader.functions";
 import {
   TARGET_WALLET,
   buildPaperBook,
+  countWeather,
   derivePaperActions,
   filterTrades,
   formatShares,
   formatTime,
   formatUsd,
+  isWeatherMarket,
   type TradeSide,
 } from "@/lib/mirror-trader";
 
@@ -43,6 +45,7 @@ function Dashboard() {
   const [search, setSearch] = useState("");
   const [side, setSide] = useState<"ALL" | TradeSide>("ALL");
   const [paperAmount, setPaperAmount] = useState(10);
+  const [weatherOnly, setWeatherOnly] = useState<boolean | null>(null);
 
   const query = useQuery({
     queryKey: ["mirror-snapshot"],
@@ -52,14 +55,23 @@ function Dashboard() {
 
   const snapshot = query.data;
 
+  const weatherCounts = useMemo(
+    () => (snapshot ? countWeather(snapshot.trades) : { weather: 0, other: 0 }),
+    [snapshot],
+  );
+  // Default ON when the wallet has weather trades; user choice always wins.
+  const weatherFilterOn = weatherOnly ?? weatherCounts.weather > 0;
+
   const derived = useMemo(() => {
     if (!snapshot) return null;
-    const visibleTrades = filterTrades(snapshot.trades, search, side);
-    const actions = derivePaperActions(snapshot.trades, paperAmount);
+    const scoped = weatherFilterOn
+      ? snapshot.trades.filter((t) => isWeatherMarket(t.title, t.slug))
+      : snapshot.trades;
+    const visibleTrades = filterTrades(scoped, search, side);
+    const actions = derivePaperActions(scoped, paperAmount);
     const visibleActions = derivePaperActions(visibleTrades, paperAmount);
     const book = buildPaperBook(actions, snapshot.positions, snapshot.fetchedAt, snapshot.mode);
     const settledPaper = book.settled.reduce((s, r) => s + r.realized, 0);
-    const sourceRealized = snapshot.positions.reduce((s, p) => s + p.realizedPnl, 0);
     const openWithMark = book.open.filter((p) => p.openPnl !== null);
     const openPaperPnl = openWithMark.reduce((s, p) => s + (p.openPnl ?? 0), 0);
     return {
@@ -67,12 +79,11 @@ function Dashboard() {
       visibleActions,
       book,
       settledPaper,
-      sourceRealized,
       openPaperPnl,
       openMarkCoverage: `${openWithMark.length}/${book.open.length}`,
       hasFreshMark: openWithMark.length > 0,
     };
-  }, [snapshot, search, side, paperAmount]);
+  }, [snapshot, search, side, paperAmount, weatherFilterOn]);
 
   const isDemo = snapshot?.mode === "DEMO";
   const loading = query.isPending;
