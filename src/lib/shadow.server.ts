@@ -595,6 +595,7 @@ export type CycleResult = {
   marks: { updated: number; failed: number };
   reconciliation: { ok: boolean; mismatches: number } | null;
   lagSeconds: number | null;
+  previews: { created: number; ineligible: number; failed: number; skippedReason: string | null };
 };
 
 export async function runIngestCycle(workerId: string): Promise<CycleResult> {
@@ -610,6 +611,7 @@ export async function runIngestCycle(workerId: string): Promise<CycleResult> {
       marks: { updated: 0, failed: 0 },
       reconciliation: null,
       lagSeconds: null,
+      previews: NO_PREVIEWS,
     };
   }
 
@@ -624,6 +626,7 @@ export async function runIngestCycle(workerId: string): Promise<CycleResult> {
       marks: { updated: 0, failed: 0 },
       reconciliation: null,
       lagSeconds: null,
+      previews: NO_PREVIEWS,
     };
   }
 
@@ -657,6 +660,7 @@ export async function runIngestCycle(workerId: string): Promise<CycleResult> {
     const process = await processPendingEvents(experiment);
     const marks = await refreshMarks(experiment.id);
     const reconciliation = inserted > 0 || !bootstrapped ? await reconcile() : null;
+    const previews = await generatePreviewsSafely(experiment.id);
 
     const newest = events.length ? Math.max(...events.map((e) => e.sourceTs)) : 0;
     const lagSeconds = newest > 0 ? Math.max(0, Math.round(Date.now() / 1000 - newest)) : null;
@@ -703,6 +707,7 @@ export async function runIngestCycle(workerId: string): Promise<CycleResult> {
       marks,
       reconciliation,
       lagSeconds,
+      previews,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
