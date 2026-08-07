@@ -584,8 +584,16 @@ function Dashboard() {
                   : `${worker.lagSeconds}s behind newest source fill`}
               </Row>
               <Row label="Events">
-                {totals?.persistedEvents ?? 0} persisted · {worker?.eventsIngested ?? 0} ingested by
-                this worker · bootstrap {worker?.bootstrapComplete ? "complete" : "pending"}
+                {totals?.totalEventsPersisted ?? 0} persisted in total (lifetime, counted from
+                stored events) ·{" "}
+                {totals?.lastPollEventsInserted == null
+                  ? "latest poll insert count unavailable"
+                  : `${totals.lastPollEventsInserted} inserted by the latest poll`}{" "}
+                · bootstrap {worker?.bootstrapComplete ? "complete" : "pending"}
+              </Row>
+              <Row label="Source data completeness">
+                {data?.sourceCompleteness.status ?? "Unavailable"}
+                {data?.sourceCompleteness.detail ? ` — ${data.sourceCompleteness.detail}` : ""}
               </Row>
               <Row label="Poll failures">
                 {worker?.pollFailures ?? 0}
