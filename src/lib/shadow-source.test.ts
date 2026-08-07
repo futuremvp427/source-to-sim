@@ -7,7 +7,8 @@ describe("source completeness", () => {
   it("every public trades request explicitly sets takerOnly=false", () => {
     const urls = src.match(/\/trades\?[^`"']+/g) ?? [];
     expect(urls.length).toBeGreaterThan(0);
-    for (const u of urls) expect(u).toContain("takerOnly=false");
+    expect(src).toContain('export const TAKER_ONLY_PARAM = "takerOnly=false";');
+    for (const u of urls) expect(u).toMatch(/takerOnly=false|\$\{TAKER_ONLY_PARAM\}/);
   });
 });
 
