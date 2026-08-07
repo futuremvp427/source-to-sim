@@ -33,7 +33,7 @@ export function Stat({
 }: {
   label: string;
   value: string;
-  hint?: string;
+  hint?: string | undefined;
   tone?: "default" | "positive" | "negative" | "muted";
 }) {
   const toneClass =
