@@ -165,7 +165,7 @@ function Dashboard() {
           label="Settled paper P&L"
           value={loading ? "—" : formatUsd(derived?.settledPaper ?? 0)}
           tone={(derived?.settledPaper ?? 0) >= 0 ? "positive" : "negative"}
-          hint="Closed simulated positions"
+          hint="DERIVED, window-bounded"
         />
         <Stat
           label="Open paper P&L"
@@ -410,7 +410,7 @@ function Dashboard() {
         {/* Settled P&L */}
         <Panel
           title="Settled P&L"
-          subtitle="Paper realizations from closed simulated positions, plus the wallet's reported realized P&L"
+          subtitle="Paper realizations are DERIVED and window-bounded; source settled P&L is only shown when verifiable"
         >
           {loading ? (
             <RowSkeleton rows={3} />
@@ -418,18 +418,25 @@ function Dashboard() {
             <>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <Stat
-                  label="Paper settled total (derived)"
+                  label="Paper settled total (DERIVED, window-bounded)"
                   value={formatUsd(derived?.settledPaper ?? 0)}
                   tone={(derived?.settledPaper ?? 0) >= 0 ? "positive" : "negative"}
-                  hint="Derived from source fills only"
+                  hint={`Only from the ${snapshot?.history.count ?? 0} fetched source fills — not lifetime`}
                 />
                 <Stat
-                  label={`Source reported realized P&L${isDemo ? " (DEMO)" : ""}`}
-                  value={formatUsd(derived?.sourceRealized ?? 0)}
-                  tone={(derived?.sourceRealized ?? 0) >= 0 ? "positive" : "negative"}
-                  hint="Reported by the public positions endpoint — not recomputed"
+                  label="Source settled P&L (wallet)"
+                  value={
+                    snapshot?.sourceSettledPnl === null || snapshot?.sourceSettledPnl === undefined
+                      ? "Unavailable"
+                      : formatUsd(snapshot.sourceSettledPnl)
+                  }
+                  tone="muted"
+                  hint="No verified closed/settled endpoint — no total is invented"
                 />
               </div>
+              {snapshot ? (
+                <p className="mt-2 text-xs text-muted-foreground">{snapshot.sourceSettledNote}</p>
+              ) : null}
               {!derived?.book.settled.length ? (
                 <EmptyState message="No settled paper positions yet." />
               ) : (
