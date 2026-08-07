@@ -140,7 +140,7 @@ export function PmusSection() {
                   <Badge tone="ok">{card.compatibility}</Badge>
                 </div>
                 <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  <Field label="Source market" value={card.marketTitle ?? card.sourceSlug ?? "—"} />
+                  <Field label="Source market" value={card.marketTitle ?? "—"} />
                   <Field label="US market" value={card.usMarketSlug ?? "—"} />
                   <Field label="Source action" value={`${card.sourceSide} ${card.outcome ?? ""}`} />
                   <Field label="Source price" value={usd(card.sourcePrice)} />
