@@ -763,6 +763,22 @@ export async function loadDashboard() {
         .eq("wallet", TARGET_WALLET),
     ]);
 
+  const status = statusRes.data;
+
+  // Lifetime + last-poll counts both come from source_events (the source of
+  // truth). The hand-maintained worker_status.events_ingested counter is not
+  // presented as authoritative.
+  const totalEventsPersisted = countsRes.count ?? 0;
+  let lastPollEventsInserted: number | null = null;
+  if (status?.last_poll_at) {
+    const { count } = await supabaseAdmin
+      .from("source_events")
+      .select("*", { count: "exact", head: true })
+      .eq("wallet", TARGET_WALLET)
+      .gte("first_seen_at", status.last_poll_at);
+    lastPollEventsInserted = count ?? 0;
+  }
+
   const positions = positionsRes.data ?? [];
   const open: DashboardOpenPosition[] = positions
     .filter((p) => Number(p.shares) > 0)
@@ -803,7 +819,6 @@ export async function loadDashboard() {
     ? roundUsd(open.reduce((s, p) => s + p.shares * (p.mark as number), 0))
     : null;
 
-  const status = statusRes.data;
   const heartbeatAgeSeconds = status?.heartbeat_at
     ? Math.round((nowMs - new Date(status.heartbeat_at).getTime()) / 1000)
     : null;
@@ -832,14 +847,15 @@ export async function loadDashboard() {
       lastPollAt: status?.last_poll_at ?? null,
       lastError: status?.last_error ?? null,
       pollFailures: status?.poll_failures ?? 0,
-      eventsIngested: status?.events_ingested ?? 0,
       lagSeconds: status?.lag_seconds ?? null,
       fence: status?.fence ?? 0,
       bootstrapComplete: checkpointRes.data?.bootstrap_complete ?? false,
       lastSourceTs: checkpointRes.data?.last_source_ts ?? 0,
     },
     totals: {
-      persistedEvents: countsRes.count ?? 0,
+      totalEventsPersisted,
+      lastPollEventsInserted,
+      persistedEvents: totalEventsPersisted,
       openPositions: open.length,
       openCostBasis,
       markedValue,
@@ -891,6 +907,10 @@ export async function loadDashboard() {
       acknowledged: a.acknowledged,
     })),
     degradedIdentityCount: (eventsRes.data ?? []).filter((e) => e.identity_degraded).length,
+    sourceCompleteness: {
+      status: "COMPLETE AS AVAILABLE FROM PUBLIC API" as const,
+      detail: `Public trade history requested with ${TAKER_ONLY_PARAM}, which returns maker and taker fills.`,
+    },
   };
 }
 
