@@ -611,6 +611,10 @@ const NO_PREVIEWS = {
  */
 async function generatePreviewsSafely(experimentId: string): Promise<typeof NO_PREVIEWS> {
   try {
+    // Bounded, self-throttled public weather-availability scan. Its result is
+    // what triggers automatic rechecks of previously unmatched source markets.
+    const { runAvailabilityScan } = await import("./pmus/availability.server");
+    await runAvailabilityScan();
     const { generatePendingPreviews } = await import("./pmus/previews.server");
     const result = await generatePendingPreviews(experimentId);
     return {
