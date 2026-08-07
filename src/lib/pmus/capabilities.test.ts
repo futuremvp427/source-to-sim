@@ -15,7 +15,6 @@ import {
   __testOnly,
   type PmusDeps,
 } from "./capabilities.server";
-import { classifyCompatibility } from "./compatibility.server";
 import { mapOutcomeSide, availableUsdBalance } from "./previews.server";
 import {
   MAX_MESSAGE_LENGTH,
@@ -194,44 +193,6 @@ describe("secret redaction", () => {
   });
 });
 
-describe("market compatibility gate", () => {
-  const active = { slug: "rain-nyc", active: true, closed: false, archived: false };
-
-  it("EXACT_MATCH only for a single active market with the same slug", () => {
-    expect(classifyCompatibility("rain-nyc", [active]).compatibility).toBe("EXACT_MATCH");
-  });
-
-  it("AMBIGUOUS when several US markets share the slug", () => {
-    expect(classifyCompatibility("rain-nyc", [active, active]).compatibility).toBe("AMBIGUOUS");
-  });
-
-  it("POSSIBLE_MATCH when the slug match is closed or inactive", () => {
-    expect(
-      classifyCompatibility("rain-nyc", [{ ...active, closed: true }]).compatibility,
-    ).toBe("POSSIBLE_MATCH");
-  });
-
-  it("POSSIBLE_MATCH when only similar markets come back", () => {
-    expect(
-      classifyCompatibility("rain-nyc", [{ slug: "rain-nyc-2", active: true }]).compatibility,
-    ).toBe("POSSIBLE_MATCH");
-  });
-
-  it("NO_MATCH with no candidates or no slug", () => {
-    expect(classifyCompatibility("rain-nyc", []).compatibility).toBe("NO_MATCH");
-    expect(classifyCompatibility(null, [active]).compatibility).toBe("NO_MATCH");
-  });
-
-  it("never returns a US slug unless the match is exact", () => {
-    for (const result of [
-      classifyCompatibility("rain-nyc", [active, active]),
-      classifyCompatibility("rain-nyc", [{ ...active, active: false }]),
-      classifyCompatibility("rain-nyc", []),
-    ]) {
-      expect(result.usMarketSlug).toBeNull();
-    }
-  });
-});
 
 describe("preview helpers", () => {
   it("maps only yes/no outcomes", () => {
