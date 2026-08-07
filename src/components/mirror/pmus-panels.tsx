@@ -119,6 +119,28 @@ export function PmusSection() {
         title="Approval queue"
         subtitle="Approving marks a preview ready for MANUAL execution. It never submits, signs or cancels a live order."
       >
+        {data?.automation ? (
+          <div className="mb-3 rounded-md border border-border p-3 text-xs">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <Field
+                label="US weather markets available"
+                value={String(data.automation.weatherMarketCount)}
+              />
+              <Field label="Last availability scan" value={stamp(data.automation.lastScanAt)} />
+              <Field
+                label="Last compatibility scan"
+                value={stamp(data.automation.lastCompatibilityCheckAt)}
+              />
+              <Field label="Last exact match" value={stamp(data.automation.lastExactMatchAt)} />
+              <Field
+                label="Pending approval previews"
+                value={String(data.automation.pendingPreviews)}
+              />
+            </div>
+            <p className="mt-2 text-[11px] text-muted-foreground">{data.automation.message}</p>
+          </div>
+        ) : null}
+
         {isPending ? (
           <p className="text-sm text-muted-foreground">Loading approval queue…</p>
         ) : !data ? (

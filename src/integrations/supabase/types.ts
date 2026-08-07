@@ -44,6 +44,56 @@ export type Database = {
         }
         Relationships: []
       }
+      compatibility_checks: {
+        Row: {
+          checked_at: string
+          checks: number
+          compatibility_status: string
+          created_at: string
+          event_key: string
+          id: string
+          matched_us_market: string | null
+          reason: string | null
+          source_event_id: string | null
+          source_market: string | null
+          source_slug: string | null
+        }
+        Insert: {
+          checked_at?: string
+          checks?: number
+          compatibility_status?: string
+          created_at?: string
+          event_key: string
+          id?: string
+          matched_us_market?: string | null
+          reason?: string | null
+          source_event_id?: string | null
+          source_market?: string | null
+          source_slug?: string | null
+        }
+        Update: {
+          checked_at?: string
+          checks?: number
+          compatibility_status?: string
+          created_at?: string
+          event_key?: string
+          id?: string
+          matched_us_market?: string | null
+          reason?: string | null
+          source_event_id?: string | null
+          source_market?: string | null
+          source_slug?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "compatibility_checks_source_event_id_fkey"
+            columns: ["source_event_id"]
+            isOneToOne: false
+            referencedRelation: "source_events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       integration_status: {
         Row: {
           account_summary: Json | null
@@ -517,6 +567,36 @@ export type Database = {
           created_at?: string
           id?: string
           label?: string | null
+        }
+        Relationships: []
+      }
+      us_market_scans: {
+        Row: {
+          detail: string | null
+          id: string
+          new_count: number
+          relevant_count: number
+          scanned_at: string
+          slugs: Json | null
+          status: string
+        }
+        Insert: {
+          detail?: string | null
+          id?: string
+          new_count?: number
+          relevant_count?: number
+          scanned_at?: string
+          slugs?: Json | null
+          status?: string
+        }
+        Update: {
+          detail?: string | null
+          id?: string
+          new_count?: number
+          relevant_count?: number
+          scanned_at?: string
+          slugs?: Json | null
+          status?: string
         }
         Relationships: []
       }

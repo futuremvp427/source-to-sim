@@ -10,6 +10,8 @@ import { getBalances, getPositions, type PmusDeps } from "./capabilities.server"
 import { isPmusConfigured } from "./credentials.server";
 import { availableUsdBalance, PREVIEW_STATUS } from "./previews.server";
 import { safeErrorMessage } from "./redact";
+import { latestAvailabilityScan } from "./availability.server";
+import { availabilityMessage } from "./automation";
 
 export const INTEGRATION_ID = "polymarket_us";
 
@@ -124,21 +126,40 @@ export type ApprovalCard = {
   decidedAt: string | null;
 };
 
+export type PmusAutomationHealth = {
+  weatherMarketCount: number;
+  newMarketCount: number;
+  lastScanAt: string | null;
+  lastScanStatus: string | null;
+  lastCompatibilityCheckAt: string | null;
+  lastExactMatchAt: string | null;
+  pendingPreviews: number;
+  message: string;
+};
+
 export type PmusPanelData = {
   connection: PmusConnectionStatus;
   pending: ApprovalCard[];
   recent: ApprovalCard[];
   counts: { pending: number; approved: number; rejected: number; ineligible: number };
+  automation: PmusAutomationHealth;
 };
 
 export async function loadPmusPanel(): Promise<PmusPanelData> {
-  const [{ data: statusRow }, { data: previewRows }] = await Promise.all([
+  const [{ data: statusRow }, { data: previewRows }, scan, { data: lastCheck }] = await Promise.all([
     supabaseAdmin.from("integration_status").select("*").eq("id", INTEGRATION_ID).maybeSingle(),
     supabaseAdmin
       .from("order_previews")
       .select("*")
       .order("created_at", { ascending: false })
       .limit(60),
+    latestAvailabilityScan(),
+    supabaseAdmin
+      .from("compatibility_checks")
+      .select("checked_at")
+      .order("checked_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
   ]);
 
   const configured = isPmusConfigured();
@@ -178,15 +199,28 @@ export async function loadPmusPanel(): Promise<PmusPanelData> {
     decidedAt: r.decided_at,
   }));
 
+  const exactMatches = cards.filter((c) => c.compatibility === "EXACT_MATCH");
+  const pendingCards = cards.filter((c) => c.status === PREVIEW_STATUS.pending);
+
   return {
     connection,
-    pending: cards.filter((c) => c.status === PREVIEW_STATUS.pending),
+    pending: pendingCards,
     recent: cards.filter((c) => c.status !== PREVIEW_STATUS.pending).slice(0, 12),
     counts: {
-      pending: cards.filter((c) => c.status === PREVIEW_STATUS.pending).length,
+      pending: pendingCards.length,
       approved: cards.filter((c) => c.status === PREVIEW_STATUS.readyForManual).length,
       rejected: cards.filter((c) => c.status === PREVIEW_STATUS.rejected).length,
       ineligible: cards.filter((c) => c.status === PREVIEW_STATUS.notEligible).length,
+    },
+    automation: {
+      weatherMarketCount: scan?.relevantCount ?? 0,
+      newMarketCount: scan?.newCount ?? 0,
+      lastScanAt: scan?.scannedAt ?? null,
+      lastScanStatus: scan?.status ?? null,
+      lastCompatibilityCheckAt: lastCheck?.checked_at ?? null,
+      lastExactMatchAt: exactMatches[0]?.createdAt ?? null,
+      pendingPreviews: pendingCards.length,
+      message: availabilityMessage(scan?.relevantCount ?? 0),
     },
   };
 }
