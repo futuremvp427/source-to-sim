@@ -106,10 +106,10 @@ const MONTHS: Record<string, string> = {
 
 /** Extracts an ISO date (YYYY-MM-DD) from text/slug/endDate, when present. */
 export function extractDate(source: {
-  question?: string | null;
-  slug?: string | null;
-  date?: string | null;
-  endDate?: string | null;
+  question?: string | null | undefined;
+  slug?: string | null | undefined;
+  date?: string | null | undefined;
+  endDate?: string | null | undefined;
 }): string | null {
   if (source.date && /^\d{4}-\d{2}-\d{2}/.test(source.date)) return source.date.slice(0, 10);
 
@@ -297,10 +297,8 @@ function evaluate(source: SourceMarket, market: UsMarket): Evidence {
     };
   }
 
-  const semanticsAgree = thresholdAgreement !== "CONFLICT";
   const strong =
     isTradable(market) &&
-    semanticsAgree &&
     (sameSlug ||
       (dateAgrees &&
         !locationConflict &&

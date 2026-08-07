@@ -117,17 +117,17 @@ export async function fetchOpenUsMarkets(): Promise<UsMarket[]> {
 
 export type MarketSearchQuery = {
   /** Source market question/title. */
-  question?: string | null;
+  question?: string | null | undefined;
   /** Source market slug (international Polymarket). */
-  slug?: string | null;
+  slug?: string | null | undefined;
   /** Location hint (city/state), when known. */
-  location?: string | null;
+  location?: string | null | undefined;
   /** ISO date (YYYY-MM-DD) of the event/expiration, when known. */
-  date?: string | null;
+  date?: string | null | undefined;
   /** Outcome labels on the source market. */
-  outcomes?: readonly string[];
+  outcomes?: readonly string[] | undefined;
   /** Category/type hint, e.g. "weather". */
-  category?: string | null;
+  category?: string | null | undefined;
 };
 
 const MAX_CANDIDATES = 25;
