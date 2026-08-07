@@ -2,6 +2,15 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
 import type { PmusConnectionStatus, PmusPanelData } from "./pmus/verify.server";
+import type { PmusAuthDiagnosis } from "./pmus/diagnose.server";
+
+/** Safe auth diagnostics: metadata only, never credentials or signatures. */
+export const diagnosePmusAuthFn = createServerFn({ method: "POST" }).handler(
+  async (): Promise<PmusAuthDiagnosis> => {
+    const { diagnosePmusAuth } = await import("./pmus/diagnose.server");
+    return diagnosePmusAuth();
+  },
+);
 
 /** Account Setup + Approval Queue read model. Never returns credentials. */
 export const getPmusPanel = createServerFn({ method: "GET" }).handler(
