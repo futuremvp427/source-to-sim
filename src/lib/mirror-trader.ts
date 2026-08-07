@@ -367,9 +367,54 @@ export function filterTrades(
   trades: SourceTrade[],
   search: string,
   side: "ALL" | TradeSide,
+  weatherOnly = false,
 ): SourceTrade[] {
   const q = search.trim().toLowerCase();
   return trades.filter(
-    (t) => (side === "ALL" || t.side === side) && (!q || t.title.toLowerCase().includes(q)),
+    (t) =>
+      (side === "ALL" || t.side === side) &&
+      (!q || t.title.toLowerCase().includes(q)) &&
+      (!weatherOnly || isWeatherMarket(t.title, t.slug)),
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* Weather classification (HEURISTIC — title/slug keywords only)        */
+/* ------------------------------------------------------------------ */
+
+/** Transparent keyword list used for the weather heuristic. Not authoritative. */
+export const WEATHER_KEYWORDS = [
+  "temperature",
+  "temp in",
+  "rain",
+  "rainfall",
+  "snow",
+  "snowfall",
+  "hurricane",
+  "tropical storm",
+  "tornado",
+  "wildfire",
+  "heat index",
+  "humidity",
+  "wind speed",
+  "weather",
+  "degrees",
+  "°c",
+  "°f",
+  "el nino",
+  "el niño",
+  "la nina",
+  "la niña",
+];
+
+/** HEURISTIC: matches known weather keywords in the market title or slug. */
+export function isWeatherMarket(title: string, slug?: string): boolean {
+  const hay = `${title} ${slug ?? ""}`.toLowerCase();
+  return WEATHER_KEYWORDS.some((k) => hay.includes(k));
+}
+
+export function countWeather(trades: SourceTrade[]): { weather: number; other: number } {
+  let weather = 0;
+  for (const t of trades) if (isWeatherMarket(t.title, t.slug)) weather += 1;
+  return { weather, other: trades.length - weather };
 }
