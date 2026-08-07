@@ -35,6 +35,8 @@ const PAGE_SIZE = 250;
 const LIVE_PAGES = 2; // bounded incremental window per poll
 const BOOTSTRAP_PAGES = 4;
 const LEASE_SECONDS = 180;
+/** Exposed for the lease regression tests only. */
+export const LEASE_SECONDS_FOR_TEST = LEASE_SECONDS;
 const MAX_MARK_REFRESH = 20;
 const PROCESS_BATCH = 300;
 
@@ -145,6 +147,9 @@ async function releaseLease(
     // A stale owner must not be able to clobber the worker that took over.
     .eq("worker_id", lease.workerId);
 }
+
+/** Test-only alias so the lease fencing rules can be asserted directly. */
+export const releaseLeaseForTest = releaseLease;
 
 /* ------------------------------------------------------------------ */
 /* Experiment / config                                                 */
