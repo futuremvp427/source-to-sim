@@ -529,6 +529,54 @@ function Dashboard() {
                     : "No reliable fresh mark — all open P&L reports Unavailable."}
                 </dd>
               </div>
+              <div className="sm:col-span-2">
+                <dt className="text-xs uppercase text-muted-foreground">History coverage</dt>
+                <dd className="mt-0.5 space-y-0.5">
+                  <p>
+                    {snapshot.history.count} trades loaded (target {snapshot.history.requestedTarget}
+                    , {snapshot.history.pagesFetched} page
+                    {snapshot.history.pagesFetched === 1 ? "" : "s"} fetched
+                    {snapshot.history.paginationSupported
+                      ? ", offset pagination working"
+                      : ", offset pagination not confirmed"}
+                    ).
+                  </p>
+                  <p className="tabular-nums">
+                    Oldest loaded:{" "}
+                    {snapshot.history.oldest === null
+                      ? "n/a"
+                      : formatTime(snapshot.history.oldest)} · Newest loaded:{" "}
+                    {snapshot.history.newest === null
+                      ? "n/a"
+                      : formatTime(snapshot.history.newest)}
+                  </p>
+                  <p>
+                    Paper P&L is{" "}
+                    <strong>
+                      {snapshot.history.complete
+                        ? "complete for this wallet's returned history"
+                        : "window-bounded (not lifetime)"}
+                    </strong>
+                    .
+                  </p>
+                  <p className="text-muted-foreground">{snapshot.history.note}</p>
+                </dd>
+              </div>
+              <div className="sm:col-span-2">
+                <dt className="text-xs uppercase text-muted-foreground">
+                  Weather classification (HEURISTIC)
+                </dt>
+                <dd className="mt-0.5">
+                  {weatherCounts.weather} of {snapshot.trades.length} loaded trades matched weather
+                  keywords in the title/slug ({weatherCounts.other} other). Keyword heuristic only —
+                  not an authoritative Polymarket category. Weather-only filter is currently{" "}
+                  {weatherFilterOn ? "ON" : "OFF"}.
+                </dd>
+              </div>
+              <div className="sm:col-span-2">
+                <dt className="text-xs uppercase text-muted-foreground">Source settled P&L</dt>
+                <dd className="mt-0.5">{snapshot.sourceSettledNote}</dd>
+              </div>
               {snapshot.fallbackReason ? (
                 <div className="sm:col-span-2 rounded-md bg-[var(--warn-soft)] px-3 py-2 text-[var(--warn)]">
                   <dt className="text-xs font-semibold uppercase">Why fallback is active</dt>
