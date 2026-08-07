@@ -8,11 +8,13 @@ import { getMirrorSnapshot } from "@/lib/mirror-trader.functions";
 import {
   TARGET_WALLET,
   buildPaperBook,
+  countWeather,
   derivePaperActions,
   filterTrades,
   formatShares,
   formatTime,
   formatUsd,
+  isWeatherMarket,
   type TradeSide,
 } from "@/lib/mirror-trader";
 
@@ -43,6 +45,7 @@ function Dashboard() {
   const [search, setSearch] = useState("");
   const [side, setSide] = useState<"ALL" | TradeSide>("ALL");
   const [paperAmount, setPaperAmount] = useState(10);
+  const [weatherOnly, setWeatherOnly] = useState<boolean | null>(null);
 
   const query = useQuery({
     queryKey: ["mirror-snapshot"],
@@ -52,14 +55,23 @@ function Dashboard() {
 
   const snapshot = query.data;
 
+  const weatherCounts = useMemo(
+    () => (snapshot ? countWeather(snapshot.trades) : { weather: 0, other: 0 }),
+    [snapshot],
+  );
+  // Default ON when the wallet has weather trades; user choice always wins.
+  const weatherFilterOn = weatherOnly ?? weatherCounts.weather > 0;
+
   const derived = useMemo(() => {
     if (!snapshot) return null;
-    const visibleTrades = filterTrades(snapshot.trades, search, side);
-    const actions = derivePaperActions(snapshot.trades, paperAmount);
+    const scoped = weatherFilterOn
+      ? snapshot.trades.filter((t) => isWeatherMarket(t.title, t.slug))
+      : snapshot.trades;
+    const visibleTrades = filterTrades(scoped, search, side);
+    const actions = derivePaperActions(scoped, paperAmount);
     const visibleActions = derivePaperActions(visibleTrades, paperAmount);
     const book = buildPaperBook(actions, snapshot.positions, snapshot.fetchedAt, snapshot.mode);
     const settledPaper = book.settled.reduce((s, r) => s + r.realized, 0);
-    const sourceRealized = snapshot.positions.reduce((s, p) => s + p.realizedPnl, 0);
     const openWithMark = book.open.filter((p) => p.openPnl !== null);
     const openPaperPnl = openWithMark.reduce((s, p) => s + (p.openPnl ?? 0), 0);
     return {
@@ -67,12 +79,11 @@ function Dashboard() {
       visibleActions,
       book,
       settledPaper,
-      sourceRealized,
       openPaperPnl,
       openMarkCoverage: `${openWithMark.length}/${book.open.length}`,
       hasFreshMark: openWithMark.length > 0,
     };
-  }, [snapshot, search, side, paperAmount]);
+  }, [snapshot, search, side, paperAmount, weatherFilterOn]);
 
   const isDemo = snapshot?.mode === "DEMO";
   const loading = query.isPending;
@@ -154,7 +165,7 @@ function Dashboard() {
           label="Settled paper P&L"
           value={loading ? "—" : formatUsd(derived?.settledPaper ?? 0)}
           tone={(derived?.settledPaper ?? 0) >= 0 ? "positive" : "negative"}
-          hint="Closed simulated positions"
+          hint="DERIVED, window-bounded"
         />
         <Stat
           label="Open paper P&L"
@@ -208,7 +219,33 @@ function Dashboard() {
             className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm tabular-nums text-foreground outline-none focus:ring-2 focus:ring-ring sm:w-40"
           />
         </label>
+        <div className="text-xs font-medium text-muted-foreground">
+          Market type
+          <div className="mt-1 flex items-center gap-2">
+            <button
+              onClick={() => setWeatherOnly(!weatherFilterOn)}
+              aria-pressed={weatherFilterOn}
+              className={`rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${
+                weatherFilterOn
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-input text-muted-foreground hover:bg-accent"
+              }`}
+            >
+              Weather only
+            </button>
+            <span className="whitespace-nowrap tabular-nums">
+              {weatherCounts.weather} weather / {weatherCounts.other} other
+              <span className="ml-1 rounded bg-secondary px-1 py-0.5 text-[10px] font-semibold text-secondary-foreground">
+                HEURISTIC
+              </span>
+            </span>
+          </div>
+        </div>
       </div>
+      <p className="mt-2 text-xs text-muted-foreground">
+        Weather classification is a transparent title/slug keyword HEURISTIC, not an authoritative
+        category. Toggle it off to see every fetched trade — nothing is hidden permanently.
+      </p>
 
       <div className="mt-6 grid grid-cols-1 gap-6">
         {/* Recent source trades */}
@@ -373,7 +410,7 @@ function Dashboard() {
         {/* Settled P&L */}
         <Panel
           title="Settled P&L"
-          subtitle="Paper realizations from closed simulated positions, plus the wallet's reported realized P&L"
+          subtitle="Paper realizations are DERIVED and window-bounded; source settled P&L is only shown when verifiable"
         >
           {loading ? (
             <RowSkeleton rows={3} />
@@ -381,18 +418,25 @@ function Dashboard() {
             <>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <Stat
-                  label="Paper settled total (derived)"
+                  label="Paper settled total (DERIVED, window-bounded)"
                   value={formatUsd(derived?.settledPaper ?? 0)}
                   tone={(derived?.settledPaper ?? 0) >= 0 ? "positive" : "negative"}
-                  hint="Derived from source fills only"
+                  hint={`Only from the ${snapshot?.history.count ?? 0} fetched source fills — not lifetime`}
                 />
                 <Stat
-                  label={`Source reported realized P&L${isDemo ? " (DEMO)" : ""}`}
-                  value={formatUsd(derived?.sourceRealized ?? 0)}
-                  tone={(derived?.sourceRealized ?? 0) >= 0 ? "positive" : "negative"}
-                  hint="Reported by the public positions endpoint — not recomputed"
+                  label="Source settled P&L (wallet)"
+                  value={
+                    snapshot?.sourceSettledPnl === null || snapshot?.sourceSettledPnl === undefined
+                      ? "Unavailable"
+                      : formatUsd(snapshot.sourceSettledPnl)
+                  }
+                  tone="muted"
+                  hint="No verified closed/settled endpoint — no total is invented"
                 />
               </div>
+              {snapshot ? (
+                <p className="mt-2 text-xs text-muted-foreground">{snapshot.sourceSettledNote}</p>
+              ) : null}
               {!derived?.book.settled.length ? (
                 <EmptyState message="No settled paper positions yet." />
               ) : (
@@ -484,6 +528,54 @@ function Dashboard() {
                     ? `Fresh source marks available for ${derived.openMarkCoverage} simulated positions; the rest report Unavailable.`
                     : "No reliable fresh mark — all open P&L reports Unavailable."}
                 </dd>
+              </div>
+              <div className="sm:col-span-2">
+                <dt className="text-xs uppercase text-muted-foreground">History coverage</dt>
+                <dd className="mt-0.5 space-y-0.5">
+                  <p>
+                    {snapshot.history.count} trades loaded (target {snapshot.history.requestedTarget}
+                    , {snapshot.history.pagesFetched} page
+                    {snapshot.history.pagesFetched === 1 ? "" : "s"} fetched
+                    {snapshot.history.paginationSupported
+                      ? ", offset pagination working"
+                      : ", offset pagination not confirmed"}
+                    ).
+                  </p>
+                  <p className="tabular-nums">
+                    Oldest loaded:{" "}
+                    {snapshot.history.oldest === null
+                      ? "n/a"
+                      : formatTime(snapshot.history.oldest)} · Newest loaded:{" "}
+                    {snapshot.history.newest === null
+                      ? "n/a"
+                      : formatTime(snapshot.history.newest)}
+                  </p>
+                  <p>
+                    Paper P&L is{" "}
+                    <strong>
+                      {snapshot.history.complete
+                        ? "complete for this wallet's returned history"
+                        : "window-bounded (not lifetime)"}
+                    </strong>
+                    .
+                  </p>
+                  <p className="text-muted-foreground">{snapshot.history.note}</p>
+                </dd>
+              </div>
+              <div className="sm:col-span-2">
+                <dt className="text-xs uppercase text-muted-foreground">
+                  Weather classification (HEURISTIC)
+                </dt>
+                <dd className="mt-0.5">
+                  {weatherCounts.weather} of {snapshot.trades.length} loaded trades matched weather
+                  keywords in the title/slug ({weatherCounts.other} other). Keyword heuristic only —
+                  not an authoritative Polymarket category. Weather-only filter is currently{" "}
+                  {weatherFilterOn ? "ON" : "OFF"}.
+                </dd>
+              </div>
+              <div className="sm:col-span-2">
+                <dt className="text-xs uppercase text-muted-foreground">Source settled P&L</dt>
+                <dd className="mt-0.5">{snapshot.sourceSettledNote}</dd>
               </div>
               {snapshot.fallbackReason ? (
                 <div className="sm:col-span-2 rounded-md bg-[var(--warn-soft)] px-3 py-2 text-[var(--warn)]">

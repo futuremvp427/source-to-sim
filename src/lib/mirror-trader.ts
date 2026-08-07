@@ -45,6 +45,21 @@ export type SourcePosition = {
 
 export type DataMode = "LIVE" | "DEMO";
 
+/** Bounded history coverage of the fetched source-trade window. */
+export type HistoryCoverage = {
+  /** Trades actually loaded. */
+  count: number;
+  /** Oldest / newest loaded trade timestamps (unix seconds), null when empty. */
+  oldest: number | null;
+  newest: number | null;
+  pagesFetched: number;
+  requestedTarget: number;
+  paginationSupported: boolean;
+  /** True only if we know we reached the wallet's full lifetime history. */
+  complete: boolean;
+  note: string;
+};
+
 export type MirrorSnapshot = {
   mode: DataMode;
   /** ISO timestamp of when the server fetched. */
@@ -56,6 +71,13 @@ export type MirrorSnapshot = {
   fallbackReason: string | null;
   sources: string[];
   warnings: string[];
+  history: HistoryCoverage;
+  /**
+   * Source (wallet) settled/lifetime P&L. null = Unavailable: the public Data API
+   * exposes no verifiable closed/settled positions endpoint or parameter.
+   */
+  sourceSettledPnl: number | null;
+  sourceSettledNote: string;
 };
 
 /* ------------------------------------------------------------------ */
@@ -345,9 +367,54 @@ export function filterTrades(
   trades: SourceTrade[],
   search: string,
   side: "ALL" | TradeSide,
+  weatherOnly = false,
 ): SourceTrade[] {
   const q = search.trim().toLowerCase();
   return trades.filter(
-    (t) => (side === "ALL" || t.side === side) && (!q || t.title.toLowerCase().includes(q)),
+    (t) =>
+      (side === "ALL" || t.side === side) &&
+      (!q || t.title.toLowerCase().includes(q)) &&
+      (!weatherOnly || isWeatherMarket(t.title, t.slug)),
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* Weather classification (HEURISTIC — title/slug keywords only)        */
+/* ------------------------------------------------------------------ */
+
+/** Transparent keyword list used for the weather heuristic. Not authoritative. */
+export const WEATHER_KEYWORDS = [
+  "temperature",
+  "temp in",
+  "rain",
+  "rainfall",
+  "snow",
+  "snowfall",
+  "hurricane",
+  "tropical storm",
+  "tornado",
+  "wildfire",
+  "heat index",
+  "humidity",
+  "wind speed",
+  "weather",
+  "degrees",
+  "°c",
+  "°f",
+  "el nino",
+  "el niño",
+  "la nina",
+  "la niña",
+];
+
+/** HEURISTIC: matches known weather keywords in the market title or slug. */
+export function isWeatherMarket(title: string, slug?: string): boolean {
+  const hay = `${title} ${slug ?? ""}`.toLowerCase();
+  return WEATHER_KEYWORDS.some((k) => hay.includes(k));
+}
+
+export function countWeather(trades: SourceTrade[]): { weather: number; other: number } {
+  let weather = 0;
+  for (const t of trades) if (isWeatherMarket(t.title, t.slug)) weather += 1;
+  return { weather, other: trades.length - weather };
 }
