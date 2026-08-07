@@ -206,6 +206,8 @@ export async function generatePendingPreviews(
       updated_at: new Date().toISOString(),
     };
 
+    if (action === "SKIP_EXISTING") continue;
+
     if (action !== "PREVIEW") {
       await upsertPreview({
         ...base,
@@ -217,6 +219,9 @@ export async function generatePendingPreviews(
       result.ineligible += 1;
       continue;
     }
+
+    const usMarketSlug = compat.usMarketSlug as string;
+    const previewSide = outcomeSide as OutcomeSide;
 
     const limitPrice = clampPrice(trade.price);
     if (limitPrice === null) {
@@ -231,8 +236,8 @@ export async function generatePendingPreviews(
 
     const preview = await previewOrder(
       {
-        marketSlug: compat.usMarketSlug,
-        outcomeSide,
+        marketSlug: usMarketSlug,
+        outcomeSide: previewSide,
         action: trade.action === "SELL" ? "ORDER_ACTION_SELL" : "ORDER_ACTION_BUY",
         quantity: Number(trade.shares.toFixed(2)),
         limitPrice,
@@ -265,7 +270,7 @@ export async function generatePendingPreviews(
 
     await raiseExactMatchAlert({
       sourceMarket: trade.market_title,
-      usMarket: compat.usMarketSlug,
+      usMarket: usMarketSlug,
       side: trade.action === "SELL" ? "SELL" : "BUY",
       previewQuantity,
       previewEstimatedCost: estimatedCost,
