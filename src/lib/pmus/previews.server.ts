@@ -9,6 +9,12 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { lastNewMarketsAt } from "./availability.server";
+import {
+  decidePreviewAction,
+  shouldRecheckCompatibility,
+  type CompatibilityStatus,
+} from "./automation";
 import { getBalances, previewOrder, type PmusDeps } from "./capabilities.server";
 import { resolveCompatibility, type MarketLookup } from "./compatibility.server";
 import { isPmusConfigured } from "./credentials.server";
@@ -63,6 +69,8 @@ export type GeneratePreviewsResult = {
   created: number;
   ineligible: number;
   failed: number;
+  rechecked: number;
+  cached: number;
   skippedReason: string | null;
 };
 
@@ -80,6 +88,8 @@ export async function generatePendingPreviews(
     created: 0,
     ineligible: 0,
     failed: 0,
+    rechecked: 0,
+    cached: 0,
     skippedReason: null,
   };
 
@@ -102,17 +112,32 @@ export async function generatePendingPreviews(
   const candidates = (trades ?? []) as CandidateRow[];
   if (candidates.length === 0) return result;
 
+  const eventKeys = candidates.map((c) => c.event_key);
+
   const { data: existing } = await supabaseAdmin
     .from("order_previews")
-    .select("event_key")
+    .select("event_key, status")
     .eq("experiment_id", experimentId)
-    .in(
-      "event_key",
-      candidates.map((c) => c.event_key),
-    );
-  const seen = new Set((existing ?? []).map((r) => r.event_key));
+    .in("event_key", eventKeys);
+  const statusByKey = new Map((existing ?? []).map((r) => [r.event_key, r.status as string]));
 
-  const fresh = candidates.filter((c) => !seen.has(c.event_key)).slice(0, MAX_PREVIEWS_PER_CYCLE);
+  const { data: checkRows } = await supabaseAdmin
+    .from("compatibility_checks")
+    .select("*")
+    .in("event_key", eventKeys);
+  const checkByKey = new Map((checkRows ?? []).map((r) => [r.event_key, r]));
+
+  // New relevant US markets since a cached NO_MATCH force an automatic recheck.
+  const newMarketsAt = await lastNewMarketsAt();
+
+  const fresh = candidates
+    .filter((c) => decidePreviewAction({
+      compatibility: "EXACT_MATCH",
+      usMarketSlug: "x",
+      outcomeSide: "OUTCOME_SIDE_YES",
+      existingStatus: statusByKey.get(c.event_key) ?? null,
+    }) !== "SKIP_EXISTING")
+    .slice(0, MAX_PREVIEWS_PER_CYCLE);
   result.considered = fresh.length;
   if (fresh.length === 0) return result;
 
@@ -124,11 +149,41 @@ export async function generatePendingPreviews(
 
   for (const trade of fresh) {
     const slug = await sourceSlugFor(trade.source_event_id);
-    const compat = await resolveCompatibility(
-      { question: trade.market_title, slug, outcomes: trade.outcome ? [trade.outcome] : [] },
-      lookup,
-    );
+    const cached = checkByKey.get(trade.event_key) ?? null;
+    const mustCheck = shouldRecheckCompatibility(cached, { newMarketsAt });
+
+    let compat: { compatibility: string; usMarketSlug: string | null; reason: string };
+    if (mustCheck) {
+      compat = await resolveCompatibility(
+        { question: trade.market_title, slug, outcomes: trade.outcome ? [trade.outcome] : [] },
+        lookup,
+      );
+      if (cached) result.rechecked += 1;
+      await recordCompatibilityCheck({
+        eventKey: trade.event_key,
+        sourceEventId: trade.source_event_id,
+        sourceMarket: trade.market_title,
+        sourceSlug: slug,
+        status: compat.compatibility as CompatibilityStatus,
+        matched: compat.usMarketSlug,
+        reason: compat.reason,
+        previousChecks: cached?.checks ?? 0,
+      });
+    } else {
+      result.cached += 1;
+      compat = {
+        compatibility: cached?.compatibility_status ?? "NO_MATCH",
+        usMarketSlug: cached?.matched_us_market ?? null,
+        reason: cached?.reason ?? "Reused a recent compatibility result.",
+      };
+    }
     const outcomeSide = mapOutcomeSide(trade.outcome);
+    const action = decidePreviewAction({
+      compatibility: compat.compatibility,
+      usMarketSlug: compat.usMarketSlug,
+      outcomeSide,
+      existingStatus: statusByKey.get(trade.event_key) ?? null,
+    });
 
     const base = {
       experiment_id: experimentId,
@@ -151,7 +206,7 @@ export async function generatePendingPreviews(
       updated_at: new Date().toISOString(),
     };
 
-    if (compat.compatibility !== "EXACT_MATCH" || !compat.usMarketSlug || !outcomeSide) {
+    if (action !== "PREVIEW") {
       await upsertPreview({
         ...base,
         status: PREVIEW_STATUS.notEligible,
@@ -207,9 +262,61 @@ export async function generatePendingPreviews(
       error: null,
     });
     result.created += 1;
+
+    await raiseExactMatchAlert({
+      sourceMarket: trade.market_title,
+      usMarket: compat.usMarketSlug,
+      side: trade.action === "SELL" ? "SELL" : "BUY",
+      previewQuantity,
+      previewEstimatedCost: estimatedCost,
+      availableBalance: balance,
+    });
   }
 
   return result;
+}
+
+async function recordCompatibilityCheck(input: {
+  eventKey: string;
+  sourceEventId: string | null;
+  sourceMarket: string | null;
+  sourceSlug: string | null;
+  status: CompatibilityStatus;
+  matched: string | null;
+  reason: string;
+  previousChecks: number;
+}): Promise<void> {
+  await supabaseAdmin.from("compatibility_checks").upsert(
+    {
+      event_key: input.eventKey,
+      source_event_id: input.sourceEventId,
+      source_market: input.sourceMarket,
+      source_slug: input.sourceSlug,
+      compatibility_status: input.status,
+      matched_us_market: input.matched,
+      reason: input.reason,
+      checks: input.previousChecks + 1,
+      checked_at: new Date().toISOString(),
+    } as never,
+    { onConflict: "event_key" },
+  );
+}
+
+/** In-app alert. Approval is still required; nothing is submitted. */
+async function raiseExactMatchAlert(info: {
+  sourceMarket: string | null;
+  usMarket: string;
+  side: string;
+  previewQuantity: number;
+  previewEstimatedCost: number;
+  availableBalance: number | null;
+}): Promise<void> {
+  await supabaseAdmin.from("alerts").insert({
+    level: "info",
+    kind: "pmus_exact_match",
+    message: "Polymarket US exact match found — order preview added to the approval queue.",
+    context: info as never,
+  } as never);
 }
 
 function clampPrice(price: number | null): number | null {
