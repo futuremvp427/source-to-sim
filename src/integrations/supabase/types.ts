@@ -44,6 +44,191 @@ export type Database = {
         }
         Relationships: []
       }
+      candidate_fingerprint: {
+        Row: {
+          bot_label: string
+          bot_likelihood: number | null
+          candidate_id: string
+          computed_at: string
+          fingerprint: Json
+          id: string
+        }
+        Insert: {
+          bot_label?: string
+          bot_likelihood?: number | null
+          candidate_id: string
+          computed_at?: string
+          fingerprint?: Json
+          id?: string
+        }
+        Update: {
+          bot_label?: string
+          bot_likelihood?: number | null
+          candidate_id?: string
+          computed_at?: string
+          fingerprint?: Json
+          id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "candidate_fingerprint_candidate_id_fkey"
+            columns: ["candidate_id"]
+            isOneToOne: false
+            referencedRelation: "candidate_watchlist"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      candidate_metrics: {
+        Row: {
+          candidate_id: string
+          completeness: number | null
+          computed_at: string
+          coverage_end: string | null
+          coverage_start: string | null
+          id: string
+          metrics: Json
+          sample_count: number
+        }
+        Insert: {
+          candidate_id: string
+          completeness?: number | null
+          computed_at?: string
+          coverage_end?: string | null
+          coverage_start?: string | null
+          id?: string
+          metrics?: Json
+          sample_count?: number
+        }
+        Update: {
+          candidate_id?: string
+          completeness?: number | null
+          computed_at?: string
+          coverage_end?: string | null
+          coverage_start?: string | null
+          id?: string
+          metrics?: Json
+          sample_count?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "candidate_metrics_candidate_id_fkey"
+            columns: ["candidate_id"]
+            isOneToOne: false
+            referencedRelation: "candidate_watchlist"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      candidate_scores: {
+        Row: {
+          candidate_id: string
+          capacity: number | null
+          completeness: Json
+          computed_at: string
+          consistency: number | null
+          copyability: number | null
+          final_score: number | null
+          id: string
+          mirror_similarity: number | null
+          profit_quality: number | null
+          risks: Json
+          score_status: string
+          strengths: Json
+        }
+        Insert: {
+          candidate_id: string
+          capacity?: number | null
+          completeness?: Json
+          computed_at?: string
+          consistency?: number | null
+          copyability?: number | null
+          final_score?: number | null
+          id?: string
+          mirror_similarity?: number | null
+          profit_quality?: number | null
+          risks?: Json
+          score_status?: string
+          strengths?: Json
+        }
+        Update: {
+          candidate_id?: string
+          capacity?: number | null
+          completeness?: Json
+          computed_at?: string
+          consistency?: number | null
+          copyability?: number | null
+          final_score?: number | null
+          id?: string
+          mirror_similarity?: number | null
+          profit_quality?: number | null
+          risks?: Json
+          score_status?: string
+          strengths?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "candidate_scores_candidate_id_fkey"
+            columns: ["candidate_id"]
+            isOneToOne: false
+            referencedRelation: "candidate_watchlist"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      candidate_watchlist: {
+        Row: {
+          added_at: string
+          handle: string
+          id: string
+          notes: string | null
+          promoted_experiment_id: string | null
+          source: string
+          status: string
+          updated_at: string
+          wallet: string | null
+          wallet_resolved: boolean
+          weekly_snapshot_pnl: number | null
+          weekly_snapshot_rank: number | null
+        }
+        Insert: {
+          added_at?: string
+          handle: string
+          id?: string
+          notes?: string | null
+          promoted_experiment_id?: string | null
+          source?: string
+          status?: string
+          updated_at?: string
+          wallet?: string | null
+          wallet_resolved?: boolean
+          weekly_snapshot_pnl?: number | null
+          weekly_snapshot_rank?: number | null
+        }
+        Update: {
+          added_at?: string
+          handle?: string
+          id?: string
+          notes?: string | null
+          promoted_experiment_id?: string | null
+          source?: string
+          status?: string
+          updated_at?: string
+          wallet?: string | null
+          wallet_resolved?: boolean
+          weekly_snapshot_pnl?: number | null
+          weekly_snapshot_rank?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "candidate_watchlist_promoted_experiment_id_fkey"
+            columns: ["promoted_experiment_id"]
+            isOneToOne: false
+            referencedRelation: "paper_experiments"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       compatibility_checks: {
         Row: {
           checked_at: string
