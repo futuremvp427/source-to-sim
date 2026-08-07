@@ -219,7 +219,33 @@ function Dashboard() {
             className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm tabular-nums text-foreground outline-none focus:ring-2 focus:ring-ring sm:w-40"
           />
         </label>
+        <div className="text-xs font-medium text-muted-foreground">
+          Market type
+          <div className="mt-1 flex items-center gap-2">
+            <button
+              onClick={() => setWeatherOnly(!weatherFilterOn)}
+              aria-pressed={weatherFilterOn}
+              className={`rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${
+                weatherFilterOn
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-input text-muted-foreground hover:bg-accent"
+              }`}
+            >
+              Weather only
+            </button>
+            <span className="whitespace-nowrap tabular-nums">
+              {weatherCounts.weather} weather / {weatherCounts.other} other
+              <span className="ml-1 rounded bg-secondary px-1 py-0.5 text-[10px] font-semibold text-secondary-foreground">
+                HEURISTIC
+              </span>
+            </span>
+          </div>
+        </div>
       </div>
+      <p className="mt-2 text-xs text-muted-foreground">
+        Weather classification is a transparent title/slug keyword HEURISTIC, not an authoritative
+        category. Toggle it off to see every fetched trade — nothing is hidden permanently.
+      </p>
 
       <div className="mt-6 grid grid-cols-1 gap-6">
         {/* Recent source trades */}
