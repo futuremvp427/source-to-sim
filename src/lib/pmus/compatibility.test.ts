@@ -53,7 +53,10 @@ describe("extractors", () => {
     });
     expect(
       compareThresholds(extractThreshold("90-91°F"), extractThreshold("exceed 90°F")),
-    ).toBe("CONFLICT");
+    ).toBe("KIND_DIFFERS");
+    expect(compareThresholds(extractThreshold("90-91°F"), extractThreshold("95-96°F"))).toBe(
+      "CONFLICT",
+    );
   });
 });
 
