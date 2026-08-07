@@ -181,15 +181,22 @@ export function extractThreshold(text: string | null | undefined): Threshold | n
   return null;
 }
 
-export type ThresholdAgreement = "AGREE" | "CONFLICT" | "UNKNOWN";
+/**
+ * AGREE      — identical threshold/range and units.
+ * CONFLICT   — same contract shape, different numbers/units. Hard exclusion.
+ * KIND_DIFFERS — different contract shape (range vs inequality). Never strong,
+ *                but may still be a partial (POSSIBLE/AMBIGUOUS) overlap.
+ * UNKNOWN    — neither side states a threshold.
+ */
+export type ThresholdAgreement = "AGREE" | "CONFLICT" | "KIND_DIFFERS" | "UNKNOWN";
 
 export function compareThresholds(
   a: Threshold | null,
   b: Threshold | null,
 ): ThresholdAgreement {
   if (!a && !b) return "UNKNOWN";
-  if (!a || !b) return "CONFLICT";
-  if (a.kind !== b.kind) return "CONFLICT";
+  if (!a || !b) return "KIND_DIFFERS";
+  if (a.kind !== b.kind) return "KIND_DIFFERS";
   if (a.unit && b.unit && a.unit !== b.unit) return "CONFLICT";
   if (a.kind === "range" && b.kind === "range") {
     return a.low === b.low && a.high === b.high ? "AGREE" : "CONFLICT";
@@ -294,6 +301,15 @@ function evaluate(source: SourceMarket, market: UsMarket): Evidence {
       weak: false,
       similarity,
       notes: "threshold/range or units differ",
+    };
+  }
+  if (thresholdAgreement === "KIND_DIFFERS" && !sameSlug) {
+    return {
+      market,
+      strong: false,
+      weak: similarity >= WEAK_TITLE_SIMILARITY || (dateAgrees && locationAgrees),
+      similarity,
+      notes: "contract shape differs (range vs threshold)",
     };
   }
 
