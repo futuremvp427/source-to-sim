@@ -45,6 +45,21 @@ export type SourcePosition = {
 
 export type DataMode = "LIVE" | "DEMO";
 
+/** Bounded history coverage of the fetched source-trade window. */
+export type HistoryCoverage = {
+  /** Trades actually loaded. */
+  count: number;
+  /** Oldest / newest loaded trade timestamps (unix seconds), null when empty. */
+  oldest: number | null;
+  newest: number | null;
+  pagesFetched: number;
+  requestedTarget: number;
+  paginationSupported: boolean;
+  /** True only if we know we reached the wallet's full lifetime history. */
+  complete: boolean;
+  note: string;
+};
+
 export type MirrorSnapshot = {
   mode: DataMode;
   /** ISO timestamp of when the server fetched. */
@@ -56,6 +71,13 @@ export type MirrorSnapshot = {
   fallbackReason: string | null;
   sources: string[];
   warnings: string[];
+  history: HistoryCoverage;
+  /**
+   * Source (wallet) settled/lifetime P&L. null = Unavailable: the public Data API
+   * exposes no verifiable closed/settled positions endpoint or parameter.
+   */
+  sourceSettledPnl: number | null;
+  sourceSettledNote: string;
 };
 
 /* ------------------------------------------------------------------ */
