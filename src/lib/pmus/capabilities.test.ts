@@ -27,9 +27,12 @@ const FAKE_KEY_ID = "fake-key-id-0000";
 const FAKE_SECRET = "ZmFrZS1zZWNyZXQta2V5LXZhbHVlLWZvci10ZXN0cw==";
 
 function harness(responseBody: unknown, status = 200) {
-  const signer = vi.fn(async () => "ZmFrZS1zaWduYXR1cmU=");
+  const signer = vi.fn(
+    async (_secret: string, _ts: string, _method: string, _path: string): Promise<string> =>
+      "ZmFrZS1zaWduYXR1cmU=",
+  );
   const transport = vi.fn(
-    async () =>
+    async (_url: string, _init: RequestInit): Promise<Response> =>
       new Response(JSON.stringify(responseBody), {
         status,
         headers: { "content-type": "application/json" },
@@ -82,7 +85,7 @@ describe("allowed capabilities", () => {
   it("sends the documented auth headers and no bearer token", async () => {
     const { deps, transport } = harness({ balances: [] });
     await getBalances(deps);
-    const init = transport.mock.calls[0]?.[1] as RequestInit;
+    const init = transport.mock.calls[0]![1];
     const headers = init.headers as Record<string, string>;
     expect(headers["X-PM-Access-Key"]).toBe(FAKE_KEY_ID);
     expect(headers["X-PM-Timestamp"]).toBe("1700000000000");
