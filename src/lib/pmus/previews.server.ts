@@ -124,7 +124,10 @@ export async function generatePendingPreviews(
 
   for (const trade of fresh) {
     const slug = await sourceSlugFor(trade.source_event_id);
-    const compat = await resolveCompatibility(slug, lookup);
+    const compat = await resolveCompatibility(
+      { question: trade.market_title, slug, outcomes: trade.outcome ? [trade.outcome] : [] },
+      lookup,
+    );
     const outcomeSide = mapOutcomeSide(trade.outcome);
 
     const base = {
