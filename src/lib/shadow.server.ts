@@ -624,18 +624,6 @@ async function generatePreviewsSafely(experimentId: string): Promise<typeof NO_P
   }
 }
 
-type UnusedCycleResultShape = {
-  ranAt: string;
-  skipped: string | null;
-  newEvents: number;
-  pagesFetched: number;
-  process: ProcessResult;
-  marks: { updated: number; failed: number };
-  reconciliation: { ok: boolean; mismatches: number } | null;
-  lagSeconds: number | null;
-  previews: { created: number; ineligible: number; failed: number; skippedReason: string | null };
-};
-
 export async function runIngestCycle(workerId: string): Promise<CycleResult> {
   const ranAt = new Date().toISOString();
   const experiment = await getExperiment();
