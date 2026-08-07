@@ -101,32 +101,21 @@ export async function raiseAlert(
 
 export type Lease = { fence: number; workerId: string };
 
+/**
+ * Atomic lease acquisition. One SQL statement decides ownership and bumps the
+ * fence; there is no read-then-decide window, so two overlapping cycles can
+ * never both believe they hold the lease. Returns null when the lease is held
+ * by a different, still-live worker.
+ */
 export async function acquireLease(workerId: string): Promise<Lease | null> {
-  const { data: current } = await supabaseAdmin
-    .from("worker_status")
-    .select("*")
-    .eq("id", WORKER_ID)
-    .maybeSingle();
-
-  const now = Date.now();
-  const leaseExpires = current?.lease_expires_at ? new Date(current.lease_expires_at).getTime() : 0;
-  const heldByOther = current?.worker_id && current.worker_id !== workerId && leaseExpires > now;
-  if (heldByOther) return null;
-
-  const fence = (current?.fence ?? 0) + 1;
-  const { error } = await supabaseAdmin
-    .from("worker_status")
-    .upsert({
-      id: WORKER_ID,
-      worker_id: workerId,
-      fence,
-      state: "running",
-      heartbeat_at: new Date(now).toISOString(),
-      lease_expires_at: new Date(now + LEASE_SECONDS * 1000).toISOString(),
-      updated_at: new Date(now).toISOString(),
-    })
-    .select();
+  const { data, error } = await supabaseAdmin.rpc("acquire_worker_lease", {
+    p_id: WORKER_ID,
+    p_worker_id: workerId,
+    p_lease_seconds: LEASE_SECONDS,
+  });
   if (error) throw new Error(error.message);
+  const fence = typeof data === "number" ? data : null;
+  if (fence === null) return null;
   return { fence, workerId };
 }
 
@@ -152,7 +141,9 @@ async function releaseLease(
       updated_at: new Date().toISOString(),
     })
     .eq("id", WORKER_ID)
-    .eq("fence", lease.fence);
+    .eq("fence", lease.fence)
+    // A stale owner must not be able to clobber the worker that took over.
+    .eq("worker_id", lease.workerId);
 }
 
 /* ------------------------------------------------------------------ */
@@ -189,12 +180,22 @@ export async function getExperiment(): Promise<Experiment> {
 /* Ingestion                                                          */
 /* ------------------------------------------------------------------ */
 
+/**
+ * takerOnly=false is explicit: the endpoint default omits a large share of this
+ * wallet's activity (maker-side fills), so relying on the default would leave
+ * the source history materially incomplete.
+ */
+export const TAKER_ONLY_PARAM = "takerOnly=false";
+
+export function buildTradesUrl(limit: number, offset: number): string {
+  return `${DATA_API}/trades?user=${TARGET_WALLET}&${TAKER_ONLY_PARAM}&limit=${limit}&offset=${offset}`;
+}
+
 async function fetchSourceWindow(pages: number): Promise<{ raw: Json[]; pagesFetched: number }> {
-  const base = `${DATA_API}/trades?user=${TARGET_WALLET}`;
   const raw: Json[] = [];
   let pagesFetched = 0;
   for (let p = 0; p < pages; p += 1) {
-    const page = await getArray(`${base}&limit=${PAGE_SIZE}&offset=${p * PAGE_SIZE}`);
+    const page = await getArray(buildTradesUrl(PAGE_SIZE, p * PAGE_SIZE));
     pagesFetched += 1;
     raw.push(...page);
     if (page.length < PAGE_SIZE) break;
