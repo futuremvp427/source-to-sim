@@ -44,6 +44,144 @@ export type Database = {
         }
         Relationships: []
       }
+      integration_status: {
+        Row: {
+          account_summary: Json | null
+          configured: boolean
+          connected: boolean
+          detail: string | null
+          id: string
+          last_verified_at: string | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          account_summary?: Json | null
+          configured?: boolean
+          connected?: boolean
+          detail?: string | null
+          id: string
+          last_verified_at?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          account_summary?: Json | null
+          configured?: boolean
+          connected?: boolean
+          detail?: string | null
+          id?: string
+          last_verified_at?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      order_previews: {
+        Row: {
+          asset: string
+          available_balance: number | null
+          balance_currency: string | null
+          candidate_notional: number
+          candidate_shares: number
+          compatibility: string
+          compatibility_reason: string | null
+          created_at: string
+          decided_at: string | null
+          error: string | null
+          event_key: string
+          experiment_id: string
+          id: string
+          market_title: string | null
+          outcome: string | null
+          preview_estimated_cost: number | null
+          preview_price: number | null
+          preview_quantity: number | null
+          preview_side: string | null
+          source_event_id: string | null
+          source_price: number | null
+          source_side: string
+          source_slug: string | null
+          source_ts: number | null
+          status: string
+          updated_at: string
+          us_market_slug: string | null
+        }
+        Insert: {
+          asset: string
+          available_balance?: number | null
+          balance_currency?: string | null
+          candidate_notional?: number
+          candidate_shares?: number
+          compatibility?: string
+          compatibility_reason?: string | null
+          created_at?: string
+          decided_at?: string | null
+          error?: string | null
+          event_key: string
+          experiment_id: string
+          id?: string
+          market_title?: string | null
+          outcome?: string | null
+          preview_estimated_cost?: number | null
+          preview_price?: number | null
+          preview_quantity?: number | null
+          preview_side?: string | null
+          source_event_id?: string | null
+          source_price?: number | null
+          source_side: string
+          source_slug?: string | null
+          source_ts?: number | null
+          status?: string
+          updated_at?: string
+          us_market_slug?: string | null
+        }
+        Update: {
+          asset?: string
+          available_balance?: number | null
+          balance_currency?: string | null
+          candidate_notional?: number
+          candidate_shares?: number
+          compatibility?: string
+          compatibility_reason?: string | null
+          created_at?: string
+          decided_at?: string | null
+          error?: string | null
+          event_key?: string
+          experiment_id?: string
+          id?: string
+          market_title?: string | null
+          outcome?: string | null
+          preview_estimated_cost?: number | null
+          preview_price?: number | null
+          preview_quantity?: number | null
+          preview_side?: string | null
+          source_event_id?: string | null
+          source_price?: number | null
+          source_side?: string
+          source_slug?: string | null
+          source_ts?: number | null
+          status?: string
+          updated_at?: string
+          us_market_slug?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "order_previews_experiment_id_fkey"
+            columns: ["experiment_id"]
+            isOneToOne: false
+            referencedRelation: "paper_experiments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "order_previews_source_event_id_fkey"
+            columns: ["source_event_id"]
+            isOneToOne: false
+            referencedRelation: "source_events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       paper_experiments: {
         Row: {
           buy_amount: number
