@@ -142,3 +142,26 @@
     color: var(--color-foreground);
   }
 }
+
+/* Mirror Trader semantic tokens */
+:root {
+  --gain: oklch(0.55 0.15 155);
+  --gain-soft: oklch(0.95 0.05 155);
+  --loss: oklch(0.55 0.19 25);
+  --loss-soft: oklch(0.96 0.05 25);
+  --warn: oklch(0.52 0.12 75);
+  --warn-soft: oklch(0.96 0.06 85);
+  --paper: oklch(0.5 0.11 250);
+  --paper-soft: oklch(0.95 0.04 250);
+}
+
+.dark {
+  --gain: oklch(0.78 0.15 155);
+  --gain-soft: oklch(0.3 0.07 155);
+  --loss: oklch(0.75 0.16 25);
+  --loss-soft: oklch(0.3 0.08 25);
+  --warn: oklch(0.82 0.13 85);
+  --warn-soft: oklch(0.32 0.07 85);
+  --paper: oklch(0.78 0.1 250);
+  --paper-soft: oklch(0.3 0.06 250);
+}
