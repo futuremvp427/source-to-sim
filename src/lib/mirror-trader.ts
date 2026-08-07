@@ -23,8 +23,8 @@ export type SourceTrade = {
   /** Unix seconds. */
   timestamp: number;
   transactionHash: string;
-  icon?: string;
-  slug?: string;
+  icon?: string | undefined;
+  slug?: string | undefined;
 };
 
 export type SourcePosition = {
@@ -40,7 +40,7 @@ export type SourcePosition = {
   cashPnl: number;
   percentPnl: number;
   redeemable: boolean;
-  endDate?: string;
+  endDate?: string | undefined;
 };
 
 export type DataMode = "LIVE" | "DEMO";
