@@ -825,14 +825,17 @@ const NO_PREVIEWS = {
  * Order-preview generation is best-effort: a Polymarket US outage must never
  * break autonomous public-wallet ingestion.
  */
-async function generatePreviewsSafely(experimentId: string): Promise<typeof NO_PREVIEWS> {
+async function generatePreviewsSafely(
+  experimentId: string,
+  wallet: string,
+): Promise<typeof NO_PREVIEWS> {
   try {
     // Bounded, self-throttled public weather-availability scan. Its result is
     // what triggers automatic rechecks of previously unmatched source markets.
     const { runAvailabilityScan } = await import("./pmus/availability.server");
     await runAvailabilityScan();
     const { generatePendingPreviews } = await import("./pmus/previews.server");
-    const result = await generatePendingPreviews(experimentId);
+    const result = await generatePendingPreviews(experimentId, {}, undefined, wallet);
     return {
       created: result.created,
       ineligible: result.ineligible,
@@ -1008,7 +1011,7 @@ export async function runExperimentCycle(
     const marks = await refreshMarks(experiment.id);
     const reconciliation = inserted > 0 || !bootstrapped ? await reconcile(wallet) : null;
     const settlements = await settleSafely(experiment.id);
-    const previews = await generatePreviewsSafely(experiment.id);
+    const previews = await generatePreviewsSafely(experiment.id, wallet);
     const copyability = await observeCopyabilitySafely(experiment);
     await raiseCashAlerts(experiment);
 
