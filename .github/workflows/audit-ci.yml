@@ -22,6 +22,6 @@ jobs:
       - name: Tests
         run: bun run test
       - name: Typecheck
-        run: bunx tsgo --noEmit
+        run: bun ./node_modules/typescript/bin/tsc --noEmit
       - name: Production build
         run: bun run build
