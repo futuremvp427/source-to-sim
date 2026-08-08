@@ -18,3 +18,9 @@ export const getSelfCheck = createServerFn({ method: "GET" }).handler(
     return runSelfCheck();
   },
 );
+
+/** Compact V2 fair-comparison cohort status. Read-only. */
+export const getV2Status = createServerFn({ method: "GET" }).handler(async () => {
+  const { loadV2Status } = await import("./v2-status.server");
+  return loadV2Status();
+});
