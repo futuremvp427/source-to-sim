@@ -16,7 +16,18 @@ export const runCandidateResearchFn = createServerFn({ method: "POST" }).handler
   async (): Promise<{ ok: true; summary: ResearchSummary } | { ok: false; error: string }> => {
     const { runCandidateResearch } = await import("./candidates/research.server");
     try {
-      return { ok: true, summary: await runCandidateResearch() };
+      const summary = await runCandidateResearch();
+      if (summary.state !== "skipped_locked") {
+        const { verifyCandidateResearchPersistence } = await import("./candidates/consistency.server");
+        const consistency = await verifyCandidateResearchPersistence({ downgradeRunState: true });
+        if (!consistency.ok) {
+          return {
+            ok: false,
+            error: `Research persistence check failed for ${consistency.issues.length} candidate(s); run state was downgraded to partial.`,
+          };
+        }
+      }
+      return { ok: true, summary };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : "research pass failed" };
     }
