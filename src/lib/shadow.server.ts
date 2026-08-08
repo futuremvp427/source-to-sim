@@ -6,6 +6,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { fetchAllRows } from "./db-pagination";
 import {
   EMPTY_POSITION,
   MARK_MAX_AGE_MS,
@@ -645,27 +646,55 @@ export async function refreshMarks(experimentId: string): Promise<{ updated: num
 
 export async function reconcile(
   wallet: string = TARGET_WALLET,
-): Promise<{ ok: boolean; mismatches: number }> {
-  const { data: events } = await supabaseAdmin
-    .from("source_events")
-    .select("asset, side, shares")
-    .eq("wallet", wallet)
-    .order("source_ts", { ascending: true })
-    .limit(5000);
+): Promise<{ ok: boolean; mismatches: number; replayComplete: boolean; replayedEvents: number }> {
+  // The replay MUST cover every persisted fill. PostgREST caps a single request
+  // at 1000 rows, so a plain .limit(5000) silently replayed only the oldest
+  // page and reported every later asset as a phantom mismatch.
+  const paged = await fetchAllRows<{ asset: string; side: string; shares: number }>(
+    async (from, to) => {
+      const { data, error } = await supabaseAdmin
+        .from("source_events")
+        .select("asset, side, shares")
+        .eq("wallet", wallet)
+        .order("source_ts", { ascending: true })
+        .order("event_key", { ascending: true })
+        .range(from, to);
+      if (error) throw new Error(error.message);
+      return (data ?? []) as { asset: string; side: string; shares: number }[];
+    },
+  );
+
+  if (!paged.complete) {
+    // Never repair from a truncated replay: that would corrupt correct state.
+    await raiseAlert(
+      "warn",
+      "reconciliation_incomplete",
+      `Reconciliation skipped for ${wallet}: the event replay was truncated after ${paged.rows.length} events.`,
+      { wallet, events: paged.rows.length } as never,
+    );
+    return { ok: true, mismatches: 0, replayComplete: false, replayedEvents: paged.rows.length };
+  }
+
   const replayed = replaySourcePositions(
-    (events ?? []).map((e) => ({
+    paged.rows.map((e) => ({
       asset: e.asset,
       side: (e.side === "SELL" ? "SELL" : "BUY") as Side,
       shares: Number(e.shares),
     })),
   );
 
-  const { data: compactRows } = await supabaseAdmin
-    .from("source_position_state")
-    .select("asset, shares")
-    .eq("wallet", wallet);
+  const compactPaged = await fetchAllRows<{ asset: string; shares: number }>(async (from, to) => {
+    const { data, error } = await supabaseAdmin
+      .from("source_position_state")
+      .select("asset, shares")
+      .eq("wallet", wallet)
+      .order("asset", { ascending: true })
+      .range(from, to);
+    if (error) throw new Error(error.message);
+    return (data ?? []) as { asset: string; shares: number }[];
+  });
   const compact = new Map<string, number>();
-  for (const r of compactRows ?? []) compact.set(r.asset, Number(r.shares));
+  for (const r of compactPaged.rows) compact.set(r.asset, Number(r.shares));
 
   const result = reconcileSourceState(compact, replayed);
   const stamp = new Date().toISOString();
@@ -693,7 +722,12 @@ export async function reconcile(
       { mismatches: result.mismatches.slice(0, 20) as never },
     );
   }
-  return { ok: result.ok, mismatches: result.mismatches.length };
+  return {
+    ok: result.ok,
+    mismatches: result.mismatches.length,
+    replayComplete: true,
+    replayedEvents: paged.rows.length,
+  };
 }
 
 /* ------------------------------------------------------------------ */

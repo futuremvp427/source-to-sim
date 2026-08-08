@@ -8,6 +8,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { fetchAllRows } from "../db-pagination";
 import { computeBuySize } from "../shadow-core";
 import {
   SAMPLE_DELAYS,
@@ -222,12 +223,18 @@ export type CopyabilitySummary = CopyabilityScore & {
 
 /** Read model: the copyability score for one isolated experiment. */
 export async function summarizeCopyability(experimentId: string): Promise<CopyabilitySummary> {
-  const { data } = await supabaseAdmin
-    .from("copyability_observations")
-    .select("event_key, sample_delay, slippage_pct, slippage_cents, spread, fillable, status")
-    .eq("experiment_id", experimentId)
-    .limit(2000);
-  const rows = data ?? [];
+  // Paged: a single PostgREST request returns at most 1000 rows, which would
+  // silently understate the observation set for busy experiments.
+  const { rows } = await fetchAllRows(async (from, to) => {
+    const { data, error } = await supabaseAdmin
+      .from("copyability_observations")
+      .select("event_key, sample_delay, slippage_pct, slippage_cents, spread, fillable, status")
+      .eq("experiment_id", experimentId)
+      .order("id", { ascending: true })
+      .range(from, to);
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  });
   const observations: ObservationLite[] = rows
     .filter((r) => r.status === "observed")
     .map((r) => ({
