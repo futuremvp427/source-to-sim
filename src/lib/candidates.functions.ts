@@ -1,0 +1,45 @@
+import { createServerFn } from "@tanstack/react-start";
+import { z } from "zod";
+
+import type { CandidatePanelData, PromotionResult, ResearchSummary } from "./candidates/research.server";
+
+/** Read model for the Research / Candidate Watchlist panel. Read-only. */
+export const getCandidatePanel = createServerFn({ method: "GET" }).handler(
+  async (): Promise<CandidatePanelData> => {
+    const { loadCandidatePanel } = await import("./candidates/research.server");
+    return loadCandidatePanel();
+  },
+);
+
+/** Bounded PUBLIC research pass over the seeded candidates. No credentials, no orders. */
+export const runCandidateResearchFn = createServerFn({ method: "POST" }).handler(
+  async (): Promise<{ ok: true; summary: ResearchSummary } | { ok: false; error: string }> => {
+    const { runCandidateResearch } = await import("./candidates/research.server");
+    try {
+      return { ok: true, summary: await runCandidateResearch() };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : "research pass failed" };
+    }
+  },
+);
+
+const idSchema = z.object({ candidateId: z.string().uuid() });
+
+/** Creates an isolated PAUSED research experiment. Does NOT start following. */
+export const promoteCandidateFn = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => idSchema.parse(input))
+  .handler(async ({ data }): Promise<PromotionResult> => {
+    const { promoteCandidate } = await import("./candidates/research.server");
+    return promoteCandidate(data.candidateId);
+  });
+
+const statusSchema = idSchema.extend({
+  status: z.enum(["RESEARCH", "REJECTED", "INSUFFICIENT_DATA"]),
+});
+
+export const setCandidateStatusFn = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) => statusSchema.parse(input))
+  .handler(async ({ data }) => {
+    const { setCandidateStatus } = await import("./candidates/research.server");
+    return setCandidateStatus(data.candidateId, data.status);
+  });
