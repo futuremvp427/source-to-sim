@@ -25,6 +25,7 @@ import {
   type PaperPositionState,
   type Side,
 } from "./shadow-core";
+import { isPhantomClosedPosition, shouldPersistPaperPosition } from "./shadow-core";
 import {
   V2_REFERENCE_NAME,
   isEligibleForV2Copy,
