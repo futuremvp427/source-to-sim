@@ -382,6 +382,77 @@ export function isPhantomClosedPosition(row: {
   return row.costBasis === 0 && row.realizedPnl === 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Atomic commit payload for process_source_event_atomic               */
+/* ------------------------------------------------------------------ */
+
+export type EventCommitInput = {
+  sourceEventId: string;
+  backfilled: boolean;
+  sourceState: {
+    wallet: string;
+    asset: string;
+    marketTitle: string | null;
+    outcome: string | null;
+    shares: number;
+    lastEventKey: string;
+    lastEventTs: number | null;
+  };
+  /** Null for pre-go-live history: source state advances, nothing is paper-copied. */
+  trade: Record<string, unknown> | null;
+  paperPosition: {
+    asset: string;
+    marketTitle: string | null;
+    outcome: string | null;
+    shares: number;
+    costBasis: number;
+    avgPrice: number;
+    realizedPnl: number;
+    lastActivityTs: number | null;
+  } | null;
+  experiment: { cash: number; realizedPnl: number } | null;
+  audit: Record<string, unknown> | null;
+};
+
+/**
+ * Builds the single jsonb document committed by process_source_event_atomic.
+ * Every mutation for one source event travels together, so the database either
+ * applies all of them or none of them.
+ */
+export function buildEventCommit(input: EventCommitInput): Record<string, unknown> {
+  return {
+    source_event_id: input.sourceEventId,
+    backfilled: input.backfilled,
+    source_state: {
+      wallet: input.sourceState.wallet,
+      asset: input.sourceState.asset,
+      market_title: input.sourceState.marketTitle,
+      outcome: input.sourceState.outcome,
+      shares: input.sourceState.shares,
+      last_event_key: input.sourceState.lastEventKey,
+      last_event_ts: input.sourceState.lastEventTs,
+    },
+    trade: input.trade,
+    paper_position: input.paperPosition
+      ? {
+          asset: input.paperPosition.asset,
+          market_title: input.paperPosition.marketTitle,
+          outcome: input.paperPosition.outcome,
+          shares: input.paperPosition.shares,
+          cost_basis: input.paperPosition.costBasis,
+          avg_price: input.paperPosition.avgPrice,
+          realized_pnl: input.paperPosition.realizedPnl,
+          settlement_status: input.paperPosition.shares > 0 ? "open" : "closed",
+          last_activity_ts: input.paperPosition.lastActivityTs,
+        }
+      : null,
+    experiment: input.experiment
+      ? { cash: input.experiment.cash, realized_pnl: input.experiment.realizedPnl }
+      : null,
+    audit: input.audit,
+  };
+}
+
 export function applyBuy(
   position: PaperPositionState,
   cash: number,

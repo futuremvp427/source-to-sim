@@ -12,6 +12,7 @@ import {
   MARK_MAX_AGE_MS,
   applyBuy,
   applySell,
+  buildEventCommit,
   decideDynamicBuy,
   decideProportionalSell,
   normalizeSourceEvents,
@@ -283,7 +284,9 @@ async function persistEvents(events: NormalizedEvent[]): Promise<number> {
   }));
   const { data, error } = await supabaseAdmin
     .from("source_events")
-    .upsert(rows, { onConflict: "event_key", ignoreDuplicates: true })
+    // Event identity is wallet-scoped: two wallets may legitimately report the
+    // same event_key, and one wallet can never record the same event twice.
+    .upsert(rows, { onConflict: "wallet,event_key", ignoreDuplicates: true })
     .select("id");
   if (error) throw new Error(error.message);
   return data?.length ?? 0;
@@ -360,7 +363,47 @@ function buildAuditRow(input: {
   };
 }
 
-async function processPendingEvents(experiment: Experiment): Promise<ProcessResult> {
+/** Raised when the database refuses a commit because another worker took the lease. */
+export class StaleFenceError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StaleFenceError";
+  }
+}
+
+export function isStaleFenceMessage(message: string): boolean {
+  return message.toLowerCase().includes("stale_fence");
+}
+
+/**
+ * Commits one source event as ONE PostgreSQL transaction that also re-verifies
+ * the worker lease fence. A stale worker cannot commit, and a partial failure
+ * cannot leave half of an event's accounting applied.
+ */
+async function commitEventAtomically(
+  lease: Lease,
+  experimentId: string,
+  payload: Record<string, unknown>,
+): Promise<{ applied: boolean }> {
+  const { data, error } = await supabaseAdmin.rpc("process_source_event_atomic", {
+    p_lock_id: lease.lockId,
+    p_worker_id: lease.workerId,
+    p_fence: lease.fence,
+    p_experiment_id: experimentId,
+    p_event: payload as never,
+  } as never);
+  if (error) {
+    if (isStaleFenceMessage(error.message)) throw new StaleFenceError(error.message);
+    throw new Error(error.message);
+  }
+  const applied = Boolean((data as { applied?: boolean } | null)?.applied);
+  return { applied };
+}
+
+async function processPendingEvents(
+  experiment: Experiment,
+  lease: Lease,
+): Promise<ProcessResult> {
   const wallet = experiment.wallet_address.toLowerCase();
   const { data: pending, error } = await supabaseAdmin
     .from("source_events")
@@ -403,11 +446,7 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
   let cash = Number(experiment.cash);
   let realizedTotal = Number(experiment.realized_pnl);
   const result: ProcessResult = { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0 };
-  const backfilledIds: string[] = [];
   const meta = new Map<string, { title: string; outcome: string | null; ts: number }>();
-  const tradeRows: Record<string, unknown>[] = [];
-  const processedIds: string[] = [];
-  const auditRows: Record<string, unknown>[] = [];
   /** Assets that already had a persisted paper_positions row before this batch. */
   const existingPaperAssets = new Set<string>(
     ((paperRows ?? []) as PaperPositionRow[]).map((r) => r.asset),
@@ -428,9 +467,29 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
       side === "BUY" ? (before ?? 0) + srcShares : Math.max(0, (before ?? 0) - srcShares);
 
     if (!isEligibleForV2Copy(Number(row.source_ts), followFrom)) {
-      sourceShares.set(row.asset, roundShares(nextSourceForRow));
-      processedIds.push(row.id);
-      backfilledIds.push(row.id);
+      const nextShares = roundShares(nextSourceForRow);
+      await commitEventAtomically(
+        lease,
+        experiment.id,
+        buildEventCommit({
+          sourceEventId: row.id,
+          backfilled: true,
+          sourceState: {
+            wallet,
+            asset: row.asset,
+            marketTitle: row.market_title,
+            outcome: row.outcome,
+            shares: nextShares,
+            lastEventKey: row.event_key,
+            lastEventTs: Number(row.source_ts),
+          },
+          trade: null,
+          paperPosition: null,
+          experiment: null,
+          audit: null,
+        }),
+      );
+      sourceShares.set(row.asset, nextShares);
       result.backfilled += 1;
       result.processed += 1;
       continue;
@@ -453,6 +512,8 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
     let cashAfter = cash;
     let realized = 0;
     let nextPosition = position;
+    const prevCash = cash;
+    const prevRealizedTotal = realizedTotal;
 
     if (decision.action === "BUY") {
       const applied = applyBuy(position, cash, decision.shares, decision.notional);
@@ -473,12 +534,8 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
     }
 
     cash = cashAfter;
-    paper.set(row.asset, nextPosition);
 
-    // Source-side state always advances, even when the paper side skipped.
-    sourceShares.set(row.asset, roundShares(nextSourceForRow));
-
-    tradeRows.push({
+    const tradeRow = {
       experiment_id: experiment.id,
       source_event_id: row.id,
       event_key: row.event_key,
@@ -494,92 +551,72 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
       cash_after: cashAfter,
       realized_pnl: realized,
       source_ts: row.source_ts,
+    };
+    const auditRow = buildAuditRow({
+      experimentId: experiment.id,
+      wallet,
+      eventKey: row.event_key,
+      marketTitle: row.market_title,
+      side,
+      action: decision.action,
+      sourceTs: Number(row.source_ts),
+      firstSeenAt: row.first_seen_at,
     });
-    auditRows.push(
-      buildAuditRow({
-        experimentId: experiment.id,
-        wallet,
-        eventKey: row.event_key,
-        marketTitle: row.market_title,
-        side,
-        action: decision.action,
-        sourceTs: Number(row.source_ts),
-        firstSeenAt: row.first_seen_at,
+
+    const nextSourceShares = roundShares(nextSourceForRow);
+    const persistPosition = shouldPersistPaperPosition({
+      hadExistingRow: existingPaperAssets.has(row.asset),
+      tradedThisBatch: tradedAssets.has(row.asset),
+    });
+
+    const commit = await commitEventAtomically(
+      lease,
+      experiment.id,
+      buildEventCommit({
+        sourceEventId: row.id,
+        backfilled: false,
+        sourceState: {
+          wallet,
+          asset: row.asset,
+          marketTitle: row.market_title,
+          outcome: row.outcome,
+          shares: nextSourceShares,
+          lastEventKey: row.event_key,
+          lastEventTs: Number(row.source_ts),
+        },
+        trade: tradeRow,
+        paperPosition: persistPosition
+          ? {
+              asset: row.asset,
+              marketTitle: row.market_title,
+              outcome: row.outcome,
+              shares: nextPosition.shares,
+              costBasis: nextPosition.costBasis,
+              avgPrice: nextPosition.avgPrice,
+              realizedPnl: nextPosition.realizedPnl,
+              lastActivityTs: Number(row.source_ts),
+            }
+          : null,
+        experiment: { cash, realizedPnl: realizedTotal },
+        audit: auditRow,
       }),
     );
-    processedIds.push(row.id);
+
+    // Source-side state always advances, even when the paper side skipped.
+    sourceShares.set(row.asset, nextSourceShares);
+
+    if (commit.applied) {
+      paper.set(row.asset, nextPosition);
+    } else {
+      // This event's trade already existed: its accounting is already in the
+      // persisted bankroll, so nothing may be applied a second time.
+      cash = prevCash;
+      realizedTotal = prevRealizedTotal;
+      if (decision.action === "BUY") result.buys -= 1;
+      if (decision.action === "SELL") result.sells -= 1;
+    }
     result.processed += 1;
   }
-
-  // Batched writes: one round-trip per chunk instead of per event.
-  const stampNow = new Date().toISOString();
-  for (const chunk of chunked(tradeRows, 200)) {
-    const { error: tradeErr } = await supabaseAdmin
-      .from("paper_trades")
-      .upsert(chunk as never, { onConflict: "experiment_id,event_key", ignoreDuplicates: true });
-    if (tradeErr) throw new Error(tradeErr.message);
-  }
-  for (const chunk of chunked(processedIds, 200)) {
-    await supabaseAdmin.from("source_events").update({ processed_at: stampNow }).in("id", chunk);
-  }
-  for (const chunk of chunked(backfilledIds, 200)) {
-    await supabaseAdmin.from("source_events").update({ backfilled: true }).in("id", chunk);
-  }
-  // Real-event validation log: proves each eligible event traversed the pipeline.
-  for (const chunk of chunked(auditRows, 200)) {
-    await supabaseAdmin
-      .from("pipeline_audit")
-      .upsert(chunk as never, { onConflict: "experiment_id,event_key", ignoreDuplicates: true });
-  }
-
-  // Persist the compact source state and the paper book (batched).
-  const sourceRows = [...sourceShares].map(([asset, shares]) => ({
-    wallet,
-    asset,
-    market_title: meta.get(asset)?.title ?? null,
-    outcome: meta.get(asset)?.outcome ?? null,
-    shares,
-    last_event_ts: meta.get(asset)?.ts ?? null,
-    updated_at: stampNow,
-  }));
-  for (const chunk of chunked(sourceRows, 200)) {
-    const { error: e } = await supabaseAdmin
-      .from("source_position_state")
-      .upsert(chunk as never, { onConflict: "wallet,asset" });
-    if (e) throw new Error(e.message);
-  }
-
-  const paperRowsOut = [...paper]
-    .filter(([asset]) =>
-      shouldPersistPaperPosition({
-        hadExistingRow: existingPaperAssets.has(asset),
-        tradedThisBatch: tradedAssets.has(asset),
-      }),
-    )
-    .map(([asset, p]) => ({
-    experiment_id: experiment.id,
-    asset,
-    market_title: meta.get(asset)?.title ?? null,
-    outcome: meta.get(asset)?.outcome ?? null,
-    shares: p.shares,
-    cost_basis: p.costBasis,
-    avg_price: p.avgPrice,
-    realized_pnl: p.realizedPnl,
-    settlement_status: p.shares > 0 ? "open" : "closed",
-    last_activity_ts: meta.get(asset)?.ts ?? null,
-    updated_at: stampNow,
-    }));
-  for (const chunk of chunked(paperRowsOut, 200)) {
-    const { error: e } = await supabaseAdmin
-      .from("paper_positions")
-      .upsert(chunk as never, { onConflict: "experiment_id,asset" });
-    if (e) throw new Error(e.message);
-  }
-
-  await supabaseAdmin
-    .from("paper_experiments")
-    .update({ cash, realized_pnl: realizedTotal, updated_at: new Date().toISOString() })
-    .eq("id", experiment.id);
 
   return result;
 }
@@ -788,14 +825,17 @@ const NO_PREVIEWS = {
  * Order-preview generation is best-effort: a Polymarket US outage must never
  * break autonomous public-wallet ingestion.
  */
-async function generatePreviewsSafely(experimentId: string): Promise<typeof NO_PREVIEWS> {
+async function generatePreviewsSafely(
+  experimentId: string,
+  wallet: string,
+): Promise<typeof NO_PREVIEWS> {
   try {
     // Bounded, self-throttled public weather-availability scan. Its result is
     // what triggers automatic rechecks of previously unmatched source markets.
     const { runAvailabilityScan } = await import("./pmus/availability.server");
     await runAvailabilityScan();
     const { generatePendingPreviews } = await import("./pmus/previews.server");
-    const result = await generatePendingPreviews(experimentId);
+    const result = await generatePendingPreviews(experimentId, {}, undefined, wallet);
     return {
       created: result.created,
       ineligible: result.ineligible,
@@ -967,11 +1007,11 @@ export async function runExperimentCycle(
     const window = await fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES);
     const events = normalizeSourceEvents(window.raw, wallet);
     const inserted = await persistEvents(events);
-    const process = await processPendingEvents(experiment);
+    const process = await processPendingEvents(experiment, lease);
     const marks = await refreshMarks(experiment.id);
     const reconciliation = inserted > 0 || !bootstrapped ? await reconcile(wallet) : null;
     const settlements = await settleSafely(experiment.id);
-    const previews = await generatePreviewsSafely(experiment.id);
+    const previews = await generatePreviewsSafely(experiment.id, wallet);
     const copyability = await observeCopyabilitySafely(experiment);
     await raiseCashAlerts(experiment);
 

@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
+import { requireAdmin } from "./admin-auth";
 import type { CandidatePanelData, PromotionResult, ResearchSummary } from "./candidates/research.server";
 
 /** Read model for the Research / Candidate Watchlist panel. Read-only. */
@@ -19,8 +20,9 @@ export const getCandidatePanel = createServerFn({ method: "GET" }).handler(
 );
 
 /** Bounded PUBLIC research pass over the seeded candidates. No credentials, no orders. */
-export const runCandidateResearchFn = createServerFn({ method: "POST" }).handler(
-  async (): Promise<{ ok: true; summary: ResearchSummary } | { ok: false; error: string }> => {
+export const runCandidateResearchFn = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .handler(async (): Promise<{ ok: true; summary: ResearchSummary } | { ok: false; error: string }> => {
     const { runCandidateResearch } = await import("./candidates/research.server");
     try {
       const summary = await runCandidateResearch();
@@ -38,13 +40,13 @@ export const runCandidateResearchFn = createServerFn({ method: "POST" }).handler
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : "research pass failed" };
     }
-  },
-);
+  });
 
 const idSchema = z.object({ candidateId: z.string().uuid() });
 
 /** Creates an isolated PAUSED research experiment. Does NOT start following. */
 export const promoteCandidateFn = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
   .inputValidator((input: unknown) => idSchema.parse(input))
   .handler(async ({ data }): Promise<PromotionResult> => {
     const { promoteCandidate } = await import("./candidates/research.server");
@@ -56,6 +58,7 @@ const statusSchema = idSchema.extend({
 });
 
 export const setCandidateStatusFn = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
   .inputValidator((input: unknown) => statusSchema.parse(input))
   .handler(async ({ data }) => {
     const { setCandidateStatus } = await import("./candidates/research.server");

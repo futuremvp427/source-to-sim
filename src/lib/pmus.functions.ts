@@ -1,16 +1,17 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
+import { requireAdmin } from "./admin-auth";
 import type { PmusConnectionStatus, PmusPanelData } from "./pmus/verify.server";
 import type { PmusAuthDiagnosis } from "./pmus/diagnose.server";
 
 /** Safe auth diagnostics: metadata only, never credentials or signatures. */
-export const diagnosePmusAuthFn = createServerFn({ method: "POST" }).handler(
-  async (): Promise<PmusAuthDiagnosis> => {
+export const diagnosePmusAuthFn = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .handler(async (): Promise<PmusAuthDiagnosis> => {
     const { diagnosePmusAuth } = await import("./pmus/diagnose.server");
     return diagnosePmusAuth();
-  },
-);
+  });
 
 /** Account Setup + Approval Queue read model. Never returns credentials. */
 export const getPmusPanel = createServerFn({ method: "GET" }).handler(
@@ -21,12 +22,12 @@ export const getPmusPanel = createServerFn({ method: "GET" }).handler(
 );
 
 /** Verify the Polymarket US connection with read-only balances + positions. */
-export const verifyPmusConnectionFn = createServerFn({ method: "POST" }).handler(
-  async (): Promise<PmusConnectionStatus> => {
+export const verifyPmusConnectionFn = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .handler(async (): Promise<PmusConnectionStatus> => {
     const { verifyPmusConnection } = await import("./pmus/verify.server");
     return verifyPmusConnection();
-  },
-);
+  });
 
 const decisionSchema = z.object({
   previewId: z.string().uuid(),
@@ -43,6 +44,7 @@ const decisionSchema = z.object({
  * PostgreSQL returned no statement-level error.
  */
 export const decidePmusPreview = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
   .inputValidator((input: unknown) => decisionSchema.parse(input))
   .handler(async ({ data }) => {
     const { decidePreview } = await import("./pmus/previews.server");

@@ -248,6 +248,7 @@ export type Database = {
           source_event_id: string | null
           source_market: string | null
           source_slug: string | null
+          wallet: string
         }
         Insert: {
           checked_at?: string
@@ -261,6 +262,7 @@ export type Database = {
           source_event_id?: string | null
           source_market?: string | null
           source_slug?: string | null
+          wallet?: string
         }
         Update: {
           checked_at?: string
@@ -274,6 +276,7 @@ export type Database = {
           source_event_id?: string | null
           source_market?: string | null
           source_slug?: string | null
+          wallet?: string
         }
         Relationships: [
           {
@@ -1050,6 +1053,27 @@ export type Database = {
         }
         Relationships: []
       }
+      user_roles: {
+        Row: {
+          created_at: string
+          id: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          role?: Database["public"]["Enums"]["app_role"]
+          user_id?: string
+        }
+        Relationships: []
+      }
       worker_checkpoints: {
         Row: {
           bootstrap_complete: boolean
@@ -1137,9 +1161,26 @@ export type Database = {
         Args: { p_id: string; p_lease_seconds: number; p_worker_id: string }
         Returns: number
       }
+      has_role: {
+        Args: {
+          _role: Database["public"]["Enums"]["app_role"]
+          _user_id: string
+        }
+        Returns: boolean
+      }
+      process_source_event_atomic: {
+        Args: {
+          p_event: Json
+          p_experiment_id: string
+          p_fence: number
+          p_lock_id: string
+          p_worker_id: string
+        }
+        Returns: Json
+      }
     }
     Enums: {
-      [_ in never]: never
+      app_role: "admin"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -1266,6 +1307,8 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      app_role: ["admin"],
+    },
   },
 } as const

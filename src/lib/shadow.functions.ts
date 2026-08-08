@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
+import { requireAdmin } from "./admin-auth";
 import type { DashboardData } from "./shadow.server";
 
 /** Read model for the dashboard. Read-only. */
@@ -12,7 +13,9 @@ export const getShadowDashboard = createServerFn({ method: "GET" }).handler(
 );
 
 /** Manually trigger one ingest cycle (the scheduled worker does this automatically). */
-export const triggerIngest = createServerFn({ method: "POST" }).handler(async () => {
+export const triggerIngest = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .handler(async () => {
   const { runIngestCycle } = await import("./shadow.server");
   try {
     const result = await runIngestCycle("manual-ui");
@@ -31,6 +34,7 @@ const settingsSchema = z.object({
 
 /** Update follower settings. Simulation-only knobs; nothing here can place an order. */
 export const updateShadowSettings = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
   .inputValidator((input: unknown) => settingsSchema.parse(input))
   .handler(async ({ data }) => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
@@ -51,7 +55,9 @@ export const updateShadowSettings = createServerFn({ method: "POST" })
   });
 
 /** Force a full replay-based reconciliation of source position state. */
-export const runReconciliation = createServerFn({ method: "POST" }).handler(async () => {
+export const runReconciliation = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .handler(async () => {
   const { reconcile } = await import("./shadow.server");
   try {
     const result = await reconcile();
@@ -61,7 +67,9 @@ export const runReconciliation = createServerFn({ method: "POST" }).handler(asyn
   }
 });
 
-export const acknowledgeAlerts = createServerFn({ method: "POST" }).handler(async () => {
+export const acknowledgeAlerts = createServerFn({ method: "POST" })
+  .middleware([requireAdmin])
+  .handler(async () => {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   await supabaseAdmin.from("alerts").update({ acknowledged: true }).eq("acknowledged", false);
   return { ok: true as const };

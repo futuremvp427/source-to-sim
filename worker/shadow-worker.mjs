@@ -39,7 +39,7 @@ while (running) {
   try {
     const res = await fetch(`${url}?worker=${encodeURIComponent(workerId)}`, {
       method: "POST",
-      headers: { apikey: hookSecret, "content-type": "application/json" },
+      headers: { "x-ingest-secret": hookSecret, "content-type": "application/json" },
     });
     const body = await res.json();
     if (!res.ok || body.ok === false) throw new Error(body.error ?? `HTTP ${res.status}`);
