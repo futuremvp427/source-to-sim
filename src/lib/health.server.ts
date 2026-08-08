@@ -22,6 +22,7 @@ export type HealthReport = {
 
 const STALE_HEARTBEAT_SECONDS = 300;
 const PUBLIC_DATA_API = "https://data-api.polymarket.com/trades?limit=1";
+const HEALTH_HTTP_TIMEOUT_MS = 8_000;
 
 function ageSeconds(iso: string | null | undefined): number | null {
   if (!iso) return null;
@@ -43,7 +44,7 @@ export async function runSelfCheck(): Promise<HealthReport> {
   });
 
   // 2. Enabled experiments
-  const { data: experiments } = await supabaseAdmin
+  const { data: experiments, error: experimentsError } = await supabaseAdmin
     .from("paper_experiments")
     .select("id, name, enabled")
     .eq("enabled", true);
@@ -51,12 +52,16 @@ export async function runSelfCheck(): Promise<HealthReport> {
   checks.push({
     id: "experiments",
     label: "Enabled experiments",
-    status: enabled === 0 ? "FAIL" : enabled < 2 ? "WARN" : "PASS",
-    detail: enabled === 0 ? "No experiment is enabled" : `${enabled} enabled: ${(experiments ?? []).map((e) => e.name).join(", ")}`,
+    status: experimentsError ? "FAIL" : enabled === 0 ? "FAIL" : enabled < 2 ? "WARN" : "PASS",
+    detail: experimentsError
+      ? experimentsError.message
+      : enabled === 0
+        ? "No experiment is enabled"
+        : `${enabled} enabled: ${(experiments ?? []).map((e) => e.name).join(", ")}`,
   });
 
   // 3. Scheduled cycle / heartbeat freshness
-  const { data: statuses } = await supabaseAdmin.from("worker_status").select("*");
+  const { data: statuses, error: statusesError } = await supabaseAdmin.from("worker_status").select("*");
   const ingestRows = (statuses ?? []).filter((s) => s.id.startsWith("ingest"));
   const freshest = ingestRows
     .map((s) => ageSeconds(s.heartbeat_at))
@@ -65,9 +70,16 @@ export async function runSelfCheck(): Promise<HealthReport> {
   checks.push({
     id: "schedule",
     label: "Scheduled polling",
-    status: freshest === undefined ? "FAIL" : freshest > STALE_HEARTBEAT_SECONDS ? "WARN" : "PASS",
-    detail:
-      freshest === undefined
+    status: statusesError
+      ? "FAIL"
+      : freshest === undefined
+        ? "FAIL"
+        : freshest > STALE_HEARTBEAT_SECONDS
+          ? "WARN"
+          : "PASS",
+    detail: statusesError
+      ? statusesError.message
+      : freshest === undefined
         ? "No worker heartbeat recorded"
         : `Last heartbeat ${freshest}s ago across ${ingestRows.length} worker row(s)`,
   });
@@ -79,8 +91,12 @@ export async function runSelfCheck(): Promise<HealthReport> {
   checks.push({
     id: "lease",
     label: "Worker lease",
-    status: stuck.length > 0 ? "WARN" : "PASS",
-    detail: stuck.length > 0 ? `${stuck.length} stale lease(s) will expire and be retaken` : "No stale leases",
+    status: statusesError ? "FAIL" : stuck.length > 0 ? "WARN" : "PASS",
+    detail: statusesError
+      ? statusesError.message
+      : stuck.length > 0
+        ? `${stuck.length} stale lease(s) will expire and be retaken`
+        : "No stale leases",
   });
 
   // 5. Ingestion errors
@@ -88,9 +104,16 @@ export async function runSelfCheck(): Promise<HealthReport> {
   checks.push({
     id: "ingestion",
     label: "Ingestion errors",
-    status: failing.length === 0 ? "PASS" : failing.some((s) => s.poll_failures >= 5) ? "FAIL" : "WARN",
-    detail:
-      failing.length === 0
+    status: statusesError
+      ? "FAIL"
+      : failing.length === 0
+        ? "PASS"
+        : failing.some((s) => s.poll_failures >= 5)
+          ? "FAIL"
+          : "WARN",
+    detail: statusesError
+      ? statusesError.message
+      : failing.length === 0
         ? "No recent ingestion failures"
         : failing.map((s) => `${s.id}: ${s.poll_failures} failure(s)`).join(", "),
   });
@@ -99,7 +122,10 @@ export async function runSelfCheck(): Promise<HealthReport> {
   let publicStatus: CheckStatus = "PASS";
   let publicDetail = "Public trades API reachable";
   try {
-    const res = await fetch(PUBLIC_DATA_API, { headers: { accept: "application/json" } });
+    const res = await fetch(PUBLIC_DATA_API, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(HEALTH_HTTP_TIMEOUT_MS),
+    });
     if (!res.ok) {
       publicStatus = "WARN";
       publicDetail = `Public trades API returned HTTP ${res.status}`;
@@ -111,7 +137,7 @@ export async function runSelfCheck(): Promise<HealthReport> {
   checks.push({ id: "public_api", label: "Polymarket public API", status: publicStatus, detail: publicDetail });
 
   // 7. Polymarket US authenticated capability (preview-only)
-  const { data: integration } = await supabaseAdmin
+  const { data: integration, error: integrationError } = await supabaseAdmin
     .from("integration_status")
     .select("*")
     .eq("id", "polymarket_us")
@@ -119,12 +145,14 @@ export async function runSelfCheck(): Promise<HealthReport> {
   checks.push({
     id: "pmus",
     label: "Polymarket US (preview only)",
-    status: integration?.connected ? "PASS" : integration?.configured ? "WARN" : "WARN",
-    detail: integration?.connected
-      ? `Connected — ${integration.detail ?? "balances/positions/preview only"}`
-      : integration?.configured
-        ? `Configured but not verified — ${integration.detail ?? "run verification"}`
-        : "Credentials not configured — previews stay unavailable",
+    status: integrationError ? "FAIL" : integration?.connected ? "PASS" : "WARN",
+    detail: integrationError
+      ? integrationError.message
+      : integration?.connected
+        ? `Connected — ${integration.detail ?? "balances/positions/preview only"}`
+        : integration?.configured
+          ? `Configured but not verified — ${integration.detail ?? "run verification"}`
+          : "Credentials not configured — previews stay unavailable",
   });
 
   const overall: CheckStatus = checks.some((c) => c.status === "FAIL")
