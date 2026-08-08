@@ -6,15 +6,14 @@ import { createFileRoute } from "@tanstack/react-router";
  * so the follower keeps running with no browser open.
  * Read-only against public Polymarket data; no trading credentials or order placement.
  *
- * INGEST_HOOK_SECRET is the intended private scheduler credential. The
- * publishable-key fallback is temporary backwards compatibility for existing
- * deployments and should be removed once the live pg_cron job is rotated.
+ * INGEST_HOOK_SECRET is the only accepted scheduler credential. The former
+ * publishable-key fallback has been removed: a browser-visible key must never
+ * be able to drive a mutating scheduler hook.
  */
 async function handle(request: Request): Promise<Response> {
-  const provided = request.headers.get("apikey") ?? "";
-  const privateSecret = process.env["INGEST_HOOK_SECRET"] ?? "";
-  const legacyPublishable = process.env["SUPABASE_PUBLISHABLE_KEY"] ?? "";
-  const expected = privateSecret || legacyPublishable;
+  const provided =
+    request.headers.get("x-ingest-secret") ?? request.headers.get("apikey") ?? "";
+  const expected = process.env["INGEST_HOOK_SECRET"] ?? "";
   if (!expected || provided !== expected) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
