@@ -181,6 +181,29 @@ export async function getExperiment(): Promise<Experiment> {
   return data as unknown as Experiment;
 }
 
+/**
+ * Every enabled experiment. The reference SHADOW experiment is always polled
+ * first; candidate shadow experiments follow. Each row carries its own wallet,
+ * bankroll and accounting, so one cycle can never cross-contaminate another.
+ */
+export async function listActiveExperiments(): Promise<Experiment[]> {
+  const { data, error } = await supabaseAdmin
+    .from("paper_experiments")
+    .select("*")
+    .eq("enabled", true)
+    .order("created_at", { ascending: true });
+  if (error) throw new Error(error.message);
+  const rows = (data ?? []) as unknown as Experiment[];
+  return rows.sort((a, b) =>
+    a.name === EXPERIMENT_NAME ? -1 : b.name === EXPERIMENT_NAME ? 1 : a.name.localeCompare(b.name),
+  );
+}
+
+/** Per-experiment worker/checkpoint row id. The reference keeps its historical id. */
+export function workerIdFor(experiment: { id: string; name: string }): string {
+  return experiment.name === EXPERIMENT_NAME ? WORKER_ID : `ingest:${experiment.id}`;
+}
+
 /* ------------------------------------------------------------------ */
 /* Ingestion                                                          */
 /* ------------------------------------------------------------------ */
@@ -192,15 +215,18 @@ export async function getExperiment(): Promise<Experiment> {
  */
 export const TAKER_ONLY_PARAM = "takerOnly=false";
 
-export function buildTradesUrl(limit: number, offset: number): string {
-  return `${DATA_API}/trades?user=${TARGET_WALLET}&${TAKER_ONLY_PARAM}&limit=${limit}&offset=${offset}`;
+export function buildTradesUrl(limit: number, offset: number, wallet: string = TARGET_WALLET): string {
+  return `${DATA_API}/trades?user=${wallet}&${TAKER_ONLY_PARAM}&limit=${limit}&offset=${offset}`;
 }
 
-async function fetchSourceWindow(pages: number): Promise<{ raw: Json[]; pagesFetched: number }> {
+async function fetchSourceWindow(
+  wallet: string,
+  pages: number,
+): Promise<{ raw: Json[]; pagesFetched: number }> {
   const raw: Json[] = [];
   let pagesFetched = 0;
   for (let p = 0; p < pages; p += 1) {
-    const page = await getArray(buildTradesUrl(PAGE_SIZE, p * PAGE_SIZE));
+    const page = await getArray(buildTradesUrl(PAGE_SIZE, p * PAGE_SIZE, wallet));
     pagesFetched += 1;
     raw.push(...page);
     if (page.length < PAGE_SIZE) break;
