@@ -26,6 +26,19 @@ async function handle(request: Request): Promise<Response> {
   try {
     const result = await runIngestCycle(workerId);
 
+    let researchPersistence: { ok: boolean; issues: number } | null = null;
+    if (result.candidateResearch.ran) {
+      try {
+        const { verifyCandidateResearchPersistence } = await import("@/lib/candidates/consistency.server");
+        const check = await verifyCandidateResearchPersistence({ downgradeRunState: true });
+        researchPersistence = { ok: check.ok, issues: check.issues.length };
+      } catch {
+        // Research consistency is diagnostic/fail-visible through worker state;
+        // it must never turn a successful ingestion cycle into a failed poll.
+        researchPersistence = { ok: false, issues: -1 };
+      }
+    }
+
     // Notification delivery is deliberately failure-isolated from ingestion.
     // A Telegram outage must never make a successful source/paper cycle fail,
     // but failed important alerts should be retried automatically on later cron runs.
@@ -37,7 +50,7 @@ async function handle(request: Request): Promise<Response> {
       // Best-effort only; delivery state remains pending/failed for a later retry.
     }
 
-    return Response.json({ ok: true, ...result, notifications });
+    return Response.json({ ok: true, ...result, researchPersistence, notifications });
   } catch (err) {
     return Response.json(
       { ok: false, error: err instanceof Error ? err.message : "ingest failed" },
