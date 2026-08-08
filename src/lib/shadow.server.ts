@@ -616,11 +616,13 @@ export async function refreshMarks(experimentId: string): Promise<{ updated: num
 /* Reconciliation                                                      */
 /* ------------------------------------------------------------------ */
 
-export async function reconcile(): Promise<{ ok: boolean; mismatches: number }> {
+export async function reconcile(
+  wallet: string = TARGET_WALLET,
+): Promise<{ ok: boolean; mismatches: number }> {
   const { data: events } = await supabaseAdmin
     .from("source_events")
     .select("asset, side, shares")
-    .eq("wallet", TARGET_WALLET)
+    .eq("wallet", wallet)
     .order("source_ts", { ascending: true })
     .limit(5000);
   const replayed = replaySourcePositions(
@@ -634,7 +636,7 @@ export async function reconcile(): Promise<{ ok: boolean; mismatches: number }> 
   const { data: compactRows } = await supabaseAdmin
     .from("source_position_state")
     .select("asset, shares")
-    .eq("wallet", TARGET_WALLET);
+    .eq("wallet", wallet);
   const compact = new Map<string, number>();
   for (const r of compactRows ?? []) compact.set(r.asset, Number(r.shares));
 
@@ -643,7 +645,7 @@ export async function reconcile(): Promise<{ ok: boolean; mismatches: number }> 
   const bad = new Set(result.mismatches.map((m) => m.asset));
 
   const rows = [...new Set([...compact.keys(), ...replayed.keys()])].map((asset) => ({
-    wallet: TARGET_WALLET,
+    wallet,
     asset,
     shares: replayed.get(asset) ?? 0,
     reconciled_at: stamp,
