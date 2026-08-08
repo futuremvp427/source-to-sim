@@ -6,6 +6,13 @@ import type { CandidatePanelData, PromotionResult, ResearchSummary } from "./can
 /** Read model for the Research / Candidate Watchlist panel. Read-only. */
 export const getCandidatePanel = createServerFn({ method: "GET" }).handler(
   async (): Promise<CandidatePanelData> => {
+    const { verifyCandidateResearchPersistence } = await import("./candidates/consistency.server");
+    const consistency = await verifyCandidateResearchPersistence();
+    if (!consistency.ok) {
+      throw new Error(
+        `Candidate research state is inconsistent for ${consistency.issues.length} candidate(s); refusing to present stale mixed-version scores.`,
+      );
+    }
     const { loadCandidatePanel } = await import("./candidates/research.server");
     return loadCandidatePanel();
   },
