@@ -362,6 +362,26 @@ export const EMPTY_POSITION: PaperPositionState = {
   realizedPnl: 0,
 };
 
+/**
+ * A paper_positions row may only be written for an asset that either already had a
+ * row, or was genuinely traded (BUY/SELL) in this batch. SKIP-only assets that were
+ * never funded must never be persisted — that produced phantom "closed" positions.
+ */
+export function shouldPersistPaperPosition(input: {
+  hadExistingRow: boolean;
+  tradedThisBatch: boolean;
+}): boolean {
+  return input.hadExistingRow || input.tradedThisBatch;
+}
+
+/** Historical phantom row signature: closed with no cost basis and no realized P&L. */
+export function isPhantomClosedPosition(row: {
+  costBasis: number;
+  realizedPnl: number;
+}): boolean {
+  return row.costBasis === 0 && row.realizedPnl === 0;
+}
+
 export function applyBuy(
   position: PaperPositionState,
   cash: number,
