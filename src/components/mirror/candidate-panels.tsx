@@ -128,11 +128,51 @@ export function CandidateSection() {
         </select>
       </div>
 
-      {research.data && "ok" in research.data && !research.data.ok ? (
-        <p className="mb-3 rounded-md border border-border px-3 py-2 text-xs text-[var(--loss)]">
-          Research pass failed: {research.data.error}
-        </p>
-      ) : null}
+      {(() => {
+        const summary = research.data && research.data.ok ? research.data.summary : null;
+        const runState = data?.runState ?? null;
+        const state = research.isPending
+          ? "running"
+          : research.isError || (research.data && !research.data.ok)
+            ? "error"
+            : (summary?.state ?? (runState?.running ? "running" : runState?.state ?? "idle"));
+        const tone =
+          state === "error"
+            ? "text-[var(--loss)]"
+            : state === "partial"
+              ? "text-amber-600"
+              : state === "success"
+                ? "text-[var(--gain)]"
+                : "text-muted-foreground";
+        const lastRun = summary?.ranAt ?? runState?.lastRunAt ?? null;
+        const resolved = summary?.resolvedCount ?? null;
+        const unresolvedCount = summary?.unresolvedCount ?? null;
+        return (
+          <div className="mb-3 rounded-md border border-border px-3 py-2 text-[11px]">
+            <p>
+              <span className="uppercase tracking-wide text-muted-foreground">Research run</span>{" "}
+              <span className={`font-semibold uppercase ${tone}`}>{state}</span>
+              {" · last run "}
+              {lastRun ? new Date(lastRun).toLocaleString("en-US") : "never"}
+              {resolved !== null ? ` · resolved ${resolved}` : ""}
+              {unresolvedCount !== null ? ` · unresolved ${unresolvedCount}` : ""}
+              {summary && summary.failures.length > 0 ? ` · failed ${summary.failures.length}` : ""}
+            </p>
+            {research.isError ? (
+              <p className="mt-1 text-[var(--loss)]">
+                {research.error instanceof Error ? research.error.message : "research pass failed"}
+              </p>
+            ) : null}
+            {research.data && !research.data.ok ? (
+              <p className="mt-1 text-[var(--loss)]">Research pass failed: {research.data.error}</p>
+            ) : null}
+            {summary?.detail ? <p className="mt-1 text-muted-foreground">{summary.detail}</p> : null}
+            {!summary && runState?.detail ? (
+              <p className="mt-1 text-muted-foreground">{runState.detail}</p>
+            ) : null}
+          </div>
+        );
+      })()}
       {promote.data && !promote.data.ok ? (
         <p className="mb-3 rounded-md border border-border px-3 py-2 text-xs text-[var(--loss)]">
           {promote.data.error}
