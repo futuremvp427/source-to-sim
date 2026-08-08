@@ -219,7 +219,10 @@ export type WatchlistRow = {
 };
 
 export async function seedWatchlist(): Promise<WatchlistRow[]> {
-  const { data: existing } = await supabaseAdmin.from("candidate_watchlist").select("*");
+  const { data: existing, error: readError } = await supabaseAdmin
+    .from("candidate_watchlist")
+    .select("*");
+  if (readError) throw new Error(`candidate_watchlist read failed: ${readError.message}`);
   const byHandle = new Map<string, WatchlistRow>(
     ((existing ?? []) as unknown as WatchlistRow[]).map((r) => [r.handle, r]),
   );
@@ -243,11 +246,11 @@ export async function seedWatchlist(): Promise<WatchlistRow[]> {
       updated_at: new Date().toISOString(),
     };
 
-    if (current) {
-      await supabaseAdmin.from("candidate_watchlist").update(payload as never).eq("id", current.id);
-    } else {
-      await supabaseAdmin.from("candidate_watchlist").insert(payload as never);
-    }
+    // Idempotent: handle is unique, so a repeat run updates in place.
+    const { error: writeError } = current
+      ? await supabaseAdmin.from("candidate_watchlist").update(payload as never).eq("id", current.id)
+      : await supabaseAdmin.from("candidate_watchlist").insert(payload as never);
+    if (writeError) throw new Error(`candidate_watchlist write failed: ${writeError.message}`);
   }
 
   const { data } = await supabaseAdmin
@@ -263,10 +266,73 @@ export async function seedWatchlist(): Promise<WatchlistRow[]> {
 
 export type ResearchSummary = {
   ranAt: string;
+  state: "success" | "partial" | "error" | "skipped_locked";
   researched: number;
+  resolvedCount: number;
+  unresolvedCount: number;
   unresolved: string[];
   insufficient: string[];
+  /** Public-API failures per candidate. The run continues past each one. */
+  failures: { handle: string; error: string }[];
+  detail: string | null;
 };
+
+/** Lightweight server-side lease so overlapping runs cannot double-write. */
+const RESEARCH_LOCK_ID = "candidate_research";
+const RESEARCH_LEASE_SECONDS = 300;
+
+async function acquireResearchLease(): Promise<boolean> {
+  const { data, error } = await supabaseAdmin.rpc("acquire_worker_lease", {
+    p_id: RESEARCH_LOCK_ID,
+    p_worker_id: `research-${Date.now()}`,
+    p_lease_seconds: RESEARCH_LEASE_SECONDS,
+  });
+  if (error) return false;
+  return data !== null && data !== undefined;
+}
+
+async function recordRunState(summary: ResearchSummary): Promise<void> {
+  await supabaseAdmin
+    .from("worker_status")
+    .update({
+      state: summary.state === "skipped_locked" ? "running" : summary.state,
+      last_poll_at: summary.ranAt,
+      last_success_at: summary.state === "error" ? null : summary.ranAt,
+      last_error: summary.detail,
+      poll_failures: summary.failures.length,
+      events_ingested: summary.researched,
+      lease_expires_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    } as never)
+    .eq("id", RESEARCH_LOCK_ID);
+}
+
+export type ResearchRunState = {
+  lastRunAt: string | null;
+  state: string;
+  detail: string | null;
+  failureCount: number;
+  researchedCount: number;
+  running: boolean;
+};
+
+export async function loadResearchRunState(): Promise<ResearchRunState | null> {
+  const { data } = await supabaseAdmin
+    .from("worker_status")
+    .select("*")
+    .eq("id", RESEARCH_LOCK_ID)
+    .maybeSingle();
+  if (!data) return null;
+  const leaseUntil = data.lease_expires_at ? new Date(data.lease_expires_at).getTime() : 0;
+  return {
+    lastRunAt: data.last_poll_at ?? null,
+    state: data.state,
+    detail: data.last_error ?? null,
+    failureCount: data.poll_failures,
+    researchedCount: data.events_ingested,
+    running: data.state === "running" && leaseUntil > Date.now(),
+  };
+}
 
 async function referenceFingerprint(): Promise<CandidateFingerprint> {
   const trades = await fetchPublicTrades(REFERENCE_WALLET);
@@ -274,12 +340,27 @@ async function referenceFingerprint(): Promise<CandidateFingerprint> {
 }
 
 export async function runCandidateResearch(): Promise<ResearchSummary> {
+  if (!(await acquireResearchLease())) {
+    return {
+      ranAt: new Date().toISOString(),
+      state: "skipped_locked",
+      researched: 0,
+      resolvedCount: 0,
+      unresolvedCount: 0,
+      unresolved: [],
+      insufficient: [],
+      failures: [],
+      detail: "Another research pass is already running.",
+    };
+  }
+
   const rows = await seedWatchlist();
   const reference = await referenceFingerprint();
   const nowSeconds = Math.floor(Date.now() / 1000);
 
   const unresolved: string[] = [];
   const insufficient: string[] = [];
+  const failures: { handle: string; error: string }[] = [];
   let researched = 0;
 
   for (const row of rows) {
@@ -287,15 +368,12 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
       unresolved.push(row.handle);
       continue;
     }
+    // One candidate's public-API failure must never abort the bounded cohort.
+    try {
     let trades: CandidateTrade[] = [];
     let positions: CandidatePosition[] = [];
-    try {
-      trades = await fetchPublicTrades(row.wallet);
-      positions = await fetchPublicPositions(row.wallet);
-    } catch {
-      insufficient.push(row.handle);
-      continue;
-    }
+    trades = await fetchPublicTrades(row.wallet);
+    positions = await fetchPublicPositions(row.wallet);
 
     const metrics = computeMetrics({ trades, positions, nowSeconds });
     const fingerprint = computeFingerprint(trades);
@@ -382,9 +460,37 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
 
     if (metrics.sampleCount === 0) insufficient.push(row.handle);
     researched += 1;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "public request failed";
+      failures.push({ handle: row.handle, error: message });
+      await supabaseAdmin
+        .from("candidate_watchlist")
+        .update({ notes: `research_error: ${message}`.slice(0, 400), updated_at: new Date().toISOString() } as never)
+        .eq("id", row.id);
+    }
   }
 
-  return { ranAt: new Date().toISOString(), researched, unresolved, insufficient };
+  const resolvedCount = rows.filter((r) => Boolean(r.wallet)).length;
+  const state: ResearchSummary["state"] =
+    researched === 0 ? "error" : failures.length > 0 || unresolved.length > 0 ? "partial" : "success";
+  const summary: ResearchSummary = {
+    ranAt: new Date().toISOString(),
+    state,
+    researched,
+    resolvedCount,
+    unresolvedCount: rows.length - resolvedCount,
+    unresolved,
+    insufficient,
+    failures,
+    detail:
+      failures.length > 0
+        ? failures.map((f) => `${f.handle}: ${f.error}`).join("; ").slice(0, 400)
+        : unresolved.length > 0
+          ? `Unresolved handles: ${unresolved.join(", ")}`
+          : null,
+  };
+  await recordRunState(summary);
+  return summary;
 }
 
 /* ------------------------------------------------------------------ */
