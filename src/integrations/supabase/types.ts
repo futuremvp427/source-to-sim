@@ -248,6 +248,7 @@ export type Database = {
           source_event_id: string | null
           source_market: string | null
           source_slug: string | null
+          wallet: string
         }
         Insert: {
           checked_at?: string
@@ -261,6 +262,7 @@ export type Database = {
           source_event_id?: string | null
           source_market?: string | null
           source_slug?: string | null
+          wallet?: string
         }
         Update: {
           checked_at?: string
@@ -274,6 +276,7 @@ export type Database = {
           source_event_id?: string | null
           source_market?: string | null
           source_slug?: string | null
+          wallet?: string
         }
         Relationships: [
           {
@@ -1136,6 +1139,16 @@ export type Database = {
       acquire_worker_lease: {
         Args: { p_id: string; p_lease_seconds: number; p_worker_id: string }
         Returns: number
+      }
+      process_source_event_atomic: {
+        Args: {
+          p_event: Json
+          p_experiment_id: string
+          p_fence: number
+          p_lock_id: string
+          p_worker_id: string
+        }
+        Returns: Json
       }
     }
     Enums: {
