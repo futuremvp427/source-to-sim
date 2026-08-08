@@ -16,6 +16,9 @@ export type ComparisonRow = ExperimentSummary & {
   isReference: boolean;
   startingCash: number;
   cash: number;
+  reservedCash: number;
+  spendableCash: number;
+  sizingRule: string;
   openPositions: number;
   markedPositions: number;
   settledCount: number;
