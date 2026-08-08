@@ -25,7 +25,19 @@ async function handle(request: Request): Promise<Response> {
   const { runIngestCycle } = await import("@/lib/shadow.server");
   try {
     const result = await runIngestCycle(workerId);
-    return Response.json({ ok: true, ...result });
+
+    // Notification delivery is deliberately failure-isolated from ingestion.
+    // A Telegram outage must never make a successful source/paper cycle fail,
+    // but failed important alerts should be retried automatically on later cron runs.
+    let notifications = { attempted: 0, sent: 0 };
+    try {
+      const { retryPendingTelegramAlerts } = await import("@/lib/notify.server");
+      notifications = await retryPendingTelegramAlerts(10);
+    } catch {
+      // Best-effort only; delivery state remains pending/failed for a later retry.
+    }
+
+    return Response.json({ ok: true, ...result, notifications });
   } catch (err) {
     return Response.json(
       { ok: false, error: err instanceof Error ? err.message : "ingest failed" },
