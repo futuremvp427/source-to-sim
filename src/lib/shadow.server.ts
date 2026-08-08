@@ -1004,7 +1004,7 @@ export async function runExperimentCycle(
     const window = await fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES);
     const events = normalizeSourceEvents(window.raw, wallet);
     const inserted = await persistEvents(events);
-    const process = await processPendingEvents(experiment);
+    const process = await processPendingEvents(experiment, lease);
     const marks = await refreshMarks(experiment.id);
     const reconciliation = inserted > 0 || !bootstrapped ? await reconcile(wallet) : null;
     const settlements = await settleSafely(experiment.id);
