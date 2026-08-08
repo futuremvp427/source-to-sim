@@ -407,6 +407,12 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
   const tradeRows: Record<string, unknown>[] = [];
   const processedIds: string[] = [];
   const auditRows: Record<string, unknown>[] = [];
+  /** Assets that already had a persisted paper_positions row before this batch. */
+  const existingPaperAssets = new Set<string>(
+    ((paperRows ?? []) as PaperPositionRow[]).map((r) => r.asset),
+  );
+  /** Assets genuinely traded (BUY/SELL) in this batch. SKIP-only assets are never written. */
+  const tradedAssets = new Set<string>();
 
   for (const row of rows) {
     const side = (row.side === "SELL" ? "SELL" : "BUY") as Side;
@@ -452,6 +458,7 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
       nextPosition = applied.position;
       cashAfter = applied.cash;
       result.buys += 1;
+      tradedAssets.add(row.asset);
     } else if (decision.action === "SELL") {
       const applied = applySell(position, cash, decision.shares, decision.price);
       nextPosition = applied.position;
@@ -459,6 +466,7 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
       realized = applied.realized;
       realizedTotal = roundUsd(realizedTotal + realized);
       result.sells += 1;
+      tradedAssets.add(row.asset);
     } else {
       result.skips += 1;
     }
@@ -540,7 +548,9 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
     if (e) throw new Error(e.message);
   }
 
-  const paperRowsOut = [...paper].map(([asset, p]) => ({
+  const paperRowsOut = [...paper]
+    .filter(([asset]) => existingPaperAssets.has(asset) || tradedAssets.has(asset))
+    .map(([asset, p]) => ({
     experiment_id: experiment.id,
     asset,
     market_title: meta.get(asset)?.title ?? null,
@@ -552,7 +562,7 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
     settlement_status: p.shares > 0 ? "open" : "closed",
     last_activity_ts: meta.get(asset)?.ts ?? null,
     updated_at: stampNow,
-  }));
+    }));
   for (const chunk of chunked(paperRowsOut, 200)) {
     const { error: e } = await supabaseAdmin
       .from("paper_positions")
@@ -1122,11 +1132,14 @@ export async function loadDashboard() {
 
   const closed = positions
     .filter((p) => Number(p.shares) <= 0)
+    // Phantom rows from the old write path: never funded, never closed for real.
+    .filter((p) => !(Number(p.cost_basis) === 0 && Number(p.realized_pnl) === 0))
     .map((p) => ({
       asset: p.asset,
       marketTitle: p.market_title ?? "Unknown market",
       outcome: p.outcome,
       realizedPnl: Number(p.realized_pnl),
+      settlementStatus: p.settlement_status as string,
       lastActivityTs: p.last_activity_ts ? Number(p.last_activity_ts) : null,
     }))
     .sort((a, b) => (b.lastActivityTs ?? 0) - (a.lastActivityTs ?? 0));
