@@ -255,6 +255,168 @@ const STATUS_TONE: Record<string, string> = {
   FAIL: "text-[var(--loss)]",
 };
 
+function cents(v: number | null | undefined): string {
+  return v === null || v === undefined ? "Unavailable" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}¢`;
+}
+
+function sourceTsLabel(ts: number | null): string {
+  return ts === null ? "Unavailable" : new Date(ts * 1000).toLocaleString();
+}
+
+function EvidenceTable({ rows }: { rows: ComparisonRow[] }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[1400px] text-xs">
+        <thead className="text-left text-[10px] uppercase tracking-wide text-muted-foreground">
+          <tr>
+            <th className="py-2 pr-3">Wallet</th>
+            <th className="py-2 pr-3">Status</th>
+            <th className="py-2 pr-3">Post-V2 events</th>
+            <th className="py-2 pr-3">Decisions</th>
+            <th className="py-2 pr-3">Paper B/S</th>
+            <th className="py-2 pr-3">Total trades</th>
+            <th className="py-2 pr-3">Skipped / rate</th>
+            <th className="py-2 pr-3">Top skip reasons</th>
+            <th className="py-2 pr-3">Avg BUY</th>
+            <th className="py-2 pr-3">Avg SELL</th>
+            <th className="py-2 pr-3">Start</th>
+            <th className="py-2 pr-3">Cash</th>
+            <th className="py-2 pr-3">Reserve</th>
+            <th className="py-2 pr-3">Spendable</th>
+            <th className="py-2 pr-3">Est. BUYs left</th>
+            <th className="py-2 pr-3">Realized</th>
+            <th className="py-2 pr-3">Unrealized</th>
+            <th className="py-2 pr-3">Total P&L</th>
+            <th className="py-2 pr-3">ROI</th>
+            <th className="py-2 pr-3">Open</th>
+            <th className="py-2 pr-3">Settled</th>
+            <th className="py-2 pr-3">Win / loss</th>
+            <th className="py-2 pr-3">Max DD</th>
+            <th className="py-2 pr-3">Detection lat.</th>
+            <th className="py-2 pr-3">Decision lat.</th>
+            <th className="py-2 pr-3">Slip now</th>
+            <th className="py-2 pr-3">Slip +30s</th>
+            <th className="py-2 pr-3">Slip +60s</th>
+            <th className="py-2 pr-3">Copyability</th>
+            <th className="py-2 pr-3">Completeness</th>
+            <th className="py-2 pr-3">Last source fill</th>
+            <th className="py-2 pr-3">Last poll OK</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.id} className="border-t border-border align-top">
+              <td className="py-2 pr-3">
+                <p className="font-medium text-card-foreground">{r.label}</p>
+                <p className="break-all text-[10px] text-muted-foreground">{r.wallet}</p>
+              </td>
+              <td className="py-2 pr-3">
+                <span className={r.enabled ? "text-[var(--gain)]" : "text-muted-foreground"}>
+                  {r.enabled ? "V2 RUNNING" : "V2 PAUSED"}
+                </span>
+              </td>
+              <td className="py-2 pr-3 tabular-nums">
+                {r.postGoLiveSourceEvents === null ? "Unavailable" : r.postGoLiveSourceEvents}
+              </td>
+              <td className="py-2 pr-3 tabular-nums">{r.eligibleDecisions}</td>
+              <td className="py-2 pr-3 tabular-nums">
+                {r.buys}/{r.sells}
+              </td>
+              <td className="py-2 pr-3 tabular-nums">{r.totalPaperTrades}</td>
+              <td className="py-2 pr-3 tabular-nums">
+                {r.skippedCount} <span className="text-[10px] text-muted-foreground">{pct(r.skipRatePct, 1)}</span>
+              </td>
+              <td className="py-2 pr-3 text-[10px] text-muted-foreground">
+                {r.skipReasons.length === 0 ? "—" : r.skipReasons.map((s) => `${s.reason} ×${s.count}`).join(", ")}
+              </td>
+              <td className="py-2 pr-3 tabular-nums">{usd(r.avgBuyUsd)}</td>
+              <td className="py-2 pr-3 tabular-nums">{usd(r.avgSellUsd)}</td>
+              <td className="py-2 pr-3 tabular-nums">{formatUsd(r.startingCash)}</td>
+              <td className="py-2 pr-3 tabular-nums">{formatUsd(r.cash)}</td>
+              <td className="py-2 pr-3 tabular-nums">{formatUsd(r.reservedCash)}</td>
+              <td className="py-2 pr-3 tabular-nums">{formatUsd(r.spendableCash)}</td>
+              <td className="py-2 pr-3 tabular-nums">
+                {r.estimatedRemainingBuys}
+                {r.nextBuyUsd === null ? (
+                  <span className="block text-[10px] text-muted-foreground">reserve reached</span>
+                ) : (
+                  <span className="block text-[10px] text-muted-foreground">next {formatUsd(r.nextBuyUsd)}</span>
+                )}
+              </td>
+              <td className={`py-2 pr-3 tabular-nums ${tone(r.realizedPnl)}`}>{formatUsd(r.realizedPnl)}</td>
+              <td className={`py-2 pr-3 tabular-nums ${tone(r.unrealizedPnl)}`}>{usd(r.unrealizedPnl)}</td>
+              <td className={`py-2 pr-3 tabular-nums ${tone(r.totalPnl)}`}>{usd(r.totalPnl)}</td>
+              <td className={`py-2 pr-3 tabular-nums ${tone(r.roiPct)}`}>{pct(r.roiPct)}</td>
+              <td className="py-2 pr-3 tabular-nums">{r.openPositions}</td>
+              <td className="py-2 pr-3 tabular-nums">{r.settledCount}</td>
+              <td className="py-2 pr-3 tabular-nums">
+                {r.wins}/{r.losses}
+              </td>
+              <td className="py-2 pr-3 tabular-nums">{formatUsd(r.maxDrawdown)}</td>
+              <td className="py-2 pr-3 tabular-nums">
+                {r.medianDetectionLatencySeconds === null ? "Unavailable" : `${r.medianDetectionLatencySeconds}s`}
+              </td>
+              <td className="py-2 pr-3 tabular-nums">
+                {r.medianDecisionLatencySeconds === null ? "Unavailable" : `${r.medianDecisionLatencySeconds}s`}
+              </td>
+              <td className="py-2 pr-3 tabular-nums">{cents(r.copyability.medianSlippageCentsByDelay.immediate)}</td>
+              <td className="py-2 pr-3 tabular-nums">{cents(r.copyability.medianSlippageCentsByDelay["30s"])}</td>
+              <td className="py-2 pr-3 tabular-nums">{cents(r.copyability.medianSlippageCentsByDelay["60s"])}</td>
+              <td className="py-2 pr-3">
+                {r.copyability.status === "SCORED" ? (
+                  <span className="font-semibold tabular-nums text-card-foreground">{r.copyability.score}</span>
+                ) : (
+                  <span className="text-[10px] uppercase text-amber-600">Insufficient data</span>
+                )}
+                <span className="block text-[10px] text-muted-foreground">
+                  {r.copyability.observedSamples}/{r.copyability.expectedSamples} samples
+                </span>
+              </td>
+              <td className="py-2 pr-3 tabular-nums">{(r.copyability.completeness * 100).toFixed(1)}%</td>
+              <td className="py-2 pr-3 text-[10px] text-muted-foreground">{sourceTsLabel(r.lastSourceActivityTs)}</td>
+              <td className="py-2 pr-3 text-[10px] text-muted-foreground">{tsLabel(r.lastSuccessAt)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export function EvidenceSection() {
+  const fetchComparison = useServerFn(getComparison);
+  const { data, isPending, isError, error } = useQuery({
+    queryKey: ["shadow-comparison"],
+    queryFn: () => fetchComparison(),
+    refetchInterval: 30_000,
+  });
+
+  return (
+    <Panel
+      title="V2 copyability evidence"
+      subtitle="Measurement only. Slippage is measured against the real public order book at detection and again at +30s, +60s, +5m and +15m: a follower BUY pays the observable ask, a follower SELL receives the observable bid. Samples that could not be observed stay blank and are never counted as zero."
+    >
+      {isPending ? (
+        <RowSkeleton rows={5} />
+      ) : isError ? (
+        <EmptyState message={`Could not load evidence: ${error instanceof Error ? error.message : "unknown error"}`} />
+      ) : (data?.v2Rows.length ?? 0) === 0 ? (
+        <EmptyState message="No V2 experiments yet." />
+      ) : (
+        <div className="space-y-3">
+          <EvidenceTable rows={data?.v2Rows ?? []} />
+          <p className="text-[11px] text-muted-foreground">
+            Copyability score = 50% slippage (delay-weighted) + 20% top-of-book spread + 30% estimated fillability from
+            visible depth. A wallet needs at least three post-go-live events with usable observations and 30% sample
+            completeness, otherwise it reports INSUFFICIENT DATA instead of a number. Estimated BUYs left replays
+            dynamic-v1 sizing against spendable cash and is an estimate only — no bankroll is ever refilled or reset.
+          </p>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 export function SelfCheckSection() {
   const fetchCheck = useServerFn(getSelfCheck);
   const { data, isPending, isError, error } = useQuery({

@@ -5,7 +5,12 @@ import { useMemo, useState } from "react";
 
 import { EmptyState, Panel, RowSkeleton, SideTag, Stat } from "@/components/mirror/panels";
 import { CandidateSection } from "@/components/mirror/candidate-panels";
-import { ComparisonSection, SelfCheckSection, V2StatusSection } from "@/components/mirror/comparison-panels";
+import {
+  ComparisonSection,
+  EvidenceSection,
+  SelfCheckSection,
+  V2StatusSection,
+} from "@/components/mirror/comparison-panels";
 import { PmusSection } from "@/components/mirror/pmus-panels";
 import { formatShares, formatTime, formatUsd, isWeatherMarket } from "@/lib/mirror-trader";
 import {
@@ -207,6 +212,8 @@ function Dashboard() {
       <V2StatusSection />
 
       <ComparisonSection />
+
+      <EvidenceSection />
 
       <SelfCheckSection />
 

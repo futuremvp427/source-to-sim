@@ -93,13 +93,26 @@ export async function raiseAlert(
   kind: string,
   message: string,
   context?: Json,
+  /** When set, the same condition is only ever alerted (and notified) once. */
+  dedupKey?: string,
 ): Promise<void> {
-  await supabaseAdmin.from("alerts").insert({
+  const row = {
     level,
     kind,
     message,
     context: (context ?? null) as never,
-  });
+    dedup_key: dedupKey ?? null,
+  };
+  const { data } = dedupKey
+    ? await supabaseAdmin
+        .from("alerts")
+        .upsert(row, { onConflict: "dedup_key", ignoreDuplicates: true })
+        .select("id")
+    : await supabaseAdmin.from("alerts").insert(row).select("id");
+  const id = data?.[0]?.id;
+  if (!id) return;
+  const { notifyAlert } = await import("./notify.server");
+  await notifyAlert({ id, level, kind, message });
 }
 
 /* ------------------------------------------------------------------ */
@@ -700,6 +713,7 @@ export type CycleResult = {
   lagSeconds: number | null;
   previews: { created: number; ineligible: number; failed: number; skippedReason: string | null };
   settlements: { settled: number; unresolved: number };
+  copyability: { scheduled: number; sampled: number; unavailable: number };
 };
 
 export type MultiCycleResult = {
@@ -796,7 +810,50 @@ function emptyCycle(ranAt: string, experiment: Experiment): CycleResult {
     lagSeconds: null,
     previews: NO_PREVIEWS,
     settlements: NO_SETTLEMENTS,
+    copyability: { scheduled: 0, sampled: 0, unavailable: 0 },
   };
+}
+
+/**
+ * Public-CLOB copyability sampling. Measurement only: a failure here must never
+ * break ingestion or paper accounting.
+ */
+async function observeCopyabilitySafely(
+  experiment: Experiment,
+): Promise<{ scheduled: number; sampled: number; unavailable: number }> {
+  try {
+    const { runCopyabilityPass } = await import("./copyability/observe.server");
+    return await runCopyabilityPass({
+      id: experiment.id,
+      starting_cash: Number(experiment.starting_cash),
+      cash: Number(experiment.cash),
+    });
+  } catch {
+    return { scheduled: 0, sampled: 0, unavailable: 0 };
+  }
+}
+
+/** Deterministic, de-duplicated cash-runway alerts. Never changes any bankroll. */
+async function raiseCashAlerts(experiment: Experiment): Promise<void> {
+  try {
+    const { decideCashAlerts } = await import("./cash-runway");
+    const { data: fresh } = await supabaseAdmin
+      .from("paper_experiments")
+      .select("cash, starting_cash")
+      .eq("id", experiment.id)
+      .maybeSingle();
+    const alerts = decideCashAlerts({
+      experimentId: experiment.id,
+      experimentName: experiment.name,
+      startingCash: Number(fresh?.starting_cash ?? experiment.starting_cash),
+      cash: Number(fresh?.cash ?? experiment.cash),
+    });
+    for (const alert of alerts) {
+      await raiseAlert(alert.level, alert.kind, alert.message, { experiment: experiment.name as never }, alert.dedupKey);
+    }
+  } catch {
+    /* measurement only */
+  }
 }
 
 /** Recurring candidate research refresh (throttled to once every 6 hours). */
@@ -865,6 +922,8 @@ export async function runExperimentCycle(
     const reconciliation = inserted > 0 || !bootstrapped ? await reconcile(wallet) : null;
     const settlements = await settleSafely(experiment.id);
     const previews = await generatePreviewsSafely(experiment.id);
+    const copyability = await observeCopyabilitySafely(experiment);
+    await raiseCashAlerts(experiment);
 
     const newest = events.length ? Math.max(...events.map((e) => e.sourceTs)) : 0;
     const lagSeconds = newest > 0 ? Math.max(0, Math.round(Date.now() / 1000 - newest)) : null;
@@ -919,6 +978,7 @@ export async function runExperimentCycle(
       lagSeconds,
       previews,
       settlements,
+      copyability,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
