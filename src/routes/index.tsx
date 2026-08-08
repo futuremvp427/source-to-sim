@@ -542,6 +542,7 @@ function Dashboard() {
                     <tr>
                       <th className="py-2 pr-2 font-medium">Market</th>
                       <th className="py-2 pr-2 text-right font-medium">Realized</th>
+                      <th className="py-2 pr-2 font-medium">Type</th>
                       <th className="py-2 font-medium">Closed</th>
                     </tr>
                   </thead>
@@ -557,6 +558,13 @@ function Dashboard() {
                           }`}
                         >
                           {formatUsd(c.realizedPnl)}
+                        </td>
+                        <td className="py-2 pr-2 text-muted-foreground">
+                          {c.settlementStatus === "settled_won"
+                            ? "Settled Won"
+                            : c.settlementStatus === "settled_lost"
+                              ? "Settled Lost"
+                              : "Sold"}
                         </td>
                         <td className="py-2 text-muted-foreground">
                           {c.lastActivityTs ? formatTime(c.lastActivityTs) : "—"}
