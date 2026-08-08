@@ -36,10 +36,32 @@ const decisionSchema = z.object({
 /**
  * Approve = READY_FOR_MANUAL_EXECUTION. Reject = REJECTED.
  * No live-order endpoint is reachable from here.
+ *
+ * The underlying UPDATE intentionally only matches PENDING_APPROVAL rows. We
+ * verify the persisted status after the write so an already-decided/missing row
+ * can never be reported to the UI as a successful transition merely because
+ * PostgreSQL returned no statement-level error.
  */
 export const decidePmusPreview = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => decisionSchema.parse(input))
   .handler(async ({ data }) => {
     const { decidePreview } = await import("./pmus/previews.server");
-    return decidePreview(data.previewId, data.decision);
+    const result = await decidePreview(data.previewId, data.decision);
+    if (!result.ok) return result;
+
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const expected = data.decision === "approve" ? "READY_FOR_MANUAL_EXECUTION" : "REJECTED";
+    const { data: row, error } = await supabaseAdmin
+      .from("order_previews")
+      .select("status")
+      .eq("id", data.previewId)
+      .maybeSingle();
+    if (error) return { ok: false as const, error: "Could not verify the preview decision." };
+    if (!row || row.status !== expected) {
+      return {
+        ok: false as const,
+        error: "Preview decision was not applied. It may already have been decided or no longer be pending.",
+      };
+    }
+    return { ok: true as const };
   });
