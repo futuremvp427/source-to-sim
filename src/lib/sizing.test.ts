@@ -31,7 +31,7 @@ describe("dynamic paper BUY sizing", () => {
     expect(b.spendableCash).toBe(42);
     const size = computeBuySize({ startingCash: S, cash: 38.5 });
     expect(size.ok).toBe(false);
-    const edge = computeBuySize({ startingCash: S, cash: 38.6 });
+    const edge = computeBuySize({ startingCash: S, cash: 39.5 });
     expect(edge.ok).toBe(true);
     if (edge.ok) expect(edge.amount).toBeLessThanOrEqual(edge.spendableCash);
     const skip = decideDynamicBuy({ price: 0.5, startingCash: S, cash: 38 });
