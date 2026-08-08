@@ -278,6 +278,7 @@ type SourceEventRow = {
   shares: number;
   price: number;
   source_ts: number;
+  first_seen_at: string;
 };
 
 type PaperPositionRow = {
@@ -296,6 +297,43 @@ export type ProcessResult = {
   /** Pre-go-live fills recorded for history/reconciliation only. */
   backfilled: number;
 };
+
+/**
+ * Real-event validation record: source timestamp vs. detection vs. decision.
+ * Written once per (experiment, event) so latency can be audited after the fact.
+ */
+function buildAuditRow(input: {
+  experimentId: string;
+  wallet: string;
+  eventKey: string;
+  marketTitle: string | null;
+  side: string;
+  action: string;
+  sourceTs: number;
+  firstSeenAt: string;
+}): Record<string, unknown> {
+  const decisionAt = new Date();
+  const detectedMs = new Date(input.firstSeenAt).getTime();
+  const sourceMs = input.sourceTs * 1000;
+  const secs = (ms: number) => Math.round((ms / 1000) * 100) / 100;
+  return {
+    experiment_id: input.experimentId,
+    event_key: input.eventKey,
+    wallet: input.wallet,
+    market_title: input.marketTitle,
+    side: input.side,
+    action: input.action,
+    source_ts: input.sourceTs,
+    detected_at: input.firstSeenAt,
+    event_persisted_at: input.firstSeenAt,
+    decision_at: decisionAt.toISOString(),
+    paper_trade_at: decisionAt.toISOString(),
+    position_updated_at: decisionAt.toISOString(),
+    detection_latency_seconds: sourceMs > 0 ? Math.max(0, secs(detectedMs - sourceMs)) : null,
+    decision_latency_seconds: Math.max(0, secs(decisionAt.getTime() - detectedMs)),
+    total_latency_seconds: sourceMs > 0 ? Math.max(0, secs(decisionAt.getTime() - sourceMs)) : null,
+  };
+}
 
 async function processPendingEvents(experiment: Experiment): Promise<ProcessResult> {
   const wallet = experiment.wallet_address.toLowerCase();
