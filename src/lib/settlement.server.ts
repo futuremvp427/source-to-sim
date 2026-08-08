@@ -51,6 +51,19 @@ type SettlementRpcRow = {
   realized_pnl: number | string;
 };
 
+type RpcResult = { data: unknown; error: { message: string } | null };
+
+async function applyVerifiedSettlementRpc(args: Record<string, unknown>): Promise<RpcResult> {
+  // The migration and this code land together; Lovable regenerates Database
+  // types only after the migration is applied, so keep this one new RPC behind
+  // a narrow typed adapter instead of weakening the whole Supabase client type.
+  const rpc = supabaseAdmin.rpc as unknown as (
+    name: string,
+    params: Record<string, unknown>,
+  ) => Promise<RpcResult>;
+  return rpc("apply_verified_paper_settlement", args);
+}
+
 export async function runSettlementPass(experimentId: string): Promise<SettlementPassResult> {
   const result: SettlementPassResult = { settled: 0, unresolved: 0, failed: 0, details: [] };
 
@@ -117,23 +130,20 @@ export async function runSettlementPass(experimentId: string): Promise<Settlemen
     }
 
     const resolutionTs = new Date().toISOString();
-    const { data: rpcData, error: rpcError } = await supabaseAdmin.rpc(
-      "apply_verified_paper_settlement",
-      {
-        p_experiment_id: experimentId,
-        p_asset: position.asset,
-        p_condition_id: conditionId,
-        p_resolution_outcome: decision.won ? "WON" : "LOST",
-        p_resolution_source: "polymarket_public_clob_market",
-        p_resolution_ts: resolutionTs,
-        p_payout_per_share: decision.payoutPerShare,
-        p_evidence: {
-          condition_id: conditionId,
-          closed: market.closed,
-          tokens: market.tokens,
-        },
-      } as never,
-    );
+    const { data: rpcData, error: rpcError } = await applyVerifiedSettlementRpc({
+      p_experiment_id: experimentId,
+      p_asset: position.asset,
+      p_condition_id: conditionId,
+      p_resolution_outcome: decision.won ? "WON" : "LOST",
+      p_resolution_source: "polymarket_public_clob_market",
+      p_resolution_ts: resolutionTs,
+      p_payout_per_share: decision.payoutPerShare,
+      p_evidence: {
+        condition_id: conditionId,
+        closed: market.closed,
+        tokens: market.tokens,
+      },
+    });
 
     if (rpcError) {
       result.failed += 1;
