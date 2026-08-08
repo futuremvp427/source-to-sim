@@ -6,6 +6,13 @@ import type { CandidatePanelData, PromotionResult, ResearchSummary } from "./can
 /** Read model for the Research / Candidate Watchlist panel. Read-only. */
 export const getCandidatePanel = createServerFn({ method: "GET" }).handler(
   async (): Promise<CandidatePanelData> => {
+    const { verifyCandidateResearchPersistence } = await import("./candidates/consistency.server");
+    const consistency = await verifyCandidateResearchPersistence();
+    if (!consistency.ok) {
+      throw new Error(
+        `Candidate research state is inconsistent for ${consistency.issues.length} candidate(s); refusing to present stale mixed-version scores.`,
+      );
+    }
     const { loadCandidatePanel } = await import("./candidates/research.server");
     return loadCandidatePanel();
   },
@@ -16,7 +23,18 @@ export const runCandidateResearchFn = createServerFn({ method: "POST" }).handler
   async (): Promise<{ ok: true; summary: ResearchSummary } | { ok: false; error: string }> => {
     const { runCandidateResearch } = await import("./candidates/research.server");
     try {
-      return { ok: true, summary: await runCandidateResearch() };
+      const summary = await runCandidateResearch();
+      if (summary.state !== "skipped_locked") {
+        const { verifyCandidateResearchPersistence } = await import("./candidates/consistency.server");
+        const consistency = await verifyCandidateResearchPersistence({ downgradeRunState: true });
+        if (!consistency.ok) {
+          return {
+            ok: false,
+            error: `Research persistence check failed for ${consistency.issues.length} candidate(s); run state was downgraded to partial.`,
+          };
+        }
+      }
+      return { ok: true, summary };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : "research pass failed" };
     }
