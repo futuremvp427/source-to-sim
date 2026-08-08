@@ -116,9 +116,13 @@ export function PmusSection() {
       </Panel>
 
       <Panel
-        title="Approval queue"
-        subtitle="Approving marks a preview ready for MANUAL execution. It never submits, signs or cancels a live order."
+        title="Approval queue — Polymarket US previews only"
+        subtitle="This queue applies ONLY to the authenticated Polymarket US preview / manual-execution workflow. Ordinary SHADOW paper trades are fully autonomous and never wait for approval. Approving marks a preview ready for MANUAL execution; it never submits, signs or cancels a live order."
       >
+        <p className="mb-3 rounded-md border border-border bg-muted/40 p-2 text-[11px] text-muted-foreground">
+          Allowed authenticated operations remain limited to balances, positions and order preview. There is no live
+          order-submission, cancel, modify, withdrawal or autonomous execution path.
+        </p>
         {data?.automation ? (
           <div className="mb-3 rounded-md border border-border p-3 text-xs">
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
