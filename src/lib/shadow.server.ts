@@ -93,13 +93,26 @@ export async function raiseAlert(
   kind: string,
   message: string,
   context?: Json,
+  /** When set, the same condition is only ever alerted (and notified) once. */
+  dedupKey?: string,
 ): Promise<void> {
-  await supabaseAdmin.from("alerts").insert({
+  const row = {
     level,
     kind,
     message,
     context: (context ?? null) as never,
-  });
+    dedup_key: dedupKey ?? null,
+  };
+  const { data } = dedupKey
+    ? await supabaseAdmin
+        .from("alerts")
+        .upsert(row, { onConflict: "dedup_key", ignoreDuplicates: true })
+        .select("id")
+    : await supabaseAdmin.from("alerts").insert(row).select("id");
+  const id = data?.[0]?.id;
+  if (!id) return;
+  const { notifyAlert } = await import("./notify.server");
+  await notifyAlert({ id, level, kind, message });
 }
 
 /* ------------------------------------------------------------------ */
@@ -865,6 +878,8 @@ export async function runExperimentCycle(
     const reconciliation = inserted > 0 || !bootstrapped ? await reconcile(wallet) : null;
     const settlements = await settleSafely(experiment.id);
     const previews = await generatePreviewsSafely(experiment.id);
+    const copyability = await observeCopyabilitySafely(experiment);
+    await raiseCashAlerts(experiment);
 
     const newest = events.length ? Math.max(...events.map((e) => e.sourceTs)) : 0;
     const lagSeconds = newest > 0 ? Math.max(0, Math.round(Date.now() / 1000 - newest)) : null;
@@ -919,6 +934,7 @@ export async function runExperimentCycle(
       lagSeconds,
       previews,
       settlements,
+      copyability,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
