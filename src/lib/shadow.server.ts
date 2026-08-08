@@ -675,6 +675,8 @@ export async function reconcile(
 
 export type CycleResult = {
   ranAt: string;
+  experimentName: string;
+  wallet: string;
   skipped: string | null;
   newEvents: number;
   pagesFetched: number;
@@ -683,7 +685,19 @@ export type CycleResult = {
   reconciliation: { ok: boolean; mismatches: number } | null;
   lagSeconds: number | null;
   previews: { created: number; ineligible: number; failed: number; skippedReason: string | null };
+  settlements: { settled: number; unresolved: number };
 };
+
+export type MultiCycleResult = {
+  ranAt: string;
+  experiments: number;
+  cycles: CycleResult[];
+  /** Reference SHADOW experiment result, kept for the existing dashboard read. */
+  reference: CycleResult | null;
+  candidateResearch: { ran: boolean; detail: string | null };
+};
+
+const NO_SETTLEMENTS = { settled: 0, unresolved: 0 };
 
 const NO_PREVIEWS = {
   created: 0,
@@ -715,42 +729,100 @@ async function generatePreviewsSafely(experimentId: string): Promise<typeof NO_P
   }
 }
 
-export async function runIngestCycle(workerId: string): Promise<CycleResult> {
+/** Settlement automation is best-effort and must never break ingestion. */
+async function settleSafely(experimentId: string): Promise<typeof NO_SETTLEMENTS> {
+  try {
+    const { runSettlementPass } = await import("./settlement.server");
+    const result = await runSettlementPass(experimentId);
+    return { settled: result.settled, unresolved: result.unresolved };
+  } catch {
+    return NO_SETTLEMENTS;
+  }
+}
+
+/**
+ * Iterates every ENABLED experiment. Each wallet has its own lease, checkpoint,
+ * bankroll and paper book, so a slow or failing candidate can never stall or
+ * corrupt the reference SHADOW experiment.
+ */
+export async function runIngestCycle(workerId: string): Promise<MultiCycleResult> {
   const ranAt = new Date().toISOString();
-  const experiment = await getExperiment();
+  const experiments = await listActiveExperiments();
+  const cycles: CycleResult[] = [];
+  for (const experiment of experiments) {
+    try {
+      cycles.push(await runExperimentCycle(experiment, workerId));
+    } catch (err) {
+      cycles.push({
+        ...emptyCycle(ranAt, experiment),
+        skipped: err instanceof Error ? err.message : "cycle failed",
+      });
+    }
+  }
+  return {
+    ranAt,
+    experiments: experiments.length,
+    cycles,
+    reference: cycles.find((c) => c.experimentName === EXPERIMENT_NAME) ?? null,
+    candidateResearch: await refreshCandidateResearchSafely(),
+  };
+}
+
+function emptyCycle(ranAt: string, experiment: Experiment): CycleResult {
+  return {
+    ranAt,
+    experimentName: experiment.name,
+    wallet: experiment.wallet_address,
+    skipped: null,
+    newEvents: 0,
+    pagesFetched: 0,
+    process: { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0 },
+    marks: { updated: 0, failed: 0 },
+    reconciliation: null,
+    lagSeconds: null,
+    previews: NO_PREVIEWS,
+    settlements: NO_SETTLEMENTS,
+  };
+}
+
+/** Recurring candidate research refresh (throttled to once every 6 hours). */
+async function refreshCandidateResearchSafely(): Promise<{ ran: boolean; detail: string | null }> {
+  try {
+    const { refreshCandidateResearchIfDue } = await import("./candidates/research.server");
+    return await refreshCandidateResearchIfDue();
+  } catch (err) {
+    return { ran: false, detail: err instanceof Error ? err.message : "research refresh skipped" };
+  }
+}
+
+export async function runExperimentCycle(
+  experiment: Experiment,
+  baseWorkerId: string,
+): Promise<CycleResult> {
+  const ranAt = new Date().toISOString();
+  const lockId = workerIdFor(experiment);
+  const wallet = experiment.wallet_address.toLowerCase();
+  const workerId = `${baseWorkerId}:${experiment.name}`;
+  const base = emptyCycle(ranAt, experiment);
   if (!experiment.enabled) {
     return {
-      ranAt,
+      ...base,
       skipped: "Follower is paused (enabled = false).",
-      newEvents: 0,
-      pagesFetched: 0,
-      process: { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0 },
-      marks: { updated: 0, failed: 0 },
-      reconciliation: null,
-      lagSeconds: null,
-      previews: NO_PREVIEWS,
     };
   }
 
-  const lease = await acquireLease(workerId);
+  const lease = await acquireLease(workerId, lockId);
   if (!lease) {
     return {
-      ranAt,
+      ...base,
       skipped: "Another worker holds the ingestion lease.",
-      newEvents: 0,
-      pagesFetched: 0,
-      process: { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0 },
-      marks: { updated: 0, failed: 0 },
-      reconciliation: null,
-      lagSeconds: null,
-      previews: NO_PREVIEWS,
     };
   }
 
   const { data: checkpoint } = await supabaseAdmin
     .from("worker_checkpoints")
     .select("*")
-    .eq("id", WORKER_ID)
+    .eq("id", lockId)
     .maybeSingle();
   const bootstrapped = checkpoint?.bootstrap_complete ?? false;
 
@@ -771,20 +843,21 @@ export async function runIngestCycle(workerId: string): Promise<CycleResult> {
   }
 
   try {
-    const window = await fetchSourceWindow(bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES);
-    const events = normalizeSourceEvents(window.raw, TARGET_WALLET);
+    const window = await fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES);
+    const events = normalizeSourceEvents(window.raw, wallet);
     const inserted = await persistEvents(events);
     const process = await processPendingEvents(experiment);
     const marks = await refreshMarks(experiment.id);
-    const reconciliation = inserted > 0 || !bootstrapped ? await reconcile() : null;
+    const reconciliation = inserted > 0 || !bootstrapped ? await reconcile(wallet) : null;
+    const settlements = await settleSafely(experiment.id);
     const previews = await generatePreviewsSafely(experiment.id);
 
     const newest = events.length ? Math.max(...events.map((e) => e.sourceTs)) : 0;
     const lagSeconds = newest > 0 ? Math.max(0, Math.round(Date.now() / 1000 - newest)) : null;
 
     await supabaseAdmin.from("worker_checkpoints").upsert({
-      id: WORKER_ID,
-      wallet: TARGET_WALLET,
+      id: lockId,
+      wallet,
       last_source_ts: Math.max(newest, checkpoint?.last_source_ts ?? 0),
       last_event_key: events.at(-1)?.eventKey ?? checkpoint?.last_event_key ?? null,
       events_seen: (checkpoint?.events_seen ?? 0) + inserted,
@@ -795,7 +868,7 @@ export async function runIngestCycle(workerId: string): Promise<CycleResult> {
     const { data: statusRow } = await supabaseAdmin
       .from("worker_status")
       .select("events_ingested")
-      .eq("id", WORKER_ID)
+      .eq("id", lockId)
       .maybeSingle();
 
     await releaseLease(lease, {
@@ -808,15 +881,21 @@ export async function runIngestCycle(workerId: string): Promise<CycleResult> {
     });
 
     if (inserted > 0) {
-      await raiseAlert("info", "new_source_trades", `Detected ${inserted} new source trade(s).`, {
+      await raiseAlert("info", "new_source_trades", `${experiment.name}: detected ${inserted} new source trade(s).`, {
+        experiment: experiment.name as never,
         buys: process.buys as never,
         sells: process.sells as never,
         skips: process.skips as never,
       });
     }
+    if (process.skips > 0) {
+      await raiseAlert("info", "paper_copy_skips", `${experiment.name}: skipped ${process.skips} source fill(s).`, {
+        experiment: experiment.name as never,
+      });
+    }
 
     return {
-      ranAt,
+      ...base,
       skipped: null,
       newEvents: inserted,
       pagesFetched: window.pagesFetched,
@@ -825,18 +904,20 @@ export async function runIngestCycle(workerId: string): Promise<CycleResult> {
       reconciliation,
       lagSeconds,
       previews,
+      settlements,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
     const { data: statusRow } = await supabaseAdmin
       .from("worker_status")
       .select("poll_failures")
-      .eq("id", WORKER_ID)
+      .eq("id", lockId)
       .maybeSingle();
     const failures = (statusRow?.poll_failures ?? 0) + 1;
     await releaseLease(lease, { state: "error", last_error: message, poll_failures: failures });
     if (failures === 1 || failures % 5 === 0) {
-      await raiseAlert("error", "poll_failure", `Ingestion poll failed: ${message}`, {
+      await raiseAlert("error", "poll_failure", `${experiment.name}: ingestion poll failed: ${message}`, {
+        experiment: experiment.name as never,
         failures: failures as never,
       });
     }
