@@ -540,13 +540,6 @@ export async function loadCandidatePanel(): Promise<CandidatePanelData> {
 /* Promotion — creates a PAUSED, isolated research experiment           */
 /* ------------------------------------------------------------------ */
 
-export const PROMOTED_EXPERIMENT_PREFIX = "CANDIDATE:";
-export const PROMOTED_STARTING_CASH = 380;
-
-export function promotedExperimentName(handle: string): string {
-  return `${PROMOTED_EXPERIMENT_PREFIX}${handle}`;
-}
-
 export type PromotionResult =
   | { ok: true; experimentId: string; experimentName: string; status: "PAUSED / RESEARCH_READY" }
   | { ok: false; error: string };
@@ -565,10 +558,9 @@ export async function promoteCandidate(candidateId: string): Promise<PromotionRe
     .maybeSingle();
   const candidate = row as unknown as WatchlistRow | null;
   if (!candidate) return { ok: false, error: "Candidate not found." };
-  if (!candidate.wallet) return { ok: false, error: "Wallet unresolved — cannot promote." };
-  if (candidate.wallet.toLowerCase() === REFERENCE_WALLET) {
-    return { ok: false, error: "That is the reference wallet; it already has the SHADOW experiment." };
-  }
+  const guard = guardPromotion({ wallet: candidate.wallet, handle: candidate.handle });
+  if (!guard.ok) return { ok: false, error: guard.error };
+  const wallet = candidate.wallet as string;
 
   const name = promotedExperimentName(candidate.handle);
   const { data: existing } = await supabaseAdmin
@@ -581,19 +573,13 @@ export async function promoteCandidate(candidateId: string): Promise<PromotionRe
   if (!experimentId) {
     const { data: created, error } = await supabaseAdmin
       .from("paper_experiments")
-      .insert({
-        name,
-        wallet_address: candidate.wallet,
-        starting_cash: PROMOTED_STARTING_CASH,
-        cash: PROMOTED_STARTING_CASH,
-        buy_amount: 10,
-        poll_interval_seconds: 60,
-        enabled: false,
-        weather_only: true,
-        realized_pnl: 0,
-        simulated: true,
-        follow_from_ts: Math.floor(Date.now() / 1000),
-      } as never)
+      .insert(
+        buildPromotedExperiment({
+          handle: candidate.handle,
+          wallet,
+          nowSeconds: Math.floor(Date.now() / 1000),
+        }) as never,
+      )
       .select("id")
       .maybeSingle();
     if (error) return { ok: false, error: error.message };
@@ -610,7 +596,7 @@ export async function promoteCandidate(candidateId: string): Promise<PromotionRe
     } as never)
     .eq("id", candidateId);
 
-  return { ok: true, experimentId, experimentName: name, status: "PAUSED / RESEARCH_READY" };
+  return { ok: true, experimentId, experimentName: name, status: PROMOTED_STATUS };
 }
 
 export async function setCandidateStatus(
