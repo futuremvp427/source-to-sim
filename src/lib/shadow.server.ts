@@ -959,12 +959,13 @@ export type DashboardOpenPosition = {
 
 export async function loadDashboard() {
   const experiment = await getExperiment();
+  const workerId = workerIdFor(experiment);
   const nowMs = Date.now();
 
   const [statusRes, checkpointRes, eventsRes, tradesRes, positionsRes, alertsRes, countsRes] =
     await Promise.all([
-      supabaseAdmin.from("worker_status").select("*").eq("id", WORKER_ID).maybeSingle(),
-      supabaseAdmin.from("worker_checkpoints").select("*").eq("id", WORKER_ID).maybeSingle(),
+      supabaseAdmin.from("worker_status").select("*").eq("id", workerId).maybeSingle(),
+      supabaseAdmin.from("worker_checkpoints").select("*").eq("id", workerId).maybeSingle(),
       supabaseAdmin
         .from("source_events")
         .select("*")
@@ -1051,6 +1052,7 @@ export async function loadDashboard() {
     experiment: {
       id: experiment.id,
       name: experiment.name,
+      cohort: isV2Name(experiment.name) ? ("V2" as const) : ("V1" as const),
       startingCash: Number(experiment.starting_cash),
       cash: Number(experiment.cash),
       buyAmount: Number(experiment.buy_amount),
