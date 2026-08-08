@@ -9,6 +9,7 @@ import { cashBreakdown } from "./shadow-core";
 import { estimateCashRunway } from "./cash-runway";
 import { median } from "./copyability/core";
 import { summarizeCopyability, type CopyabilitySummary } from "./copyability/observe.server";
+import { fetchAllRows } from "./db-pagination";
 
 import { summarizeExperiment, type ExperimentSummary, type TradeLite } from "./comparison-core";
 import { workerIdFor } from "./shadow.server";
@@ -62,37 +63,95 @@ export type ComparisonData = {
   v1Rows: ComparisonRow[];
 };
 
-const TRADE_LIMIT = 500;
+type ComparisonTradeRow = {
+  id: string;
+  action: string;
+  realized_pnl: number | null;
+  created_at: string;
+  reason: string | null;
+  notional: number | null;
+  source_ts: number | null;
+};
+
+type SettlementRow = {
+  id: string;
+  realized_pnl: number | null;
+  settled_at: string;
+};
+
+async function loadAllTrades(experimentId: string): Promise<ComparisonTradeRow[]> {
+  const paged = await fetchAllRows<ComparisonTradeRow>(async (from, to) => {
+    const { data, error } = await supabaseAdmin
+      .from("paper_trades")
+      .select("id, action, realized_pnl, created_at, reason, notional, source_ts")
+      .eq("experiment_id", experimentId)
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to);
+    if (error) throw new Error(error.message);
+    return (data ?? []) as unknown as ComparisonTradeRow[];
+  });
+  if (!paged.complete) throw new Error(`Comparison trade history truncated for ${experimentId}`);
+  return paged.rows;
+}
+
+async function loadAllSettlements(experimentId: string): Promise<SettlementRow[]> {
+  const paged = await fetchAllRows<SettlementRow>(async (from, to) => {
+    const { data, error } = await supabaseAdmin
+      .from("paper_settlements")
+      .select("id, realized_pnl, settled_at")
+      .eq("experiment_id", experimentId)
+      .order("settled_at", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, to);
+    if (error) throw new Error(error.message);
+    return (data ?? []) as unknown as SettlementRow[];
+  });
+  if (!paged.complete) throw new Error(`Comparison settlement history truncated for ${experimentId}`);
+  return paged.rows;
+}
+
+function meanNotional(rows: ComparisonTradeRow[], action: string): number | null {
+  const values = rows
+    .filter((t) => String(t.action) === action)
+    .map((t) => Number(t.notional ?? 0))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  if (values.length === 0) return null;
+  return Math.round((values.reduce((sum, n) => sum + n, 0) / values.length) * 100) / 100;
+}
 
 export async function loadComparison(): Promise<ComparisonData> {
-  const { data: experiments } = await supabaseAdmin.from("paper_experiments").select("*");
+  const { data: experiments, error: experimentsError } = await supabaseAdmin
+    .from("paper_experiments")
+    .select("*");
+  if (experimentsError) throw new Error(experimentsError.message);
 
   const rows: ComparisonRow[] = [];
   for (const experiment of experiments ?? []) {
     const workerId = workerIdFor({ id: experiment.id, name: experiment.name });
-    const [positionsRes, tradesRes, auditRes, settledRes, statusRes, checkpointRes, postGoLiveRes, copyability] =
-      await Promise.all([
+    const [
+      positionsRes,
+      allTrades,
+      auditRes,
+      settlements,
+      statusRes,
+      checkpointRes,
+      postGoLiveRes,
+      copyability,
+    ] = await Promise.all([
       supabaseAdmin
         .from("paper_positions")
         .select("shares, cost_basis, mark")
         .eq("experiment_id", experiment.id)
         .gt("shares", 0),
-      supabaseAdmin
-        .from("paper_trades")
-        .select("action, realized_pnl, created_at, reason, notional, source_ts")
-        .eq("experiment_id", experiment.id)
-        .order("created_at", { ascending: true })
-        .limit(TRADE_LIMIT),
+      loadAllTrades(experiment.id),
       supabaseAdmin
         .from("pipeline_audit")
         .select("total_latency_seconds, detection_latency_seconds, decision_latency_seconds")
         .eq("experiment_id", experiment.id)
         .order("created_at", { ascending: false })
         .limit(100),
-      supabaseAdmin
-        .from("paper_settlements")
-        .select("id", { count: "exact", head: true })
-        .eq("experiment_id", experiment.id),
+      loadAllSettlements(experiment.id),
       supabaseAdmin.from("worker_status").select("*").eq("id", workerId).maybeSingle(),
       supabaseAdmin.from("worker_checkpoints").select("*").eq("id", workerId).maybeSingle(),
       experiment.follow_from_ts === null
@@ -105,6 +164,11 @@ export async function loadComparison(): Promise<ComparisonData> {
       summarizeCopyability(experiment.id),
     ]);
 
+    if (positionsRes.error) throw new Error(positionsRes.error.message);
+    if (auditRes.error) throw new Error(auditRes.error.message);
+    if (statusRes.error) throw new Error(statusRes.error.message);
+    if (checkpointRes.error) throw new Error(checkpointRes.error.message);
+
     const positions = positionsRes.data ?? [];
     const marked = positions.filter((p) => p.mark !== null);
     const openValue =
@@ -116,7 +180,7 @@ export async function loadComparison(): Promise<ComparisonData> {
     const openCostBasis =
       Math.round(positions.reduce((sum, p) => sum + Number(p.cost_basis), 0) * 100) / 100;
 
-    const skipped = (tradesRes.data ?? []).filter((t) => String(t.action) === "SKIP");
+    const skipped = allTrades.filter((t) => String(t.action) === "SKIP");
     const reasonCounts = new Map<string, number>();
     for (const t of skipped) {
       const raw = String(t.reason ?? "Unspecified");
@@ -128,10 +192,15 @@ export async function loadComparison(): Promise<ComparisonData> {
       .sort((a, b) => b.count - a.count)
       .slice(0, 3);
 
-    const trades: TradeLite[] = (tradesRes.data ?? []).map((t) => ({
+    const tradePerformanceEvents: TradeLite[] = allTrades.map((t) => ({
       action: String(t.action),
       realizedPnl: Number(t.realized_pnl ?? 0),
       createdAt: String(t.created_at),
+    }));
+    const settlementPerformanceEvents: TradeLite[] = settlements.map((s) => ({
+      action: "SETTLEMENT",
+      realizedPnl: Number(s.realized_pnl ?? 0),
+      createdAt: String(s.settled_at),
     }));
 
     const summary = summarizeExperiment({
@@ -139,17 +208,12 @@ export async function loadComparison(): Promise<ComparisonData> {
       cash: Number(experiment.cash),
       realizedPnl: Number(experiment.realized_pnl),
       openValue,
-      trades,
+      trades: [...tradePerformanceEvents, ...settlementPerformanceEvents],
       latencies: (auditRes.data ?? [])
         .filter((a) => a.total_latency_seconds !== null)
         .map((a) => Number(a.total_latency_seconds)),
     });
 
-    const allTrades = tradesRes.data ?? [];
-    const notionalFor = (action: string) =>
-      median(
-        allTrades.filter((t) => String(t.action) === action).map((t) => Number(t.notional ?? 0)).filter((n) => n > 0),
-      );
     const runway = estimateCashRunway({
       startingCash: Number(experiment.starting_cash),
       cash: Number(experiment.cash),
@@ -185,7 +249,7 @@ export async function loadComparison(): Promise<ComparisonData> {
       unrealizedPnl: openValue === null ? null : Math.round((openValue - openCostBasis) * 100) / 100,
       skippedCount: skipped.length,
       skipReasons,
-      settledCount: settledRes.count ?? 0,
+      settledCount: settlements.length,
       lastEventTs: checkpointRes.data?.last_source_ts ?? null,
       lagSeconds: statusRes.data?.lag_seconds ?? null,
       workerState: statusRes.data?.state ?? null,
@@ -196,8 +260,8 @@ export async function loadComparison(): Promise<ComparisonData> {
       totalPaperTrades: summary.buys + summary.sells,
       skipRatePct:
         allTrades.length === 0 ? null : Math.round((skipped.length / allTrades.length) * 1000) / 10,
-      avgBuyUsd: notionalFor("BUY"),
-      avgSellUsd: notionalFor("SELL"),
+      avgBuyUsd: meanNotional(allTrades, "BUY"),
+      avgSellUsd: meanNotional(allTrades, "SELL"),
       nextBuyUsd: runway.nextBuyUsd,
       estimatedRemainingBuys: runway.estimatedRemainingBuys,
       medianDetectionLatencySeconds: median(
