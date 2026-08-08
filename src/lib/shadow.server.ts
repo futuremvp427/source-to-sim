@@ -24,6 +24,11 @@ import {
   type PaperPositionState,
   type Side,
 } from "./shadow-core";
+import {
+  V2_REFERENCE_NAME,
+  isEligibleForV2Copy,
+  isV2Name,
+} from "./v2-cohort";
 
 export const TARGET_WALLET = "0x8fbd7cf5f806f563080864694415829f7229a959";
 export const EXPERIMENT_NAME = "SHADOW";
@@ -170,15 +175,20 @@ export type Experiment = {
   follow_from_ts: number | null;
 };
 
+/**
+ * The active reference experiment: the V2 fair-comparison row for the reference
+ * wallet when it exists, otherwise the frozen V1 SHADOW row.
+ */
 export async function getExperiment(): Promise<Experiment> {
   const { data, error } = await supabaseAdmin
     .from("paper_experiments")
     .select("*")
-    .eq("name", EXPERIMENT_NAME)
-    .maybeSingle();
+    .in("name", [V2_REFERENCE_NAME, EXPERIMENT_NAME]);
   if (error) throw new Error(error.message);
-  if (!data) throw new Error("SHADOW experiment row is missing");
-  return data as unknown as Experiment;
+  const rows = (data ?? []) as unknown as Experiment[];
+  const row = rows.find((r) => r.name === V2_REFERENCE_NAME) ?? rows[0];
+  if (!row) throw new Error("Reference experiment row is missing");
+  return row;
 }
 
 /**
@@ -199,7 +209,7 @@ export async function listActiveExperiments(): Promise<Experiment[]> {
   );
 }
 
-/** Per-experiment worker/checkpoint row id. The reference keeps its historical id. */
+/** Per-experiment worker/checkpoint row id. The V1 reference keeps its historical id. */
 export function workerIdFor(experiment: { id: string; name: string }): string {
   return experiment.name === EXPERIMENT_NAME ? WORKER_ID : `ingest:${experiment.id}`;
 }
@@ -396,7 +406,7 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
     const nextSourceForRow =
       side === "BUY" ? (before ?? 0) + srcShares : Math.max(0, (before ?? 0) - srcShares);
 
-    if (Number(row.source_ts) < followFrom) {
+    if (!isEligibleForV2Copy(Number(row.source_ts), followFrom)) {
       sourceShares.set(row.asset, roundShares(nextSourceForRow));
       processedIds.push(row.id);
       backfilledIds.push(row.id);
