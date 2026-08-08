@@ -77,7 +77,7 @@ export function CandidateSection() {
       action={
         <button
           type="button"
-          onClick={() => research.mutate({})}
+          onClick={() => research.mutate(undefined as never)}
           disabled={research.isPending}
           className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-50"
         >
@@ -202,7 +202,7 @@ export function CandidateSection() {
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => promote.mutate({ candidateId: c.id })}
+                  onClick={() => promote.mutate({ data: { candidateId: c.id } })}
                   disabled={!c.walletResolved || promote.isPending || c.status === "PROMOTED_TO_SHADOW"}
                   className="rounded-lg border border-border px-3 py-1.5 text-[11px] font-medium hover:bg-muted disabled:opacity-50"
                 >

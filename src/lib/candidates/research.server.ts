@@ -10,6 +10,13 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 import {
+  PROMOTED_STATUS,
+  buildPromotedExperiment,
+  guardPromotion,
+  promotedExperimentName,
+} from "./promotion";
+
+import {
   capacityScore,
   computeFingerprint,
   computeMetrics,
