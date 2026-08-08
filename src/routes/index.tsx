@@ -227,42 +227,26 @@ function Dashboard() {
         subtitle="Simulation-only settings. Nothing here can place, sign or cancel a real order."
       >
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <label className="text-xs">
-            <span className="font-medium text-muted-foreground">Paper buy amount (USD)</span>
-            <input
-              type="number"
-              min={0.5}
-              step={0.5}
-              value={buyAmountDraft || String(exp?.buyAmount ?? "")}
-              onChange={(e) => setBuyAmountDraft(e.target.value)}
-              onBlur={() => {
-                const v = Number(buyAmountDraft);
-                if (buyAmountDraft && Number.isFinite(v) && v >= 0.5) {
-                  saveSettings.mutate({ data: { buyAmount: v } } as never);
-                }
-                setBuyAmountDraft("");
-              }}
-              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm tabular-nums"
-            />
-          </label>
-          <label className="text-xs">
-            <span className="font-medium text-muted-foreground">Poll interval (seconds)</span>
-            <input
-              type="number"
-              min={15}
-              step={15}
-              value={pollDraft || String(exp?.pollIntervalSeconds ?? "")}
-              onChange={(e) => setPollDraft(e.target.value)}
-              onBlur={() => {
-                const v = Number(pollDraft);
-                if (pollDraft && Number.isFinite(v) && v >= 15) {
-                  saveSettings.mutate({ data: { pollIntervalSeconds: Math.round(v) } } as never);
-                }
-                setPollDraft("");
-              }}
-              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm tabular-nums"
-            />
-          </label>
+          {/* Legacy knobs are read-only facts: they do not drive active V2 behaviour. */}
+          <div className="text-xs">
+            <span className="font-medium text-muted-foreground">BUY sizing (active)</span>
+            <p className="mt-1 rounded-md border border-border bg-muted/40 px-2 py-1.5 text-sm">
+              dynamic-v1 — automatic
+            </p>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              min($5, 1% of spendable cash), $1 floor, 10% reserve. Not user-configurable; the
+              legacy fixed paper buy amount no longer affects V2.
+            </p>
+          </div>
+          <div className="text-xs">
+            <span className="font-medium text-muted-foreground">Polling cadence (active)</span>
+            <p className="mt-1 rounded-md border border-border bg-muted/40 px-2 py-1.5 text-sm">
+              Every minute — scheduled
+            </p>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Controlled by the server-side scheduler, not by the legacy poll-interval setting.
+            </p>
+          </div>
           <div className="text-xs">
             <span className="font-medium text-muted-foreground">Follower</span>
             <button
