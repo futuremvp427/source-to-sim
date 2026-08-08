@@ -6,6 +6,9 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 import { cashBreakdown } from "./shadow-core";
+import { estimateCashRunway } from "./cash-runway";
+import { median } from "./copyability/core";
+import { summarizeCopyability, type CopyabilitySummary } from "./copyability/observe.server";
 
 import { summarizeExperiment, type ExperimentSummary, type TradeLite } from "./comparison-core";
 import { workerIdFor } from "./shadow.server";
@@ -36,6 +39,19 @@ export type ComparisonRow = ExperimentSummary & {
   workerState: string | null;
   lastSuccessAt: string | null;
   lastError: string | null;
+  /* --- evidence pass (measurement only) --- */
+  postGoLiveSourceEvents: number | null;
+  eligibleDecisions: number;
+  totalPaperTrades: number;
+  skipRatePct: number | null;
+  avgBuyUsd: number | null;
+  avgSellUsd: number | null;
+  nextBuyUsd: number | null;
+  estimatedRemainingBuys: number;
+  medianDetectionLatencySeconds: number | null;
+  medianDecisionLatencySeconds: number | null;
+  lastSourceActivityTs: number | null;
+  copyability: CopyabilitySummary;
 };
 
 export type ComparisonData = {
@@ -54,7 +70,8 @@ export async function loadComparison(): Promise<ComparisonData> {
   const rows: ComparisonRow[] = [];
   for (const experiment of experiments ?? []) {
     const workerId = workerIdFor({ id: experiment.id, name: experiment.name });
-    const [positionsRes, tradesRes, auditRes, settledRes, statusRes, checkpointRes] = await Promise.all([
+    const [positionsRes, tradesRes, auditRes, settledRes, statusRes, checkpointRes, postGoLiveRes, copyability] =
+      await Promise.all([
       supabaseAdmin
         .from("paper_positions")
         .select("shares, cost_basis, mark")
@@ -62,15 +79,14 @@ export async function loadComparison(): Promise<ComparisonData> {
         .gt("shares", 0),
       supabaseAdmin
         .from("paper_trades")
-        .select("action, realized_pnl, created_at, reason")
+        .select("action, realized_pnl, created_at, reason, notional, source_ts")
         .eq("experiment_id", experiment.id)
         .order("created_at", { ascending: true })
         .limit(TRADE_LIMIT),
       supabaseAdmin
         .from("pipeline_audit")
-        .select("total_latency_seconds")
+        .select("total_latency_seconds, detection_latency_seconds, decision_latency_seconds")
         .eq("experiment_id", experiment.id)
-        .not("total_latency_seconds", "is", null)
         .order("created_at", { ascending: false })
         .limit(100),
       supabaseAdmin
@@ -79,6 +95,14 @@ export async function loadComparison(): Promise<ComparisonData> {
         .eq("experiment_id", experiment.id),
       supabaseAdmin.from("worker_status").select("*").eq("id", workerId).maybeSingle(),
       supabaseAdmin.from("worker_checkpoints").select("*").eq("id", workerId).maybeSingle(),
+      experiment.follow_from_ts === null
+        ? Promise.resolve({ count: null })
+        : supabaseAdmin
+            .from("source_events")
+            .select("*", { count: "exact", head: true })
+            .eq("wallet", experiment.wallet_address.toLowerCase())
+            .gte("source_ts", Number(experiment.follow_from_ts)),
+      summarizeCopyability(experiment.id),
     ]);
 
     const positions = positionsRes.data ?? [];
@@ -116,8 +140,24 @@ export async function loadComparison(): Promise<ComparisonData> {
       realizedPnl: Number(experiment.realized_pnl),
       openValue,
       trades,
-      latencies: (auditRes.data ?? []).map((a) => Number(a.total_latency_seconds)),
+      latencies: (auditRes.data ?? [])
+        .filter((a) => a.total_latency_seconds !== null)
+        .map((a) => Number(a.total_latency_seconds)),
     });
+
+    const allTrades = tradesRes.data ?? [];
+    const notionalFor = (action: string) =>
+      median(
+        allTrades.filter((t) => String(t.action) === action).map((t) => Number(t.notional ?? 0)).filter((n) => n > 0),
+      );
+    const runway = estimateCashRunway({
+      startingCash: Number(experiment.starting_cash),
+      cash: Number(experiment.cash),
+    });
+    const lastSourceActivityTs = allTrades.reduce<number | null>((acc, t) => {
+      const ts = t.source_ts === null ? null : Number(t.source_ts);
+      return ts === null ? acc : acc === null ? ts : Math.max(acc, ts);
+    }, null);
 
     rows.push({
       ...summary,
@@ -151,6 +191,27 @@ export async function loadComparison(): Promise<ComparisonData> {
       workerState: statusRes.data?.state ?? null,
       lastSuccessAt: statusRes.data?.last_success_at ?? null,
       lastError: statusRes.data?.last_error ?? null,
+      postGoLiveSourceEvents: postGoLiveRes.count ?? null,
+      eligibleDecisions: allTrades.length,
+      totalPaperTrades: summary.buys + summary.sells,
+      skipRatePct:
+        allTrades.length === 0 ? null : Math.round((skipped.length / allTrades.length) * 1000) / 10,
+      avgBuyUsd: notionalFor("BUY"),
+      avgSellUsd: notionalFor("SELL"),
+      nextBuyUsd: runway.nextBuyUsd,
+      estimatedRemainingBuys: runway.estimatedRemainingBuys,
+      medianDetectionLatencySeconds: median(
+        (auditRes.data ?? [])
+          .filter((a) => a.detection_latency_seconds !== null)
+          .map((a) => Number(a.detection_latency_seconds)),
+      ),
+      medianDecisionLatencySeconds: median(
+        (auditRes.data ?? [])
+          .filter((a) => a.decision_latency_seconds !== null)
+          .map((a) => Number(a.decision_latency_seconds)),
+      ),
+      lastSourceActivityTs,
+      copyability,
     });
   }
 
