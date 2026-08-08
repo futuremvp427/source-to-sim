@@ -82,6 +82,8 @@ export async function generatePendingPreviews(
   experimentId: string,
   deps: PmusDeps = {},
   lookup?: MarketLookup,
+  /** Source wallet: compatibility results are wallet-scoped. */
+  wallet: string = "",
 ): Promise<GeneratePreviewsResult> {
   const result: GeneratePreviewsResult = {
     considered: 0,
@@ -124,6 +126,7 @@ export async function generatePendingPreviews(
   const { data: checkRows } = await supabaseAdmin
     .from("compatibility_checks")
     .select("*")
+    .eq("wallet", wallet)
     .in("event_key", eventKeys);
   const checkByKey = new Map((checkRows ?? []).map((r) => [r.event_key, r]));
 
@@ -161,6 +164,7 @@ export async function generatePendingPreviews(
       if (cached) result.rechecked += 1;
       await recordCompatibilityCheck({
         eventKey: trade.event_key,
+        wallet,
         sourceEventId: trade.source_event_id,
         sourceMarket: trade.market_title,
         sourceSlug: slug,
@@ -269,6 +273,7 @@ export async function generatePendingPreviews(
     result.created += 1;
 
     await raiseExactMatchAlert({
+      eventKey: trade.event_key,
       sourceMarket: trade.market_title,
       usMarket: usMarketSlug,
       side: trade.action === "SELL" ? "SELL" : "BUY",
@@ -283,6 +288,7 @@ export async function generatePendingPreviews(
 
 async function recordCompatibilityCheck(input: {
   eventKey: string;
+  wallet: string;
   sourceEventId: string | null;
   sourceMarket: string | null;
   sourceSlug: string | null;
@@ -294,6 +300,7 @@ async function recordCompatibilityCheck(input: {
   await supabaseAdmin.from("compatibility_checks").upsert(
     {
       event_key: input.eventKey,
+      wallet: input.wallet,
       source_event_id: input.sourceEventId,
       source_market: input.sourceMarket,
       source_slug: input.sourceSlug,
@@ -303,12 +310,17 @@ async function recordCompatibilityCheck(input: {
       checks: input.previousChecks + 1,
       checked_at: new Date().toISOString(),
     } as never,
-    { onConflict: "event_key" },
+    { onConflict: "wallet,event_key" },
   );
 }
 
-/** In-app alert. Approval is still required; nothing is submitted. */
+/**
+ * In-app alert routed through the shared raiseAlert path, so it gets immediate
+ * Telegram notification, retry behaviour and event-scoped de-duplication.
+ * Approval is still required; nothing is submitted.
+ */
 async function raiseExactMatchAlert(info: {
+  eventKey: string;
   sourceMarket: string | null;
   usMarket: string;
   side: string;
@@ -316,12 +328,14 @@ async function raiseExactMatchAlert(info: {
   previewEstimatedCost: number;
   availableBalance: number | null;
 }): Promise<void> {
-  await supabaseAdmin.from("alerts").insert({
-    level: "info",
-    kind: "pmus_exact_match",
-    message: "Polymarket US exact match found — order preview added to the approval queue.",
-    context: info as never,
-  } as never);
+  const { raiseAlert } = await import("../shadow.server");
+  await raiseAlert(
+    "info",
+    "pmus_exact_match",
+    "Polymarket US exact match found — order preview added to the approval queue.",
+    info as never,
+    `pmus_exact_match:${info.eventKey}:${info.usMarket}`,
+  );
 }
 
 function clampPrice(price: number | null): number | null {
