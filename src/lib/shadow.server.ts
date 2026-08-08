@@ -298,9 +298,11 @@ export type ProcessResult = {
 };
 
 async function processPendingEvents(experiment: Experiment): Promise<ProcessResult> {
+  const wallet = experiment.wallet_address.toLowerCase();
   const { data: pending, error } = await supabaseAdmin
     .from("source_events")
-    .select("id, event_key, asset, market_title, outcome, side, shares, price, source_ts")
+    .select("id, event_key, asset, market_title, outcome, side, shares, price, source_ts, first_seen_at")
+    .eq("wallet", wallet)
     .is("processed_at", null)
     .order("source_ts", { ascending: true })
     .order("event_key", { ascending: true })
@@ -315,7 +317,7 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
   const { data: sourceStateRows } = await supabaseAdmin
     .from("source_position_state")
     .select("asset, shares")
-    .eq("wallet", TARGET_WALLET)
+    .eq("wallet", wallet)
     .in("asset", assets);
   const sourceShares = new Map<string, number>();
   for (const r of sourceStateRows ?? []) sourceShares.set(r.asset, Number(r.shares));
@@ -342,6 +344,7 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
   const meta = new Map<string, { title: string; outcome: string | null; ts: number }>();
   const tradeRows: Record<string, unknown>[] = [];
   const processedIds: string[] = [];
+  const auditRows: Record<string, unknown>[] = [];
 
   for (const row of rows) {
     const side = (row.side === "SELL" ? "SELL" : "BUY") as Side;
@@ -417,6 +420,18 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
       realized_pnl: realized,
       source_ts: row.source_ts,
     });
+    auditRows.push(
+      buildAuditRow({
+        experimentId: experiment.id,
+        wallet,
+        eventKey: row.event_key,
+        marketTitle: row.market_title,
+        side,
+        action: decision.action,
+        sourceTs: Number(row.source_ts),
+        firstSeenAt: row.first_seen_at,
+      }),
+    );
     processedIds.push(row.id);
     result.processed += 1;
   }
@@ -435,10 +450,16 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
   for (const chunk of chunked(backfilledIds, 200)) {
     await supabaseAdmin.from("source_events").update({ backfilled: true }).in("id", chunk);
   }
+  // Real-event validation log: proves each eligible event traversed the pipeline.
+  for (const chunk of chunked(auditRows, 200)) {
+    await supabaseAdmin
+      .from("pipeline_audit")
+      .upsert(chunk as never, { onConflict: "experiment_id,event_key", ignoreDuplicates: true });
+  }
 
   // Persist the compact source state and the paper book (batched).
   const sourceRows = [...sourceShares].map(([asset, shares]) => ({
-    wallet: TARGET_WALLET,
+    wallet,
     asset,
     market_title: meta.get(asset)?.title ?? null,
     outcome: meta.get(asset)?.outcome ?? null,
