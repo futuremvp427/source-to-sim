@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { decideResolution, settlementCredit } from "./settlement-core";
 import { buildTradesUrl, workerIdFor, EXPERIMENT_NAME, WORKER_ID } from "./shadow.server";
-import { deriveEventKey, normalizeSourceEvents } from "./shadow-core";
+import { normalizeSourceEvents } from "./shadow-core";
 
 const resolvedMarket = (winnerToken: string) => ({
   closed: true,
@@ -41,7 +41,7 @@ describe("safety invariant: same-second distinctness and double-copy prevention"
     const a = normalizeSourceEvents(raw as never, "0xwallet")[0]!;
     const b = normalizeSourceEvents(raw as never, "0xwallet")[0]!;
     expect(a.eventKey).toBe(b.eventKey);
-    expect(deriveEventKey({ ...a, wallet: "0xwallet" } as never)).toBeTruthy();
+    expect(a.identityBasis).toBe("tx_hash_log_index");
   });
 });
 
