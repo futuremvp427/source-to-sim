@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 
 import { EmptyState, Panel, RowSkeleton, SideTag, Stat } from "@/components/mirror/panels";
 import { CandidateSection } from "@/components/mirror/candidate-panels";
+import { ComparisonSection, SelfCheckSection } from "@/components/mirror/comparison-panels";
 import { PmusSection } from "@/components/mirror/pmus-panels";
 import { formatShares, formatTime, formatUsd, isWeatherMarket } from "@/lib/mirror-trader";
 import {
@@ -203,6 +204,10 @@ function Dashboard() {
       </div>
 
       {/* ------- Polymarket US account setup + approval queue ------- */}
+      <ComparisonSection />
+
+      <SelfCheckSection />
+
       <PmusSection />
 
       <CandidateSection />
