@@ -10,7 +10,7 @@ function isStartCommand(text: string): boolean {
 
 /** Returns the latest private chat that sent /start, using only the bot token server-side. */
 export async function findLatestPrivateStartChatId(): Promise<number> {
-  const token = process.env["TELEGRAM_BOT_TOKEN"];
+  const token = process.env["TELEGRAM_BOT_TOKEN"]?.trim();
   if (!token) throw new Error("Telegram bot token is not configured");
 
   const response = await fetch(`https://api.telegram.org/bot${token}/getUpdates`, {
