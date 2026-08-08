@@ -11,7 +11,7 @@ import {
   MARK_MAX_AGE_MS,
   applyBuy,
   applySell,
-  decideBuy,
+  decideDynamicBuy,
   decideProportionalSell,
   normalizeSourceEvents,
   openPnl,
@@ -407,7 +407,11 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
 
     const decision =
       side === "BUY"
-        ? decideBuy({ price, buyAmount: Number(experiment.buy_amount), availableCash: cash })
+        ? decideDynamicBuy({
+            price,
+            startingCash: Number(experiment.starting_cash),
+            cash,
+          })
         : decideProportionalSell({
             price,
             sourceSharesBefore: before,
