@@ -77,14 +77,19 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Lovable App" },
-      { name: "description", content: "Lovable Generated Project" },
-      { name: "author", content: "Lovable" },
-      { property: "og:title", content: "Lovable App" },
-      { property: "og:description", content: "Lovable Generated Project" },
+      { title: "Mirror Trader — Shadow/Paper Research" },
+      {
+        name: "description",
+        content: "Autonomous multi-wallet Polymarket shadow/paper research, monitoring, and preview-only analytics.",
+      },
+      { name: "author", content: "Mirror Trader" },
+      { property: "og:title", content: "Mirror Trader — Shadow/Paper Research" },
+      {
+        property: "og:description",
+        content: "Research + shadow/paper monitoring. No autonomous live-order submission.",
+      },
       { property: "og:type", content: "website" },
-      { name: "twitter:card", content: "summary_large_image" },
-      { name: "twitter:site", content: "@Lovable" },
+      { name: "twitter:card", content: "summary" },
     ],
     links: [
       {
