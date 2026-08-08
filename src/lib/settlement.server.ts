@@ -3,18 +3,19 @@
  *
  * Only a VERIFIED public resolution (market closed + exactly one declared
  * winning outcome on Polymarket's public CLOB market record) may close a paper
- * position. The unique (experiment_id, asset) constraint on paper_settlements
- * guarantees a simulated payout is credited EXACTLY ONCE, even across restarts.
+ * position. Settlement accounting is applied by one PostgreSQL RPC transaction
+ * so a crash can never strand an idempotency row between payout/cash/position
+ * updates.
  */
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
-import { decideResolution, settlementCredit, type PublicMarketResolution } from "./settlement-core";
+import { decideResolution, type PublicMarketResolution } from "./settlement-core";
 import { raiseAlert } from "./shadow.server";
-import { roundUsd } from "./shadow-core";
 
 const CLOB_API = "https://clob.polymarket.com";
 const MAX_POSITIONS_PER_PASS = 25;
+const RESOLUTION_TIMEOUT_MS = 10_000;
 
 export type SettlementPassResult = {
   settled: number;
@@ -26,6 +27,7 @@ export type SettlementPassResult = {
 async function fetchMarketResolution(conditionId: string): Promise<PublicMarketResolution | null> {
   const res = await fetch(`${CLOB_API}/markets/${conditionId}`, {
     headers: { accept: "application/json" },
+    signal: AbortSignal.timeout(RESOLUTION_TIMEOUT_MS),
   });
   if (!res.ok) return null;
   const body = (await res.json()) as {
@@ -43,23 +45,31 @@ async function fetchMarketResolution(conditionId: string): Promise<PublicMarketR
   };
 }
 
+type SettlementRpcRow = {
+  applied: boolean;
+  payout: number | string;
+  realized_pnl: number | string;
+};
+
 export async function runSettlementPass(experimentId: string): Promise<SettlementPassResult> {
   const result: SettlementPassResult = { settled: 0, unresolved: 0, failed: 0, details: [] };
 
-  const { data: positions } = await supabaseAdmin
+  const { data: positions, error: positionsError } = await supabaseAdmin
     .from("paper_positions")
     .select("asset, market_title, outcome, shares, cost_basis, realized_pnl")
     .eq("experiment_id", experimentId)
     .eq("settlement_status", "open")
     .gt("shares", 0)
     .limit(MAX_POSITIONS_PER_PASS);
+  if (positionsError) throw new Error(positionsError.message);
   if (!positions || positions.length === 0) return result;
 
   const assets = positions.map((p) => p.asset);
-  const { data: eventRows } = await supabaseAdmin
+  const { data: eventRows, error: eventsError } = await supabaseAdmin
     .from("source_events")
-    .select("asset, condition_id, slug")
+    .select("asset, condition_id")
     .in("asset", assets);
+  if (eventsError) throw new Error(eventsError.message);
   const conditionByAsset = new Map<string, string>();
   for (const row of eventRows ?? []) {
     if (row.condition_id && !conditionByAsset.has(row.asset)) {
@@ -106,85 +116,61 @@ export async function runSettlementPass(experimentId: string): Promise<Settlemen
       continue;
     }
 
-    const shares = Number(position.shares);
-    const costBasis = Number(position.cost_basis);
-    const credit = settlementCredit({ shares, costBasis, payoutPerShare: decision.payoutPerShare });
-
-    // Idempotency gate: the unique (experiment_id, asset) index makes a second
-    // insert fail, so a replayed pass can never credit the payout twice.
-    const { error: insertError } = await supabaseAdmin.from("paper_settlements").insert({
-      experiment_id: experimentId,
-      asset: position.asset,
-      market_title: position.market_title,
-      outcome: position.outcome,
-      condition_id: conditionId,
-      shares,
-      cost_basis: costBasis,
-      resolution_outcome: decision.won ? "WON" : "LOST",
-      resolution_source: "polymarket_public_clob_market",
-      resolution_ts: new Date().toISOString(),
-      verified: true,
-      payout: credit.payout,
-      realized_pnl: credit.realizedPnl,
-      evidence: {
-        condition_id: conditionId,
-        closed: market.closed,
-        tokens: market.tokens,
+    const resolutionTs = new Date().toISOString();
+    const { data: rpcData, error: rpcError } = await supabaseAdmin.rpc(
+      "apply_verified_paper_settlement",
+      {
+        p_experiment_id: experimentId,
+        p_asset: position.asset,
+        p_condition_id: conditionId,
+        p_resolution_outcome: decision.won ? "WON" : "LOST",
+        p_resolution_source: "polymarket_public_clob_market",
+        p_resolution_ts: resolutionTs,
+        p_payout_per_share: decision.payoutPerShare,
+        p_evidence: {
+          condition_id: conditionId,
+          closed: market.closed,
+          tokens: market.tokens,
+        },
       } as never,
-    } as never);
-    if (insertError) {
-      result.unresolved += 1;
+    );
+
+    if (rpcError) {
+      result.failed += 1;
       result.details.push({
         asset: position.asset,
         marketTitle: position.market_title,
-        status: "Already settled",
+        status: `Atomic settlement failed — left OPEN (${rpcError.message})`,
       });
       continue;
     }
 
-    const { data: experiment } = await supabaseAdmin
-      .from("paper_experiments")
-      .select("cash, realized_pnl")
-      .eq("id", experimentId)
-      .maybeSingle();
+    const rpcRow = (Array.isArray(rpcData) ? rpcData[0] : rpcData) as SettlementRpcRow | null;
+    if (!rpcRow?.applied) {
+      result.unresolved += 1;
+      result.details.push({
+        asset: position.asset,
+        marketTitle: position.market_title,
+        status: "Already settled or position no longer open",
+      });
+      continue;
+    }
 
-    await supabaseAdmin
-      .from("paper_experiments")
-      .update({
-        cash: roundUsd(Number(experiment?.cash ?? 0) + credit.payout),
-        realized_pnl: roundUsd(Number(experiment?.realized_pnl ?? 0) + credit.realizedPnl),
-        updated_at: new Date().toISOString(),
-      } as never)
-      .eq("id", experimentId);
-
-    await supabaseAdmin
-      .from("paper_positions")
-      .update({
-        shares: 0,
-        cost_basis: 0,
-        avg_price: 0,
-        realized_pnl: roundUsd(Number(position.realized_pnl ?? 0) + credit.realizedPnl),
-        mark: decision.payoutPerShare,
-        mark_source: "settlement",
-        mark_ts: new Date().toISOString(),
-        settlement_status: decision.won ? "settled_won" : "settled_lost",
-        updated_at: new Date().toISOString(),
-      } as never)
-      .eq("experiment_id", experimentId)
-      .eq("asset", position.asset);
-
+    const payout = Number(rpcRow.payout ?? 0);
+    const realized = Number(rpcRow.realized_pnl ?? 0);
     result.settled += 1;
     result.details.push({
       asset: position.asset,
       marketTitle: position.market_title,
-      status: `${decision.won ? "WON" : "LOST"} — simulated payout $${credit.payout.toFixed(2)}`,
+      status: `${decision.won ? "WON" : "LOST"} — simulated payout $${payout.toFixed(2)}`,
     });
 
     await raiseAlert(
       "info",
       "position_settled",
-      `Simulated settlement: ${position.market_title ?? position.asset} ${decision.won ? "WON" : "LOST"} (payout $${credit.payout.toFixed(2)}).`,
+      `Simulated settlement: ${position.market_title ?? position.asset} ${decision.won ? "WON" : "LOST"} (payout $${payout.toFixed(2)}, realized ${realized >= 0 ? "+" : ""}$${realized.toFixed(2)}).`,
       { asset: position.asset as never, condition_id: conditionId as never },
+      `position_settled:${experimentId}:${position.asset}`,
     );
   }
 
