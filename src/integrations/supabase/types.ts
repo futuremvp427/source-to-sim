@@ -19,28 +19,34 @@ export type Database = {
           acknowledged: boolean
           context: Json | null
           created_at: string
+          dedup_key: string | null
           id: string
           kind: string
           level: string
           message: string
+          notified_at: string | null
         }
         Insert: {
           acknowledged?: boolean
           context?: Json | null
           created_at?: string
+          dedup_key?: string | null
           id?: string
           kind: string
           level?: string
           message: string
+          notified_at?: string | null
         }
         Update: {
           acknowledged?: boolean
           context?: Json | null
           created_at?: string
+          dedup_key?: string | null
           id?: string
           kind?: string
           level?: string
           message?: string
+          notified_at?: string | null
         }
         Relationships: []
       }
@@ -272,6 +278,114 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "compatibility_checks_source_event_id_fkey"
+            columns: ["source_event_id"]
+            isOneToOne: false
+            referencedRelation: "source_events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      copyability_observations: {
+        Row: {
+          asset: string
+          best_ask: number | null
+          best_bid: number | null
+          created_at: string
+          delay_seconds: number
+          detected_at: string | null
+          event_key: string
+          experiment_id: string
+          fillable: boolean | null
+          follower_price: number | null
+          id: string
+          improved: boolean | null
+          leader_price: number | null
+          market_title: string | null
+          midpoint: number | null
+          observed_at: string | null
+          price_direction: string | null
+          required_shares: number | null
+          sample_delay: string
+          scheduled_at: string
+          side: string
+          slippage_cents: number | null
+          slippage_pct: number | null
+          source_event_id: string | null
+          source_ts: number | null
+          spread: number | null
+          status: string
+          visible_depth: number | null
+        }
+        Insert: {
+          asset: string
+          best_ask?: number | null
+          best_bid?: number | null
+          created_at?: string
+          delay_seconds: number
+          detected_at?: string | null
+          event_key: string
+          experiment_id: string
+          fillable?: boolean | null
+          follower_price?: number | null
+          id?: string
+          improved?: boolean | null
+          leader_price?: number | null
+          market_title?: string | null
+          midpoint?: number | null
+          observed_at?: string | null
+          price_direction?: string | null
+          required_shares?: number | null
+          sample_delay: string
+          scheduled_at: string
+          side: string
+          slippage_cents?: number | null
+          slippage_pct?: number | null
+          source_event_id?: string | null
+          source_ts?: number | null
+          spread?: number | null
+          status?: string
+          visible_depth?: number | null
+        }
+        Update: {
+          asset?: string
+          best_ask?: number | null
+          best_bid?: number | null
+          created_at?: string
+          delay_seconds?: number
+          detected_at?: string | null
+          event_key?: string
+          experiment_id?: string
+          fillable?: boolean | null
+          follower_price?: number | null
+          id?: string
+          improved?: boolean | null
+          leader_price?: number | null
+          market_title?: string | null
+          midpoint?: number | null
+          observed_at?: string | null
+          price_direction?: string | null
+          required_shares?: number | null
+          sample_delay?: string
+          scheduled_at?: string
+          side?: string
+          slippage_cents?: number | null
+          slippage_pct?: number | null
+          source_event_id?: string | null
+          source_ts?: number | null
+          spread?: number | null
+          status?: string
+          visible_depth?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "copyability_observations_experiment_id_fkey"
+            columns: ["experiment_id"]
+            isOneToOne: false
+            referencedRelation: "paper_experiments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "copyability_observations_source_event_id_fkey"
             columns: ["source_event_id"]
             isOneToOne: false
             referencedRelation: "source_events"
