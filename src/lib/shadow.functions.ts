@@ -34,7 +34,8 @@ export const updateShadowSettings = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => settingsSchema.parse(input))
   .handler(async ({ data }) => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { EXPERIMENT_NAME } = await import("./shadow.server");
+    const { getExperiment } = await import("./shadow.server");
+    const reference = await getExperiment();
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
     if (data.buyAmount !== undefined) patch["buy_amount"] = data.buyAmount;
     if (data.pollIntervalSeconds !== undefined)
@@ -44,7 +45,7 @@ export const updateShadowSettings = createServerFn({ method: "POST" })
     const { error } = await supabaseAdmin
       .from("paper_experiments")
       .update(patch as never)
-      .eq("name", EXPERIMENT_NAME);
+      .eq("id", reference.id);
     if (error) return { ok: false as const, error: error.message };
     return { ok: true as const };
   });
