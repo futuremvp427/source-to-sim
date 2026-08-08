@@ -4,6 +4,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { useMemo, useState } from "react";
 
 import { EmptyState, Panel, RowSkeleton, SideTag, Stat } from "@/components/mirror/panels";
+import { CandidateSection } from "@/components/mirror/candidate-panels";
 import { PmusSection } from "@/components/mirror/pmus-panels";
 import { formatShares, formatTime, formatUsd, isWeatherMarket } from "@/lib/mirror-trader";
 import {
@@ -203,6 +204,8 @@ function Dashboard() {
 
       {/* ------- Polymarket US account setup + approval queue ------- */}
       <PmusSection />
+
+      <CandidateSection />
 
       {/* ---------------- Controls ---------------- */}
       <Panel
