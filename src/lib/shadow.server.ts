@@ -550,7 +550,12 @@ async function processPendingEvents(experiment: Experiment): Promise<ProcessResu
   }
 
   const paperRowsOut = [...paper]
-    .filter(([asset]) => existingPaperAssets.has(asset) || tradedAssets.has(asset))
+    .filter(([asset]) =>
+      shouldPersistPaperPosition({
+        hadExistingRow: existingPaperAssets.has(asset),
+        tradedThisBatch: tradedAssets.has(asset),
+      }),
+    )
     .map(([asset, p]) => ({
     experiment_id: experiment.id,
     asset,
@@ -1134,7 +1139,13 @@ export async function loadDashboard() {
   const closed = positions
     .filter((p) => Number(p.shares) <= 0)
     // Phantom rows from the old write path: never funded, never closed for real.
-    .filter((p) => !(Number(p.cost_basis) === 0 && Number(p.realized_pnl) === 0))
+    .filter(
+      (p) =>
+        !isPhantomClosedPosition({
+          costBasis: Number(p.cost_basis),
+          realizedPnl: Number(p.realized_pnl),
+        }),
+    )
     .map((p) => ({
       asset: p.asset,
       marketTitle: p.market_title ?? "Unknown market",
