@@ -82,7 +82,14 @@ export function CandidateSection() {
       action={
         <button
           type="button"
-          onClick={() => research.mutate()}
+          onClick={() => {
+            console.log("[research] click");
+            try {
+              research.mutate();
+            } catch (err) {
+              console.log("[research] mutate threw", err);
+            }
+          }}
           disabled={research.isPending}
           className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-50"
         >
