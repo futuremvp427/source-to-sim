@@ -1,7 +1,9 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+
+import { supabase } from "@/integrations/supabase/client";
 
 import { EmptyState, Panel, RowSkeleton, SideTag, Stat } from "@/components/mirror/panels";
 import { CandidateSection } from "@/components/mirror/candidate-panels";
@@ -82,8 +84,16 @@ function Dashboard() {
   const [search, setSearch] = useState("");
   const [side, setSide] = useState<"ALL" | "BUY" | "SELL">("ALL");
   const [weatherOnly, setWeatherOnly] = useState(true);
-  const [buyAmountDraft, setBuyAmountDraft] = useState<string>("");
-  const [pollDraft, setPollDraft] = useState<string>("");
+  const [operatorEmail, setOperatorEmail] = useState<string | null>(null);
+
+  useEffect(() => {
+    void supabase.auth.getUser().then(({ data }) => setOperatorEmail(data.user?.email ?? null));
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event !== "SIGNED_IN" && event !== "SIGNED_OUT" && event !== "USER_UPDATED") return;
+      setOperatorEmail(session?.user.email ?? null);
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
 
   const events = data?.events ?? [];
   const weatherCounts = useMemo(() => {
@@ -158,6 +168,25 @@ function Dashboard() {
             >
               {isFetching ? "Refreshing…" : "Refresh"}
             </button>
+            {operatorEmail ? (
+              <button
+                type="button"
+                onClick={async () => {
+                  await queryClient.cancelQueries();
+                  await supabase.auth.signOut();
+                }}
+                className="rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium hover:bg-muted"
+              >
+                Sign out {operatorEmail}
+              </button>
+            ) : (
+              <Link
+                to="/auth"
+                className="rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium hover:bg-muted"
+              >
+                Operator sign in
+              </Link>
+            )}
           </div>
         </div>
         <p className="mt-2 text-xs text-muted-foreground">
