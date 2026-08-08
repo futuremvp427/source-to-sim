@@ -12,6 +12,7 @@ import {
   MARK_MAX_AGE_MS,
   applyBuy,
   applySell,
+  buildEventCommit,
   decideDynamicBuy,
   decideProportionalSell,
   normalizeSourceEvents,
@@ -283,7 +284,9 @@ async function persistEvents(events: NormalizedEvent[]): Promise<number> {
   }));
   const { data, error } = await supabaseAdmin
     .from("source_events")
-    .upsert(rows, { onConflict: "event_key", ignoreDuplicates: true })
+    // Event identity is wallet-scoped: two wallets may legitimately report the
+    // same event_key, and one wallet can never record the same event twice.
+    .upsert(rows, { onConflict: "wallet,event_key", ignoreDuplicates: true })
     .select("id");
   if (error) throw new Error(error.message);
   return data?.length ?? 0;
