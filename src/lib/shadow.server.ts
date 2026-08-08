@@ -101,7 +101,7 @@ export async function raiseAlert(
 /* Lease / fencing so only one worker ingests at a time                */
 /* ------------------------------------------------------------------ */
 
-export type Lease = { fence: number; workerId: string };
+export type Lease = { fence: number; workerId: string; lockId: string };
 
 /**
  * Atomic lease acquisition. One SQL statement decides ownership and bumps the
@@ -109,16 +109,16 @@ export type Lease = { fence: number; workerId: string };
  * never both believe they hold the lease. Returns null when the lease is held
  * by a different, still-live worker.
  */
-export async function acquireLease(workerId: string): Promise<Lease | null> {
+export async function acquireLease(workerId: string, lockId: string = WORKER_ID): Promise<Lease | null> {
   const { data, error } = await supabaseAdmin.rpc("acquire_worker_lease", {
-    p_id: WORKER_ID,
+    p_id: lockId,
     p_worker_id: workerId,
     p_lease_seconds: LEASE_SECONDS,
   });
   if (error) throw new Error(error.message);
   const fence = typeof data === "number" ? data : null;
   if (fence === null) return null;
-  return { fence, workerId };
+  return { fence, workerId, lockId };
 }
 
 async function releaseLease(
@@ -142,7 +142,7 @@ async function releaseLease(
       lease_expires_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     })
-    .eq("id", WORKER_ID)
+    .eq("id", lease.lockId)
     .eq("fence", lease.fence)
     // A stale owner must not be able to clobber the worker that took over.
     .eq("worker_id", lease.workerId);
