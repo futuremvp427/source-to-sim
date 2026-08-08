@@ -429,6 +429,8 @@ export type Database = {
           poll_interval_seconds: number
           realized_pnl: number
           simulated: boolean
+          sizing_rule: string
+          sizing_rule_updated_at: string
           starting_cash: number
           updated_at: string
           wallet_address: string
@@ -445,6 +447,8 @@ export type Database = {
           poll_interval_seconds?: number
           realized_pnl?: number
           simulated?: boolean
+          sizing_rule?: string
+          sizing_rule_updated_at?: string
           starting_cash?: number
           updated_at?: string
           wallet_address: string
@@ -461,6 +465,8 @@ export type Database = {
           poll_interval_seconds?: number
           realized_pnl?: number
           simulated?: boolean
+          sizing_rule?: string
+          sizing_rule_updated_at?: string
           starting_cash?: number
           updated_at?: string
           wallet_address?: string

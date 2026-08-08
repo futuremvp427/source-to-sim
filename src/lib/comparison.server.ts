@@ -5,6 +5,8 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { cashBreakdown } from "./shadow-core";
+
 import { summarizeExperiment, type ExperimentSummary, type TradeLite } from "./comparison-core";
 import { EXPERIMENT_NAME, workerIdFor } from "./shadow.server";
 
@@ -16,6 +18,9 @@ export type ComparisonRow = ExperimentSummary & {
   isReference: boolean;
   startingCash: number;
   cash: number;
+  reservedCash: number;
+  spendableCash: number;
+  sizingRule: string;
   openPositions: number;
   markedPositions: number;
   settledCount: number;
@@ -101,6 +106,15 @@ export async function loadComparison(): Promise<ComparisonData> {
       isReference: experiment.name === EXPERIMENT_NAME,
       startingCash: Number(experiment.starting_cash),
       cash: Number(experiment.cash),
+      reservedCash: cashBreakdown({
+        startingCash: Number(experiment.starting_cash),
+        cash: Number(experiment.cash),
+      }).reservedCash,
+      spendableCash: cashBreakdown({
+        startingCash: Number(experiment.starting_cash),
+        cash: Number(experiment.cash),
+      }).spendableCash,
+      sizingRule: String(experiment.sizing_rule ?? "dynamic-v1"),
       openPositions: positions.length,
       markedPositions: marked.length,
       settledCount: settledRes.count ?? 0,

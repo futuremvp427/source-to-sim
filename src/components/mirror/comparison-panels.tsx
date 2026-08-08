@@ -55,6 +55,9 @@ export function ComparisonSection() {
                 <th className="py-2 pr-3">ROI</th>
                 <th className="py-2 pr-3">Realized</th>
                 <th className="py-2 pr-3">Cash</th>
+                <th className="py-2 pr-3">Reserved</th>
+                <th className="py-2 pr-3">Spendable</th>
+                <th className="py-2 pr-3">Sizing rule</th>
                 <th className="py-2 pr-3">Open</th>
                 <th className="py-2 pr-3">Win / loss</th>
                 <th className="py-2 pr-3">Max DD</th>
@@ -78,6 +81,9 @@ export function ComparisonSection() {
                   <td className={`py-2 pr-3 tabular-nums ${tone(r.roiPct)}`}>{pct(r.roiPct)}</td>
                   <td className={`py-2 pr-3 tabular-nums ${tone(r.realizedPnl)}`}>{formatUsd(r.realizedPnl)}</td>
                   <td className="py-2 pr-3 tabular-nums">{formatUsd(r.cash)}</td>
+                  <td className="py-2 pr-3 tabular-nums">{formatUsd(r.reservedCash)}</td>
+                  <td className="py-2 pr-3 tabular-nums">{formatUsd(r.spendableCash)}</td>
+                  <td className="py-2 pr-3 text-[11px] text-muted-foreground">{r.sizingRule}</td>
                   <td className="py-2 pr-3 tabular-nums">
                     {r.openPositions}
                     {r.openPositions > 0 && r.markedPositions < r.openPositions ? (
@@ -104,6 +110,8 @@ export function ComparisonSection() {
             </tbody>
           </table>
           <p className="mt-2 text-[11px] text-muted-foreground">
+            Paper BUY sizing: min($5, 1% of available paper cash), floor $1, with a 10% starting-bankroll cash
+            reserve that new BUYs may never breach (skipped as INSUFFICIENT_CASH_RESERVE).{" "}
             Equity = simulated cash + marked open positions. Median latency is the source-timestamp → paper-decision
             delay from the event validation log. Win/loss counts only paper trades that realized P&L.
           </p>
