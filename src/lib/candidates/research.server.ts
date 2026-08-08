@@ -403,7 +403,7 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
 
     const { strengths, risks } = strengthsAndRisks({ metrics, mirror, profit, copy, fingerprint });
 
-    await supabaseAdmin.from("candidate_metrics").upsert(
+    const { error: candidate_metricsError } = await supabaseAdmin.from("candidate_metrics").upsert(
       {
         candidate_id: row.id,
         computed_at: new Date().toISOString(),
@@ -416,7 +416,7 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
       { onConflict: "candidate_id" },
     );
 
-    await supabaseAdmin.from("candidate_fingerprint").upsert(
+    const { error: candidate_fingerprintError } = await supabaseAdmin.from("candidate_fingerprint").upsert(
       {
         candidate_id: row.id,
         computed_at: new Date().toISOString(),
@@ -430,8 +430,9 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
       } as never,
       { onConflict: "candidate_id" },
     );
+    if (candidate_fingerprintError) throw new Error(`candidate_fingerprint write failed: ${candidate_fingerprintError.message}`);
 
-    await supabaseAdmin.from("candidate_scores").upsert(
+    const { error: candidate_scoresError } = await supabaseAdmin.from("candidate_scores").upsert(
       {
         candidate_id: row.id,
         computed_at: new Date().toISOString(),
@@ -457,6 +458,8 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
       } as never,
       { onConflict: "candidate_id" },
     );
+
+    if (candidate_scoresError) throw new Error(`candidate_scores write failed: ${candidate_scoresError.message}`);
 
     if (metrics.sampleCount === 0) insufficient.push(row.handle);
     researched += 1;
@@ -555,6 +558,7 @@ function mv(bag: Record<string, unknown> | null, key: string): number | null {
 
 export type CandidatePanelData = {
   generatedAt: string;
+  runState: ResearchRunState | null;
   referenceHandle: string;
   referenceWallet: string;
   candidates: CandidateView[];
@@ -643,6 +647,7 @@ export async function loadCandidatePanel(): Promise<CandidatePanelData> {
 
   return {
     generatedAt: new Date().toISOString(),
+    runState: await loadResearchRunState(),
     referenceHandle: REFERENCE_HANDLE,
     referenceWallet: REFERENCE_WALLET,
     candidates,
