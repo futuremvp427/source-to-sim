@@ -1,25 +1,5 @@
--- Deep-audit hardening: multi-wallet identity scope, notification delivery state,
+-- Deep-audit hardening: notification delivery state,
 -- one-active-experiment-per-wallet guard, and atomic paper settlement.
-
--- source_events.event_key is source-native and can legitimately repeat across
--- different monitored wallets. Scope uniqueness to the wallet instead of the
--- entire table so a fill observed for wallet B can never be silently discarded
--- because wallet A already persisted the same source key.
-ALTER TABLE public.source_events
-  DROP CONSTRAINT IF EXISTS source_events_event_key_key;
-CREATE UNIQUE INDEX IF NOT EXISTS source_events_wallet_event_key_key
-  ON public.source_events (wallet, event_key);
-
--- Compatibility checks must likewise be tied to the concrete persisted source
--- event, not a globally-unique event_key assumption.
-ALTER TABLE public.compatibility_checks
-  DROP CONSTRAINT IF EXISTS compatibility_checks_event_key_key;
-ALTER TABLE public.compatibility_checks
-  DROP CONSTRAINT IF EXISTS compatibility_checks_source_event_id_key;
-ALTER TABLE public.compatibility_checks
-  ADD CONSTRAINT compatibility_checks_source_event_id_key UNIQUE (source_event_id);
-CREATE INDEX IF NOT EXISTS compatibility_checks_event_key_idx
-  ON public.compatibility_checks (event_key);
 
 -- processed_at currently belongs to source_events, so two enabled experiments
 -- for the same wallet would compete for the same processing bit. Fail closed at
@@ -64,8 +44,6 @@ DECLARE
   v_realized numeric;
   v_status text;
 BEGIN
-  -- Lock the paper position and refuse to settle anything that is no longer
-  -- genuinely open. This also prevents two settlement calls racing each other.
   SELECT * INTO v_position
   FROM public.paper_positions
   WHERE experiment_id = p_experiment_id
@@ -79,7 +57,6 @@ BEGIN
     RETURN;
   END IF;
 
-  -- Serialize cash/P&L mutation for this experiment.
   PERFORM 1
   FROM public.paper_experiments
   WHERE id = p_experiment_id
