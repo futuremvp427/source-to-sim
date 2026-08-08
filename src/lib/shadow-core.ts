@@ -167,6 +167,87 @@ function validPrice(price: number): boolean {
   return Number.isFinite(price) && price > 0 && price <= 1;
 }
 
+/* ------------------------------------------------------------------ */
+/* Dynamic BUY sizing (PAPER ONLY)                                     */
+/* ------------------------------------------------------------------ */
+
+/** Persisted so we know exactly when the sizing strategy changed. */
+export const SIZING_RULE_VERSION = "dynamic-v1";
+export const SIZING_RULE_LABEL =
+  "min($5, 1% of paper cash), floor $1, 10% starting-bankroll reserve";
+
+export const SIZING_MAX_USD = 5;
+export const SIZING_CASH_FRACTION = 0.01;
+export const SIZING_MIN_USD = 1;
+export const SIZING_RESERVE_FRACTION = 0.1;
+
+export type CashBreakdown = {
+  availableCash: number;
+  reservedCash: number;
+  spendableCash: number;
+};
+
+function roundCents(v: number): number {
+  return Math.round(v * 100) / 100;
+}
+
+/** Reserve is 10% of the STARTING bankroll, so it never drifts with P&L. */
+export function cashBreakdown(input: { startingCash: number; cash: number }): CashBreakdown {
+  const reservedCash = roundCents(Math.max(0, input.startingCash) * SIZING_RESERVE_FRACTION);
+  return {
+    availableCash: roundUsd(input.cash),
+    reservedCash,
+    spendableCash: roundCents(Math.max(0, input.cash - reservedCash)),
+  };
+}
+
+export type BuySize =
+  | { ok: true; amount: number; spendableCash: number; reservedCash: number }
+  | { ok: false; reason: string; spendableCash: number; reservedCash: number };
+
+/**
+ * target_buy_usd = min($5, 1% of available paper cash), floored at $1,
+ * and never allowed to breach the 10% starting-bankroll reserve.
+ */
+export function computeBuySize(input: { startingCash: number; cash: number }): BuySize {
+  const { availableCash, reservedCash, spendableCash } = cashBreakdown(input);
+  if (spendableCash + 1e-9 < SIZING_MIN_USD) {
+    return {
+      ok: false,
+      reason: `INSUFFICIENT_CASH_RESERVE (spendable ${spendableCash} < ${SIZING_MIN_USD}, reserve ${reservedCash})`,
+      spendableCash,
+      reservedCash,
+    };
+  }
+  const target = Math.min(SIZING_MAX_USD, Math.max(0, availableCash) * SIZING_CASH_FRACTION);
+  const floored = Math.max(SIZING_MIN_USD, target);
+  const amount = roundCents(Math.min(floored, spendableCash));
+  return { ok: true, amount, spendableCash, reservedCash };
+}
+
+/** BUY sized dynamically from current paper cash, at the source fill price. */
+export function decideDynamicBuy(input: {
+  price: number;
+  startingCash: number;
+  cash: number;
+}): FollowerDecision {
+  const { price } = input;
+  if (!validPrice(price)) {
+    return { action: "SKIP", shares: 0, notional: 0, price, reason: "Invalid source price" };
+  }
+  const size = computeBuySize({ startingCash: input.startingCash, cash: input.cash });
+  if (!size.ok) {
+    return { action: "SKIP", shares: 0, notional: 0, price, reason: size.reason };
+  }
+  return {
+    action: "BUY",
+    shares: roundShares(size.amount / price),
+    notional: roundUsd(size.amount),
+    price,
+    reason: `Dynamic sizing ${SIZING_RULE_VERSION}: $${size.amount} (${SIZING_RULE_LABEL})`,
+  };
+}
+
 /** BUY: spend the configured simulated amount at the source fill price. */
 export function decideBuy(input: {
   price: number;
