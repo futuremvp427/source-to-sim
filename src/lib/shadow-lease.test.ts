@@ -107,7 +107,7 @@ describe("atomic lease acquisition", () => {
   });
 
   it("a live lease blocks a different worker", async () => {
-    expect(await acquireLease("A")).toEqual({ fence: 1, workerId: "A" });
+    expect(await acquireLease("A")).toEqual({ fence: 1, workerId: "A", lockId: "ingest" });
     expect(await acquireLease("B")).toBeNull();
   });
 
@@ -116,7 +116,7 @@ describe("atomic lease acquisition", () => {
     expect(a!.fence).toBe(1);
     state.now += (LEASE_SECONDS_FOR_TEST + 1) * 1000; // A goes stale
     const b = await acquireLease("B");
-    expect(b).toEqual({ fence: 2, workerId: "B" });
+    expect(b).toEqual({ fence: 2, workerId: "B", lockId: "ingest" });
   });
 
   it("a stale owner cannot release or overwrite the new owner's lease", async () => {

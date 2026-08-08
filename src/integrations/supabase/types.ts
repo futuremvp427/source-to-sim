@@ -539,6 +539,74 @@ export type Database = {
           },
         ]
       }
+      paper_settlements: {
+        Row: {
+          asset: string
+          condition_id: string | null
+          cost_basis: number
+          created_at: string
+          evidence: Json
+          experiment_id: string
+          id: string
+          market_title: string | null
+          outcome: string | null
+          payout: number
+          realized_pnl: number
+          resolution_outcome: string
+          resolution_source: string
+          resolution_ts: string | null
+          settled_at: string
+          shares: number
+          verified: boolean
+        }
+        Insert: {
+          asset: string
+          condition_id?: string | null
+          cost_basis?: number
+          created_at?: string
+          evidence?: Json
+          experiment_id: string
+          id?: string
+          market_title?: string | null
+          outcome?: string | null
+          payout?: number
+          realized_pnl?: number
+          resolution_outcome: string
+          resolution_source: string
+          resolution_ts?: string | null
+          settled_at?: string
+          shares?: number
+          verified?: boolean
+        }
+        Update: {
+          asset?: string
+          condition_id?: string | null
+          cost_basis?: number
+          created_at?: string
+          evidence?: Json
+          experiment_id?: string
+          id?: string
+          market_title?: string | null
+          outcome?: string | null
+          payout?: number
+          realized_pnl?: number
+          resolution_outcome?: string
+          resolution_source?: string
+          resolution_ts?: string | null
+          settled_at?: string
+          shares?: number
+          verified?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "paper_settlements_experiment_id_fkey"
+            columns: ["experiment_id"]
+            isOneToOne: false
+            referencedRelation: "paper_experiments"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       paper_trades: {
         Row: {
           action: string
@@ -610,6 +678,83 @@ export type Database = {
             columns: ["source_event_id"]
             isOneToOne: false
             referencedRelation: "source_events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      pipeline_audit: {
+        Row: {
+          action: string | null
+          alert_created_at: string | null
+          compatibility_checked_at: string | null
+          created_at: string
+          decision_at: string | null
+          decision_latency_seconds: number | null
+          detected_at: string | null
+          detection_latency_seconds: number | null
+          event_key: string
+          event_persisted_at: string | null
+          experiment_id: string
+          id: string
+          market_title: string | null
+          paper_trade_at: string | null
+          position_updated_at: string | null
+          preview_created_at: string | null
+          side: string | null
+          source_ts: number | null
+          total_latency_seconds: number | null
+          wallet: string
+        }
+        Insert: {
+          action?: string | null
+          alert_created_at?: string | null
+          compatibility_checked_at?: string | null
+          created_at?: string
+          decision_at?: string | null
+          decision_latency_seconds?: number | null
+          detected_at?: string | null
+          detection_latency_seconds?: number | null
+          event_key: string
+          event_persisted_at?: string | null
+          experiment_id: string
+          id?: string
+          market_title?: string | null
+          paper_trade_at?: string | null
+          position_updated_at?: string | null
+          preview_created_at?: string | null
+          side?: string | null
+          source_ts?: number | null
+          total_latency_seconds?: number | null
+          wallet: string
+        }
+        Update: {
+          action?: string | null
+          alert_created_at?: string | null
+          compatibility_checked_at?: string | null
+          created_at?: string
+          decision_at?: string | null
+          decision_latency_seconds?: number | null
+          detected_at?: string | null
+          detection_latency_seconds?: number | null
+          event_key?: string
+          event_persisted_at?: string | null
+          experiment_id?: string
+          id?: string
+          market_title?: string | null
+          paper_trade_at?: string | null
+          position_updated_at?: string | null
+          preview_created_at?: string | null
+          side?: string | null
+          source_ts?: number | null
+          total_latency_seconds?: number | null
+          wallet?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pipeline_audit_experiment_id_fkey"
+            columns: ["experiment_id"]
+            isOneToOne: false
+            referencedRelation: "paper_experiments"
             referencedColumns: ["id"]
           },
         ]

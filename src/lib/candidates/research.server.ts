@@ -339,6 +339,28 @@ async function referenceFingerprint(): Promise<CandidateFingerprint> {
   return computeFingerprint(trades);
 }
 
+/** Recurring refresh interval for the autonomous candidate research pass. */
+export const RESEARCH_REFRESH_HOURS = 6;
+
+/**
+ * Called by the scheduled ingest cycle. Runs the bounded public research pass
+ * at most once every RESEARCH_REFRESH_HOURS; otherwise it is a cheap no-op.
+ */
+export async function refreshCandidateResearchIfDue(): Promise<{
+  ran: boolean;
+  detail: string | null;
+}> {
+  const state = await loadResearchRunState();
+  const lastRun = state?.lastRunAt ? new Date(state.lastRunAt).getTime() : 0;
+  const dueAt = lastRun + RESEARCH_REFRESH_HOURS * 3600_000;
+  if (state?.running) return { ran: false, detail: "A research pass is already running." };
+  if (lastRun > 0 && Date.now() < dueAt) {
+    return { ran: false, detail: `Next refresh due ${new Date(dueAt).toISOString()}` };
+  }
+  const summary = await runCandidateResearch();
+  return { ran: summary.state !== "skipped_locked", detail: summary.detail };
+}
+
 export async function runCandidateResearch(): Promise<ResearchSummary> {
   if (!(await acquireResearchLease())) {
     return {
