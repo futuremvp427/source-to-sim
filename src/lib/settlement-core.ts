@@ -29,6 +29,42 @@ export type GammaResolutionEvidence = {
   clobTokenIds: string[];
 };
 
+/**
+ * Parse Gamma outcomePrices without JavaScript's permissive Number(null/""/true)
+ * coercions. Gamma may return the array directly or as a JSON-encoded string;
+ * each member must itself be a finite number or a non-empty numeric string.
+ */
+export function parseGammaOutcomePrices(value: unknown): number[] | null {
+  let raw: unknown = value;
+  if (typeof value === "string") {
+    try {
+      raw = JSON.parse(value) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(raw)) return null;
+
+  const numbers: number[] = [];
+  for (const item of raw) {
+    if (typeof item === "number") {
+      if (!Number.isFinite(item)) return null;
+      numbers.push(item);
+      continue;
+    }
+    if (typeof item === "string") {
+      const trimmed = item.trim();
+      if (!trimmed) return null;
+      const parsed = Number(trimmed);
+      if (!Number.isFinite(parsed)) return null;
+      numbers.push(parsed);
+      continue;
+    }
+    return null;
+  }
+  return numbers;
+}
+
 export type ResolutionDecision =
   | { verified: false; reason: string }
   | { verified: true; won: boolean; outcome: string | null; payoutPerShare: 0 | 1 };
@@ -66,8 +102,8 @@ export function decideResolutionWithGammaFallback(
   if (primary.verified || !clob.closed) return primary;
 
   // Gamma is only a fallback for a CLOB payload that declares NO winner. If
-  // CLOB declares multiple winners, the two authoritative views are already
-  // contradictory/ambiguous and we must not use another source to override it.
+  // CLOB declares multiple winners, the authoritative views are already
+  // contradictory/ambiguous and another source must not override it.
   const clobWinnerCount = clob.tokens.filter((t) => t.winner).length;
   if (clobWinnerCount !== 0) {
     return { verified: false, reason: `Conflicting CLOB resolution (${clobWinnerCount} winning outcomes)` };
@@ -92,7 +128,6 @@ export function decideResolutionWithGammaFallback(
   }
 
   // Verify the token->outcome mapping for EVERY token, not just the held one.
-  // A matching token set with swapped/mismatched labels is not sufficient proof.
   for (let index = 0; index < n; index += 1) {
     const tokenId = gamma.clobTokenIds[index]!;
     const clobOutcome = clob.tokens.find((t) => t.tokenId === tokenId)?.outcome ?? null;
