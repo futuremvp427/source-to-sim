@@ -15,7 +15,7 @@ import {
   decideResolution,
   decideResolutionWithGammaFallback,
   parseGammaOutcomePrices,
-  selectSettlementBatch,
+  selectSettlementBatchByCursor,
   SETTLEMENT_BATCH_SIZE,
   type GammaResolutionEvidence,
   type PublicMarketResolution,
@@ -241,10 +241,7 @@ async function applyVerifiedSettlementRpc(args: Record<string, unknown>): Promis
   return client.rpc("apply_verified_paper_settlement", args);
 }
 
-export async function runSettlementPass(
-  experimentId: string,
-  cycleIndex: number = Math.floor(Date.now() / 60_000),
-): Promise<SettlementPassResult> {
+export async function runSettlementPass(experimentId: string): Promise<SettlementPassResult> {
   const result: SettlementPassResult = {
     settled: 0,
     unresolved: 0,
@@ -254,6 +251,19 @@ export async function runSettlementPass(
     failuresByType: {},
     details: [],
   };
+
+  // Persisted cursor state makes fairness depend on completed scans rather than
+  // Date.now()/minute parity. Select * keeps generated Supabase types compatible
+  // until Lovable regenerates them for the new migration column.
+  const { data: experimentState, error: stateError } = await supabaseAdmin
+    .from("paper_experiments")
+    .select("*")
+    .eq("id", experimentId)
+    .maybeSingle();
+  if (stateError) throw new Error(stateError.message);
+  const cursorAsset =
+    (experimentState as unknown as { settlement_cursor_asset?: string | null } | null)
+      ?.settlement_cursor_asset ?? null;
 
   const openBook = await fetchAllRows(async (from, to) => {
     const { data, error } = await supabaseAdmin
@@ -268,12 +278,19 @@ export async function runSettlementPass(
     return data ?? [];
   });
 
-  const batch = selectSettlementBatch(openBook.rows.length, cycleIndex, MAX_POSITIONS_PER_PASS);
+  const batch = selectSettlementBatchByCursor(
+    openBook.rows.map((row) => row.asset),
+    cursorAsset,
+    MAX_POSITIONS_PER_PASS,
+  );
   result.batchIndex = batch.batchIndex;
   result.batchCount = batch.batchCount;
-  if (batch.size <= 0) return result;
+  if (batch.assets.length === 0) return result;
 
-  const positions = openBook.rows.slice(batch.offset, batch.offset + batch.size);
+  const positionByAsset = new Map(openBook.rows.map((row) => [row.asset, row] as const));
+  const positions = batch.assets
+    .map((asset) => positionByAsset.get(asset))
+    .filter((position): position is (typeof openBook.rows)[number] => position !== undefined);
   if (positions.length === 0) return result;
 
   const assets = positions.map((p) => p.asset);
@@ -397,7 +414,18 @@ export async function runSettlementPass(
     );
   }
 
-  if (result.failed > 0) {
+  // Advance only after the full selected scan completes. If the pass throws
+  // before this point, the same batch is retried safely on the next cycle.
+  if (batch.nextCursor) {
+    const { error: cursorError } = await supabaseAdmin
+      .from("paper_experiments")
+      .update({ settlement_cursor_asset: batch.nextCursor } as never)
+      .eq("id", experimentId);
+    if (cursorError) throw new Error(`Failed to persist settlement scan cursor: ${cursorError.message}`);
+  }
+
+  const lookupFailureCount = Object.values(result.failuresByType).reduce((sum, count) => sum + count, 0);
+  if (lookupFailureCount > 0) {
     const bucket = new Date().toISOString().slice(0, 13);
     const breakdown = Object.entries(result.failuresByType)
       .sort((a, b) => b[1] - a[1])
@@ -406,10 +434,10 @@ export async function runSettlementPass(
     await raiseAlert(
       "warn",
       "settlement_lookups_failed",
-      `Settlement pass had ${result.failed} failed public resolution lookup(s) (batch ${batch.batchIndex + 1}/${batch.batchCount}) — ${breakdown}.`,
+      `Settlement pass had ${lookupFailureCount} failed public resolution lookup(s) (batch ${batch.batchIndex + 1}/${batch.batchCount}) — ${breakdown}.`,
       {
         experiment_id: experimentId as never,
-        failed: result.failed as never,
+        failed: lookupFailureCount as never,
         failures_by_type: result.failuresByType as never,
       },
       `settlement_lookups_failed:${experimentId}:${bucket}`,
