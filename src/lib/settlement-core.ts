@@ -17,6 +17,18 @@ export type PublicMarketResolution = {
   tokens: ResolutionToken[];
 };
 
+/**
+ * Secondary official Polymarket (Gamma) evidence used only when the CLOB market
+ * is closed but does not expose a usable winner flag. Arrays must map 1:1.
+ */
+export type GammaResolutionEvidence = {
+  closed: boolean;
+  conditionId: string;
+  outcomes: string[];
+  outcomePrices: number[];
+  clobTokenIds: string[];
+};
+
 export type ResolutionDecision =
   | { verified: false; reason: string }
   | { verified: true; won: boolean; outcome: string | null; payoutPerShare: 0 | 1 };
@@ -35,6 +47,52 @@ export function decideResolution(asset: string, market: PublicMarketResolution):
     won: token.winner,
     outcome: token.outcome,
     payoutPerShare: token.winner ? 1 : 0,
+  };
+}
+
+/**
+ * Fail-closed fallback for a CLOB response that is explicitly closed but has no
+ * usable `winner` flag. Gamma is also an official public Polymarket API. We only
+ * accept terminal evidence when Gamma independently says closed, the outcome /
+ * token / price arrays map 1:1, and prices are exactly one 1 and all remaining
+ * 0. Anything less remains unresolved.
+ */
+export function decideResolutionWithGammaFallback(
+  asset: string,
+  clob: PublicMarketResolution,
+  gamma: GammaResolutionEvidence | null,
+): ResolutionDecision {
+  const primary = decideResolution(asset, clob);
+  if (primary.verified || !clob.closed) return primary;
+  if (!gamma?.closed) return primary;
+
+  const n = gamma.outcomes.length;
+  if (n < 2 || gamma.outcomePrices.length !== n || gamma.clobTokenIds.length !== n) {
+    return { verified: false, reason: "Gamma resolution arrays do not map 1:1" };
+  }
+  if (new Set(gamma.clobTokenIds).size !== n || gamma.clobTokenIds.some((id) => !id)) {
+    return { verified: false, reason: "Gamma resolution token mapping is invalid" };
+  }
+
+  const winnerIndexes = gamma.outcomePrices
+    .map((price, index) => ({ price, index }))
+    .filter(({ price }) => price === 1)
+    .map(({ index }) => index);
+  const terminal = gamma.outcomePrices.every((price) => price === 0 || price === 1);
+  if (!terminal || winnerIndexes.length !== 1) {
+    return { verified: false, reason: "Gamma does not provide a single terminal 1/0 outcome" };
+  }
+
+  const heldIndex = gamma.clobTokenIds.findIndex((id) => id === asset);
+  if (heldIndex < 0) return { verified: false, reason: "Held asset is not part of the Gamma-resolved market" };
+
+  const winnerIndex = winnerIndexes[0]!;
+  const won = heldIndex === winnerIndex;
+  return {
+    verified: true,
+    won,
+    outcome: gamma.outcomes[heldIndex] ?? null,
+    payoutPerShare: won ? 1 : 0,
   };
 }
 
