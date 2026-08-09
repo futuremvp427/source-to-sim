@@ -168,29 +168,65 @@ export type SettlementCredit = {
 
 export const SETTLEMENT_BATCH_SIZE = 25;
 
-export type SettlementBatch = { offset: number; size: number; batchIndex: number; batchCount: number };
+export type CursorSettlementBatch = {
+  assets: string[];
+  startIndex: number;
+  batchIndex: number;
+  batchCount: number;
+  wrapped: boolean;
+  nextCursor: string | null;
+};
 
 /**
- * Deterministic rotating batch selection.
+ * Select the next settlement batch from a stable asset-sorted open book using
+ * the last asset that was ACTUALLY scanned. This makes progress depend on
+ * completed settlement passes rather than wall-clock minute parity.
  *
- * Keeps at most `batchSize` expensive public resolution lookups per pass while
- * guaranteeing that every open position becomes eligible within
- * ceil(openCount / batchSize) passes: the cycle index advances the batch by one
- * each pass and wraps around after the final batch. Callers MUST pair this with
- * a stable ORDER BY (asset ASC) — Postgres row order is otherwise undefined.
+ * If the previous cursor asset disappeared because the position settled, the
+ * scan resumes at the first lexicographically greater asset. The final batch
+ * wraps to the beginning so newly-added lower-sorting assets are not starved.
  */
-export function selectSettlementBatch(
-  openCount: number,
-  cycleIndex: number,
+export function selectSettlementBatchByCursor(
+  sortedAssets: string[],
+  cursorAsset: string | null,
   batchSize: number = SETTLEMENT_BATCH_SIZE,
-): SettlementBatch {
-  if (openCount <= 0 || batchSize <= 0) {
-    return { offset: 0, size: 0, batchIndex: 0, batchCount: 0 };
+): CursorSettlementBatch {
+  const assets = [...sortedAssets];
+  const openCount = assets.length;
+  if (openCount === 0 || batchSize <= 0) {
+    return {
+      assets: [],
+      startIndex: 0,
+      batchIndex: 0,
+      batchCount: 0,
+      wrapped: false,
+      nextCursor: cursorAsset,
+    };
   }
+
+  const size = Math.min(batchSize, openCount);
+  let startIndex = 0;
+  if (cursorAsset) {
+    const next = assets.findIndex((asset) => asset > cursorAsset);
+    startIndex = next >= 0 ? next : 0;
+  }
+
+  const selected: string[] = [];
+  for (let i = 0; i < size; i += 1) {
+    selected.push(assets[(startIndex + i) % openCount]!);
+  }
+
+  const wrapped = startIndex + size > openCount || (cursorAsset !== null && startIndex === 0);
   const batchCount = Math.ceil(openCount / batchSize);
-  const batchIndex = ((Math.trunc(cycleIndex) % batchCount) + batchCount) % batchCount;
-  const offset = batchIndex * batchSize;
-  return { offset, size: Math.min(batchSize, openCount - offset), batchIndex, batchCount };
+  const batchIndex = Math.min(Math.floor(startIndex / batchSize), Math.max(0, batchCount - 1));
+  return {
+    assets: selected,
+    startIndex,
+    batchIndex,
+    batchCount,
+    wrapped,
+    nextCursor: selected.at(-1) ?? cursorAsset,
+  };
 }
 
 /** $1 per winning share, $0 otherwise. Realized P&L is payout minus the paper cost basis. */
