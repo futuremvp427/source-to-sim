@@ -65,11 +65,12 @@ async function applyVerifiedSettlementRpc(args: Record<string, unknown>): Promis
   // The migration and this code land together; Lovable regenerates Database
   // types only after the migration is applied, so keep this one new RPC behind
   // a narrow typed adapter instead of weakening the whole Supabase client type.
-  const rpc = supabaseAdmin.rpc as unknown as (
-    name: string,
-    params: Record<string, unknown>,
-  ) => Promise<RpcResult>;
-  return rpc("apply_verified_paper_settlement", args);
+  // Must stay bound to the client: a detached `rpc` reference loses `this` and
+  // throws "Cannot read properties of undefined (reading 'rest')".
+  const client = supabaseAdmin as unknown as {
+    rpc: (name: string, params: Record<string, unknown>) => Promise<RpcResult>;
+  };
+  return client.rpc("apply_verified_paper_settlement", args);
 }
 
 export async function runSettlementPass(

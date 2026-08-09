@@ -1161,6 +1161,23 @@ export type Database = {
         Args: { p_id: string; p_lease_seconds: number; p_worker_id: string }
         Returns: number
       }
+      apply_verified_paper_settlement: {
+        Args: {
+          p_asset: string
+          p_condition_id: string
+          p_evidence: Json
+          p_experiment_id: string
+          p_payout_per_share: number
+          p_resolution_outcome: string
+          p_resolution_source: string
+          p_resolution_ts: string
+        }
+        Returns: {
+          applied: boolean
+          payout: number
+          realized_pnl: number
+        }[]
+      }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
