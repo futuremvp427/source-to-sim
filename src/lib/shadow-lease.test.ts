@@ -27,11 +27,13 @@ function atomicAcquire(workerId: string, leaseSeconds: number): number | null {
     };
     return 1;
   }
+  // An active lease is exclusive even to the same worker_id. This prevents a
+  // later cron invocation with the same stable worker name from bumping the
+  // fence and invalidating the still-running prior cycle.
   const free =
     state.row.worker_id === null ||
-    state.row.worker_id === workerId ||
     state.row.lease_expires_at === null ||
-    state.row.lease_expires_at < state.now;
+    state.row.lease_expires_at <= state.now;
   if (!free) return null;
   state.row.worker_id = workerId;
   state.row.fence += 1;
@@ -111,12 +113,25 @@ describe("atomic lease acquisition", () => {
     expect(await acquireLease("B")).toBeNull();
   });
 
+  it("a live lease also blocks the same worker from self-preempting", async () => {
+    expect(await acquireLease("A")).toEqual({ fence: 1, workerId: "A", lockId: "ingest" });
+    expect(await acquireLease("A")).toBeNull();
+    expect(state.row!.fence).toBe(1);
+  });
+
   it("B takes over a stale lease with fence N+1", async () => {
     const a = await acquireLease("A");
     expect(a!.fence).toBe(1);
     state.now += (LEASE_SECONDS_FOR_TEST + 1) * 1000; // A goes stale
     const b = await acquireLease("B");
     expect(b).toEqual({ fence: 2, workerId: "B", lockId: "ingest" });
+  });
+
+  it("the same worker can acquire again after the prior lease is released", async () => {
+    const a = (await acquireLease("A"))!;
+    await releaseLeaseForTest(a, { state: "idle" });
+    const next = await acquireLease("A");
+    expect(next).toEqual({ fence: 2, workerId: "A", lockId: "ingest" });
   });
 
   it("a stale owner cannot release or overwrite the new owner's lease", async () => {
@@ -133,10 +148,5 @@ describe("atomic lease acquisition", () => {
     // The real owner can release.
     await releaseLeaseForTest(b, { state: "idle" });
     expect(state.row!.lease_expires_at).toBe(state.now);
-  });
-
-  it("the same worker may renew its own lease, bumping the fence", async () => {
-    expect((await acquireLease("A"))!.fence).toBe(1);
-    expect((await acquireLease("A"))!.fence).toBe(2);
   });
 });
