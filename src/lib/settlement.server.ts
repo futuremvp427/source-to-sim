@@ -251,21 +251,34 @@ export async function runSettlementPass(
       continue;
     }
 
-    let market: PublicMarketResolution | null = null;
+    let lookup: LookupResult;
     try {
-      market = await fetchMarketResolution(conditionId);
-    } catch {
-      market = null;
+      lookup = await fetchMarketResolution(conditionId);
+    } catch (err) {
+      lookup = {
+        ok: false,
+        failure: {
+          type: "NETWORK_ERROR",
+          attempts: 1,
+          elapsedMs: 0,
+          summary: (err instanceof Error ? err.message : "unknown lookup error").slice(0, 200),
+        },
+      };
     }
-    if (!market) {
+    if (!lookup.ok) {
+      const label = failureLabel(lookup.failure);
       result.failed += 1;
+      result.failuresByType[label] = (result.failuresByType[label] ?? 0) + 1;
       result.details.push({
         asset: position.asset,
         marketTitle: position.market_title,
-        status: "Public resolution lookup failed — left OPEN",
+        status:
+          `Public resolution lookup failed — left OPEN (${label}, ` +
+          `${lookup.failure.attempts} attempt(s), ${lookup.failure.elapsedMs}ms: ${lookup.failure.summary})`,
       });
       continue;
     }
+    const market = lookup.market;
 
     const decision = decideResolution(position.asset, market);
     if (!decision.verified) {
