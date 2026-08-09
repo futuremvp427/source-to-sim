@@ -22,6 +22,40 @@ import { raiseAlert } from "./shadow.server";
 const CLOB_API = "https://clob.polymarket.com";
 const MAX_POSITIONS_PER_PASS = SETTLEMENT_BATCH_SIZE;
 const RESOLUTION_TIMEOUT_MS = 10_000;
+const MAX_LOOKUP_ATTEMPTS = 3;
+
+/** Safe, non-sensitive failure classification for a public resolution lookup. */
+export type LookupFailure = {
+  type: "HTTP" | "TIMEOUT" | "NETWORK_ERROR" | "INVALID_JSON" | "INVALID_RESPONSE_SHAPE";
+  status?: number;
+  attempts: number;
+  elapsedMs: number;
+  /** Short, truncated, non-sensitive summary — public market data only. */
+  summary: string;
+};
+
+export function failureLabel(f: Pick<LookupFailure, "type" | "status">): string {
+  return f.type === "HTTP" ? `HTTP_${f.status ?? 0}` : f.type;
+}
+
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+function backoffMs(attempt: number): number {
+  // retry 1: ~250-500ms, retry 2: ~750-1500ms
+  const base = attempt === 1 ? 250 : 750;
+  return base + Math.random() * base;
+}
+
+function retryAfterMs(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 5_000);
+  const date = Date.parse(header);
+  if (!Number.isNaN(date)) return Math.min(Math.max(0, date - Date.now()), 5_000);
+  return null;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export type SettlementPassResult = {
   settled: number;
@@ -32,24 +66,104 @@ export type SettlementPassResult = {
   details: { asset: string; marketTitle: string | null; status: string }[];
 };
 
-async function fetchMarketResolution(conditionId: string): Promise<PublicMarketResolution | null> {
-  const res = await fetch(`${CLOB_API}/markets/${conditionId}`, {
-    headers: { accept: "application/json" },
-    signal: AbortSignal.timeout(RESOLUTION_TIMEOUT_MS),
-  });
-  if (!res.ok) return null;
-  const body = (await res.json()) as {
-    closed?: boolean;
-    tokens?: { token_id?: string; outcome?: string; winner?: boolean }[];
-  };
-  if (typeof body.closed !== "boolean" || !Array.isArray(body.tokens)) return null;
+type LookupResult =
+  | { ok: true; market: PublicMarketResolution; attempts: number }
+  | { ok: false; failure: LookupFailure };
+
+async function attemptLookup(
+  conditionId: string,
+): Promise<
+  | { ok: true; market: PublicMarketResolution }
+  | { ok: false; type: LookupFailure["type"]; status?: number; summary: string; retryAfter?: number | null }
+> {
+  let res: Response;
+  try {
+    res = await fetch(`${CLOB_API}/markets/${conditionId}`, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(RESOLUTION_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const name = err instanceof Error ? err.name : "";
+    const timeout = name === "TimeoutError" || name === "AbortError";
+    return {
+      ok: false,
+      type: timeout ? "TIMEOUT" : "NETWORK_ERROR",
+      summary: timeout ? `no response within ${RESOLUTION_TIMEOUT_MS}ms` : `fetch failed (${name || "unknown"})`,
+    };
+  }
+
+  if (!res.ok) {
+    return {
+      ok: false,
+      type: "HTTP",
+      status: res.status,
+      summary: `public CLOB responded ${res.status}`,
+      retryAfter: retryAfterMs(res.headers.get("retry-after")),
+    };
+  }
+
+  let body: { closed?: boolean; tokens?: { token_id?: string; outcome?: string; winner?: boolean }[] };
+  try {
+    body = (await res.json()) as typeof body;
+  } catch {
+    return { ok: false, type: "INVALID_JSON", status: res.status, summary: "response body was not JSON" };
+  }
+
+  if (typeof body.closed !== "boolean" || !Array.isArray(body.tokens)) {
+    return {
+      ok: false,
+      type: "INVALID_RESPONSE_SHAPE",
+      status: res.status,
+      summary: `missing closed/tokens (closed=${typeof body.closed}, tokens=${Array.isArray(body.tokens)})`,
+    };
+  }
+
   return {
-    closed: body.closed,
-    tokens: body.tokens.map((t) => ({
-      tokenId: String(t.token_id ?? ""),
-      outcome: t.outcome ?? null,
-      winner: t.winner === true,
-    })),
+    ok: true,
+    market: {
+      closed: body.closed,
+      tokens: body.tokens.map((t) => ({
+        tokenId: String(t.token_id ?? ""),
+        outcome: t.outcome ?? null,
+        winner: t.winner === true,
+      })),
+    },
+  };
+}
+
+/**
+ * Public resolution lookup with bounded retries. Only transient transport
+ * failures (429/5xx/timeout/network) are retried; a valid HTTP 200 — resolved or
+ * not — and 4xx client errors are returned immediately.
+ */
+async function fetchMarketResolution(conditionId: string): Promise<LookupResult> {
+  const startedAt = Date.now();
+  let last: Awaited<ReturnType<typeof attemptLookup>> | null = null;
+
+  for (let attempt = 1; attempt <= MAX_LOOKUP_ATTEMPTS; attempt += 1) {
+    const outcome = await attemptLookup(conditionId);
+    if (outcome.ok) return { ok: true, market: outcome.market, attempts: attempt };
+    last = outcome;
+
+    const retryable =
+      outcome.type === "TIMEOUT" ||
+      outcome.type === "NETWORK_ERROR" ||
+      (outcome.type === "HTTP" && RETRYABLE_STATUS.has(outcome.status ?? 0));
+    if (!retryable || attempt === MAX_LOOKUP_ATTEMPTS) break;
+
+    await sleep(outcome.retryAfter ?? backoffMs(attempt));
+  }
+
+  const failure = last as Exclude<Awaited<ReturnType<typeof attemptLookup>>, { ok: true }>;
+  return {
+    ok: false,
+    failure: {
+      type: failure.type,
+      ...(failure.status === undefined ? {} : { status: failure.status }),
+      attempts: MAX_LOOKUP_ATTEMPTS,
+      elapsedMs: Date.now() - startedAt,
+      summary: failure.summary.slice(0, 200),
+    },
   };
 }
 
