@@ -63,6 +63,8 @@ export type SettlementPassResult = {
   failed: number;
   batchIndex: number;
   batchCount: number;
+  /** Failure counts keyed by safe label, e.g. { HTTP_429: 3, TIMEOUT: 2 }. */
+  failuresByType: Record<string, number>;
   details: { asset: string; marketTitle: string | null; status: string }[];
 };
 
