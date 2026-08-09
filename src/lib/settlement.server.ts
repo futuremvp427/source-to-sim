@@ -14,6 +14,7 @@ import { fetchAllRows } from "./db-pagination";
 import {
   decideResolution,
   decideResolutionWithGammaFallback,
+  parseGammaOutcomePrices,
   selectSettlementBatch,
   SETTLEMENT_BATCH_SIZE,
   type GammaResolutionEvidence,
@@ -178,23 +179,6 @@ function parseStringArray(value: unknown): string[] | null {
   }
 }
 
-function parseNumberArray(value: unknown): number[] | null {
-  const raw = Array.isArray(value)
-    ? value
-    : typeof value === "string"
-      ? (() => {
-          try {
-            return JSON.parse(value) as unknown;
-          } catch {
-            return null;
-          }
-        })()
-      : null;
-  if (!Array.isArray(raw)) return null;
-  const numbers = raw.map((v) => Number(v));
-  return numbers.every((v) => Number.isFinite(v)) ? numbers : null;
-}
-
 /**
  * Official Gamma fallback for a CLOB market that is closed but has no usable
  * winner flag. It is evidence-only: failure/ambiguity simply leaves the paper
@@ -229,7 +213,7 @@ async function fetchGammaResolution(conditionId: string): Promise<GammaResolutio
 
   const market = exact[0]!;
   const outcomes = parseStringArray(market["outcomes"]);
-  const outcomePrices = parseNumberArray(market["outcomePrices"]);
+  const outcomePrices = parseGammaOutcomePrices(market["outcomePrices"]);
   const clobTokenIds = parseStringArray(market["clobTokenIds"]);
   if (!outcomes || !outcomePrices || !clobTokenIds) return null;
 
@@ -307,7 +291,11 @@ export async function runSettlementPass(
     const conditionId = conditionByAsset.get(position.asset);
     if (!conditionId) {
       result.unresolved += 1;
-      result.details.push({ asset: position.asset, marketTitle: position.market_title, status: "No condition id on record — left OPEN" });
+      result.details.push({
+        asset: position.asset,
+        marketTitle: position.market_title,
+        status: "No condition id on record — left OPEN",
+      });
       continue;
     }
 
@@ -372,14 +360,22 @@ export async function runSettlementPass(
 
     if (rpcError) {
       result.failed += 1;
-      result.details.push({ asset: position.asset, marketTitle: position.market_title, status: `Atomic settlement failed — left OPEN (${rpcError.message})` });
+      result.details.push({
+        asset: position.asset,
+        marketTitle: position.market_title,
+        status: `Atomic settlement failed — left OPEN (${rpcError.message})`,
+      });
       continue;
     }
 
     const rpcRow = (Array.isArray(rpcData) ? rpcData[0] : rpcData) as SettlementRpcRow | null;
     if (!rpcRow?.applied) {
       result.unresolved += 1;
-      result.details.push({ asset: position.asset, marketTitle: position.market_title, status: "Already settled or position no longer open" });
+      result.details.push({
+        asset: position.asset,
+        marketTitle: position.market_title,
+        status: "Already settled or position no longer open",
+      });
       continue;
     }
 
@@ -411,7 +407,11 @@ export async function runSettlementPass(
       "warn",
       "settlement_lookups_failed",
       `Settlement pass had ${result.failed} failed public resolution lookup(s) (batch ${batch.batchIndex + 1}/${batch.batchCount}) — ${breakdown}.`,
-      { experiment_id: experimentId as never, failed: result.failed as never, failures_by_type: result.failuresByType as never },
+      {
+        experiment_id: experimentId as never,
+        failed: result.failed as never,
+        failures_by_type: result.failuresByType as never,
+      },
       `settlement_lookups_failed:${experimentId}:${bucket}`,
     );
   }

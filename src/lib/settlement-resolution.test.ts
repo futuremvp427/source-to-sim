@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   decideResolution,
   decideResolutionWithGammaFallback,
+  parseGammaOutcomePrices,
   type GammaResolutionEvidence,
   type PublicMarketResolution,
 } from "./settlement-core";
@@ -52,6 +53,20 @@ describe("settlement resolution verification", () => {
       won: true,
       outcome: "No",
       payoutPerShare: 1,
+    });
+  });
+
+  it("never lets Gamma override a contradictory CLOB payload with multiple winners", () => {
+    const conflicting: PublicMarketResolution = {
+      closed: true,
+      tokens: [
+        { tokenId: YES, outcome: "Yes", winner: true },
+        { tokenId: NO, outcome: "No", winner: true },
+      ],
+    };
+    expect(decideResolutionWithGammaFallback(YES, conflicting, gamma([0, 1]))).toEqual({
+      verified: false,
+      reason: "Conflicting CLOB resolution (2 winning outcomes)",
     });
   });
 
@@ -110,11 +125,40 @@ describe("settlement resolution verification", () => {
     });
   });
 
-  it("fails closed when CLOB and Gamma disagree on the held asset's outcome label", () => {
+  it("fails closed when any CLOB/Gamma token outcome mapping disagrees", () => {
     const swapped = { ...gamma(), outcomes: ["No", "Yes"] };
     expect(decideResolutionWithGammaFallback(YES, clob(null), swapped)).toEqual({
       verified: false,
-      reason: "CLOB and Gamma disagree on the outcome label for the held asset",
+      reason: "CLOB and Gamma disagree on token outcome mapping",
     });
+
+    const threeWayClob: PublicMarketResolution = {
+      closed: true,
+      tokens: [
+        { tokenId: "a", outcome: "A", winner: false },
+        { tokenId: "b", outcome: "B", winner: false },
+        { tokenId: "c", outcome: "C", winner: false },
+      ],
+    };
+    const threeWayGamma: GammaResolutionEvidence = {
+      closed: true,
+      conditionId: "0xcondition",
+      outcomes: ["A", "C", "B"],
+      outcomePrices: [0, 1, 0],
+      clobTokenIds: ["a", "b", "c"],
+    };
+    expect(decideResolutionWithGammaFallback("a", threeWayClob, threeWayGamma)).toEqual({
+      verified: false,
+      reason: "CLOB and Gamma disagree on token outcome mapping",
+    });
+  });
+
+  it("strictly parses Gamma outcome prices without coercing null/blank/boolean values", () => {
+    expect(parseGammaOutcomePrices('["0", "1"]')).toEqual([0, 1]);
+    expect(parseGammaOutcomePrices([0, "1"])).toEqual([0, 1]);
+    expect(parseGammaOutcomePrices([null, 1])).toBeNull();
+    expect(parseGammaOutcomePrices(["", "1"])).toBeNull();
+    expect(parseGammaOutcomePrices([false, true])).toBeNull();
+    expect(parseGammaOutcomePrices("not-json")).toBeNull();
   });
 });

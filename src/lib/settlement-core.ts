@@ -29,6 +29,42 @@ export type GammaResolutionEvidence = {
   clobTokenIds: string[];
 };
 
+/**
+ * Parse Gamma outcomePrices without JavaScript's permissive Number(null/""/true)
+ * coercions. Gamma may return the array directly or as a JSON-encoded string;
+ * each member must itself be a finite number or a non-empty numeric string.
+ */
+export function parseGammaOutcomePrices(value: unknown): number[] | null {
+  let raw: unknown = value;
+  if (typeof value === "string") {
+    try {
+      raw = JSON.parse(value) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(raw)) return null;
+
+  const numbers: number[] = [];
+  for (const item of raw) {
+    if (typeof item === "number") {
+      if (!Number.isFinite(item)) return null;
+      numbers.push(item);
+      continue;
+    }
+    if (typeof item === "string") {
+      const trimmed = item.trim();
+      if (!trimmed) return null;
+      const parsed = Number(trimmed);
+      if (!Number.isFinite(parsed)) return null;
+      numbers.push(parsed);
+      continue;
+    }
+    return null;
+  }
+  return numbers;
+}
+
 export type ResolutionDecision =
   | { verified: false; reason: string }
   | { verified: true; won: boolean; outcome: string | null; payoutPerShare: 0 | 1 };
@@ -64,6 +100,15 @@ export function decideResolutionWithGammaFallback(
 ): ResolutionDecision {
   const primary = decideResolution(asset, clob);
   if (primary.verified || !clob.closed) return primary;
+
+  // Gamma is only a fallback for a CLOB payload that declares NO winner. If
+  // CLOB declares multiple winners, the authoritative views are already
+  // contradictory/ambiguous and another source must not override it.
+  const clobWinnerCount = clob.tokens.filter((t) => t.winner).length;
+  if (clobWinnerCount !== 0) {
+    return { verified: false, reason: `Conflicting CLOB resolution (${clobWinnerCount} winning outcomes)` };
+  }
+
   if (!gamma?.closed) return primary;
 
   const n = gamma.outcomes.length;
@@ -82,14 +127,19 @@ export function decideResolutionWithGammaFallback(
     return { verified: false, reason: "Gamma token IDs do not match the CLOB token set for this market" };
   }
 
-  const heldIndexForLabel = gamma.clobTokenIds.findIndex((id) => id === asset);
-  if (heldIndexForLabel < 0) {
-    return { verified: false, reason: "Held asset is not part of the Gamma-resolved market" };
+  // Verify the token->outcome mapping for EVERY token, not just the held one.
+  for (let index = 0; index < n; index += 1) {
+    const tokenId = gamma.clobTokenIds[index]!;
+    const clobOutcome = clob.tokens.find((t) => t.tokenId === tokenId)?.outcome ?? null;
+    const gammaOutcome = gamma.outcomes[index] ?? null;
+    if (clobOutcome !== null && clobOutcome !== gammaOutcome) {
+      return { verified: false, reason: "CLOB and Gamma disagree on token outcome mapping" };
+    }
   }
-  const clobHeldOutcome = clob.tokens.find((t) => t.tokenId === asset)?.outcome ?? null;
-  const gammaHeldOutcome = gamma.outcomes[heldIndexForLabel] ?? null;
-  if (clobHeldOutcome !== null && clobHeldOutcome !== gammaHeldOutcome) {
-    return { verified: false, reason: "CLOB and Gamma disagree on the outcome label for the held asset" };
+
+  const heldIndex = gamma.clobTokenIds.findIndex((id) => id === asset);
+  if (heldIndex < 0) {
+    return { verified: false, reason: "Held asset is not part of the Gamma-resolved market" };
   }
 
   const winnerIndexes = gamma.outcomePrices
@@ -100,9 +150,6 @@ export function decideResolutionWithGammaFallback(
   if (!terminal || winnerIndexes.length !== 1) {
     return { verified: false, reason: "Gamma does not provide a single terminal 1/0 outcome" };
   }
-
-  const heldIndex = gamma.clobTokenIds.findIndex((id) => id === asset);
-  if (heldIndex < 0) return { verified: false, reason: "Held asset is not part of the Gamma-resolved market" };
 
   const winnerIndex = winnerIndexes[0]!;
   const won = heldIndex === winnerIndex;
