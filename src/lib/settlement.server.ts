@@ -1,11 +1,11 @@
 /**
  * Settlement / resolution automation for the SHADOW paper book.
  *
- * Only a VERIFIED public resolution (market closed + exactly one declared
- * winning outcome on Polymarket's public CLOB market record) may close a paper
- * position. Settlement accounting is applied by one PostgreSQL RPC transaction
- * so a crash can never strand an idempotency row between payout/cash/position
- * updates.
+ * Only a VERIFIED public resolution may close a paper position. CLOB winner
+ * flags are primary evidence; when a closed CLOB market omits a usable winner
+ * flag, a fail-closed official Gamma fallback may verify an exact terminal 1/0
+ * outcome mapped to the same CLOB token IDs. Settlement accounting is applied
+ * by one PostgreSQL RPC transaction.
  */
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
@@ -13,13 +13,16 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { fetchAllRows } from "./db-pagination";
 import {
   decideResolution,
+  decideResolutionWithGammaFallback,
   selectSettlementBatch,
   SETTLEMENT_BATCH_SIZE,
+  type GammaResolutionEvidence,
   type PublicMarketResolution,
 } from "./settlement-core";
 import { raiseAlert } from "./shadow.server";
 
 const CLOB_API = "https://clob.polymarket.com";
+const GAMMA_API = "https://gamma-api.polymarket.com";
 const MAX_POSITIONS_PER_PASS = SETTLEMENT_BATCH_SIZE;
 const RESOLUTION_TIMEOUT_MS = 10_000;
 const MAX_LOOKUP_ATTEMPTS = 3;
@@ -41,7 +44,6 @@ export function failureLabel(f: Pick<LookupFailure, "type" | "status">): string 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
 function backoffMs(attempt: number): number {
-  // retry 1: ~250-500ms, retry 2: ~750-1500ms
   const base = attempt === 1 ? 250 : 750;
   return base + Math.random() * base;
 }
@@ -63,7 +65,6 @@ export type SettlementPassResult = {
   failed: number;
   batchIndex: number;
   batchCount: number;
-  /** Failure counts keyed by safe label, e.g. { HTTP_429: 3, TIMEOUT: 2 }. */
   failuresByType: Record<string, number>;
   details: { asset: string; marketTitle: string | null; status: string }[];
 };
@@ -133,11 +134,7 @@ async function attemptLookup(
   };
 }
 
-/**
- * Public resolution lookup with bounded retries. Only transient transport
- * failures (429/5xx/timeout/network) are retried; a valid HTTP 200 — resolved or
- * not — and 4xx client errors are returned immediately.
- */
+/** Public CLOB resolution lookup with bounded transient retries. */
 async function fetchMarketResolution(conditionId: string): Promise<LookupResult> {
   const startedAt = Date.now();
   let last: Awaited<ReturnType<typeof attemptLookup>> | null = null;
@@ -154,7 +151,6 @@ async function fetchMarketResolution(conditionId: string): Promise<LookupResult>
       outcome.type === "NETWORK_ERROR" ||
       (outcome.type === "HTTP" && RETRYABLE_STATUS.has(outcome.status ?? 0));
     if (!retryable || attempt === MAX_LOOKUP_ATTEMPTS) break;
-
     await sleep(outcome.retryAfter ?? backoffMs(attempt));
   }
 
@@ -171,6 +167,81 @@ async function fetchMarketResolution(conditionId: string): Promise<LookupResult>
   };
 }
 
+function parseStringArray(value: unknown): string[] | null {
+  if (Array.isArray(value) && value.every((v) => typeof v === "string")) return value;
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) && parsed.every((v) => typeof v === "string") ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseNumberArray(value: unknown): number[] | null {
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? (() => {
+          try {
+            return JSON.parse(value) as unknown;
+          } catch {
+            return null;
+          }
+        })()
+      : null;
+  if (!Array.isArray(raw)) return null;
+  const numbers = raw.map((v) => Number(v));
+  return numbers.every((v) => Number.isFinite(v)) ? numbers : null;
+}
+
+/**
+ * Official Gamma fallback for a CLOB market that is closed but has no usable
+ * winner flag. It is evidence-only: failure/ambiguity simply leaves the paper
+ * position OPEN.
+ */
+async function fetchGammaResolution(conditionId: string): Promise<GammaResolutionEvidence | null> {
+  let res: Response;
+  try {
+    const params = new URLSearchParams({ condition_ids: conditionId, closed: "true", limit: "2" });
+    res = await fetch(`${GAMMA_API}/markets?${params}`, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(RESOLUTION_TIMEOUT_MS),
+    });
+  } catch {
+    return null;
+  }
+  if (!res.ok) return null;
+
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(body)) return null;
+
+  const exact = body.filter((row): row is Record<string, unknown> => {
+    if (!row || typeof row !== "object") return false;
+    return String((row as Record<string, unknown>)["conditionId"] ?? "").toLowerCase() === conditionId.toLowerCase();
+  });
+  if (exact.length !== 1) return null;
+
+  const market = exact[0]!;
+  const outcomes = parseStringArray(market["outcomes"]);
+  const outcomePrices = parseNumberArray(market["outcomePrices"]);
+  const clobTokenIds = parseStringArray(market["clobTokenIds"]);
+  if (!outcomes || !outcomePrices || !clobTokenIds) return null;
+
+  return {
+    closed: market["closed"] === true,
+    conditionId,
+    outcomes,
+    outcomePrices,
+    clobTokenIds,
+  };
+}
+
 type SettlementRpcRow = {
   applied: boolean;
   payout: number | string;
@@ -180,11 +251,6 @@ type SettlementRpcRow = {
 type RpcResult = { data: unknown; error: { message: string } | null };
 
 async function applyVerifiedSettlementRpc(args: Record<string, unknown>): Promise<RpcResult> {
-  // The migration and this code land together; Lovable regenerates Database
-  // types only after the migration is applied, so keep this one new RPC behind
-  // a narrow typed adapter instead of weakening the whole Supabase client type.
-  // Must stay bound to the client: a detached `rpc` reference loses `this` and
-  // throws "Cannot read properties of undefined (reading 'rest')".
   const client = supabaseAdmin as unknown as {
     rpc: (name: string, params: Record<string, unknown>) => Promise<RpcResult>;
   };
@@ -205,9 +271,6 @@ export async function runSettlementPass(
     details: [],
   };
 
-  // Rotating scan: read the full open book in a STABLE order (asset ASC), then
-  // work exactly one deterministic batch per pass so no open position can be
-  // starved by an arbitrary LIMIT window.
   const openBook = await fetchAllRows(async (from, to) => {
     const { data, error } = await supabaseAdmin
       .from("paper_positions")
@@ -237,20 +300,14 @@ export async function runSettlementPass(
   if (eventsError) throw new Error(eventsError.message);
   const conditionByAsset = new Map<string, string>();
   for (const row of eventRows ?? []) {
-    if (row.condition_id && !conditionByAsset.has(row.asset)) {
-      conditionByAsset.set(row.asset, row.condition_id);
-    }
+    if (row.condition_id && !conditionByAsset.has(row.asset)) conditionByAsset.set(row.asset, row.condition_id);
   }
 
   for (const position of positions) {
     const conditionId = conditionByAsset.get(position.asset);
     if (!conditionId) {
       result.unresolved += 1;
-      result.details.push({
-        asset: position.asset,
-        marketTitle: position.market_title,
-        status: "No condition id on record — left OPEN",
-      });
+      result.details.push({ asset: position.asset, marketTitle: position.market_title, status: "No condition id on record — left OPEN" });
       continue;
     }
 
@@ -275,22 +332,25 @@ export async function runSettlementPass(
       result.details.push({
         asset: position.asset,
         marketTitle: position.market_title,
-        status:
-          `Public resolution lookup failed — left OPEN (${label}, ` +
-          `${lookup.failure.attempts} attempt(s), ${lookup.failure.elapsedMs}ms: ${lookup.failure.summary})`,
+        status: `Public resolution lookup failed — left OPEN (${label}, ${lookup.failure.attempts} attempt(s), ${lookup.failure.elapsedMs}ms: ${lookup.failure.summary})`,
       });
       continue;
     }
-    const market = lookup.market;
 
-    const decision = decideResolution(position.asset, market);
+    const market = lookup.market;
+    let decision = decideResolution(position.asset, market);
+    let gammaEvidence: GammaResolutionEvidence | null = null;
+    let resolutionSource = "polymarket_public_clob_market";
+
+    if (!decision.verified && market.closed && decision.reason.startsWith("Unconfirmed resolution")) {
+      gammaEvidence = await fetchGammaResolution(conditionId);
+      decision = decideResolutionWithGammaFallback(position.asset, market, gammaEvidence);
+      if (decision.verified) resolutionSource = "polymarket_public_clob_plus_gamma_terminal_prices";
+    }
+
     if (!decision.verified) {
       result.unresolved += 1;
-      result.details.push({
-        asset: position.asset,
-        marketTitle: position.market_title,
-        status: decision.reason,
-      });
+      result.details.push({ asset: position.asset, marketTitle: position.market_title, status: decision.reason });
       continue;
     }
 
@@ -300,34 +360,26 @@ export async function runSettlementPass(
       p_asset: position.asset,
       p_condition_id: conditionId,
       p_resolution_outcome: decision.won ? "WON" : "LOST",
-      p_resolution_source: "polymarket_public_clob_market",
+      p_resolution_source: resolutionSource,
       p_resolution_ts: resolutionTs,
       p_payout_per_share: decision.payoutPerShare,
       p_evidence: {
         condition_id: conditionId,
-        closed: market.closed,
-        tokens: market.tokens,
+        clob: { closed: market.closed, tokens: market.tokens },
+        gamma: gammaEvidence,
       },
     });
 
     if (rpcError) {
       result.failed += 1;
-      result.details.push({
-        asset: position.asset,
-        marketTitle: position.market_title,
-        status: `Atomic settlement failed — left OPEN (${rpcError.message})`,
-      });
+      result.details.push({ asset: position.asset, marketTitle: position.market_title, status: `Atomic settlement failed — left OPEN (${rpcError.message})` });
       continue;
     }
 
     const rpcRow = (Array.isArray(rpcData) ? rpcData[0] : rpcData) as SettlementRpcRow | null;
     if (!rpcRow?.applied) {
       result.unresolved += 1;
-      result.details.push({
-        asset: position.asset,
-        marketTitle: position.market_title,
-        status: "Already settled or position no longer open",
-      });
+      result.details.push({ asset: position.asset, marketTitle: position.market_title, status: "Already settled or position no longer open" });
       continue;
     }
 
@@ -350,7 +402,6 @@ export async function runSettlementPass(
   }
 
   if (result.failed > 0) {
-    // One summarized warning per pass (bucketed hourly) instead of one alert per position.
     const bucket = new Date().toISOString().slice(0, 13);
     const breakdown = Object.entries(result.failuresByType)
       .sort((a, b) => b[1] - a[1])
@@ -360,11 +411,7 @@ export async function runSettlementPass(
       "warn",
       "settlement_lookups_failed",
       `Settlement pass had ${result.failed} failed public resolution lookup(s) (batch ${batch.batchIndex + 1}/${batch.batchCount}) — ${breakdown}.`,
-      {
-        experiment_id: experimentId as never,
-        failed: result.failed as never,
-        failures_by_type: result.failuresByType as never,
-      },
+      { experiment_id: experimentId as never, failed: result.failed as never, failures_by_type: result.failuresByType as never },
       `settlement_lookups_failed:${experimentId}:${bucket}`,
     );
   }
