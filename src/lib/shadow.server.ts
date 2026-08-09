@@ -853,7 +853,23 @@ async function settleSafely(experimentId: string): Promise<typeof NO_SETTLEMENTS
     const { runSettlementPass } = await import("./settlement.server");
     const result = await runSettlementPass(experimentId);
     return { settled: result.settled, unresolved: result.unresolved };
-  } catch {
+  } catch (err) {
+    // Ingestion must stay isolated from settlement failure, but the failure
+    // itself must never be silent. Bucketed hourly so a persistent outage does
+    // not notify every minute.
+    const message = err instanceof Error ? err.message : "unknown settlement error";
+    const bucket = new Date().toISOString().slice(0, 13);
+    try {
+      await raiseAlert(
+        "error",
+        "settlement_pass_failed",
+        `Settlement pass failed for experiment ${experimentId}: ${message} (at ${new Date().toISOString()})`,
+        { experiment_id: experimentId as never, error: message as never },
+        `settlement_pass_failed:${experimentId}:${bucket}`,
+      );
+    } catch {
+      // alerting itself must not break ingestion
+    }
     return NO_SETTLEMENTS;
   }
 }
