@@ -43,6 +43,33 @@ export type SettlementCredit = {
   realizedPnl: number;
 };
 
+export const SETTLEMENT_BATCH_SIZE = 25;
+
+export type SettlementBatch = { offset: number; size: number; batchIndex: number; batchCount: number };
+
+/**
+ * Deterministic rotating batch selection.
+ *
+ * Keeps at most `batchSize` expensive public resolution lookups per pass while
+ * guaranteeing that every open position becomes eligible within
+ * ceil(openCount / batchSize) passes: the cycle index advances the batch by one
+ * each pass and wraps around after the final batch. Callers MUST pair this with
+ * a stable ORDER BY (asset ASC) — Postgres row order is otherwise undefined.
+ */
+export function selectSettlementBatch(
+  openCount: number,
+  cycleIndex: number,
+  batchSize: number = SETTLEMENT_BATCH_SIZE,
+): SettlementBatch {
+  if (openCount <= 0 || batchSize <= 0) {
+    return { offset: 0, size: 0, batchIndex: 0, batchCount: 0 };
+  }
+  const batchCount = Math.ceil(openCount / batchSize);
+  const batchIndex = ((Math.trunc(cycleIndex) % batchCount) + batchCount) % batchCount;
+  const offset = batchIndex * batchSize;
+  return { offset, size: Math.min(batchSize, openCount - offset), batchIndex, batchCount };
+}
+
 /** $1 per winning share, $0 otherwise. Realized P&L is payout minus the paper cost basis. */
 export function settlementCredit(input: {
   shares: number;
