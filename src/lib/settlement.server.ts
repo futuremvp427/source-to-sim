@@ -10,17 +10,24 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
-import { decideResolution, type PublicMarketResolution } from "./settlement-core";
+import {
+  decideResolution,
+  selectSettlementBatch,
+  SETTLEMENT_BATCH_SIZE,
+  type PublicMarketResolution,
+} from "./settlement-core";
 import { raiseAlert } from "./shadow.server";
 
 const CLOB_API = "https://clob.polymarket.com";
-const MAX_POSITIONS_PER_PASS = 25;
+const MAX_POSITIONS_PER_PASS = SETTLEMENT_BATCH_SIZE;
 const RESOLUTION_TIMEOUT_MS = 10_000;
 
 export type SettlementPassResult = {
   settled: number;
   unresolved: number;
   failed: number;
+  batchIndex: number;
+  batchCount: number;
   details: { asset: string; marketTitle: string | null; status: string }[];
 };
 
@@ -64,8 +71,33 @@ async function applyVerifiedSettlementRpc(args: Record<string, unknown>): Promis
   return rpc("apply_verified_paper_settlement", args);
 }
 
-export async function runSettlementPass(experimentId: string): Promise<SettlementPassResult> {
-  const result: SettlementPassResult = { settled: 0, unresolved: 0, failed: 0, details: [] };
+export async function runSettlementPass(
+  experimentId: string,
+  cycleIndex: number = Math.floor(Date.now() / 60_000),
+): Promise<SettlementPassResult> {
+  const result: SettlementPassResult = {
+    settled: 0,
+    unresolved: 0,
+    failed: 0,
+    batchIndex: 0,
+    batchCount: 0,
+    details: [],
+  };
+
+  // Rotating scan: count first, then read one deterministic batch so no open
+  // position can be starved by an arbitrary LIMIT window.
+  const { count: openCount, error: countError } = await supabaseAdmin
+    .from("paper_positions")
+    .select("asset", { count: "exact", head: true })
+    .eq("experiment_id", experimentId)
+    .eq("settlement_status", "open")
+    .gt("shares", 0);
+  if (countError) throw new Error(countError.message);
+
+  const batch = selectSettlementBatch(openCount ?? 0, cycleIndex, MAX_POSITIONS_PER_PASS);
+  result.batchIndex = batch.batchIndex;
+  result.batchCount = batch.batchCount;
+  if (batch.size <= 0) return result;
 
   const { data: positions, error: positionsError } = await supabaseAdmin
     .from("paper_positions")
@@ -73,7 +105,8 @@ export async function runSettlementPass(experimentId: string): Promise<Settlemen
     .eq("experiment_id", experimentId)
     .eq("settlement_status", "open")
     .gt("shares", 0)
-    .limit(MAX_POSITIONS_PER_PASS);
+    .order("asset", { ascending: true })
+    .range(batch.offset, batch.offset + batch.size - 1);
   if (positionsError) throw new Error(positionsError.message);
   if (!positions || positions.length === 0) return result;
 
@@ -181,6 +214,18 @@ export async function runSettlementPass(experimentId: string): Promise<Settlemen
       `Simulated settlement: ${position.market_title ?? position.asset} ${decision.won ? "WON" : "LOST"} (payout $${payout.toFixed(2)}, realized ${realized >= 0 ? "+" : ""}$${realized.toFixed(2)}).`,
       { asset: position.asset as never, condition_id: conditionId as never },
       `position_settled:${experimentId}:${position.asset}`,
+    );
+  }
+
+  if (result.failed > 0) {
+    // One summarized warning per pass (bucketed hourly) instead of one alert per position.
+    const bucket = new Date().toISOString().slice(0, 13);
+    await raiseAlert(
+      "warn",
+      "settlement_lookups_failed",
+      `Settlement pass had ${result.failed} failed public resolution lookup(s) (batch ${batch.batchIndex + 1}/${batch.batchCount}).`,
+      { experiment_id: experimentId as never, failed: result.failed as never },
+      `settlement_lookups_failed:${experimentId}:${bucket}`,
     );
   }
 
