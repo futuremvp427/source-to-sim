@@ -545,6 +545,7 @@ export type Database = {
           name: string
           poll_interval_seconds: number
           realized_pnl: number
+          settlement_cursor_asset: string | null
           simulated: boolean
           sizing_rule: string
           sizing_rule_updated_at: string
@@ -563,6 +564,7 @@ export type Database = {
           name: string
           poll_interval_seconds?: number
           realized_pnl?: number
+          settlement_cursor_asset?: string | null
           simulated?: boolean
           sizing_rule?: string
           sizing_rule_updated_at?: string
@@ -581,6 +583,7 @@ export type Database = {
           name?: string
           poll_interval_seconds?: number
           realized_pnl?: number
+          settlement_cursor_asset?: string | null
           simulated?: boolean
           sizing_rule?: string
           sizing_rule_updated_at?: string
