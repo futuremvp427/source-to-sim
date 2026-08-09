@@ -201,6 +201,7 @@ export async function runSettlementPass(
     failed: 0,
     batchIndex: 0,
     batchCount: 0,
+    failuresByType: {},
     details: [],
   };
 
