@@ -22,6 +22,40 @@ import { raiseAlert } from "./shadow.server";
 const CLOB_API = "https://clob.polymarket.com";
 const MAX_POSITIONS_PER_PASS = SETTLEMENT_BATCH_SIZE;
 const RESOLUTION_TIMEOUT_MS = 10_000;
+const MAX_LOOKUP_ATTEMPTS = 3;
+
+/** Safe, non-sensitive failure classification for a public resolution lookup. */
+export type LookupFailure = {
+  type: "HTTP" | "TIMEOUT" | "NETWORK_ERROR" | "INVALID_JSON" | "INVALID_RESPONSE_SHAPE";
+  status?: number;
+  attempts: number;
+  elapsedMs: number;
+  /** Short, truncated, non-sensitive summary — public market data only. */
+  summary: string;
+};
+
+export function failureLabel(f: Pick<LookupFailure, "type" | "status">): string {
+  return f.type === "HTTP" ? `HTTP_${f.status ?? 0}` : f.type;
+}
+
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+function backoffMs(attempt: number): number {
+  // retry 1: ~250-500ms, retry 2: ~750-1500ms
+  const base = attempt === 1 ? 250 : 750;
+  return base + Math.random() * base;
+}
+
+function retryAfterMs(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 5_000);
+  const date = Date.parse(header);
+  if (!Number.isNaN(date)) return Math.min(Math.max(0, date - Date.now()), 5_000);
+  return null;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export type SettlementPassResult = {
   settled: number;
@@ -29,27 +63,111 @@ export type SettlementPassResult = {
   failed: number;
   batchIndex: number;
   batchCount: number;
+  /** Failure counts keyed by safe label, e.g. { HTTP_429: 3, TIMEOUT: 2 }. */
+  failuresByType: Record<string, number>;
   details: { asset: string; marketTitle: string | null; status: string }[];
 };
 
-async function fetchMarketResolution(conditionId: string): Promise<PublicMarketResolution | null> {
-  const res = await fetch(`${CLOB_API}/markets/${conditionId}`, {
-    headers: { accept: "application/json" },
-    signal: AbortSignal.timeout(RESOLUTION_TIMEOUT_MS),
-  });
-  if (!res.ok) return null;
-  const body = (await res.json()) as {
-    closed?: boolean;
-    tokens?: { token_id?: string; outcome?: string; winner?: boolean }[];
-  };
-  if (typeof body.closed !== "boolean" || !Array.isArray(body.tokens)) return null;
+type LookupResult =
+  | { ok: true; market: PublicMarketResolution; attempts: number }
+  | { ok: false; failure: LookupFailure };
+
+async function attemptLookup(
+  conditionId: string,
+): Promise<
+  | { ok: true; market: PublicMarketResolution }
+  | { ok: false; type: LookupFailure["type"]; status?: number; summary: string; retryAfter?: number | null }
+> {
+  let res: Response;
+  try {
+    res = await fetch(`${CLOB_API}/markets/${conditionId}`, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(RESOLUTION_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const name = err instanceof Error ? err.name : "";
+    const timeout = name === "TimeoutError" || name === "AbortError";
+    return {
+      ok: false,
+      type: timeout ? "TIMEOUT" : "NETWORK_ERROR",
+      summary: timeout ? `no response within ${RESOLUTION_TIMEOUT_MS}ms` : `fetch failed (${name || "unknown"})`,
+    };
+  }
+
+  if (!res.ok) {
+    return {
+      ok: false,
+      type: "HTTP",
+      status: res.status,
+      summary: `public CLOB responded ${res.status}`,
+      retryAfter: retryAfterMs(res.headers.get("retry-after")),
+    };
+  }
+
+  let body: { closed?: boolean; tokens?: { token_id?: string; outcome?: string; winner?: boolean }[] };
+  try {
+    body = (await res.json()) as typeof body;
+  } catch {
+    return { ok: false, type: "INVALID_JSON", status: res.status, summary: "response body was not JSON" };
+  }
+
+  if (typeof body.closed !== "boolean" || !Array.isArray(body.tokens)) {
+    return {
+      ok: false,
+      type: "INVALID_RESPONSE_SHAPE",
+      status: res.status,
+      summary: `missing closed/tokens (closed=${typeof body.closed}, tokens=${Array.isArray(body.tokens)})`,
+    };
+  }
+
   return {
-    closed: body.closed,
-    tokens: body.tokens.map((t) => ({
-      tokenId: String(t.token_id ?? ""),
-      outcome: t.outcome ?? null,
-      winner: t.winner === true,
-    })),
+    ok: true,
+    market: {
+      closed: body.closed,
+      tokens: body.tokens.map((t) => ({
+        tokenId: String(t.token_id ?? ""),
+        outcome: t.outcome ?? null,
+        winner: t.winner === true,
+      })),
+    },
+  };
+}
+
+/**
+ * Public resolution lookup with bounded retries. Only transient transport
+ * failures (429/5xx/timeout/network) are retried; a valid HTTP 200 — resolved or
+ * not — and 4xx client errors are returned immediately.
+ */
+async function fetchMarketResolution(conditionId: string): Promise<LookupResult> {
+  const startedAt = Date.now();
+  let last: Awaited<ReturnType<typeof attemptLookup>> | null = null;
+  let attemptsUsed = 0;
+
+  for (let attempt = 1; attempt <= MAX_LOOKUP_ATTEMPTS; attempt += 1) {
+    const outcome = await attemptLookup(conditionId);
+    attemptsUsed = attempt;
+    if (outcome.ok) return { ok: true, market: outcome.market, attempts: attempt };
+    last = outcome;
+
+    const retryable =
+      outcome.type === "TIMEOUT" ||
+      outcome.type === "NETWORK_ERROR" ||
+      (outcome.type === "HTTP" && RETRYABLE_STATUS.has(outcome.status ?? 0));
+    if (!retryable || attempt === MAX_LOOKUP_ATTEMPTS) break;
+
+    await sleep(outcome.retryAfter ?? backoffMs(attempt));
+  }
+
+  const failure = last as Exclude<Awaited<ReturnType<typeof attemptLookup>>, { ok: true }>;
+  return {
+    ok: false,
+    failure: {
+      type: failure.type,
+      ...(failure.status === undefined ? {} : { status: failure.status }),
+      attempts: attemptsUsed,
+      elapsedMs: Date.now() - startedAt,
+      summary: failure.summary.slice(0, 200),
+    },
   };
 }
 
@@ -83,6 +201,7 @@ export async function runSettlementPass(
     failed: 0,
     batchIndex: 0,
     batchCount: 0,
+    failuresByType: {},
     details: [],
   };
 
@@ -135,21 +254,34 @@ export async function runSettlementPass(
       continue;
     }
 
-    let market: PublicMarketResolution | null = null;
+    let lookup: LookupResult;
     try {
-      market = await fetchMarketResolution(conditionId);
-    } catch {
-      market = null;
+      lookup = await fetchMarketResolution(conditionId);
+    } catch (err) {
+      lookup = {
+        ok: false,
+        failure: {
+          type: "NETWORK_ERROR",
+          attempts: 1,
+          elapsedMs: 0,
+          summary: (err instanceof Error ? err.message : "unknown lookup error").slice(0, 200),
+        },
+      };
     }
-    if (!market) {
+    if (!lookup.ok) {
+      const label = failureLabel(lookup.failure);
       result.failed += 1;
+      result.failuresByType[label] = (result.failuresByType[label] ?? 0) + 1;
       result.details.push({
         asset: position.asset,
         marketTitle: position.market_title,
-        status: "Public resolution lookup failed — left OPEN",
+        status:
+          `Public resolution lookup failed — left OPEN (${label}, ` +
+          `${lookup.failure.attempts} attempt(s), ${lookup.failure.elapsedMs}ms: ${lookup.failure.summary})`,
       });
       continue;
     }
+    const market = lookup.market;
 
     const decision = decideResolution(position.asset, market);
     if (!decision.verified) {
@@ -220,11 +352,19 @@ export async function runSettlementPass(
   if (result.failed > 0) {
     // One summarized warning per pass (bucketed hourly) instead of one alert per position.
     const bucket = new Date().toISOString().slice(0, 13);
+    const breakdown = Object.entries(result.failuresByType)
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, count]) => `${label}: ${count}`)
+      .join(", ");
     await raiseAlert(
       "warn",
       "settlement_lookups_failed",
-      `Settlement pass had ${result.failed} failed public resolution lookup(s) (batch ${batch.batchIndex + 1}/${batch.batchCount}).`,
-      { experiment_id: experimentId as never, failed: result.failed as never },
+      `Settlement pass had ${result.failed} failed public resolution lookup(s) (batch ${batch.batchIndex + 1}/${batch.batchCount}) — ${breakdown}.`,
+      {
+        experiment_id: experimentId as never,
+        failed: result.failed as never,
+        failures_by_type: result.failuresByType as never,
+      },
       `settlement_lookups_failed:${experimentId}:${bucket}`,
     );
   }
