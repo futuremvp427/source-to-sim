@@ -117,12 +117,4 @@ describe("settlement resolution verification", () => {
       reason: "CLOB and Gamma disagree on the outcome label for the held asset",
     });
   });
-
-  it("never uses Gamma to override an open CLOB market (duplicate guard)", () => {
-    const open: PublicMarketResolution = { ...clob(null), closed: false };
-    expect(decideResolutionWithGammaFallback(YES, open, gamma([0, 1]))).toEqual({
-      verified: false,
-      reason: "Market is not closed",
-    });
-  });
 });
