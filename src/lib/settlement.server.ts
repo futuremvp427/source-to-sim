@@ -10,6 +10,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { fetchAllRows } from "./db-pagination";
 import {
   decideResolution,
   selectSettlementBatch,
@@ -84,31 +85,29 @@ export async function runSettlementPass(
     details: [],
   };
 
-  // Rotating scan: count first, then read one deterministic batch so no open
-  // position can be starved by an arbitrary LIMIT window.
-  const { count: openCount, error: countError } = await supabaseAdmin
-    .from("paper_positions")
-    .select("asset", { count: "exact", head: true })
-    .eq("experiment_id", experimentId)
-    .eq("settlement_status", "open")
-    .gt("shares", 0);
-  if (countError) throw new Error(countError.message);
+  // Rotating scan: read the full open book in a STABLE order (asset ASC), then
+  // work exactly one deterministic batch per pass so no open position can be
+  // starved by an arbitrary LIMIT window.
+  const openBook = await fetchAllRows(async (from, to) => {
+    const { data, error } = await supabaseAdmin
+      .from("paper_positions")
+      .select("asset, market_title, outcome, shares, cost_basis, realized_pnl")
+      .eq("experiment_id", experimentId)
+      .eq("settlement_status", "open")
+      .gt("shares", 0)
+      .order("asset", { ascending: true })
+      .range(from, to);
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  });
 
-  const batch = selectSettlementBatch(openCount ?? 0, cycleIndex, MAX_POSITIONS_PER_PASS);
+  const batch = selectSettlementBatch(openBook.rows.length, cycleIndex, MAX_POSITIONS_PER_PASS);
   result.batchIndex = batch.batchIndex;
   result.batchCount = batch.batchCount;
   if (batch.size <= 0) return result;
 
-  const { data: positions, error: positionsError } = await supabaseAdmin
-    .from("paper_positions")
-    .select("asset, market_title, outcome, shares, cost_basis, realized_pnl")
-    .eq("experiment_id", experimentId)
-    .eq("settlement_status", "open")
-    .gt("shares", 0)
-    .order("asset", { ascending: true })
-    .range(batch.offset, batch.offset + batch.size - 1);
-  if (positionsError) throw new Error(positionsError.message);
-  if (!positions || positions.length === 0) return result;
+  const positions = openBook.rows.slice(batch.offset, batch.offset + batch.size);
+  if (positions.length === 0) return result;
 
   const assets = positions.map((p) => p.asset);
   const { data: eventRows, error: eventsError } = await supabaseAdmin
