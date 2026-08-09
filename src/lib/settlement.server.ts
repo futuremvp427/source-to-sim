@@ -352,11 +352,19 @@ export async function runSettlementPass(
   if (result.failed > 0) {
     // One summarized warning per pass (bucketed hourly) instead of one alert per position.
     const bucket = new Date().toISOString().slice(0, 13);
+    const breakdown = Object.entries(result.failuresByType)
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, count]) => `${label}: ${count}`)
+      .join(", ");
     await raiseAlert(
       "warn",
       "settlement_lookups_failed",
-      `Settlement pass had ${result.failed} failed public resolution lookup(s) (batch ${batch.batchIndex + 1}/${batch.batchCount}).`,
-      { experiment_id: experimentId as never, failed: result.failed as never },
+      `Settlement pass had ${result.failed} failed public resolution lookup(s) (batch ${batch.batchIndex + 1}/${batch.batchCount}) — ${breakdown}.`,
+      {
+        experiment_id: experimentId as never,
+        failed: result.failed as never,
+        failures_by_type: result.failuresByType as never,
+      },
       `settlement_lookups_failed:${experimentId}:${bucket}`,
     );
   }
