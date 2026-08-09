@@ -101,4 +101,20 @@ describe("settlement resolution verification", () => {
       reason: "Market is not closed",
     });
   });
+
+  it("fails closed when Gamma token IDs do not match the CLOB token set", () => {
+    const foreign = { ...gamma(), clobTokenIds: [YES, "other-token"] };
+    expect(decideResolutionWithGammaFallback(YES, clob(null), foreign)).toEqual({
+      verified: false,
+      reason: "Gamma token IDs do not match the CLOB token set for this market",
+    });
+  });
+
+  it("fails closed when CLOB and Gamma disagree on the held asset's outcome label", () => {
+    const swapped = { ...gamma(), outcomes: ["No", "Yes"] };
+    expect(decideResolutionWithGammaFallback(YES, clob(null), swapped)).toEqual({
+      verified: false,
+      reason: "CLOB and Gamma disagree on the outcome label for the held asset",
+    });
+  });
 });

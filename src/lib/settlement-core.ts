@@ -74,6 +74,24 @@ export function decideResolutionWithGammaFallback(
     return { verified: false, reason: "Gamma resolution token mapping is invalid" };
   }
 
+  const clobTokenIds = new Set(clob.tokens.map((t) => t.tokenId).filter((id) => !!id));
+  const gammaTokenIds = new Set(gamma.clobTokenIds);
+  const sameTokenSet =
+    clobTokenIds.size === gammaTokenIds.size && [...gammaTokenIds].every((id) => clobTokenIds.has(id));
+  if (!sameTokenSet) {
+    return { verified: false, reason: "Gamma token IDs do not match the CLOB token set for this market" };
+  }
+
+  const heldIndexForLabel = gamma.clobTokenIds.findIndex((id) => id === asset);
+  if (heldIndexForLabel < 0) {
+    return { verified: false, reason: "Held asset is not part of the Gamma-resolved market" };
+  }
+  const clobHeldOutcome = clob.tokens.find((t) => t.tokenId === asset)?.outcome ?? null;
+  const gammaHeldOutcome = gamma.outcomes[heldIndexForLabel] ?? null;
+  if (clobHeldOutcome !== null && clobHeldOutcome !== gammaHeldOutcome) {
+    return { verified: false, reason: "CLOB and Gamma disagree on the outcome label for the held asset" };
+  }
+
   const winnerIndexes = gamma.outcomePrices
     .map((price, index) => ({ price, index }))
     .filter(({ price }) => price === 1)
