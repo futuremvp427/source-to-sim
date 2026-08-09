@@ -139,9 +139,11 @@ async function attemptLookup(
 async function fetchMarketResolution(conditionId: string): Promise<LookupResult> {
   const startedAt = Date.now();
   let last: Awaited<ReturnType<typeof attemptLookup>> | null = null;
+  let attemptsUsed = 0;
 
   for (let attempt = 1; attempt <= MAX_LOOKUP_ATTEMPTS; attempt += 1) {
     const outcome = await attemptLookup(conditionId);
+    attemptsUsed = attempt;
     if (outcome.ok) return { ok: true, market: outcome.market, attempts: attempt };
     last = outcome;
 
@@ -160,7 +162,7 @@ async function fetchMarketResolution(conditionId: string): Promise<LookupResult>
     failure: {
       type: failure.type,
       ...(failure.status === undefined ? {} : { status: failure.status }),
-      attempts: MAX_LOOKUP_ATTEMPTS,
+      attempts: attemptsUsed,
       elapsedMs: Date.now() - startedAt,
       summary: failure.summary.slice(0, 200),
     },
