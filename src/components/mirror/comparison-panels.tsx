@@ -5,8 +5,9 @@ import { useServerFn } from "@tanstack/react-start";
 
 import { EmptyState, Panel, RowSkeleton } from "@/components/mirror/panels";
 import { formatUsd } from "@/lib/mirror-trader";
-import { getComparison, getSelfCheck, getV2Status } from "@/lib/ops.functions";
+import { getCapacityComparison, getComparison, getSelfCheck, getV2Status } from "@/lib/ops.functions";
 import type { ComparisonRow } from "@/lib/comparison.server";
+import type { CapacityRow } from "@/lib/capacity-core";
 
 function usd(v: number | null): string {
   return v === null ? "Unavailable" : formatUsd(v);
@@ -30,6 +31,104 @@ function ago(seconds: number | null): string {
 
 function tsLabel(iso: string | null): string {
   return iso === null ? "Unavailable" : new Date(iso).toLocaleString();
+}
+
+function roiPct(v: number | null): string {
+  return v === null ? "Unavailable" : `${(v * 100).toFixed(2)}%`;
+}
+
+function CapacityRowCells({ row, cohort }: { row: CapacityRow | null; cohort: "V2" | "V3" }) {
+  if (!row) {
+    return (
+      <tr className="border-t border-border">
+        <td className="py-2 pr-3 text-[11px] uppercase text-muted-foreground">{cohort}</td>
+        <td className="py-2 pr-3 text-[11px] text-muted-foreground" colSpan={10}>
+          No enabled {cohort} experiment for this wallet.
+        </td>
+      </tr>
+    );
+  }
+  return (
+    <tr className="border-t border-border">
+      <td className="py-2 pr-3">
+        <span className="text-[11px] font-semibold uppercase text-card-foreground">{row.cohort}</span>
+        <span className="block text-[10px] text-muted-foreground">{row.name}</span>
+      </td>
+      <td className="py-2 pr-3 tabular-nums">{formatUsd(row.startingBankroll)}</td>
+      <td className="py-2 pr-3 tabular-nums">{formatUsd(row.cash)}</td>
+      <td className="py-2 pr-3 tabular-nums">{formatUsd(row.reserve)}</td>
+      <td className="py-2 pr-3 tabular-nums">{formatUsd(row.spendable)}</td>
+      <td className="py-2 pr-3 tabular-nums">{formatUsd(row.openCostBasis)}</td>
+      <td className={`py-2 pr-3 tabular-nums ${tone(row.realizedPnl)}`}>{formatUsd(row.realizedPnl)}</td>
+      <td className={`py-2 pr-3 tabular-nums ${tone(row.roi)}`}>{roiPct(row.roi)}</td>
+      <td className="py-2 pr-3 tabular-nums">
+        {row.buys}/{row.sells}
+      </td>
+      <td className="py-2 pr-3 tabular-nums">{row.insufficientCashSkips}</td>
+      <td className="py-2 pr-3 tabular-nums">{formatUsd(row.maxDrawdownCash)}</td>
+      <td className="py-2 pr-3 tabular-nums">{row.settledMarkets}</td>
+    </tr>
+  );
+}
+
+export function CapacityComparisonSection() {
+  const fetchCapacity = useServerFn(getCapacityComparison);
+  const { data, isPending, isError, error } = useQuery({
+    queryKey: ["capacity-comparison"],
+    queryFn: () => fetchCapacity(),
+    refetchInterval: 30_000,
+  });
+
+  return (
+    <Panel
+      title="V2 vs V3 capacity comparison"
+      subtitle="PAPER SIMULATION / DERIVED. Same five wallets, same dynamic-v1 sizing — only the simulated bankroll differs ($380 V2 vs $1,000 V3). Read-only: no live orders, no new instrumentation."
+    >
+      {isPending ? (
+        <RowSkeleton rows={5} />
+      ) : isError ? (
+        <EmptyState
+          message={`Could not load capacity comparison: ${error instanceof Error ? error.message : "unknown error"}`}
+        />
+      ) : (data?.groups.length ?? 0) === 0 ? (
+        <EmptyState message="No enabled V2 or V3 experiments yet." />
+      ) : (
+        <div className="space-y-4">
+          {(data?.groups ?? []).map((group) => (
+            <div key={group.handle} className="rounded-md border border-border p-3">
+              <p className="text-xs font-medium text-card-foreground">{group.handle}</p>
+              <p className="break-all text-[10px] text-muted-foreground">{group.wallet}</p>
+              <div className="mt-2 overflow-x-auto">
+                <table className="w-full min-w-[900px] text-xs">
+                  <thead className="text-left text-[10px] uppercase tracking-wide text-muted-foreground">
+                    <tr>
+                      <th className="py-2 pr-3">Cohort</th>
+                      <th className="py-2 pr-3">Bankroll</th>
+                      <th className="py-2 pr-3">Cash</th>
+                      <th className="py-2 pr-3">Reserve</th>
+                      <th className="py-2 pr-3">Spendable</th>
+                      <th className="py-2 pr-3">Open cost basis</th>
+                      <th className="py-2 pr-3">Realized P&L</th>
+                      <th className="py-2 pr-3">ROI</th>
+                      <th className="py-2 pr-3">Copied B/S</th>
+                      <th className="py-2 pr-3">Cash-reserve skips</th>
+                      <th className="py-2 pr-3">Max DD (cash)</th>
+                      <th className="py-2 pr-3">Settled</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <CapacityRowCells row={group.v2} cohort="V2" />
+                    <CapacityRowCells row={group.v3} cohort="V3" />
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+          <p className="text-[11px] text-muted-foreground">{data?.note}</p>
+        </div>
+      )}
+    </Panel>
+  );
 }
 
 function CohortTable({ rows }: { rows: ComparisonRow[] }) {

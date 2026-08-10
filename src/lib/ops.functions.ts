@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 
 import type { ComparisonData } from "./comparison.server";
 import type { HealthReport } from "./health.server";
+import type { CapacityComparisonData } from "./capacity.server";
 
 /** Fair-comparison read model for every enabled shadow experiment. Read-only. */
 export const getComparison = createServerFn({ method: "GET" }).handler(
@@ -24,3 +25,11 @@ export const getV2Status = createServerFn({ method: "GET" }).handler(async () =>
   const { loadV2Status } = await import("./v2-status.server");
   return loadV2Status();
 });
+
+/** V2 vs V3 capacity cohort comparison. Read-only, fully derived. */
+export const getCapacityComparison = createServerFn({ method: "GET" }).handler(
+  async (): Promise<CapacityComparisonData> => {
+    const { loadCapacityComparison } = await import("./capacity.server");
+    return loadCapacityComparison();
+  },
+);

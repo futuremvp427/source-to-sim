@@ -8,6 +8,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { EmptyState, Panel, RowSkeleton, SideTag, Stat } from "@/components/mirror/panels";
 import { CandidateSection } from "@/components/mirror/candidate-panels";
 import {
+  CapacityComparisonSection,
   ComparisonSection,
   EvidenceSection,
   SelfCheckSection,
@@ -241,6 +242,8 @@ function Dashboard() {
       <V2StatusSection />
 
       <ComparisonSection />
+
+      <CapacityComparisonSection />
 
       <EvidenceSection />
 
