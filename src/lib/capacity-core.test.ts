@@ -93,10 +93,14 @@ describe("buildCapacityRow", () => {
     expect(row.maxDrawdownCash).toBe(50);
   });
 
-  it("floors spendable at zero and nulls roi without a bankroll", () => {
-    const row = buildCapacityRow(baseInput({ cash: 40, startingBankroll: 0 }));
+  it("floors spendable at zero when cash sits below the reserve", () => {
+    const row = buildCapacityRow(baseInput({ cash: 20, startingBankroll: 380 }));
+    expect(row.reserve).toBe(38);
     expect(row.spendable).toBe(0);
-    expect(row.roi).toBeNull();
+  });
+
+  it("nulls roi without a bankroll", () => {
+    expect(buildCapacityRow(baseInput({ startingBankroll: 0 })).roi).toBeNull();
   });
 });
 
