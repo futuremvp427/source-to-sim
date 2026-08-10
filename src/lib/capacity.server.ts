@@ -29,16 +29,6 @@ export type CapacityComparisonData = {
 const NOTE =
   "PAPER SIMULATION / DERIVED. V2 and V3 follow the same five wallets with the same dynamic-v1 sizing rule; only the simulated bankroll differs ($380 vs $1,000). Max drawdown is CASH-basis: running peak minus current simulated cash from the recorded cash_after sequence. It excludes unrealized open-position value and is not a mark-to-market equity drawdown.";
 
-async function countRows(
-  table: "paper_trades" | "paper_positions",
-  build: (q: ReturnType<typeof supabaseAdmin.from>) => unknown,
-): Promise<number> {
-  void table;
-  void build;
-  return 0;
-}
-void countRows;
-
 async function loadCashPoints(experimentId: string): Promise<CashPoint[]> {
   const { rows } = await fetchAllRows<{ created_at: string; cash_after: number | string | null }>(
     async (from, to) => {
