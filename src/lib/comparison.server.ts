@@ -12,6 +12,7 @@ import { summarizeCopyability, type CopyabilitySummary } from "./copyability/obs
 import { fetchAllRows } from "./db-pagination";
 
 import { summarizeExperiment, type ExperimentSummary, type TradeLite } from "./comparison-core";
+import { summarizeLatency, type LatencyBreakdown } from "./latency-core";
 import { workerIdFor } from "./shadow.server";
 import { V2_REFERENCE_NAME, experimentCohort, experimentLabel, type Cohort } from "./v2-cohort";
 
@@ -51,6 +52,8 @@ export type ComparisonRow = ExperimentSummary & {
   estimatedRemainingBuys: number;
   medianDetectionLatencySeconds: number | null;
   medianDecisionLatencySeconds: number | null;
+  /** Stage-by-stage decomposition; decision latency alone is never the total. */
+  latency: LatencyBreakdown;
   lastSourceActivityTs: number | null;
   copyability: CopyabilitySummary;
 };
@@ -147,7 +150,9 @@ export async function loadComparison(): Promise<ComparisonData> {
       loadAllTrades(experiment.id),
       supabaseAdmin
         .from("pipeline_audit")
-        .select("total_latency_seconds, detection_latency_seconds, decision_latency_seconds")
+        .select(
+          "total_latency_seconds, detection_latency_seconds, decision_latency_seconds, source_ts, detected_at, event_persisted_at, decision_at",
+        )
         .eq("experiment_id", experiment.id)
         .order("created_at", { ascending: false })
         .limit(100),
@@ -273,6 +278,14 @@ export async function loadComparison(): Promise<ComparisonData> {
         (auditRes.data ?? [])
           .filter((a) => a.decision_latency_seconds !== null)
           .map((a) => Number(a.decision_latency_seconds)),
+      ),
+      latency: summarizeLatency(
+        (auditRes.data ?? []).map((a) => ({
+          sourceTs: a.source_ts === null ? null : Number(a.source_ts),
+          detectedAt: a.detected_at ?? null,
+          eventPersistedAt: a.event_persisted_at ?? null,
+          decisionAt: a.decision_at ?? null,
+        })),
       ),
       lastSourceActivityTs,
       copyability,

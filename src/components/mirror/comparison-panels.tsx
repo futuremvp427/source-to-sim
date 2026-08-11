@@ -369,6 +369,15 @@ function sourceTsLabel(ts: number | null): string {
 }
 
 function EvidenceTable({ rows }: { rows: ComparisonRow[] }) {
+  return <EvidenceTableBody rows={rows} />;
+}
+
+/** Latency stage value. A stage with no usable sample is never shown as 0s. */
+function secs(v: number | null): string {
+  return v === null ? "Unavailable" : `${v}s`;
+}
+
+function EvidenceTableBody({ rows }: { rows: ComparisonRow[] }) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full min-w-[1400px] text-xs">
@@ -397,8 +406,10 @@ function EvidenceTable({ rows }: { rows: ComparisonRow[] }) {
             <th className="py-2 pr-3">Settled</th>
             <th className="py-2 pr-3">Win / loss</th>
             <th className="py-2 pr-3">Max DD</th>
-            <th className="py-2 pr-3">Detection lat.</th>
-            <th className="py-2 pr-3">Decision lat.</th>
+            <th className="py-2 pr-3">Publish + poll</th>
+            <th className="py-2 pr-3">Ingest</th>
+            <th className="py-2 pr-3">Decision</th>
+            <th className="py-2 pr-3">Source → decision</th>
             <th className="py-2 pr-3">Slip now</th>
             <th className="py-2 pr-3">Slip +30s</th>
             <th className="py-2 pr-3">Slip +60s</th>
@@ -459,10 +470,13 @@ function EvidenceTable({ rows }: { rows: ComparisonRow[] }) {
               </td>
               <td className="py-2 pr-3 tabular-nums">{formatUsd(r.maxDrawdown)}</td>
               <td className="py-2 pr-3 tabular-nums">
-                {r.medianDetectionLatencySeconds === null ? "Unavailable" : `${r.medianDetectionLatencySeconds}s`}
+                {secs(r.latency.medianPublishPollSeconds)}
               </td>
+              <td className="py-2 pr-3 tabular-nums">{secs(r.latency.medianIngestSeconds)}</td>
+              <td className="py-2 pr-3 tabular-nums">{secs(r.latency.medianDecisionSeconds)}</td>
               <td className="py-2 pr-3 tabular-nums">
-                {r.medianDecisionLatencySeconds === null ? "Unavailable" : `${r.medianDecisionLatencySeconds}s`}
+                {secs(r.latency.medianSourceToDecisionSeconds)}
+                <span className="block text-[10px] text-muted-foreground">n={r.latency.samples}</span>
               </td>
               <td className="py-2 pr-3 tabular-nums">{cents(r.copyability.medianSlippageCentsByDelay.immediate)}</td>
               <td className="py-2 pr-3 tabular-nums">{cents(r.copyability.medianSlippageCentsByDelay["30s"])}</td>
@@ -516,6 +530,33 @@ export function EvidenceSection() {
             completeness, otherwise it reports INSUFFICIENT DATA instead of a number. Estimated BUYs left replays
             dynamic-v1 sizing against spendable cash and is an estimate only — no bankroll is ever refilled or reset.
           </p>
+          <div className="space-y-1 border-t border-border pt-3 text-[11px] text-muted-foreground">
+            <p className="font-semibold uppercase tracking-wide text-card-foreground">Latency stages</p>
+            <p>
+              Publish + poll = source fill timestamp to our detection; it bundles the exchange's own publication delay
+              with our polling interval, which public data cannot separate. Ingest = detection to durable persistence.
+              Decision = persistence to the deterministic paper decision. Source → decision = the end-to-end figure.
+              Decision latency alone is not copying latency, and no stage is a fill latency: nothing is ever sent to a
+              venue. Each figure is a median over the last 100 audited events (n); a stage with no usable sample reads
+              Unavailable, never 0s. Negative intervals from source/worker clock skew are dropped, not clamped.
+            </p>
+            <p className="font-semibold uppercase tracking-wide text-card-foreground">Accounting definitions</p>
+            <p>
+              These units are not interchangeable. <strong>Decisions</strong> = source events evaluated (count).{" "}
+              <strong>Buys / sells</strong> = decisions that produced a paper trade (count).{" "}
+              <strong>Skipped</strong> = decisions the rules declined (count). <strong>Positions</strong> = open paper
+              positions with shares &gt; 0 (count). <strong>Settled</strong> = positions closed by a verified market
+              resolution (count); <strong>wins / losses</strong> are settled positions with positive / non-positive
+              payout. <strong>Open cost basis</strong> = simulated cash already committed to open positions (USD).{" "}
+              <strong>Cash</strong> = uncommitted simulated cash, including the untouchable reserve (USD).{" "}
+              <strong>Realized P&amp;L</strong> = closed and settled outcomes only (USD).{" "}
+              <strong>Unrealized P&amp;L</strong> = marked open value minus open cost basis (USD, null unless every
+              open position has a fresh mark). <strong>Total P&amp;L</strong> = realized + unrealized (USD, null
+              whenever unrealized is null). <strong>Equity</strong> = cash + marked open-position value (USD, null
+              unless fully marked). <strong>ROI</strong> = total P&amp;L ÷ starting bankroll (percent, null whenever
+              total P&amp;L is null). All figures are PAPER SIMULATION / DERIVED.
+            </p>
+          </div>
         </div>
       )}
     </Panel>

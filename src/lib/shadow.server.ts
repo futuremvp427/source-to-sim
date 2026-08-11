@@ -45,7 +45,14 @@ const BOOTSTRAP_PAGES = 4;
 const LEASE_SECONDS = 180;
 /** Exposed for the lease regression tests only. */
 export const LEASE_SECONDS_FOR_TEST = LEASE_SECONDS;
-const MAX_MARK_REFRESH = 20;
+/**
+ * A refresh pass must be able to cover every open position inside
+ * MARK_MAX_AGE_MS, otherwise equity can never satisfy the freshness rule.
+ * Books are fetched in small concurrent batches to keep the pass well inside
+ * one scheduler cycle without hammering the public CLOB.
+ */
+const MAX_MARK_REFRESH = 400;
+const MARK_FETCH_CONCURRENCY = 8;
 const PROCESS_BATCH = 300;
 
 type Json = Record<string, unknown>;
@@ -656,7 +663,9 @@ export async function refreshMarks(experimentId: string): Promise<{ updated: num
 
   let updated = 0;
   let failed = 0;
-  for (const row of open ?? []) {
+  const rows = open ?? [];
+
+  const markOne = async (row: { asset: string }) => {
     try {
       const book = await fetchBook(row.asset);
       const resolved = resolveMark({
@@ -679,7 +688,8 @@ export async function refreshMarks(experimentId: string): Promise<{ updated: num
         })
         .eq("experiment_id", experimentId)
         .eq("asset", row.asset);
-      updated += 1;
+      if (resolved.mark === null) failed += 1;
+      else updated += 1;
     } catch {
       failed += 1;
       // Stale marks are cleared rather than reused, so open P&L reads Unavailable.
@@ -689,6 +699,10 @@ export async function refreshMarks(experimentId: string): Promise<{ updated: num
         .eq("experiment_id", experimentId)
         .eq("asset", row.asset);
     }
+  };
+
+  for (let i = 0; i < rows.length; i += MARK_FETCH_CONCURRENCY) {
+    await Promise.all(rows.slice(i, i + MARK_FETCH_CONCURRENCY).map(markOne));
   }
   return { updated, failed };
 }
