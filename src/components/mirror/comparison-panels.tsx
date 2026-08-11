@@ -397,8 +397,10 @@ function EvidenceTable({ rows }: { rows: ComparisonRow[] }) {
             <th className="py-2 pr-3">Settled</th>
             <th className="py-2 pr-3">Win / loss</th>
             <th className="py-2 pr-3">Max DD</th>
-            <th className="py-2 pr-3">Detection lat.</th>
-            <th className="py-2 pr-3">Decision lat.</th>
+            <th className="py-2 pr-3">Publish + poll</th>
+            <th className="py-2 pr-3">Ingest</th>
+            <th className="py-2 pr-3">Decision</th>
+            <th className="py-2 pr-3">Source → decision</th>
             <th className="py-2 pr-3">Slip now</th>
             <th className="py-2 pr-3">Slip +30s</th>
             <th className="py-2 pr-3">Slip +60s</th>
@@ -459,10 +461,13 @@ function EvidenceTable({ rows }: { rows: ComparisonRow[] }) {
               </td>
               <td className="py-2 pr-3 tabular-nums">{formatUsd(r.maxDrawdown)}</td>
               <td className="py-2 pr-3 tabular-nums">
-                {r.medianDetectionLatencySeconds === null ? "Unavailable" : `${r.medianDetectionLatencySeconds}s`}
+                {secs(r.latency.medianPublishPollSeconds)}
               </td>
+              <td className="py-2 pr-3 tabular-nums">{secs(r.latency.medianIngestSeconds)}</td>
+              <td className="py-2 pr-3 tabular-nums">{secs(r.latency.medianDecisionSeconds)}</td>
               <td className="py-2 pr-3 tabular-nums">
-                {r.medianDecisionLatencySeconds === null ? "Unavailable" : `${r.medianDecisionLatencySeconds}s`}
+                {secs(r.latency.medianSourceToDecisionSeconds)}
+                <span className="block text-[10px] text-muted-foreground">n={r.latency.samples}</span>
               </td>
               <td className="py-2 pr-3 tabular-nums">{cents(r.copyability.medianSlippageCentsByDelay.immediate)}</td>
               <td className="py-2 pr-3 tabular-nums">{cents(r.copyability.medianSlippageCentsByDelay["30s"])}</td>
