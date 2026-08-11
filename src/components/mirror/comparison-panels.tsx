@@ -42,7 +42,7 @@ function CapacityRowCells({ row, cohort }: { row: CapacityRow | null; cohort: "V
     return (
       <tr className="border-t border-border">
         <td className="py-2 pr-3 text-[11px] uppercase text-muted-foreground">{cohort}</td>
-        <td className="py-2 pr-3 text-[11px] text-muted-foreground" colSpan={10}>
+        <td className="py-2 pr-3 text-[11px] text-muted-foreground" colSpan={11}>
           No enabled {cohort} experiment for this wallet.
         </td>
       </tr>
@@ -58,8 +58,12 @@ function CapacityRowCells({ row, cohort }: { row: CapacityRow | null; cohort: "V
       <td className="py-2 pr-3 tabular-nums">{formatUsd(row.cash)}</td>
       <td className="py-2 pr-3 tabular-nums">{formatUsd(row.reserve)}</td>
       <td className="py-2 pr-3 tabular-nums">{formatUsd(row.spendable)}</td>
-      <td className="py-2 pr-3 tabular-nums">{formatUsd(row.openCostBasis)}</td>
-      <td className={`py-2 pr-3 tabular-nums ${tone(row.realizedPnl)}`}>{formatUsd(row.realizedPnl)}</td>
+       <td className="py-2 pr-3 tabular-nums">{formatUsd(row.openCostBasis)}</td>
+       <td className="py-2 pr-3 tabular-nums">
+         {row.markedOpenPositions} / {row.openPositions} (
+         {row.markCoveragePct === null ? "N/A" : `${row.markCoveragePct.toFixed(0)}%`})
+       </td>
+       <td className={`py-2 pr-3 tabular-nums ${tone(row.realizedPnl)}`}>{formatUsd(row.realizedPnl)}</td>
       <td className={`py-2 pr-3 tabular-nums ${tone(row.roi)}`}>{roiPct(row.roi)}</td>
       <td className="py-2 pr-3 tabular-nums">
         {row.buys}/{row.sells}
@@ -99,7 +103,7 @@ export function CapacityComparisonSection() {
               <p className="text-xs font-medium text-card-foreground">{group.handle}</p>
               <p className="break-all text-[10px] text-muted-foreground">{group.wallet}</p>
               <div className="mt-2 overflow-x-auto">
-                <table className="w-full min-w-[900px] text-xs">
+                <table className="w-full min-w-[1000px] text-xs">
                   <thead className="text-left text-[10px] uppercase tracking-wide text-muted-foreground">
                     <tr>
                       <th className="py-2 pr-3">Cohort</th>
@@ -107,9 +111,10 @@ export function CapacityComparisonSection() {
                       <th className="py-2 pr-3">Cash</th>
                       <th className="py-2 pr-3">Reserve</th>
                       <th className="py-2 pr-3">Spendable</th>
-                      <th className="py-2 pr-3">Open cost basis</th>
-                      <th className="py-2 pr-3">Realized P&L</th>
-                      <th className="py-2 pr-3">ROI</th>
+                       <th className="py-2 pr-3">Open cost basis</th>
+                       <th className="py-2 pr-3">MARK COVERAGE</th>
+                       <th className="py-2 pr-3">Realized P&L</th>
+                       <th className="py-2 pr-3">ROI</th>
                       <th className="py-2 pr-3">Copied B/S</th>
                       <th className="py-2 pr-3">Cash-reserve skips</th>
                       <th className="py-2 pr-3">Max cash deployment</th>
