@@ -502,7 +502,17 @@ export function applySell(
 /* ------------------------------------------------------------------ */
 
 /** A mark older than this is not trusted; open P&L becomes Unavailable (null). */
-export const MARK_MAX_AGE_MS = 120_000;
+/**
+ * Freshness requirement for a trustworthy mark.
+ *
+ * A mark older than this is discarded (never reused, never replaced by the
+ * entry price or zero), so equity reads Unavailable instead of guessing. The
+ * window is 10 minutes because a full mark refresh pass over every open
+ * position must be able to complete within it on the one-minute scheduler;
+ * a 2-minute window made complete coverage — and therefore equity — reachable
+ * only by luck.
+ */
+export const MARK_MAX_AGE_MS = 600_000;
 
 export type MarkInput = {
   bestBid: number | null;
