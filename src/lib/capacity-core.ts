@@ -26,6 +26,8 @@ export type CapacityRowInput = {
   cash: number;
   realizedPnl: number;
   openCostBasis: number;
+  openPositions: number;
+  markedOpenPositions: number;
   buys: number;
   sells: number;
   insufficientCashSkips: number;
@@ -37,6 +39,7 @@ export type CapacityRow = Omit<CapacityRowInput, "cashPoints"> & {
   reserve: number;
   spendable: number;
   roi: number | null;
+  markCoveragePct: number | null;
   /** CASH-basis drawdown (realized cash only, no unrealized open value). */
   maxDrawdownCash: number;
 };
@@ -78,6 +81,8 @@ export function buildCapacityRow(input: CapacityRowInput): CapacityRow {
     reserve,
     spendable: roundUsd(Math.max(0, input.cash - reserve)),
     roi: input.startingBankroll > 0 ? input.realizedPnl / input.startingBankroll : null,
+    markCoveragePct:
+      input.openPositions > 0 ? (input.markedOpenPositions / input.openPositions) * 100 : null,
     maxDrawdownCash: cashMaxDrawdown(input.startingBankroll, cashPoints),
   };
 }

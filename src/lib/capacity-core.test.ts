@@ -19,12 +19,14 @@ function baseInput(over: Partial<CapacityRowInput> = {}): CapacityRowInput {
     startingBankroll: 1000,
     cash: 950,
     realizedPnl: -20,
-    openCostBasis: 70,
-    buys: 10,
-    sells: 2,
-    insufficientCashSkips: 0,
-    settledMarkets: 1,
-    cashPoints: [],
+  openCostBasis: 70,
+  openPositions: 4,
+  markedOpenPositions: 3,
+  buys: 10,
+  sells: 2,
+  insufficientCashSkips: 0,
+  settledMarkets: 1,
+  cashPoints: [],
     ...over,
   };
 }
@@ -78,7 +80,7 @@ describe("cashMaxDrawdown", () => {
 });
 
 describe("buildCapacityRow", () => {
-  it("derives reserve, spendable, roi and cash drawdown", () => {
+  it("derives reserve, spendable, roi, mark coverage and cash deployment", () => {
     const row = buildCapacityRow(
       baseInput({
         cashPoints: [
@@ -90,7 +92,12 @@ describe("buildCapacityRow", () => {
     expect(row.reserve).toBe(100);
     expect(row.spendable).toBe(850);
     expect(row.roi).toBeCloseTo(-0.02, 10);
+    expect(row.markCoveragePct).toBe(75);
     expect(row.maxDrawdownCash).toBe(50);
+  });
+
+  it("reports unavailable mark coverage when there are no open positions", () => {
+    expect(buildCapacityRow(baseInput({ openPositions: 0, markedOpenPositions: 0 })).markCoveragePct).toBeNull();
   });
 
   it("floors spendable at zero when cash sits below the reserve", () => {

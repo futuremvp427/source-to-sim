@@ -66,7 +66,7 @@ export async function loadCapacityComparison(): Promise<CapacityComparisonData> 
       await Promise.all([
         supabaseAdmin
           .from("paper_positions")
-          .select("shares, cost_basis, settlement_status")
+          .select("shares, cost_basis, settlement_status, mark")
           .eq("experiment_id", experiment.id),
         supabaseAdmin
           .from("paper_trades")
@@ -87,9 +87,9 @@ export async function loadCapacityComparison(): Promise<CapacityComparisonData> 
         loadCashPoints(experiment.id),
       ]);
 
-    const openCostBasis = (positions ?? [])
-      .filter((p) => Number(p.shares) > 0)
-      .reduce((sum, p) => sum + Number(p.cost_basis ?? 0), 0);
+    const openPositions = (positions ?? []).filter((p) => Number(p.shares) > 0);
+    const openCostBasis = openPositions.reduce((sum, p) => sum + Number(p.cost_basis ?? 0), 0);
+    const markedOpenPositions = openPositions.filter((p) => p.mark !== null).length;
     const settledMarkets = (positions ?? []).filter(
       (p) => p.settlement_status === "settled_won" || p.settlement_status === "settled_lost",
     ).length;
@@ -105,6 +105,8 @@ export async function loadCapacityComparison(): Promise<CapacityComparisonData> 
         cash: Number(experiment.cash ?? 0),
         realizedPnl: Number(experiment.realized_pnl ?? 0),
         openCostBasis,
+        openPositions: openPositions.length,
+        markedOpenPositions,
         buys: buys ?? 0,
         sells: sells ?? 0,
         insufficientCashSkips: skips ?? 0,
