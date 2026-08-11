@@ -58,12 +58,13 @@ function CapacityRowCells({ row, cohort }: { row: CapacityRow | null; cohort: "V
       <td className="py-2 pr-3 tabular-nums">{formatUsd(row.cash)}</td>
       <td className="py-2 pr-3 tabular-nums">{formatUsd(row.reserve)}</td>
       <td className="py-2 pr-3 tabular-nums">{formatUsd(row.spendable)}</td>
-       <td className="py-2 pr-3 tabular-nums">{formatUsd(row.openCostBasis)}</td>
-       <td className="py-2 pr-3 tabular-nums">
-         {row.markedOpenPositions} / {row.openPositions} (
-         {row.markCoveragePct === null ? "N/A" : `${row.markCoveragePct.toFixed(0)}%`})
-       </td>
-       <td className={`py-2 pr-3 tabular-nums ${tone(row.realizedPnl)}`}>{formatUsd(row.realizedPnl)}</td>
+      <td className="py-2 pr-3 tabular-nums">{formatUsd(row.openCostBasis)}</td>
+      <td className="py-2 pr-3 tabular-nums">
+        {row.markCoveragePct === null
+          ? "0 / 0 — N/A"
+          : `${row.markedOpenPositions} / ${row.openPositions} (${row.markCoveragePct.toFixed(0)}%)`}
+      </td>
+      <td className={`py-2 pr-3 tabular-nums ${tone(row.realizedPnl)}`}>{formatUsd(row.realizedPnl)}</td>
       <td className={`py-2 pr-3 tabular-nums ${tone(row.roi)}`}>{roiPct(row.roi)}</td>
       <td className="py-2 pr-3 tabular-nums">
         {row.buys}/{row.sells}
