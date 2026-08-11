@@ -369,6 +369,15 @@ function sourceTsLabel(ts: number | null): string {
 }
 
 function EvidenceTable({ rows }: { rows: ComparisonRow[] }) {
+  return <EvidenceTableBody rows={rows} />;
+}
+
+/** Latency stage value. A stage with no usable sample is never shown as 0s. */
+function secs(v: number | null): string {
+  return v === null ? "Unavailable" : `${v}s`;
+}
+
+function EvidenceTableBody({ rows }: { rows: ComparisonRow[] }) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full min-w-[1400px] text-xs">
