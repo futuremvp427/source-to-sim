@@ -27,7 +27,7 @@ export type CapacityComparisonData = {
 };
 
 const NOTE =
-  "PAPER SIMULATION / DERIVED. V2 and V3 follow the same five wallets with the same dynamic-v1 sizing rule; only the simulated bankroll differs ($380 vs $1,000). Max drawdown is CASH-basis: running peak minus current simulated cash from the recorded cash_after sequence. It excludes unrealized open-position value and is not a mark-to-market equity drawdown.";
+  "PAPER SIMULATION / DERIVED. V2 and V3 follow the same five wallets with the same dynamic-v1 sizing rule; only the simulated bankroll differs ($380 vs $1,000). Max cash deployment measures simulated cash committed/deployed from the running cash peak using the recorded cash_after sequence. It excludes current open-position value, is not mark-to-market drawdown, and is not realized loss. True portfolio drawdown remains unavailable until complete fresh marking exists.";
 
 async function loadCashPoints(experimentId: string): Promise<CashPoint[]> {
   const { rows } = await fetchAllRows<{ created_at: string; cash_after: number | string | null }>(

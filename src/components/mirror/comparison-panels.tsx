@@ -112,7 +112,7 @@ export function CapacityComparisonSection() {
                       <th className="py-2 pr-3">ROI</th>
                       <th className="py-2 pr-3">Copied B/S</th>
                       <th className="py-2 pr-3">Cash-reserve skips</th>
-                      <th className="py-2 pr-3">Max DD (cash)</th>
+                      <th className="py-2 pr-3">Max cash deployment</th>
                       <th className="py-2 pr-3">Settled</th>
                     </tr>
                   </thead>
