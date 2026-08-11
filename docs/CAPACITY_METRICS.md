@@ -14,6 +14,12 @@ Use realized P&L and, when every open position has a fresh mark, simulated equit
 
 `INSUFFICIENT_CASH_RESERVE` counts source BUYs that could not be copied because spendable cash would have breached the fixed 10% starting-bankroll reserve. A high count is evidence of a capacity constraint at that bankroll; it is not a source-trade failure.
 
+## Mark coverage
+
+`MARK COVERAGE` is shown as `marked open positions / total open positions (percent)`. For example, `3 / 4 (75%)` means three of four currently open paper positions have a usable public mark. `0 / 0 — N/A` means the cohort has no open positions, not that marking failed.
+
+Treat mark coverage as a data-quality/completeness indicator. A value below 100% means simulated equity is intentionally not considered complete enough for performance interpretation.
+
 ## Equity availability
 
 Simulated equity is intentionally reported as unavailable unless every open position has a sufficiently fresh public mark. Missing or stale marks are not substituted with historical prices.
