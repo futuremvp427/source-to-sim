@@ -530,6 +530,33 @@ export function EvidenceSection() {
             completeness, otherwise it reports INSUFFICIENT DATA instead of a number. Estimated BUYs left replays
             dynamic-v1 sizing against spendable cash and is an estimate only — no bankroll is ever refilled or reset.
           </p>
+          <div className="space-y-1 border-t border-border pt-3 text-[11px] text-muted-foreground">
+            <p className="font-semibold uppercase tracking-wide text-card-foreground">Latency stages</p>
+            <p>
+              Publish + poll = source fill timestamp to our detection; it bundles the exchange's own publication delay
+              with our polling interval, which public data cannot separate. Ingest = detection to durable persistence.
+              Decision = persistence to the deterministic paper decision. Source → decision = the end-to-end figure.
+              Decision latency alone is not copying latency, and no stage is a fill latency: nothing is ever sent to a
+              venue. Each figure is a median over the last 100 audited events (n); a stage with no usable sample reads
+              Unavailable, never 0s. Negative intervals from source/worker clock skew are dropped, not clamped.
+            </p>
+            <p className="font-semibold uppercase tracking-wide text-card-foreground">Accounting definitions</p>
+            <p>
+              These units are not interchangeable. <strong>Decisions</strong> = source events evaluated (count).{" "}
+              <strong>Buys / sells</strong> = decisions that produced a paper trade (count).{" "}
+              <strong>Skipped</strong> = decisions the rules declined (count). <strong>Positions</strong> = open paper
+              positions with shares &gt; 0 (count). <strong>Settled</strong> = positions closed by a verified market
+              resolution (count); <strong>wins / losses</strong> are settled positions with positive / non-positive
+              payout. <strong>Open cost basis</strong> = simulated cash already committed to open positions (USD).{" "}
+              <strong>Cash</strong> = uncommitted simulated cash, including the untouchable reserve (USD).{" "}
+              <strong>Realized P&amp;L</strong> = closed and settled outcomes only (USD).{" "}
+              <strong>Unrealized P&amp;L</strong> = marked open value minus open cost basis (USD, null unless every
+              open position has a fresh mark). <strong>Total P&amp;L</strong> = realized + unrealized (USD, null
+              whenever unrealized is null). <strong>Equity</strong> = cash + marked open-position value (USD, null
+              unless fully marked). <strong>ROI</strong> = total P&amp;L ÷ starting bankroll (percent, null whenever
+              total P&amp;L is null). All figures are PAPER SIMULATION / DERIVED.
+            </p>
+          </div>
         </div>
       )}
     </Panel>
