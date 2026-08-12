@@ -1153,38 +1153,55 @@ export async function runExperimentCycle(
   }
 
   try {
+    /**
+     * Per-stage durations, persisted with the worker row. This is how a slow
+     * stage is identified in production instead of guessed at, and why the
+     * mark stage could be proven to be the deadline consumer.
+     */
+    const stageMs: Record<string, number> = {};
+    const timed = async <T>(label: string, work: () => Promise<T>): Promise<T> => {
+      const startedAt = Date.now();
+      try {
+        return await work();
+      } finally {
+        stageMs[label] = Date.now() - startedAt;
+      }
+    };
     // Bounded so a hung upstream call fails through the normal error path (which
     // releases the lease) instead of being killed with the lease still claimed.
     const stages = await withDeadline(
       (async () => {
-        const window = await fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES);
+        const window = await timed("source_ingest", () =>
+          fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES),
+        );
         const events = normalizeSourceEvents(window.raw, wallet);
-        const inserted = await persistEvents(events);
-        const process = await processPendingEvents(experiment, lease);
-        const marks = await refreshMarks(experiment.id);
-        const reconciliation =
+        const inserted = await timed("persist_events", () => persistEvents(events));
+        const process = await timed("paper_processing", () => processPendingEvents(experiment, lease));
+        const marks = await timed("mark_refresh", () => refreshMarks(experiment.id));
+        const reconciliation = await timed("reconciliation", () =>
           inserted > 0 || !bootstrapped
-            ? await boundedStage(reconcile(wallet), RECONCILE_DEADLINE_MS, "reconciliation", null)
-            : null;
-        const settlements = await boundedStage(
-          settleSafely(experiment.id),
-          SETTLEMENT_DEADLINE_MS,
-          "settlement",
-          NO_SETTLEMENTS,
+            ? boundedStage(reconcile(wallet), RECONCILE_DEADLINE_MS, "reconciliation", null)
+            : Promise.resolve(null),
         );
-        const previews = await boundedStage(
-          generatePreviewsSafely(experiment.id, wallet),
-          PREVIEW_DEADLINE_MS,
-          "previews",
-          NO_PREVIEWS,
+        const settlements = await timed("settlement", () =>
+          boundedStage(settleSafely(experiment.id), SETTLEMENT_DEADLINE_MS, "settlement", NO_SETTLEMENTS),
         );
-        const copyability = await boundedStage(
-          observeCopyabilitySafely(experiment),
-          COPYABILITY_DEADLINE_MS,
-          "copyability",
-          { scheduled: 0, sampled: 0, unavailable: 0 },
+        const previews = await timed("previews", () =>
+          boundedStage(
+            generatePreviewsSafely(experiment.id, wallet),
+            PREVIEW_DEADLINE_MS,
+            "previews",
+            NO_PREVIEWS,
+          ),
         );
-        await raiseCashAlerts(experiment);
+        const copyability = await timed("copyability", () =>
+          boundedStage(observeCopyabilitySafely(experiment), COPYABILITY_DEADLINE_MS, "copyability", {
+            scheduled: 0,
+            sampled: 0,
+            unavailable: 0,
+          }),
+        );
+        await timed("cash_alerts", () => raiseCashAlerts(experiment));
         return { window, events, inserted, process, marks, reconciliation, settlements, previews, copyability };
       })(),
       EXPERIMENT_DEADLINE_MS,
@@ -1219,6 +1236,7 @@ export async function runExperimentCycle(
       events_ingested: (statusRow?.events_ingested ?? 0) + inserted,
       lag_seconds: lagSeconds,
       last_success_at: new Date().toISOString(),
+      stage_ms: stageMs as never,
     });
 
     if (inserted > 0) {
@@ -1247,6 +1265,7 @@ export async function runExperimentCycle(
       previews,
       settlements,
       copyability,
+      stageMs,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
@@ -1256,7 +1275,12 @@ export async function runExperimentCycle(
       .eq("id", lockId)
       .maybeSingle();
     const failures = (statusRow?.poll_failures ?? 0) + 1;
-    await releaseLease(lease, { state: "error", last_error: message, poll_failures: failures });
+    await releaseLease(lease, {
+      state: "error",
+      last_error: message,
+      poll_failures: failures,
+      stage_ms: stageMs as never,
+    });
     if (failures === 1 || failures % 5 === 0) {
       await raiseAlert("error", "poll_failure", `${experiment.name}: ingestion poll failed: ${message}`, {
         experiment: experiment.name as never,
