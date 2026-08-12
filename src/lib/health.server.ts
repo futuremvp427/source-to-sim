@@ -5,6 +5,9 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { MARK_MAX_AGE_MS } from "./shadow-core";
+import { classifyWorker, findAbandonedWorkers, type WorkerRow } from "./worker-health";
+
 export type CheckStatus = "PASS" | "WARN" | "FAIL";
 
 export type HealthCheck = {
@@ -20,7 +23,6 @@ export type HealthReport = {
   checks: HealthCheck[];
 };
 
-const STALE_HEARTBEAT_SECONDS = 300;
 const PUBLIC_DATA_API = "https://data-api.polymarket.com/trades?limit=1";
 const HEALTH_HTTP_TIMEOUT_MS = 8_000;
 
@@ -60,43 +62,45 @@ export async function runSelfCheck(): Promise<HealthReport> {
         : `${enabled} enabled: ${(experiments ?? []).map((e) => e.name).join(", ")}`,
   });
 
-  // 3. Scheduled cycle / heartbeat freshness
+  // 3. Required workers — judged on COMPLETED cycles, never on heartbeat alone.
   const { data: statuses, error: statusesError } = await supabaseAdmin.from("worker_status").select("*");
-  const ingestRows = (statuses ?? []).filter((s) => s.id.startsWith("ingest"));
-  const freshest = ingestRows
-    .map((s) => ageSeconds(s.heartbeat_at))
-    .filter((v): v is number => v !== null)
-    .sort((a, b) => a - b)[0];
+  const rows = (statuses ?? []) as unknown as WorkerRow[];
+  const ingestRows = rows.filter((s) => s.id.startsWith("ingest"));
+  const requiredIds = (experiments ?? []).map((e) =>
+    e.name === "SHADOW" ? "ingest" : `ingest:${e.id}`,
+  );
+  const nowMs = Date.now();
+  const verdicts = requiredIds.map((id) => classifyWorker(rows.find((r) => r.id === id), nowMs));
+  const worst: CheckStatus = verdicts.some((v) => v.status === "FAIL")
+    ? "FAIL"
+    : verdicts.some((v) => v.status === "WARN")
+      ? "WARN"
+      : "PASS";
+  const problem = verdicts.filter((v) => v.status !== "PASS");
   checks.push({
     id: "schedule",
-    label: "Scheduled polling",
-    status: statusesError
-      ? "FAIL"
-      : freshest === undefined
-        ? "FAIL"
-        : freshest > STALE_HEARTBEAT_SECONDS
-          ? "WARN"
-          : "PASS",
+    label: "Required worker cycles",
+    status: statusesError ? "FAIL" : verdicts.length === 0 ? "FAIL" : worst,
     detail: statusesError
       ? statusesError.message
-      : freshest === undefined
-        ? "No worker heartbeat recorded"
-        : `Last heartbeat ${freshest}s ago across ${ingestRows.length} worker row(s)`,
+      : verdicts.length === 0
+        ? "No required worker rows"
+        : problem.length === 0
+          ? `All ${verdicts.length} required worker(s) completed a cycle recently`
+          : problem.map((v) => `${v.id}: ${v.reason}`).join("; "),
   });
 
-  // 4. Lease health — no stuck leases
-  const stuck = ingestRows.filter(
-    (s) => s.state === "running" && (ageSeconds(s.heartbeat_at) ?? 0) > STALE_HEARTBEAT_SECONDS,
-  );
+  // 4. Abandoned cycles — a killed cycle must not read as healthy.
+  const abandoned = findAbandonedWorkers(ingestRows, nowMs);
   checks.push({
     id: "lease",
-    label: "Worker lease",
-    status: statusesError ? "FAIL" : stuck.length > 0 ? "WARN" : "PASS",
+    label: "Worker lease recovery",
+    status: statusesError ? "FAIL" : abandoned.length > 0 ? "WARN" : "PASS",
     detail: statusesError
       ? statusesError.message
-      : stuck.length > 0
-        ? `${stuck.length} stale lease(s) will expire and be retaken`
-        : "No stale leases",
+      : abandoned.length > 0
+        ? `${abandoned.length} abandoned cycle(s) pending reclaim: ${abandoned.map((a) => a.id).join(", ")}`
+        : "No abandoned cycles; leases expire and are reacquired atomically",
   });
 
   // 5. Ingestion errors
@@ -118,7 +122,71 @@ export async function runSelfCheck(): Promise<HealthReport> {
         : failing.map((s) => `${s.id}: ${s.poll_failures} failure(s)`).join(", "),
   });
 
-  // 6. Public Polymarket data API
+  // 6. Source ingestion freshness
+  const { data: newestEvent } = await supabaseAdmin
+    .from("source_events")
+    .select("first_seen_at")
+    .order("first_seen_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const sourceAge = ageSeconds(newestEvent?.first_seen_at ?? null);
+  checks.push({
+    id: "source_freshness",
+    label: "Source ingestion freshness",
+    status: sourceAge === null ? "FAIL" : sourceAge > 86_400 ? "FAIL" : sourceAge > 21_600 ? "WARN" : "PASS",
+    detail:
+      sourceAge === null
+        ? "No source fills persisted"
+        : `Newest persisted source fill ${Math.round(sourceAge / 60)} min old`,
+  });
+
+  // 7. Settlement health — unacknowledged settlement warnings/errors
+  const { data: settlementAlerts } = await supabaseAdmin
+    .from("alerts")
+    .select("level, kind, created_at")
+    .eq("acknowledged", false)
+    .gte("created_at", new Date(Date.now() - 6 * 3600_000).toISOString());
+  const settlementIssues = (settlementAlerts ?? []).filter(
+    (a) => a.kind.includes("settle") || a.kind.includes("resolution"),
+  );
+  checks.push({
+    id: "settlement",
+    label: "Settlement",
+    status: settlementIssues.some((a) => a.level === "error")
+      ? "FAIL"
+      : settlementIssues.length > 0
+        ? "WARN"
+        : "PASS",
+    detail:
+      settlementIssues.length === 0
+        ? "No unresolved settlement warnings in the last 6h"
+        : `${settlementIssues.length} open settlement alert(s)`,
+  });
+
+  // 8. Mark freshness required for risk/equity calculations
+  const { data: openPositions } = await supabaseAdmin
+    .from("paper_positions")
+    .select("shares, mark, mark_ts")
+    .gt("shares", 0);
+  const open = openPositions ?? [];
+  const fresh = open.filter(
+    (p) =>
+      p.mark !== null &&
+      p.mark_ts !== null &&
+      Date.now() - new Date(p.mark_ts).getTime() <= MARK_MAX_AGE_MS,
+  ).length;
+  const coverage = open.length === 0 ? 100 : Math.round((fresh / open.length) * 1000) / 10;
+  checks.push({
+    id: "marks",
+    label: "Mark freshness (risk/equity)",
+    status: open.length === 0 ? "PASS" : coverage >= 99.9 ? "PASS" : coverage > 0 ? "WARN" : "FAIL",
+    detail:
+      open.length === 0
+        ? "No open paper positions to mark"
+        : `${fresh}/${open.length} open positions marked within ${Math.round(MARK_MAX_AGE_MS / 1000)}s (${coverage}%)`,
+  });
+
+  // 9. Public Polymarket data API
   let publicStatus: CheckStatus = "PASS";
   let publicDetail = "Public trades API reachable";
   try {

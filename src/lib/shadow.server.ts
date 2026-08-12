@@ -8,6 +8,12 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 import { fetchAllRows } from "./db-pagination";
 import {
+  classifyWorker,
+  findAbandonedWorkers,
+  orderByStaleness,
+  type WorkerRow,
+} from "./worker-health";
+import {
   EMPTY_POSITION,
   MARK_MAX_AGE_MS,
   applyBuy,
@@ -54,6 +60,57 @@ export const LEASE_SECONDS_FOR_TEST = LEASE_SECONDS;
 const MAX_MARK_REFRESH = 800;
 const MARK_FETCH_CONCURRENCY = 16;
 const PROCESS_BATCH = 300;
+/**
+ * A scheduled invocation is a single HTTP request with a finite platform budget.
+ * Without an explicit budget the request is killed mid-experiment, which leaves
+ * that experiment's worker row stuck at state='running' with last_poll_at
+ * frozen. We therefore stop starting new experiment cycles once the budget is
+ * spent, and bound each individual cycle so a hung upstream call still releases
+ * its lease through the normal error path.
+ */
+const CYCLE_BUDGET_MS = 50_000;
+/**
+ * Independent-lease experiments processed concurrently per batch. Kept small:
+ * each experiment already fans out its own mark fetches, so too much total
+ * concurrency makes the public CLOB rate-limit and marks fail.
+ */
+const EXPERIMENT_CONCURRENCY = 2;
+const EXPERIMENT_DEADLINE_MS = 40_000;
+const RESEARCH_DEADLINE_MS = 8_000;
+/** Auxiliary (non-accounting) stage budgets, so one slow stage cannot eat a cycle. */
+const SETTLEMENT_DEADLINE_MS = 8_000;
+const PREVIEW_DEADLINE_MS = 6_000;
+const COPYABILITY_DEADLINE_MS = 6_000;
+const RECONCILE_DEADLINE_MS = 8_000;
+
+class DeadlineError extends Error {}
+
+async function withDeadline<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new DeadlineError(`${label} exceeded ${ms}ms deadline`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Bounded auxiliary stage. On timeout the cycle continues with the neutral
+ * fallback so ingestion, paper accounting and marking always complete; the
+ * stage's own writes remain idempotent and fenced.
+ */
+async function boundedStage<T>(work: Promise<T>, ms: number, label: string, fallback: T): Promise<T> {
+  try {
+    return await withDeadline(work, ms, label);
+  } catch {
+    return fallback;
+  }
+}
 
 type Json = Record<string, unknown>;
 
@@ -823,6 +880,10 @@ export type MultiCycleResult = {
   cycles: CycleResult[];
   /** Reference SHADOW experiment result, kept for the existing dashboard read. */
   reference: CycleResult | null;
+  /** Stuck worker rows whose state was reclaimed at the start of this cycle. */
+  reclaimedWorkers: number;
+  /** Experiments intentionally left for the next cycle to stay inside the budget. */
+  deferredExperiments: number;
   candidateResearch: { ran: boolean; detail: string | null };
 };
 
@@ -895,25 +956,93 @@ async function settleSafely(experimentId: string): Promise<typeof NO_SETTLEMENTS
  */
 export async function runIngestCycle(workerId: string): Promise<MultiCycleResult> {
   const ranAt = new Date().toISOString();
+  const startedMs = Date.now();
   const experiments = await listActiveExperiments();
+  const reclaimed = await reclaimAbandonedWorkers();
+  const ordered = await orderExperimentsForCycle(experiments);
   const cycles: CycleResult[] = [];
-  for (const experiment of experiments) {
-    try {
-      cycles.push(await runExperimentCycle(experiment, workerId));
-    } catch (err) {
-      cycles.push({
-        ...emptyCycle(ranAt, experiment),
-        skipped: err instanceof Error ? err.message : "cycle failed",
-      });
+  let deferred = 0;
+  // Experiments hold independent leases, checkpoints and books, so a small
+  // concurrent batch cannot overlap execution for the same experiment. Batching
+  // lets every enabled experiment finish inside one scheduler cycle, which is
+  // what keeps marks inside the freshness window.
+  for (const batch of chunked(ordered, EXPERIMENT_CONCURRENCY)) {
+    if (Date.now() - startedMs > CYCLE_BUDGET_MS) {
+      // Out of budget: leave the remaining experiments untouched. They are served
+      // first on the next cycle because ordering is least-recently-completed-first.
+      for (const experiment of batch) {
+        deferred += 1;
+        cycles.push({
+          ...emptyCycle(ranAt, experiment),
+          skipped: "Deferred to the next scheduled cycle (cycle time budget reached).",
+        });
+      }
+      continue;
     }
+    const settled = await Promise.allSettled(
+      batch.map((experiment) => runExperimentCycle(experiment, workerId)),
+    );
+    settled.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        cycles.push(result.value);
+        return;
+      }
+      cycles.push({
+        ...emptyCycle(ranAt, batch[index]!),
+        skipped: result.reason instanceof Error ? result.reason.message : "cycle failed",
+      });
+    });
   }
   return {
     ranAt,
     experiments: experiments.length,
     cycles,
     reference: cycles.find((c) => c.experimentName === EXPERIMENT_NAME) ?? null,
-    candidateResearch: await refreshCandidateResearchSafely(),
+    reclaimedWorkers: reclaimed,
+    deferredExperiments: deferred,
+    candidateResearch:
+      Date.now() - startedMs > CYCLE_BUDGET_MS
+        ? { ran: false, detail: "deferred: cycle time budget reached" }
+        : await refreshCandidateResearchSafely(),
   };
+}
+
+/**
+ * A cycle killed by the platform leaves state='running' forever even though its
+ * lease has long expired. The lease itself never blocked recovery (acquisition
+ * is atomic and expiry-based), but the stuck state hid the failure from health
+ * reporting. Reclaiming only rewrites worker STATE — never any paper accounting,
+ * fence, or lease ownership — so fencing guarantees are untouched.
+ */
+async function reclaimAbandonedWorkers(): Promise<number> {
+  const { data } = await supabaseAdmin
+    .from("worker_status")
+    .select("id, state, heartbeat_at, last_poll_at, last_success_at, lease_expires_at, poll_failures");
+  const abandoned = findAbandonedWorkers((data ?? []) as unknown as WorkerRow[], Date.now());
+  for (const row of abandoned) {
+    await supabaseAdmin
+      .from("worker_status")
+      .update({
+        state: "stale",
+        last_error: "Previous cycle was abandoned before completion (lease expired while running).",
+        updated_at: new Date().toISOString(),
+      } as never)
+      .eq("id", row.id)
+      .eq("state", "running");
+  }
+  return abandoned.length;
+}
+
+/** Least-recently-completed experiment first, so no experiment can be starved. */
+async function orderExperimentsForCycle(experiments: Experiment[]): Promise<Experiment[]> {
+  const { data } = await supabaseAdmin.from("worker_status").select("id, last_poll_at, last_success_at");
+  const completedAt = new Map<string, number | null>();
+  for (const row of (data ?? []) as { id: string; last_poll_at: string | null; last_success_at: string | null }[]) {
+    const iso = row.last_success_at ?? row.last_poll_at;
+    const ms = iso ? new Date(iso).getTime() : NaN;
+    completedAt.set(row.id, Number.isFinite(ms) ? ms : null);
+  }
+  return orderByStaleness(experiments, (e) => completedAt.get(workerIdFor(e)) ?? null);
 }
 
 function emptyCycle(ranAt: string, experiment: Experiment): CycleResult {
@@ -980,7 +1109,7 @@ async function raiseCashAlerts(experiment: Experiment): Promise<void> {
 async function refreshCandidateResearchSafely(): Promise<{ ran: boolean; detail: string | null }> {
   try {
     const { refreshCandidateResearchIfDue } = await import("./candidates/research.server");
-    return await refreshCandidateResearchIfDue();
+    return await withDeadline(refreshCandidateResearchIfDue(), RESEARCH_DEADLINE_MS, "candidate research");
   } catch (err) {
     return { ran: false, detail: err instanceof Error ? err.message : "research refresh skipped" };
   }
@@ -1034,16 +1163,45 @@ export async function runExperimentCycle(
   }
 
   try {
-    const window = await fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES);
-    const events = normalizeSourceEvents(window.raw, wallet);
-    const inserted = await persistEvents(events);
-    const process = await processPendingEvents(experiment, lease);
-    const marks = await refreshMarks(experiment.id);
-    const reconciliation = inserted > 0 || !bootstrapped ? await reconcile(wallet) : null;
-    const settlements = await settleSafely(experiment.id);
-    const previews = await generatePreviewsSafely(experiment.id, wallet);
-    const copyability = await observeCopyabilitySafely(experiment);
-    await raiseCashAlerts(experiment);
+    // Bounded so a hung upstream call fails through the normal error path (which
+    // releases the lease) instead of being killed with the lease still claimed.
+    const stages = await withDeadline(
+      (async () => {
+        const window = await fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES);
+        const events = normalizeSourceEvents(window.raw, wallet);
+        const inserted = await persistEvents(events);
+        const process = await processPendingEvents(experiment, lease);
+        const marks = await refreshMarks(experiment.id);
+        const reconciliation =
+          inserted > 0 || !bootstrapped
+            ? await boundedStage(reconcile(wallet), RECONCILE_DEADLINE_MS, "reconciliation", null)
+            : null;
+        const settlements = await boundedStage(
+          settleSafely(experiment.id),
+          SETTLEMENT_DEADLINE_MS,
+          "settlement",
+          NO_SETTLEMENTS,
+        );
+        const previews = await boundedStage(
+          generatePreviewsSafely(experiment.id, wallet),
+          PREVIEW_DEADLINE_MS,
+          "previews",
+          NO_PREVIEWS,
+        );
+        const copyability = await boundedStage(
+          observeCopyabilitySafely(experiment),
+          COPYABILITY_DEADLINE_MS,
+          "copyability",
+          { scheduled: 0, sampled: 0, unavailable: 0 },
+        );
+        await raiseCashAlerts(experiment);
+        return { window, events, inserted, process, marks, reconciliation, settlements, previews, copyability };
+      })(),
+      EXPERIMENT_DEADLINE_MS,
+      `${experiment.name} ingest cycle`,
+    );
+    const { window, events, inserted, process, marks, reconciliation, settlements, previews, copyability } =
+      stages;
 
     const newest = events.length ? Math.max(...events.map((e) => e.sourceTs)) : 0;
     const lagSeconds = newest > 0 ? Math.max(0, Math.round(Date.now() / 1000 - newest)) : null;
