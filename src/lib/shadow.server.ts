@@ -1152,21 +1152,22 @@ export async function runExperimentCycle(
     );
   }
 
+  /**
+   * Per-stage durations, persisted with the worker row. This is how a slow
+   * stage is identified in production instead of guessed at, and why the
+   * mark stage could be proven to be the deadline consumer.
+   */
+  const stageMs: Record<string, number> = {};
+  const timed = async <T>(label: string, work: () => Promise<T>): Promise<T> => {
+    const startedAt = Date.now();
+    try {
+      return await work();
+    } finally {
+      stageMs[label] = Date.now() - startedAt;
+    }
+  };
+
   try {
-    /**
-     * Per-stage durations, persisted with the worker row. This is how a slow
-     * stage is identified in production instead of guessed at, and why the
-     * mark stage could be proven to be the deadline consumer.
-     */
-    const stageMs: Record<string, number> = {};
-    const timed = async <T>(label: string, work: () => Promise<T>): Promise<T> => {
-      const startedAt = Date.now();
-      try {
-        return await work();
-      } finally {
-        stageMs[label] = Date.now() - startedAt;
-      }
-    };
     // Bounded so a hung upstream call fails through the normal error path (which
     // releases the lease) instead of being killed with the lease still claimed.
     const stages = await withDeadline(
