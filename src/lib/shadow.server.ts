@@ -38,6 +38,7 @@ import {
   isEligibleForV2Copy,
   isV2Name,
 } from "./v2-cohort";
+import { isGeneralShadowName } from "./general-shadow";
 
 export const TARGET_WALLET = "0x8fbd7cf5f806f563080864694415829f7229a959";
 export const EXPERIMENT_NAME = "SHADOW";
@@ -81,6 +82,8 @@ const RESEARCH_DEADLINE_MS = 8_000;
 const SETTLEMENT_DEADLINE_MS = 8_000;
 const PREVIEW_DEADLINE_MS = 6_000;
 const COPYABILITY_DEADLINE_MS = 6_000;
+/** General Shadow non-trade activity evidence stage. Bounded and isolated. */
+const GENERAL_ACTIVITY_DEADLINE_MS = 6_000;
 const RECONCILE_DEADLINE_MS = 8_000;
 
 class DeadlineError extends Error {}
@@ -1192,13 +1195,31 @@ export async function runExperimentCycle(
           boundedStage(settleSafely(experiment.id), SETTLEMENT_DEADLINE_MS, "settlement", NO_SETTLEMENTS),
         );
         const previews = await timed("previews", () =>
-          boundedStage(
-            generatePreviewsSafely(experiment.id, wallet),
-            PREVIEW_DEADLINE_MS,
-            "previews",
-            NO_PREVIEWS,
-          ),
+          // General Shadow has no order path at all: the PMUS preview stage is
+          // never reached for those experiments.
+          isGeneralShadowName(experiment.name)
+            ? Promise.resolve(NO_PREVIEWS)
+            : boundedStage(
+                generatePreviewsSafely(experiment.id, wallet),
+                PREVIEW_DEADLINE_MS,
+                "previews",
+                NO_PREVIEWS,
+              ),
         );
+        if (isGeneralShadowName(experiment.name)) {
+          await timed("general_activity", async () => {
+            try {
+              const { ingestGeneralActivity } = await import("./general-shadow.server");
+              await withDeadline(
+                ingestGeneralActivity(wallet),
+                GENERAL_ACTIVITY_DEADLINE_MS,
+                "general activity",
+              );
+            } catch {
+              // Evidence-only stage: a failure never blocks paper accounting.
+            }
+          });
+        }
         const copyability = await timed("copyability", () =>
           boundedStage(observeCopyabilitySafely(experiment), COPYABILITY_DEADLINE_MS, "copyability", {
             scheduled: 0,
