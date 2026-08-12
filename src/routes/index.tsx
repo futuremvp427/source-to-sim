@@ -245,6 +245,7 @@ function Dashboard() {
       <ComparisonSection />
 
       <CapacityComparisonSection />
+      <ObservationLogSection />
 
       <EvidenceSection />
 
