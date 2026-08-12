@@ -23,7 +23,6 @@ export type HealthReport = {
   checks: HealthCheck[];
 };
 
-const STALE_HEARTBEAT_SECONDS = 300;
 const PUBLIC_DATA_API = "https://data-api.polymarket.com/trades?limit=1";
 const HEALTH_HTTP_TIMEOUT_MS = 8_000;
 
