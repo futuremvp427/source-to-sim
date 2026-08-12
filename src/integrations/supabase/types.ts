@@ -1164,6 +1164,7 @@ export type Database = {
           last_success_at: string | null
           lease_expires_at: string | null
           poll_failures: number
+          stage_ms: Json | null
           state: string
           updated_at: string
           worker_id: string | null
@@ -1179,6 +1180,7 @@ export type Database = {
           last_success_at?: string | null
           lease_expires_at?: string | null
           poll_failures?: number
+          stage_ms?: Json | null
           state?: string
           updated_at?: string
           worker_id?: string | null
@@ -1194,6 +1196,7 @@ export type Database = {
           last_success_at?: string | null
           lease_expires_at?: string | null
           poll_failures?: number
+          stage_ms?: Json | null
           state?: string
           updated_at?: string
           worker_id?: string | null
