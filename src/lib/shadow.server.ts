@@ -215,6 +215,8 @@ async function releaseLease(
     events_ingested: number;
     lag_seconds: number | null;
     last_success_at: string;
+    /** Per-stage durations (ms) for the cycle that is releasing the lease. */
+    stage_ms: Record<string, number>;
   }>,
 ): Promise<void> {
   await supabaseAdmin
@@ -862,6 +864,8 @@ export type CycleResult = {
   previews: { created: number; ineligible: number; failed: number; skippedReason: string | null };
   settlements: { settled: number; unresolved: number };
   copyability: { scheduled: number; sampled: number; unavailable: number };
+  /** Stage-duration telemetry (ms) for this cycle. Empty on a skipped cycle. */
+  stageMs?: Record<string, number>;
 };
 
 export type MultiCycleResult = {
