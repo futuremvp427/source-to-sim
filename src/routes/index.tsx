@@ -15,6 +15,7 @@ import {
   V2StatusSection,
 } from "@/components/mirror/comparison-panels";
 import { PmusSection } from "@/components/mirror/pmus-panels";
+import { ObservationLogSection } from "@/components/mirror/observation-panel";
 import { LiveSafetySection } from "@/components/mirror/live-safety-panel";
 import { formatShares, formatTime, formatUsd, isWeatherMarket } from "@/lib/mirror-trader";
 import {
