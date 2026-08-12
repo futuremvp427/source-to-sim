@@ -204,15 +204,6 @@ function median(values: number[]): number | null {
   return Math.round(v * 100) / 100;
 }
 
-async function countRows(
-  table: "source_events" | "paper_trades" | "copyability_observations" | "general_activity",
-  apply: (q: ReturnType<typeof supabaseAdmin.from>) => unknown,
-): Promise<number> {
-  const query = apply(supabaseAdmin.from(table) as never) as { count: number | null };
-  const res = (await (query as unknown as Promise<{ count: number | null }>)) ?? { count: 0 };
-  return res.count ?? 0;
-}
-
 async function loadWallet(experiment: {
   id: string;
   name: string;
