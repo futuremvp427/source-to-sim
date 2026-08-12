@@ -329,8 +329,16 @@ async function fetchSourceWindow(
   return { raw, pagesFetched };
 }
 
-/** Insert new events only. The unique event_key makes replays idempotent. */
-async function persistEvents(events: NormalizedEvent[]): Promise<number> {
+/**
+ * Insert new events only. The unique event_key makes replays idempotent.
+ *
+ * keepRaw=false stores no raw provider payload. Used for the high-frequency
+ * General Shadow wallets: every field we measure or display is already
+ * extracted into typed columns, and the raw blob is ~75% of the row, so
+ * dropping it keeps this cohort from crowding out the Weather observation
+ * window. Weather rows are untouched.
+ */
+async function persistEvents(events: NormalizedEvent[], keepRaw = true): Promise<number> {
   if (events.length === 0) return 0;
   const rows = events.map((e) => ({
     event_key: e.eventKey,
@@ -349,7 +357,7 @@ async function persistEvents(events: NormalizedEvent[]): Promise<number> {
     source_ts: e.sourceTs,
     identity_basis: e.identityBasis,
     identity_degraded: e.identityDegraded,
-    raw: e.raw as never,
+    raw: (keepRaw ? e.raw : null) as never,
   }));
   const { data, error } = await supabaseAdmin
     .from("source_events")
@@ -1073,6 +1081,9 @@ async function observeCopyabilitySafely(
       id: experiment.id,
       starting_cash: Number(experiment.starting_cash),
       cash: Number(experiment.cash),
+      ...(isGeneralShadowName(experiment.name)
+        ? { delays: ["immediate", "30s", "60s"] as const }
+        : {}),
     });
   } catch {
     return { scheduled: 0, sampled: 0, unavailable: 0 };
@@ -1183,7 +1194,9 @@ export async function runExperimentCycle(
           fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES),
         );
         const events = normalizeSourceEvents(window.raw, wallet);
-        const inserted = await timed("persist_events", () => persistEvents(events));
+        const inserted = await timed("persist_events", () =>
+          persistEvents(events, !isGeneralShadowName(experiment.name)),
+        );
         const process = await timed("paper_processing", () => processPendingEvents(experiment, lease));
         const marks = await timed("mark_refresh", () => refreshMarks(experiment.id));
         const reconciliation = await timed("reconciliation", () =>
