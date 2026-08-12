@@ -53,7 +53,12 @@ async function scheduleObservations(experiment: {
   id: string;
   starting_cash: number;
   cash: number;
+  /** General Shadow samples immediate/+30s/+60s only (storage-bounded cohort). */
+  delays?: readonly SampleDelay[];
 }): Promise<number> {
+  const wantedDelays = experiment.delays
+    ? SAMPLE_DELAYS.filter((d) => experiment.delays!.includes(d.delay))
+    : SAMPLE_DELAYS;
   const { data: trades } = await supabaseAdmin
     .from("paper_trades")
     .select("event_key, source_event_id, asset, market_title, side, price, shares, source_ts, created_at")
@@ -83,7 +88,7 @@ async function scheduleObservations(experiment: {
     const shares = Number(r.shares ?? 0);
     const requiredShares = shares > 0 ? shares : price && price > 0 ? notional / price : null;
     const detectedMs = new Date(r.created_at).getTime();
-    for (const { delay, seconds } of SAMPLE_DELAYS) {
+    for (const { delay, seconds } of wantedDelays) {
       inserts.push({
         experiment_id: experiment.id,
         event_key: r.event_key,
@@ -192,6 +197,7 @@ export async function runCopyabilityPass(experiment: {
   id: string;
   starting_cash: number;
   cash: number;
+  delays?: readonly SampleDelay[];
 }): Promise<{ scheduled: number; sampled: number; unavailable: number }> {
   const scheduled = await scheduleObservations(experiment);
   const taken = await takeDueSamples(experiment.id);
