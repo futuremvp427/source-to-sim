@@ -66,7 +66,7 @@ export function LiveSafetySection() {
       {isPending ? (
         <RowSkeleton rows={4} />
       ) : isError || !data ? (
-        <EmptyState label="Administrator sign-in required to view the live safety layer." />
+        <EmptyState message="Administrator sign-in required to view the live safety layer." />
       ) : (
         <div className="space-y-4 text-sm">
           <div className="flex flex-wrap items-center gap-2">
