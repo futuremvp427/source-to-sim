@@ -73,6 +73,11 @@ const CYCLE_BUDGET_MS = 40_000;
 const EXPERIMENT_CONCURRENCY = 4;
 const EXPERIMENT_DEADLINE_MS = 25_000;
 const RESEARCH_DEADLINE_MS = 8_000;
+/** Auxiliary (non-accounting) stage budgets, so one slow stage cannot eat a cycle. */
+const SETTLEMENT_DEADLINE_MS = 8_000;
+const PREVIEW_DEADLINE_MS = 6_000;
+const COPYABILITY_DEADLINE_MS = 6_000;
+const RECONCILE_DEADLINE_MS = 8_000;
 
 class DeadlineError extends Error {}
 
@@ -87,6 +92,19 @@ async function withDeadline<T>(work: Promise<T>, ms: number, label: string): Pro
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Bounded auxiliary stage. On timeout the cycle continues with the neutral
+ * fallback so ingestion, paper accounting and marking always complete; the
+ * stage's own writes remain idempotent and fenced.
+ */
+async function boundedStage<T>(work: Promise<T>, ms: number, label: string, fallback: T): Promise<T> {
+  try {
+    return await withDeadline(work, ms, label);
+  } catch {
+    return fallback;
   }
 }
 
