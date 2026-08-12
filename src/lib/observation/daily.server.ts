@@ -88,34 +88,51 @@ async function loadSettlements(experimentId: string): Promise<SettlementRow[]> {
   return rows;
 }
 
+/**
+ * Copyability aggregates without a full-table read: counts come from indexed
+ * head queries and the median entry slippage is taken from the most recent
+ * SLIPPAGE_SAMPLE observations, which keeps this panel cheap even after tens of
+ * thousands of samples accumulate.
+ */
+const SLIPPAGE_SAMPLE = 2000;
+
 async function loadSlippageCents(experimentId: string): Promise<{
   medianCents: number | null;
   fillabilityPct: number | null;
   completenessPct: number | null;
 }> {
-  const { rows } = await fetchAllRows<{
-    status: string;
-    fillable: boolean | null;
-    slippage_cents: number | string | null;
-  }>(async (from, to) => {
-    const { data } = await supabaseAdmin
+  const base = () =>
+    supabaseAdmin
       .from("copyability_observations")
-      .select("status, fillable, slippage_cents")
-      .eq("experiment_id", experimentId)
-      .range(from, to);
-    return data ?? [];
-  });
+      .select("*", { count: "exact", head: true })
+      .eq("experiment_id", experimentId);
 
-  if (rows.length === 0) return { medianCents: null, fillabilityPct: null, completenessPct: null };
-  const observed = rows.filter((r) => r.status === "observed");
-  const cents = observed
-    .map((r) => (r.slippage_cents === null ? null : Number(r.slippage_cents)))
-    .filter((v): v is number => v !== null && Number.isFinite(v));
-  const fillableCount = observed.filter((r) => r.fillable === true).length;
+  const [total, observedCount, fillableCount, sample] = await Promise.all([
+    base(),
+    base().eq("status", "observed"),
+    base().eq("status", "observed").eq("fillable", true),
+    supabaseAdmin
+      .from("copyability_observations")
+      .select("slippage_cents")
+      .eq("experiment_id", experimentId)
+      .eq("status", "observed")
+      .not("slippage_cents", "is", null)
+      .order("observed_at", { ascending: false })
+      .limit(SLIPPAGE_SAMPLE),
+  ]);
+
+  const totalRows = total.count ?? 0;
+  const observed = observedCount.count ?? 0;
+  if (totalRows === 0) return { medianCents: null, fillabilityPct: null, completenessPct: null };
+
+  const cents = (sample.data ?? [])
+    .map((r) => Number(r.slippage_cents))
+    .filter((v) => Number.isFinite(v));
+
   return {
     medianCents: median(cents),
-    fillabilityPct: observed.length === 0 ? null : (fillableCount / observed.length) * 100,
-    completenessPct: (observed.length / rows.length) * 100,
+    fillabilityPct: observed === 0 ? null : ((fillableCount.count ?? 0) / observed) * 100,
+    completenessPct: (observed / totalRows) * 100,
   };
 }
 
