@@ -18,7 +18,14 @@ export type BookSnapshot = {
   ask: number | null;
   bidDepth: number | null;
   askDepth: number | null;
+  /**
+   * When WE observed this book. Freshness of a mark is the age of our
+   * observation, not the age of the book's last change: a quiet market whose
+   * top of book has not moved for an hour still has a current, tradable price.
+   */
   ts: number;
+  /** The venue's own last-update timestamp, kept for diagnostics only. */
+  bookTs: number | null;
 };
 
 type Level = { price?: string; size?: string };
@@ -76,13 +83,14 @@ export async function fetchBooksBatched(assets: string[]): Promise<Map<string, B
       if (!asset) continue;
       const bid = best(book.bids, "max");
       const ask = best(book.asks, "min");
-      const ts = Number(book.timestamp);
+      const venueTs = Number(book.timestamp);
       out.set(asset, {
         bid: bid.price,
         ask: ask.price,
         bidDepth: bid.size,
         askDepth: ask.size,
-        ts: Number.isFinite(ts) && ts > 0 ? ts : Date.now(),
+        ts: Date.now(),
+        bookTs: Number.isFinite(venueTs) && venueTs > 0 ? venueTs : null,
       });
     }
   }
