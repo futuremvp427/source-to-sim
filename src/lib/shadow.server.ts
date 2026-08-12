@@ -44,7 +44,6 @@ export const EXPERIMENT_NAME = "SHADOW";
 export const WORKER_ID = "ingest";
 
 const DATA_API = "https://data-api.polymarket.com";
-const CLOB_API = "https://clob.polymarket.com";
 const PAGE_SIZE = 250;
 const LIVE_PAGES = 2; // bounded incremental window per poll
 const BOOTSTRAP_PAGES = 4;
