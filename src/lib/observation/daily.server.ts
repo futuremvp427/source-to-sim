@@ -10,12 +10,12 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
-import { fetchAllRows } from "./../db-pagination";
-import { median } from "./../copyability/core";
-import { MARK_MAX_AGE_MS } from "./../shadow-core";
-import { V2_PREFIX, isV2Name } from "./../v2-cohort";
-import { V3_PREFIX, isV3Name } from "./../v3-cohort";
-import { classifyWorker, type WorkerRow } from "./../worker-health";
+import { fetchAllRows } from "../db-pagination";
+import { median } from "../copyability/core";
+import { MARK_MAX_AGE_MS } from "../shadow-core";
+import { V2_PREFIX, isV2Name } from "../v2-cohort";
+import { V3_PREFIX, isV3Name } from "../v3-cohort";
+import { classifyWorker, type WorkerRow } from "../worker-health";
 import { buildMilestones, estimateSlippageAdjustedPnl, type Milestone } from "./milestones";
 
 export type ObservationDay = {
@@ -182,7 +182,6 @@ async function buildSeries(experiment: {
       bucket.adjusted += adjusted;
       bucket.adjustable += 1;
     }
-    bucket.settlements > 0 && (realizedTotal += 0);
     byDay.set(key, bucket);
   }
 
