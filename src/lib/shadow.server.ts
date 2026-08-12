@@ -1168,10 +1168,28 @@ export async function runExperimentCycle(
         const inserted = await persistEvents(events);
         const process = await processPendingEvents(experiment, lease);
         const marks = await refreshMarks(experiment.id);
-        const reconciliation = inserted > 0 || !bootstrapped ? await reconcile(wallet) : null;
-        const settlements = await settleSafely(experiment.id);
-        const previews = await generatePreviewsSafely(experiment.id, wallet);
-        const copyability = await observeCopyabilitySafely(experiment);
+        const reconciliation =
+          inserted > 0 || !bootstrapped
+            ? await boundedStage(reconcile(wallet), RECONCILE_DEADLINE_MS, "reconciliation", null)
+            : null;
+        const settlements = await boundedStage(
+          settleSafely(experiment.id),
+          SETTLEMENT_DEADLINE_MS,
+          "settlement",
+          NO_SETTLEMENTS,
+        );
+        const previews = await boundedStage(
+          generatePreviewsSafely(experiment.id, wallet),
+          PREVIEW_DEADLINE_MS,
+          "previews",
+          NO_PREVIEWS,
+        );
+        const copyability = await boundedStage(
+          observeCopyabilitySafely(experiment),
+          COPYABILITY_DEADLINE_MS,
+          "copyability",
+          { scheduled: 0, sampled: 0, unavailable: 0 },
+        );
         await raiseCashAlerts(experiment);
         return { window, events, inserted, process, marks, reconciliation, settlements, previews, copyability };
       })(),
