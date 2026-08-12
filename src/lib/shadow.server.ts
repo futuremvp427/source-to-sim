@@ -69,6 +69,8 @@ const PROCESS_BATCH = 300;
  * its lease through the normal error path.
  */
 const CYCLE_BUDGET_MS = 40_000;
+/** Independent-lease experiments processed concurrently per batch. */
+const EXPERIMENT_CONCURRENCY = 4;
 const EXPERIMENT_DEADLINE_MS = 25_000;
 const RESEARCH_DEADLINE_MS = 8_000;
 
