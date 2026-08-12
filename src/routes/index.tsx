@@ -15,6 +15,7 @@ import {
   V2StatusSection,
 } from "@/components/mirror/comparison-panels";
 import { PmusSection } from "@/components/mirror/pmus-panels";
+import { LiveSafetySection } from "@/components/mirror/live-safety-panel";
 import { formatShares, formatTime, formatUsd, isWeatherMarket } from "@/lib/mirror-trader";
 import {
   acknowledgeAlerts,
@@ -248,6 +249,8 @@ function Dashboard() {
       <EvidenceSection />
 
       <SelfCheckSection />
+
+      <LiveSafetySection />
 
       <PmusSection />
 

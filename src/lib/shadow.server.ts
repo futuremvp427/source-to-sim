@@ -51,8 +51,8 @@ export const LEASE_SECONDS_FOR_TEST = LEASE_SECONDS;
  * Books are fetched in small concurrent batches to keep the pass well inside
  * one scheduler cycle without hammering the public CLOB.
  */
-const MAX_MARK_REFRESH = 400;
-const MARK_FETCH_CONCURRENCY = 8;
+const MAX_MARK_REFRESH = 800;
+const MARK_FETCH_CONCURRENCY = 16;
 const PROCESS_BATCH = 300;
 
 type Json = Record<string, unknown>;

@@ -503,16 +503,17 @@ export function applySell(
 
 /** A mark older than this is not trusted; open P&L becomes Unavailable (null). */
 /**
- * Freshness requirement for a trustworthy mark.
+ * Freshness requirement for a trustworthy mark: 120 seconds.
  *
  * A mark older than this is discarded (never reused, never replaced by the
- * entry price or zero), so equity reads Unavailable instead of guessing. The
- * window is 10 minutes because a full mark refresh pass over every open
- * position must be able to complete within it on the one-minute scheduler;
- * a 2-minute window made complete coverage — and therefore equity — reachable
- * only by luck.
+ * entry price, zero, or a guess), so equity reads Unavailable instead of
+ * pretending. 120s is supported by measured production runtime: a concurrent
+ * book refresh returns ~32 books in ~350ms, so the largest open book of 200
+ * positions completes in ~2-3s — two orders of magnitude inside the window.
+ * The limiting factor is scheduler cadence per experiment, not the refresh
+ * itself, so the honest response to a missed pass is Unavailable equity.
  */
-export const MARK_MAX_AGE_MS = 600_000;
+export const MARK_MAX_AGE_MS = 120_000;
 
 export type MarkInput = {
   bestBid: number | null;
