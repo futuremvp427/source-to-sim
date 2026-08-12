@@ -3,7 +3,8 @@ import { useServerFn } from "@tanstack/react-start";
 
 import { EmptyState, Panel, RowSkeleton } from "@/components/mirror/panels";
 import { formatUsd } from "@/lib/mirror-trader";
-import type { MilestoneStatus, ObservationSeries } from "@/lib/observation/daily.server";
+import type { ObservationSeries } from "@/lib/observation/daily.server";
+import type { MilestoneStatus } from "@/lib/observation/milestones";
 import { getObservationLog } from "@/lib/ops.functions";
 
 function usd(v: number | null): string {
