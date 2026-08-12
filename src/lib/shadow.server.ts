@@ -58,7 +58,8 @@ export const LEASE_SECONDS_FOR_TEST = LEASE_SECONDS;
  * one scheduler cycle without hammering the public CLOB.
  */
 const MAX_MARK_REFRESH = 800;
-const MARK_FETCH_CONCURRENCY = 16;
+/** Books arrive in one batched request; only the DB writes are fanned out. */
+const MARK_WRITE_CONCURRENCY = 25;
 const PROCESS_BATCH = 300;
 /**
  * A scheduled invocation is a single HTTP request with a finite platform budget.
@@ -689,26 +690,11 @@ async function processPendingEvents(
 /* Marks from the public CLOB                                          */
 /* ------------------------------------------------------------------ */
 
-type BookLevel = { price: string; size: string };
-
-async function fetchBook(
-  asset: string,
-): Promise<{ bid: number | null; ask: number | null; ts: number | null }> {
-  const json = (await getJson(`${CLOB_API}/book?token_id=${asset}`)) as {
-    bids?: BookLevel[];
-    asks?: BookLevel[];
-    timestamp?: string;
-  };
-  const bids = (json.bids ?? []).map((l) => Number(l.price)).filter((n) => Number.isFinite(n) && n > 0);
-  const asks = (json.asks ?? []).map((l) => Number(l.price)).filter((n) => Number.isFinite(n) && n > 0);
-  const ts = Number(json.timestamp);
-  return {
-    bid: bids.length ? Math.max(...bids) : null,
-    ask: asks.length ? Math.min(...asks) : null,
-    ts: Number.isFinite(ts) && ts > 0 ? ts : Date.now(),
-  };
-}
-
+/**
+ * Marks come from ONE batched public POST /books call per 100 open positions.
+ * Per-asset fetching could not cover a 200-position book inside a cycle, which
+ * was the direct cause of both cycle-deadline failures and low mark coverage.
+ */
 export async function refreshMarks(experimentId: string): Promise<{ updated: number; failed: number }> {
   const { data: open } = await supabaseAdmin
     .from("paper_positions")
@@ -721,45 +707,50 @@ export async function refreshMarks(experimentId: string): Promise<{ updated: num
   let updated = 0;
   let failed = 0;
   const rows = open ?? [];
+  if (rows.length === 0) return { updated, failed };
 
-  const markOne = async (row: { asset: string }) => {
-    try {
-      const book = await fetchBook(row.asset);
-      const resolved = resolveMark({
-        bestBid: book.bid,
-        bestAsk: book.ask,
-        midpoint: null,
-        markTs: book.ts,
-        nowMs: Date.now(),
-      });
-      await supabaseAdmin
-        .from("paper_positions")
-        .update({
-          best_bid: book.bid,
-          best_ask: book.ask,
-          midpoint: resolved.mark,
-          mark: resolved.mark,
-          mark_source: resolved.source,
-          mark_ts: resolved.mark === null ? null : new Date(book.ts ?? Date.now()).toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("experiment_id", experimentId)
-        .eq("asset", row.asset);
-      if (resolved.mark === null) failed += 1;
-      else updated += 1;
-    } catch {
+  const { fetchBooksBatched } = await import("./clob-books.server");
+  const books = await fetchBooksBatched(rows.map((r) => r.asset));
+
+  const writeOne = async (asset: string) => {
+    const book = books.get(asset) ?? null;
+    if (book === null) {
       failed += 1;
-      // Stale marks are cleared rather than reused, so open P&L reads Unavailable.
+      // No public book in this pass: clear rather than reuse a stale price, so
+      // open P&L reads Unavailable instead of a fabricated mark.
       await supabaseAdmin
         .from("paper_positions")
         .update({ mark: null, mark_source: null, mark_ts: null, updated_at: new Date().toISOString() })
         .eq("experiment_id", experimentId)
-        .eq("asset", row.asset);
+        .eq("asset", asset);
+      return;
     }
+    const resolved = resolveMark({
+      bestBid: book.bid,
+      bestAsk: book.ask,
+      midpoint: null,
+      markTs: book.ts,
+      nowMs: Date.now(),
+    });
+    await supabaseAdmin
+      .from("paper_positions")
+      .update({
+        best_bid: book.bid,
+        best_ask: book.ask,
+        midpoint: resolved.mark,
+        mark: resolved.mark,
+        mark_source: resolved.source,
+        mark_ts: resolved.mark === null ? null : new Date(book.ts).toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("experiment_id", experimentId)
+      .eq("asset", asset);
+    if (resolved.mark === null) failed += 1;
+    else updated += 1;
   };
 
-  for (let i = 0; i < rows.length; i += MARK_FETCH_CONCURRENCY) {
-    await Promise.all(rows.slice(i, i + MARK_FETCH_CONCURRENCY).map(markOne));
+  for (let i = 0; i < rows.length; i += MARK_WRITE_CONCURRENCY) {
+    await Promise.all(rows.slice(i, i + MARK_WRITE_CONCURRENCY).map((r) => writeOne(r.asset)));
   }
   return { updated, failed };
 }
