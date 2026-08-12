@@ -3,6 +3,7 @@ import { createServerFn } from "@tanstack/react-start";
 import type { ComparisonData } from "./comparison.server";
 import type { HealthReport } from "./health.server";
 import type { CapacityComparisonData } from "./capacity.server";
+import type { ObservationLogData } from "./observation/daily.server";
 
 /** Fair-comparison read model for every enabled shadow experiment. Read-only. */
 export const getComparison = createServerFn({ method: "GET" }).handler(
@@ -31,5 +32,13 @@ export const getCapacityComparison = createServerFn({ method: "GET" }).handler(
   async (): Promise<CapacityComparisonData> => {
     const { loadCapacityComparison } = await import("./capacity.server");
     return loadCapacityComparison();
+  },
+);
+
+/** Out-of-sample daily observation log + research milestones. Read-only, fully derived. */
+export const getObservationLog = createServerFn({ method: "GET" }).handler(
+  async (): Promise<ObservationLogData> => {
+    const { loadObservationLog } = await import("./observation/daily.server");
+    return loadObservationLog();
   },
 );
