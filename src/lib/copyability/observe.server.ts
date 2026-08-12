@@ -21,7 +21,6 @@ import {
   type Side,
 } from "./core";
 
-const CLOB_API = "https://clob.polymarket.com";
 /** A sample taken more than this late is not the requested delay — stored as unavailable. */
 export const SAMPLE_TOLERANCE_SECONDS = 150;
 const SCHEDULE_BATCH = 40;
