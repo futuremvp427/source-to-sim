@@ -1074,7 +1074,7 @@ async function raiseCashAlerts(experiment: Experiment): Promise<void> {
 async function refreshCandidateResearchSafely(): Promise<{ ran: boolean; detail: string | null }> {
   try {
     const { refreshCandidateResearchIfDue } = await import("./candidates/research.server");
-    return await refreshCandidateResearchIfDue();
+    return await withDeadline(refreshCandidateResearchIfDue(), RESEARCH_DEADLINE_MS, "candidate research");
   } catch (err) {
     return { ran: false, detail: err instanceof Error ? err.message : "research refresh skipped" };
   }
