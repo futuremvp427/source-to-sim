@@ -938,25 +938,36 @@ export async function runIngestCycle(workerId: string): Promise<MultiCycleResult
   const ordered = await orderExperimentsForCycle(experiments);
   const cycles: CycleResult[] = [];
   let deferred = 0;
-  for (const experiment of ordered) {
+  // Experiments hold independent leases, checkpoints and books, so a small
+  // concurrent batch cannot overlap execution for the same experiment. Batching
+  // lets every enabled experiment finish inside one scheduler cycle, which is
+  // what keeps marks inside the freshness window.
+  for (const batch of chunked(ordered, EXPERIMENT_CONCURRENCY)) {
     if (Date.now() - startedMs > CYCLE_BUDGET_MS) {
       // Out of budget: leave the remaining experiments untouched. They are served
       // first on the next cycle because ordering is least-recently-completed-first.
-      deferred += 1;
-      cycles.push({
-        ...emptyCycle(ranAt, experiment),
-        skipped: "Deferred to the next scheduled cycle (cycle time budget reached).",
-      });
+      for (const experiment of batch) {
+        deferred += 1;
+        cycles.push({
+          ...emptyCycle(ranAt, experiment),
+          skipped: "Deferred to the next scheduled cycle (cycle time budget reached).",
+        });
+      }
       continue;
     }
-    try {
-      cycles.push(await runExperimentCycle(experiment, workerId));
-    } catch (err) {
+    const settled = await Promise.allSettled(
+      batch.map((experiment) => runExperimentCycle(experiment, workerId)),
+    );
+    settled.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        cycles.push(result.value);
+        return;
+      }
       cycles.push({
-        ...emptyCycle(ranAt, experiment),
-        skipped: err instanceof Error ? err.message : "cycle failed",
+        ...emptyCycle(ranAt, batch[index]!),
+        skipped: result.reason instanceof Error ? result.reason.message : "cycle failed",
       });
-    }
+    });
   }
   return {
     ranAt,
