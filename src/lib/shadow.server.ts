@@ -68,10 +68,14 @@ const PROCESS_BATCH = 300;
  * spent, and bound each individual cycle so a hung upstream call still releases
  * its lease through the normal error path.
  */
-const CYCLE_BUDGET_MS = 40_000;
-/** Independent-lease experiments processed concurrently per batch. */
-const EXPERIMENT_CONCURRENCY = 4;
-const EXPERIMENT_DEADLINE_MS = 25_000;
+const CYCLE_BUDGET_MS = 50_000;
+/**
+ * Independent-lease experiments processed concurrently per batch. Kept small:
+ * each experiment already fans out its own mark fetches, so too much total
+ * concurrency makes the public CLOB rate-limit and marks fail.
+ */
+const EXPERIMENT_CONCURRENCY = 2;
+const EXPERIMENT_DEADLINE_MS = 40_000;
 const RESEARCH_DEADLINE_MS = 8_000;
 /** Auxiliary (non-accounting) stage budgets, so one slow stage cannot eat a cycle. */
 const SETTLEMENT_DEADLINE_MS = 8_000;
