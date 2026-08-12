@@ -1067,16 +1067,27 @@ export async function runExperimentCycle(
   }
 
   try {
-    const window = await fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES);
-    const events = normalizeSourceEvents(window.raw, wallet);
-    const inserted = await persistEvents(events);
-    const process = await processPendingEvents(experiment, lease);
-    const marks = await refreshMarks(experiment.id);
-    const reconciliation = inserted > 0 || !bootstrapped ? await reconcile(wallet) : null;
-    const settlements = await settleSafely(experiment.id);
-    const previews = await generatePreviewsSafely(experiment.id, wallet);
-    const copyability = await observeCopyabilitySafely(experiment);
-    await raiseCashAlerts(experiment);
+    // Bounded so a hung upstream call fails through the normal error path (which
+    // releases the lease) instead of being killed with the lease still claimed.
+    const stages = await withDeadline(
+      (async () => {
+        const window = await fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES);
+        const events = normalizeSourceEvents(window.raw, wallet);
+        const inserted = await persistEvents(events);
+        const process = await processPendingEvents(experiment, lease);
+        const marks = await refreshMarks(experiment.id);
+        const reconciliation = inserted > 0 || !bootstrapped ? await reconcile(wallet) : null;
+        const settlements = await settleSafely(experiment.id);
+        const previews = await generatePreviewsSafely(experiment.id, wallet);
+        const copyability = await observeCopyabilitySafely(experiment);
+        await raiseCashAlerts(experiment);
+        return { window, events, inserted, process, marks, reconciliation, settlements, previews, copyability };
+      })(),
+      EXPERIMENT_DEADLINE_MS,
+      `${experiment.name} ingest cycle`,
+    );
+    const { window, events, inserted, process, marks, reconciliation, settlements, previews, copyability } =
+      stages;
 
     const newest = events.length ? Math.max(...events.map((e) => e.sourceTs)) : 0;
     const lagSeconds = newest > 0 ? Math.max(0, Math.round(Date.now() / 1000 - newest)) : null;
