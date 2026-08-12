@@ -429,6 +429,51 @@ export type Database = {
         }
         Relationships: []
       }
+      live_safety_state: {
+        Row: {
+          activated_at: string | null
+          activated_by: string | null
+          activation_stage: string
+          armed_at: string | null
+          armed_by: string | null
+          id: string
+          kill_switch_engaged: boolean
+          last_action: string | null
+          last_action_at: string | null
+          max_live_exposure_usd: number
+          max_live_notional_usd: number
+          updated_at: string
+        }
+        Insert: {
+          activated_at?: string | null
+          activated_by?: string | null
+          activation_stage?: string
+          armed_at?: string | null
+          armed_by?: string | null
+          id?: string
+          kill_switch_engaged?: boolean
+          last_action?: string | null
+          last_action_at?: string | null
+          max_live_exposure_usd?: number
+          max_live_notional_usd?: number
+          updated_at?: string
+        }
+        Update: {
+          activated_at?: string | null
+          activated_by?: string | null
+          activation_stage?: string
+          armed_at?: string | null
+          armed_by?: string | null
+          id?: string
+          kill_switch_engaged?: boolean
+          last_action?: string | null
+          last_action_at?: string | null
+          max_live_exposure_usd?: number
+          max_live_notional_usd?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
       order_previews: {
         Row: {
           asset: string
