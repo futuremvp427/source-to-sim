@@ -8,6 +8,12 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 import { fetchAllRows } from "./db-pagination";
 import {
+  classifyWorker,
+  findAbandonedWorkers,
+  orderByStaleness,
+  type WorkerRow,
+} from "./worker-health";
+import {
   EMPTY_POSITION,
   MARK_MAX_AGE_MS,
   applyBuy,
@@ -54,6 +60,33 @@ export const LEASE_SECONDS_FOR_TEST = LEASE_SECONDS;
 const MAX_MARK_REFRESH = 800;
 const MARK_FETCH_CONCURRENCY = 16;
 const PROCESS_BATCH = 300;
+/**
+ * A scheduled invocation is a single HTTP request with a finite platform budget.
+ * Without an explicit budget the request is killed mid-experiment, which leaves
+ * that experiment's worker row stuck at state='running' with last_poll_at
+ * frozen. We therefore stop starting new experiment cycles once the budget is
+ * spent, and bound each individual cycle so a hung upstream call still releases
+ * its lease through the normal error path.
+ */
+const CYCLE_BUDGET_MS = 40_000;
+const EXPERIMENT_DEADLINE_MS = 25_000;
+const RESEARCH_DEADLINE_MS = 8_000;
+
+class DeadlineError extends Error {}
+
+async function withDeadline<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new DeadlineError(`${label} exceeded ${ms}ms deadline`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 type Json = Record<string, unknown>;
 
