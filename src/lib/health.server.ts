@@ -123,7 +123,71 @@ export async function runSelfCheck(): Promise<HealthReport> {
         : failing.map((s) => `${s.id}: ${s.poll_failures} failure(s)`).join(", "),
   });
 
-  // 6. Public Polymarket data API
+  // 6. Source ingestion freshness
+  const { data: newestEvent } = await supabaseAdmin
+    .from("source_events")
+    .select("first_seen_at")
+    .order("first_seen_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const sourceAge = ageSeconds(newestEvent?.first_seen_at ?? null);
+  checks.push({
+    id: "source_freshness",
+    label: "Source ingestion freshness",
+    status: sourceAge === null ? "FAIL" : sourceAge > 86_400 ? "FAIL" : sourceAge > 21_600 ? "WARN" : "PASS",
+    detail:
+      sourceAge === null
+        ? "No source fills persisted"
+        : `Newest persisted source fill ${Math.round(sourceAge / 60)} min old`,
+  });
+
+  // 7. Settlement health — unacknowledged settlement warnings/errors
+  const { data: settlementAlerts } = await supabaseAdmin
+    .from("alerts")
+    .select("level, kind, created_at")
+    .eq("acknowledged", false)
+    .gte("created_at", new Date(Date.now() - 6 * 3600_000).toISOString());
+  const settlementIssues = (settlementAlerts ?? []).filter(
+    (a) => a.kind.includes("settle") || a.kind.includes("resolution"),
+  );
+  checks.push({
+    id: "settlement",
+    label: "Settlement",
+    status: settlementIssues.some((a) => a.level === "error")
+      ? "FAIL"
+      : settlementIssues.length > 0
+        ? "WARN"
+        : "PASS",
+    detail:
+      settlementIssues.length === 0
+        ? "No unresolved settlement warnings in the last 6h"
+        : `${settlementIssues.length} open settlement alert(s)`,
+  });
+
+  // 8. Mark freshness required for risk/equity calculations
+  const { data: openPositions } = await supabaseAdmin
+    .from("paper_positions")
+    .select("shares, mark, mark_ts")
+    .gt("shares", 0);
+  const open = openPositions ?? [];
+  const fresh = open.filter(
+    (p) =>
+      p.mark !== null &&
+      p.mark_ts !== null &&
+      Date.now() - new Date(p.mark_ts).getTime() <= MARK_MAX_AGE_MS,
+  ).length;
+  const coverage = open.length === 0 ? 100 : Math.round((fresh / open.length) * 1000) / 10;
+  checks.push({
+    id: "marks",
+    label: "Mark freshness (risk/equity)",
+    status: open.length === 0 ? "PASS" : coverage >= 99.9 ? "PASS" : coverage > 0 ? "WARN" : "FAIL",
+    detail:
+      open.length === 0
+        ? "No open paper positions to mark"
+        : `${fresh}/${open.length} open positions marked within ${Math.round(MARK_MAX_AGE_MS / 1000)}s (${coverage}%)`,
+  });
+
+  // 9. Public Polymarket data API
   let publicStatus: CheckStatus = "PASS";
   let publicDetail = "Public trades API reachable";
   try {
