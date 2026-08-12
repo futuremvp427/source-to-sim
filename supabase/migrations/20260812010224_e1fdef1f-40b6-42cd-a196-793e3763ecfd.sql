@@ -1,0 +1,1 @@
+ALTER TABLE public.worker_status ADD COLUMN IF NOT EXISTS stage_ms jsonb;

@@ -21,35 +21,17 @@ import {
   type Side,
 } from "./core";
 
-const CLOB_API = "https://clob.polymarket.com";
 /** A sample taken more than this late is not the requested delay — stored as unavailable. */
 export const SAMPLE_TOLERANCE_SECONDS = 150;
 const SCHEDULE_BATCH = 40;
-const SAMPLE_BATCH = 25;
-
-type BookLevel = { price: string; size: string };
-
-async function fetchBookSample(
-  asset: string,
-): Promise<{ bestBid: number | null; bestAsk: number | null; bidDepth: number | null; askDepth: number | null }> {
-  const res = await fetch(`${CLOB_API}/book?token_id=${asset}`, {
-    headers: { accept: "application/json" },
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!res.ok) throw new Error(`book responded ${res.status}`);
-  const json = (await res.json()) as { bids?: BookLevel[]; asks?: BookLevel[] };
-  const level = (levels: BookLevel[] | undefined, pick: "max" | "min") => {
-    const parsed = (levels ?? [])
-      .map((l) => ({ price: Number(l.price), size: Number(l.size) }))
-      .filter((l) => Number.isFinite(l.price) && l.price > 0 && Number.isFinite(l.size));
-    if (parsed.length === 0) return { price: null as number | null, size: null as number | null };
-    const best = parsed.reduce((a, b) => (pick === "max" ? (b.price > a.price ? b : a) : b.price < a.price ? b : a));
-    return { price: best.price, size: best.size };
-  };
-  const bid = level(json.bids, "max");
-  const ask = level(json.asks, "min");
-  return { bestBid: bid.price, bestAsk: ask.price, bidDepth: bid.size, askDepth: ask.size };
-}
+/**
+ * Sampling throughput, not the standard, was the limit on completeness: at 25
+ * sequential single-book fetches per cycle the due queue grew faster than it
+ * drained, so nearly every sample aged past SAMPLE_TOLERANCE_SECONDS and was
+ * (correctly) recorded as unavailable. Books are now read in one batched public
+ * request, so a whole due batch costs a single round trip.
+ */
+const SAMPLE_BATCH = 200;
 
 type ScheduleSource = {
   event_key: string;
@@ -142,7 +124,13 @@ async function takeDueSamples(experimentId: string): Promise<{ sampled: number; 
   const rows = due ?? [];
   if (rows.length === 0) return { sampled: 0, unavailable: 0 };
 
-  const books = new Map<string, Awaited<ReturnType<typeof fetchBookSample>> | null>();
+  const inTolerance = rows.filter(
+    (r) => (nowMs - new Date(r.scheduled_at as string).getTime()) / 1000 <= SAMPLE_TOLERANCE_SECONDS,
+  );
+  const { fetchBooksBatched } = await import("../clob-books.server");
+  const books = inTolerance.length
+    ? await fetchBooksBatched(inTolerance.map((r) => r.asset as string))
+    : new Map();
   let sampled = 0;
   let unavailable = 0;
 
@@ -156,14 +144,7 @@ async function takeDueSamples(experimentId: string): Promise<{ sampled: number; 
       unavailable += 1;
       continue;
     }
-    if (!books.has(row.asset)) {
-      try {
-        books.set(row.asset, await fetchBookSample(row.asset));
-      } catch {
-        books.set(row.asset, null);
-      }
-    }
-    const book = books.get(row.asset) ?? null;
+    const book = books.get(row.asset as string) ?? null;
     if (book === null) {
       await supabaseAdmin
         .from("copyability_observations")
@@ -178,8 +159,8 @@ async function takeDueSamples(experimentId: string): Promise<{ sampled: number; 
       leaderPrice: row.leader_price === null ? null : Number(row.leader_price),
       requiredShares: row.required_shares === null ? null : Number(row.required_shares),
       sample: {
-        bestBid: book.bestBid,
-        bestAsk: book.bestAsk,
+        bestBid: book.bid,
+        bestAsk: book.ask,
         midpoint: null,
         visibleDepth: side === "BUY" ? book.askDepth : book.bidDepth,
       },
@@ -189,8 +170,8 @@ async function takeDueSamples(experimentId: string): Promise<{ sampled: number; 
       .update({
         status: "observed",
         observed_at: new Date().toISOString(),
-        best_bid: book.bestBid,
-        best_ask: book.bestAsk,
+        best_bid: book.bid,
+        best_ask: book.ask,
         midpoint: math.midpoint,
         spread: math.spread,
         follower_price: math.followerPrice,

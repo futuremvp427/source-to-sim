@@ -44,7 +44,6 @@ export const EXPERIMENT_NAME = "SHADOW";
 export const WORKER_ID = "ingest";
 
 const DATA_API = "https://data-api.polymarket.com";
-const CLOB_API = "https://clob.polymarket.com";
 const PAGE_SIZE = 250;
 const LIVE_PAGES = 2; // bounded incremental window per poll
 const BOOTSTRAP_PAGES = 4;
@@ -58,7 +57,8 @@ export const LEASE_SECONDS_FOR_TEST = LEASE_SECONDS;
  * one scheduler cycle without hammering the public CLOB.
  */
 const MAX_MARK_REFRESH = 800;
-const MARK_FETCH_CONCURRENCY = 16;
+/** Books arrive in one batched request; only the DB writes are fanned out. */
+const MARK_WRITE_CONCURRENCY = 25;
 const PROCESS_BATCH = 300;
 /**
  * A scheduled invocation is a single HTTP request with a finite platform budget.
@@ -215,6 +215,8 @@ async function releaseLease(
     events_ingested: number;
     lag_seconds: number | null;
     last_success_at: string;
+    /** Per-stage durations (ms) for the cycle that is releasing the lease. */
+    stage_ms: Record<string, number>;
   }>,
 ): Promise<void> {
   await supabaseAdmin
@@ -689,26 +691,11 @@ async function processPendingEvents(
 /* Marks from the public CLOB                                          */
 /* ------------------------------------------------------------------ */
 
-type BookLevel = { price: string; size: string };
-
-async function fetchBook(
-  asset: string,
-): Promise<{ bid: number | null; ask: number | null; ts: number | null }> {
-  const json = (await getJson(`${CLOB_API}/book?token_id=${asset}`)) as {
-    bids?: BookLevel[];
-    asks?: BookLevel[];
-    timestamp?: string;
-  };
-  const bids = (json.bids ?? []).map((l) => Number(l.price)).filter((n) => Number.isFinite(n) && n > 0);
-  const asks = (json.asks ?? []).map((l) => Number(l.price)).filter((n) => Number.isFinite(n) && n > 0);
-  const ts = Number(json.timestamp);
-  return {
-    bid: bids.length ? Math.max(...bids) : null,
-    ask: asks.length ? Math.min(...asks) : null,
-    ts: Number.isFinite(ts) && ts > 0 ? ts : Date.now(),
-  };
-}
-
+/**
+ * Marks come from ONE batched public POST /books call per 100 open positions.
+ * Per-asset fetching could not cover a 200-position book inside a cycle, which
+ * was the direct cause of both cycle-deadline failures and low mark coverage.
+ */
 export async function refreshMarks(experimentId: string): Promise<{ updated: number; failed: number }> {
   const { data: open } = await supabaseAdmin
     .from("paper_positions")
@@ -721,45 +708,50 @@ export async function refreshMarks(experimentId: string): Promise<{ updated: num
   let updated = 0;
   let failed = 0;
   const rows = open ?? [];
+  if (rows.length === 0) return { updated, failed };
 
-  const markOne = async (row: { asset: string }) => {
-    try {
-      const book = await fetchBook(row.asset);
-      const resolved = resolveMark({
-        bestBid: book.bid,
-        bestAsk: book.ask,
-        midpoint: null,
-        markTs: book.ts,
-        nowMs: Date.now(),
-      });
-      await supabaseAdmin
-        .from("paper_positions")
-        .update({
-          best_bid: book.bid,
-          best_ask: book.ask,
-          midpoint: resolved.mark,
-          mark: resolved.mark,
-          mark_source: resolved.source,
-          mark_ts: resolved.mark === null ? null : new Date(book.ts ?? Date.now()).toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("experiment_id", experimentId)
-        .eq("asset", row.asset);
-      if (resolved.mark === null) failed += 1;
-      else updated += 1;
-    } catch {
+  const { fetchBooksBatched } = await import("./clob-books.server");
+  const books = await fetchBooksBatched(rows.map((r) => r.asset));
+
+  const writeOne = async (asset: string) => {
+    const book = books.get(asset) ?? null;
+    if (book === null) {
       failed += 1;
-      // Stale marks are cleared rather than reused, so open P&L reads Unavailable.
+      // No public book in this pass: clear rather than reuse a stale price, so
+      // open P&L reads Unavailable instead of a fabricated mark.
       await supabaseAdmin
         .from("paper_positions")
         .update({ mark: null, mark_source: null, mark_ts: null, updated_at: new Date().toISOString() })
         .eq("experiment_id", experimentId)
-        .eq("asset", row.asset);
+        .eq("asset", asset);
+      return;
     }
+    const resolved = resolveMark({
+      bestBid: book.bid,
+      bestAsk: book.ask,
+      midpoint: null,
+      markTs: book.ts,
+      nowMs: Date.now(),
+    });
+    await supabaseAdmin
+      .from("paper_positions")
+      .update({
+        best_bid: book.bid,
+        best_ask: book.ask,
+        midpoint: resolved.mark,
+        mark: resolved.mark,
+        mark_source: resolved.source,
+        mark_ts: resolved.mark === null ? null : new Date(book.ts).toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("experiment_id", experimentId)
+      .eq("asset", asset);
+    if (resolved.mark === null) failed += 1;
+    else updated += 1;
   };
 
-  for (let i = 0; i < rows.length; i += MARK_FETCH_CONCURRENCY) {
-    await Promise.all(rows.slice(i, i + MARK_FETCH_CONCURRENCY).map(markOne));
+  for (let i = 0; i < rows.length; i += MARK_WRITE_CONCURRENCY) {
+    await Promise.all(rows.slice(i, i + MARK_WRITE_CONCURRENCY).map((r) => writeOne(r.asset)));
   }
   return { updated, failed };
 }
@@ -872,6 +864,8 @@ export type CycleResult = {
   previews: { created: number; ineligible: number; failed: number; skippedReason: string | null };
   settlements: { settled: number; unresolved: number };
   copyability: { scheduled: number; sampled: number; unavailable: number };
+  /** Stage-duration telemetry (ms) for this cycle. Empty on a skipped cycle. */
+  stageMs?: Record<string, number>;
 };
 
 export type MultiCycleResult = {
@@ -1162,39 +1156,57 @@ export async function runExperimentCycle(
     );
   }
 
+  /**
+   * Per-stage durations, persisted with the worker row. This is how a slow
+   * stage is identified in production instead of guessed at, and why the
+   * mark stage could be proven to be the deadline consumer.
+   */
+  const stageMs: Record<string, number> = {};
+  const timed = async <T>(label: string, work: () => Promise<T>): Promise<T> => {
+    const startedAt = Date.now();
+    try {
+      return await work();
+    } finally {
+      stageMs[label] = Date.now() - startedAt;
+    }
+  };
+
   try {
     // Bounded so a hung upstream call fails through the normal error path (which
     // releases the lease) instead of being killed with the lease still claimed.
     const stages = await withDeadline(
       (async () => {
-        const window = await fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES);
+        const window = await timed("source_ingest", () =>
+          fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES),
+        );
         const events = normalizeSourceEvents(window.raw, wallet);
-        const inserted = await persistEvents(events);
-        const process = await processPendingEvents(experiment, lease);
-        const marks = await refreshMarks(experiment.id);
-        const reconciliation =
+        const inserted = await timed("persist_events", () => persistEvents(events));
+        const process = await timed("paper_processing", () => processPendingEvents(experiment, lease));
+        const marks = await timed("mark_refresh", () => refreshMarks(experiment.id));
+        const reconciliation = await timed("reconciliation", () =>
           inserted > 0 || !bootstrapped
-            ? await boundedStage(reconcile(wallet), RECONCILE_DEADLINE_MS, "reconciliation", null)
-            : null;
-        const settlements = await boundedStage(
-          settleSafely(experiment.id),
-          SETTLEMENT_DEADLINE_MS,
-          "settlement",
-          NO_SETTLEMENTS,
+            ? boundedStage(reconcile(wallet), RECONCILE_DEADLINE_MS, "reconciliation", null)
+            : Promise.resolve(null),
         );
-        const previews = await boundedStage(
-          generatePreviewsSafely(experiment.id, wallet),
-          PREVIEW_DEADLINE_MS,
-          "previews",
-          NO_PREVIEWS,
+        const settlements = await timed("settlement", () =>
+          boundedStage(settleSafely(experiment.id), SETTLEMENT_DEADLINE_MS, "settlement", NO_SETTLEMENTS),
         );
-        const copyability = await boundedStage(
-          observeCopyabilitySafely(experiment),
-          COPYABILITY_DEADLINE_MS,
-          "copyability",
-          { scheduled: 0, sampled: 0, unavailable: 0 },
+        const previews = await timed("previews", () =>
+          boundedStage(
+            generatePreviewsSafely(experiment.id, wallet),
+            PREVIEW_DEADLINE_MS,
+            "previews",
+            NO_PREVIEWS,
+          ),
         );
-        await raiseCashAlerts(experiment);
+        const copyability = await timed("copyability", () =>
+          boundedStage(observeCopyabilitySafely(experiment), COPYABILITY_DEADLINE_MS, "copyability", {
+            scheduled: 0,
+            sampled: 0,
+            unavailable: 0,
+          }),
+        );
+        await timed("cash_alerts", () => raiseCashAlerts(experiment));
         return { window, events, inserted, process, marks, reconciliation, settlements, previews, copyability };
       })(),
       EXPERIMENT_DEADLINE_MS,
@@ -1229,6 +1241,7 @@ export async function runExperimentCycle(
       events_ingested: (statusRow?.events_ingested ?? 0) + inserted,
       lag_seconds: lagSeconds,
       last_success_at: new Date().toISOString(),
+      stage_ms: stageMs as never,
     });
 
     if (inserted > 0) {
@@ -1257,6 +1270,7 @@ export async function runExperimentCycle(
       previews,
       settlements,
       copyability,
+      stageMs,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
@@ -1266,7 +1280,12 @@ export async function runExperimentCycle(
       .eq("id", lockId)
       .maybeSingle();
     const failures = (statusRow?.poll_failures ?? 0) + 1;
-    await releaseLease(lease, { state: "error", last_error: message, poll_failures: failures });
+    await releaseLease(lease, {
+      state: "error",
+      last_error: message,
+      poll_failures: failures,
+      stage_ms: stageMs as never,
+    });
     if (failures === 1 || failures % 5 === 0) {
       await raiseAlert("error", "poll_failure", `${experiment.name}: ingestion poll failed: ${message}`, {
         experiment: experiment.name as never,

@@ -540,6 +540,15 @@ export function resolveMark(input: MarkInput): ResolvedMark {
     return { mark: (bestBid + bestAsk) / 2, source: "clob_book_mid", fresh: true };
   }
   if (midpoint !== null && midpoint > 0) return { mark: midpoint, source: "clob_midpoint", fresh: true };
+  /**
+   * One-sided book with bids only: the best bid is a live, executable exit
+   * price for a long paper position, so marking there is conservative and real
+   * (never an entry price, a guess or a stale quote). An ask-only book has no
+   * exit liquidity at all, so it stays Unavailable rather than being marked.
+   */
+  if (bestBid !== null && bestBid > 0 && (bestAsk === null || !(bestAsk > 0))) {
+    return { mark: bestBid, source: "clob_best_bid", fresh: true };
+  }
   return { mark: null, source: null, fresh: false };
 }
 
