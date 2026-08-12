@@ -928,9 +928,23 @@ async function settleSafely(experimentId: string): Promise<typeof NO_SETTLEMENTS
  */
 export async function runIngestCycle(workerId: string): Promise<MultiCycleResult> {
   const ranAt = new Date().toISOString();
+  const startedMs = Date.now();
   const experiments = await listActiveExperiments();
+  const reclaimed = await reclaimAbandonedWorkers();
+  const ordered = await orderExperimentsForCycle(experiments);
   const cycles: CycleResult[] = [];
-  for (const experiment of experiments) {
+  let deferred = 0;
+  for (const experiment of ordered) {
+    if (Date.now() - startedMs > CYCLE_BUDGET_MS) {
+      // Out of budget: leave the remaining experiments untouched. They are served
+      // first on the next cycle because ordering is least-recently-completed-first.
+      deferred += 1;
+      cycles.push({
+        ...emptyCycle(ranAt, experiment),
+        skipped: "Deferred to the next scheduled cycle (cycle time budget reached).",
+      });
+      continue;
+    }
     try {
       cycles.push(await runExperimentCycle(experiment, workerId));
     } catch (err) {
@@ -945,8 +959,51 @@ export async function runIngestCycle(workerId: string): Promise<MultiCycleResult
     experiments: experiments.length,
     cycles,
     reference: cycles.find((c) => c.experimentName === EXPERIMENT_NAME) ?? null,
-    candidateResearch: await refreshCandidateResearchSafely(),
+    reclaimedWorkers: reclaimed,
+    deferredExperiments: deferred,
+    candidateResearch:
+      Date.now() - startedMs > CYCLE_BUDGET_MS
+        ? { ran: false, detail: "deferred: cycle time budget reached" }
+        : await refreshCandidateResearchSafely(),
   };
+}
+
+/**
+ * A cycle killed by the platform leaves state='running' forever even though its
+ * lease has long expired. The lease itself never blocked recovery (acquisition
+ * is atomic and expiry-based), but the stuck state hid the failure from health
+ * reporting. Reclaiming only rewrites worker STATE — never any paper accounting,
+ * fence, or lease ownership — so fencing guarantees are untouched.
+ */
+async function reclaimAbandonedWorkers(): Promise<number> {
+  const { data } = await supabaseAdmin
+    .from("worker_status")
+    .select("id, state, heartbeat_at, last_poll_at, last_success_at, lease_expires_at, poll_failures");
+  const abandoned = findAbandonedWorkers((data ?? []) as unknown as WorkerRow[], Date.now());
+  for (const row of abandoned) {
+    await supabaseAdmin
+      .from("worker_status")
+      .update({
+        state: "stale",
+        last_error: "Previous cycle was abandoned before completion (lease expired while running).",
+        updated_at: new Date().toISOString(),
+      } as never)
+      .eq("id", row.id)
+      .eq("state", "running");
+  }
+  return abandoned.length;
+}
+
+/** Least-recently-completed experiment first, so no experiment can be starved. */
+async function orderExperimentsForCycle(experiments: Experiment[]): Promise<Experiment[]> {
+  const { data } = await supabaseAdmin.from("worker_status").select("id, last_poll_at, last_success_at");
+  const completedAt = new Map<string, number | null>();
+  for (const row of (data ?? []) as { id: string; last_poll_at: string | null; last_success_at: string | null }[]) {
+    const iso = row.last_success_at ?? row.last_poll_at;
+    const ms = iso ? new Date(iso).getTime() : NaN;
+    completedAt.set(row.id, Number.isFinite(ms) ? ms : null);
+  }
+  return orderByStaleness(experiments, (e) => completedAt.get(workerIdFor(e)) ?? null);
 }
 
 function emptyCycle(ranAt: string, experiment: Experiment): CycleResult {
