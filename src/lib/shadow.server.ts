@@ -38,6 +38,7 @@ import {
   isEligibleForV2Copy,
   isV2Name,
 } from "./v2-cohort";
+import { isGeneralShadowName } from "./general-shadow";
 
 export const TARGET_WALLET = "0x8fbd7cf5f806f563080864694415829f7229a959";
 export const EXPERIMENT_NAME = "SHADOW";
@@ -81,6 +82,8 @@ const RESEARCH_DEADLINE_MS = 8_000;
 const SETTLEMENT_DEADLINE_MS = 8_000;
 const PREVIEW_DEADLINE_MS = 6_000;
 const COPYABILITY_DEADLINE_MS = 6_000;
+/** General Shadow non-trade activity evidence stage. Bounded and isolated. */
+const GENERAL_ACTIVITY_DEADLINE_MS = 6_000;
 const RECONCILE_DEADLINE_MS = 8_000;
 
 class DeadlineError extends Error {}
@@ -326,8 +329,16 @@ async function fetchSourceWindow(
   return { raw, pagesFetched };
 }
 
-/** Insert new events only. The unique event_key makes replays idempotent. */
-async function persistEvents(events: NormalizedEvent[]): Promise<number> {
+/**
+ * Insert new events only. The unique event_key makes replays idempotent.
+ *
+ * keepRaw=false stores no raw provider payload. Used for the high-frequency
+ * General Shadow wallets: every field we measure or display is already
+ * extracted into typed columns, and the raw blob is ~75% of the row, so
+ * dropping it keeps this cohort from crowding out the Weather observation
+ * window. Weather rows are untouched.
+ */
+async function persistEvents(events: NormalizedEvent[], keepRaw = true): Promise<number> {
   if (events.length === 0) return 0;
   const rows = events.map((e) => ({
     event_key: e.eventKey,
@@ -346,7 +357,7 @@ async function persistEvents(events: NormalizedEvent[]): Promise<number> {
     source_ts: e.sourceTs,
     identity_basis: e.identityBasis,
     identity_degraded: e.identityDegraded,
-    raw: e.raw as never,
+    raw: (keepRaw ? e.raw : null) as never,
   }));
   const { data, error } = await supabaseAdmin
     .from("source_events")
@@ -1070,6 +1081,9 @@ async function observeCopyabilitySafely(
       id: experiment.id,
       starting_cash: Number(experiment.starting_cash),
       cash: Number(experiment.cash),
+      ...(isGeneralShadowName(experiment.name)
+        ? { delays: ["immediate", "30s", "60s"] as const }
+        : {}),
     });
   } catch {
     return { scheduled: 0, sampled: 0, unavailable: 0 };
@@ -1180,7 +1194,9 @@ export async function runExperimentCycle(
           fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES),
         );
         const events = normalizeSourceEvents(window.raw, wallet);
-        const inserted = await timed("persist_events", () => persistEvents(events));
+        const inserted = await timed("persist_events", () =>
+          persistEvents(events, !isGeneralShadowName(experiment.name)),
+        );
         const process = await timed("paper_processing", () => processPendingEvents(experiment, lease));
         const marks = await timed("mark_refresh", () => refreshMarks(experiment.id));
         const reconciliation = await timed("reconciliation", () =>
@@ -1192,13 +1208,31 @@ export async function runExperimentCycle(
           boundedStage(settleSafely(experiment.id), SETTLEMENT_DEADLINE_MS, "settlement", NO_SETTLEMENTS),
         );
         const previews = await timed("previews", () =>
-          boundedStage(
-            generatePreviewsSafely(experiment.id, wallet),
-            PREVIEW_DEADLINE_MS,
-            "previews",
-            NO_PREVIEWS,
-          ),
+          // General Shadow has no order path at all: the PMUS preview stage is
+          // never reached for those experiments.
+          isGeneralShadowName(experiment.name)
+            ? Promise.resolve(NO_PREVIEWS)
+            : boundedStage(
+                generatePreviewsSafely(experiment.id, wallet),
+                PREVIEW_DEADLINE_MS,
+                "previews",
+                NO_PREVIEWS,
+              ),
         );
+        if (isGeneralShadowName(experiment.name)) {
+          await timed("general_activity", async () => {
+            try {
+              const { ingestGeneralActivity } = await import("./general-shadow.server");
+              await withDeadline(
+                ingestGeneralActivity(wallet),
+                GENERAL_ACTIVITY_DEADLINE_MS,
+                "general activity",
+              );
+            } catch {
+              // Evidence-only stage: a failure never blocks paper accounting.
+            }
+          });
+        }
         const copyability = await timed("copyability", () =>
           boundedStage(observeCopyabilitySafely(experiment), COPYABILITY_DEADLINE_MS, "copyability", {
             scheduled: 0,

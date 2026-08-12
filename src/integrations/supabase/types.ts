@@ -396,6 +396,72 @@ export type Database = {
           },
         ]
       }
+      general_activity: {
+        Row: {
+          activity_type: string
+          asset: string | null
+          category: string
+          condition_id: string | null
+          created_at: string
+          economics_status: string
+          event_key: string
+          first_seen_at: string
+          id: string
+          market_title: string | null
+          outcome: string | null
+          post_go_live: boolean
+          price: number | null
+          raw: Json | null
+          shares: number | null
+          slug: string | null
+          source_ts: number
+          usdc_size: number | null
+          wallet: string
+        }
+        Insert: {
+          activity_type: string
+          asset?: string | null
+          category?: string
+          condition_id?: string | null
+          created_at?: string
+          economics_status?: string
+          event_key: string
+          first_seen_at?: string
+          id?: string
+          market_title?: string | null
+          outcome?: string | null
+          post_go_live?: boolean
+          price?: number | null
+          raw?: Json | null
+          shares?: number | null
+          slug?: string | null
+          source_ts: number
+          usdc_size?: number | null
+          wallet: string
+        }
+        Update: {
+          activity_type?: string
+          asset?: string | null
+          category?: string
+          condition_id?: string | null
+          created_at?: string
+          economics_status?: string
+          event_key?: string
+          first_seen_at?: string
+          id?: string
+          market_title?: string | null
+          outcome?: string | null
+          post_go_live?: boolean
+          price?: number | null
+          raw?: Json | null
+          shares?: number | null
+          slug?: string | null
+          source_ts?: number
+          usdc_size?: number | null
+          wallet?: string
+        }
+        Relationships: []
+      }
       integration_status: {
         Row: {
           account_summary: Json | null
