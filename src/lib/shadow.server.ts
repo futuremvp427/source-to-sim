@@ -856,6 +856,10 @@ export type MultiCycleResult = {
   cycles: CycleResult[];
   /** Reference SHADOW experiment result, kept for the existing dashboard read. */
   reference: CycleResult | null;
+  /** Stuck worker rows whose state was reclaimed at the start of this cycle. */
+  reclaimedWorkers: number;
+  /** Experiments intentionally left for the next cycle to stay inside the budget. */
+  deferredExperiments: number;
   candidateResearch: { ran: boolean; detail: string | null };
 };
 
