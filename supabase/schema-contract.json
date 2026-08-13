@@ -56,6 +56,13 @@
       "name": "paper_trades_experiment_created_idx",
       "must_exist": true,
       "definition_contains": ["experiment_id, created_at desc"]
+    },
+    {
+      "schema": "public",
+      "table": "paper_trades",
+      "name": "paper_trades_experiment_created_id_idx",
+      "must_exist": true,
+      "definition_contains": ["experiment_id, created_at, id"]
     }
   ],
   "constraints": [
@@ -136,6 +143,20 @@
       "table": "paper_experiments",
       "name": "settlement_cursor_asset",
       "type": "text",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "paper_experiments",
+      "name": "copyability_cursor_created_at",
+      "type": "timestamp with time zone",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "paper_experiments",
+      "name": "copyability_cursor_id",
+      "type": "uuid",
       "not_null": false
     },
     {

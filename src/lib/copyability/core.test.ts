@@ -3,8 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   computeObservation,
   copyabilityScore,
+  isAfterCursor,
   midpointOf,
+  nextCursorFor,
+  selectCursorPage,
   spreadCents,
+  type CursorPosition,
   type ObservationLite,
   type SampleDelay,
 } from "./core";
@@ -133,5 +137,63 @@ describe("copyability score", () => {
     const scoreB = copyabilityScore({ observations: b, scheduledEvents: 3 });
     expect(scoreA.score).not.toBe(scoreB.score);
     expect(copyabilityScore({ observations: a, scheduledEvents: 3 }).score).toBe(scoreA.score);
+  });
+});
+
+type CursorRow = { createdAt: string; id: string };
+
+function row(createdAt: string, id: string): CursorRow {
+  return { createdAt, id };
+}
+
+describe("scheduling cursor", () => {
+  it("a null cursor starts from the earliest row", () => {
+    expect(isAfterCursor(row("2026-08-13T00:00:00Z", "a"), null)).toBe(true);
+  });
+
+  it("orders strictly by created_at, then by id on ties", () => {
+    const cursor: CursorPosition = { createdAt: "2026-08-13T00:00:00Z", id: "m" };
+    expect(isAfterCursor(row("2026-08-13T00:00:01Z", "a"), cursor)).toBe(true); // later createdAt
+    expect(isAfterCursor(row("2026-08-12T23:59:59Z", "z"), cursor)).toBe(false); // earlier createdAt
+    expect(isAfterCursor(row("2026-08-13T00:00:00Z", "z"), cursor)).toBe(true); // tie, later id
+    expect(isAfterCursor(row("2026-08-13T00:00:00Z", "a"), cursor)).toBe(false); // tie, earlier/equal id
+  });
+
+  it("backlog larger than the page size eventually schedules every row through repeated paging", () => {
+    const rows = Array.from({ length: 97 }, (_, i) =>
+      row(`2026-08-13T00:${String(Math.floor(i / 10)).padStart(2, "0")}:00Z`, String(i).padStart(3, "0")),
+    );
+    const limit = 10;
+    let cursor: CursorPosition | null = null;
+    const seen: CursorRow[] = [];
+    for (let guard = 0; guard < 50; guard += 1) {
+      const page = selectCursorPage(rows, cursor, limit);
+      if (page.length === 0) break;
+      seen.push(...page);
+      cursor = nextCursorFor(page);
+    }
+    expect(seen).toEqual(rows);
+  });
+
+  it("resuming from a persisted cursor is deterministic", () => {
+    const rows = Array.from({ length: 25 }, (_, i) => row("2026-08-13T00:00:00Z", String(i).padStart(2, "0")));
+    const firstPage = selectCursorPage(rows, null, 10);
+    const cursor = nextCursorFor(firstPage);
+    const resumedA = selectCursorPage(rows, cursor, 10);
+    const resumedB = selectCursorPage(rows, cursor, 10);
+    expect(resumedA).toEqual(resumedB);
+    expect(resumedA).toEqual(rows.slice(10, 20));
+  });
+
+  it("ties on created_at are still fully covered via the id tiebreak", () => {
+    const rows = [row("2026-08-13T00:00:00Z", "a"), row("2026-08-13T00:00:00Z", "b"), row("2026-08-13T00:00:00Z", "c")];
+    const page1 = selectCursorPage(rows, null, 2);
+    expect(page1).toEqual([rows[0], rows[1]]);
+    const page2 = selectCursorPage(rows, nextCursorFor(page1), 2);
+    expect(page2).toEqual([rows[2]]);
+  });
+
+  it("an empty page yields a null next cursor (no advance)", () => {
+    expect(nextCursorFor([])).toBeNull();
   });
 });
