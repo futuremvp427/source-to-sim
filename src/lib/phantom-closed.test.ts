@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import {
   EMPTY_POSITION,
+  SETTLED_POSITION_SKIP_REASON,
   applyBuy,
   applySell,
   decideDynamicBuy,
   decideProportionalSell,
   isPhantomClosedPosition,
+  isTerminalSettlementStatus,
   shouldPersistPaperPosition,
+  type FollowerDecision,
   type PaperPositionState,
 } from "./shadow-core";
 
@@ -27,18 +30,28 @@ function runBatch(input: {
   cash: number;
   existing?: Map<string, PaperPositionState>;
   sourceShares?: Map<string, number>;
+  /** Persisted settlement_status per asset before this batch. */
+  settlementStatus?: Map<string, string>;
 }) {
   const paper = new Map<string, PaperPositionState>(input.existing ?? []);
   const existingPaperAssets = new Set(paper.keys());
   const tradedAssets = new Set<string>();
   const sourceShares = new Map(input.sourceShares ?? []);
+  const settlementStatus = new Map(input.settlementStatus ?? []);
+  const terminalAssets = new Set<string>();
   let cash = input.cash;
+  const actions: string[] = [];
+  const reasons: string[] = [];
 
   for (const e of input.events) {
     const position = paper.get(e.asset) ?? EMPTY_POSITION;
     const before = sourceShares.has(e.asset) ? (sourceShares.get(e.asset) as number) : null;
-    const decision =
-      e.side === "BUY"
+    // A late source event must never reopen a position already at final settlement.
+    const isTerminal = isTerminalSettlementStatus(settlementStatus.get(e.asset));
+    if (isTerminal) terminalAssets.add(e.asset);
+    const decision: FollowerDecision = isTerminal
+      ? { action: "SKIP", shares: 0, notional: 0, price: e.price, reason: SETTLED_POSITION_SKIP_REASON }
+      : e.side === "BUY"
         ? decideDynamicBuy({ price: e.price, startingCash: input.startingCash, cash })
         : decideProportionalSell({
             price: e.price,
@@ -46,6 +59,8 @@ function runBatch(input: {
             sourceSoldShares: e.shares,
             paperShares: position.shares,
           });
+    actions.push(decision.action);
+    reasons.push(decision.reason);
     let next = position;
     if (decision.action === "BUY") {
       const applied = applyBuy(position, cash, decision.shares, decision.notional);
@@ -65,12 +80,17 @@ function runBatch(input: {
     );
   }
 
+  // Mirrors shadow.server.ts's real write gate exactly: a terminal asset is
+  // never persisted, even with unchanged values, regardless of hadExistingRow
+  // or tradedThisBatch.
   const rows: Row[] = [...paper]
-    .filter(([asset]) =>
-      shouldPersistPaperPosition({
-        hadExistingRow: existingPaperAssets.has(asset),
-        tradedThisBatch: tradedAssets.has(asset),
-      }),
+    .filter(
+      ([asset]) =>
+        !terminalAssets.has(asset) &&
+        shouldPersistPaperPosition({
+          hadExistingRow: existingPaperAssets.has(asset),
+          tradedThisBatch: tradedAssets.has(asset),
+        }),
     )
     .map(([asset, p]) => ({
       asset,
@@ -80,7 +100,7 @@ function runBatch(input: {
       settlement_status: p.shares > 0 ? "open" : "closed",
     }));
 
-  return { rows, cash };
+  return { rows, cash, actions, reasons };
 }
 
 /** Mirrors loadDashboard's closed-list construction. */
@@ -182,5 +202,96 @@ describe("phantom closed positions", () => {
       cash: before,
     });
     expect(cash).toBe(before);
+  });
+});
+
+describe("terminal settlement finality", () => {
+  it("SKIPs a late BUY after a settled win and never persists any row for it", () => {
+    const existing = new Map<string, PaperPositionState>([
+      ["a", { shares: 0, costBasis: 0, avgPrice: 0, realizedPnl: 4.2 }],
+    ]);
+    const settlementStatus = new Map([["a", "settled_won"]]);
+    const { rows, cash, actions, reasons } = runBatch({
+      events: [{ asset: "a", side: "BUY", price: 0.5, shares: 10 }],
+      startingCash: 380,
+      cash: 380,
+      existing,
+      settlementStatus,
+    });
+    expect(actions).toEqual(["SKIP"]);
+    expect(reasons).toEqual([SETTLED_POSITION_SKIP_REASON]);
+    // Not even an unchanged-value write happens: the terminal row is absent
+    // from what gets persisted, exactly like the real !isTerminal write gate.
+    expect(rows.find((r) => r.asset === "a")).toBeUndefined();
+    expect(cash).toBe(380);
+  });
+
+  it("SKIPs a late BUY after a settled loss and never persists any row for it", () => {
+    const existing = new Map<string, PaperPositionState>([
+      ["a", { shares: 0, costBasis: 0, avgPrice: 0, realizedPnl: -3.75 }],
+    ]);
+    const settlementStatus = new Map([["a", "settled_lost"]]);
+    const { rows, cash, actions, reasons } = runBatch({
+      events: [{ asset: "a", side: "BUY", price: 0.5, shares: 10 }],
+      startingCash: 380,
+      cash: 380,
+      existing,
+      settlementStatus,
+    });
+    expect(actions).toEqual(["SKIP"]);
+    expect(reasons).toEqual([SETTLED_POSITION_SKIP_REASON]);
+    expect(rows.find((r) => r.asset === "a")).toBeUndefined();
+    expect(cash).toBe(380);
+  });
+
+  it("SKIPs a late SELL after terminal settlement, never mutates the bankroll, and never persists any row for it", () => {
+    const existing = new Map<string, PaperPositionState>([
+      ["a", { shares: 0, costBasis: 0, avgPrice: 0, realizedPnl: 2.1 }],
+    ]);
+    const settlementStatus = new Map([["a", "settled_won"]]);
+    const { rows, cash, actions, reasons } = runBatch({
+      events: [{ asset: "a", side: "SELL", price: 0.9, shares: 5 }],
+      startingCash: 380,
+      cash: 380,
+      existing,
+      sourceShares: new Map([["a", 20]]),
+      settlementStatus,
+    });
+    expect(actions).toEqual(["SKIP"]);
+    expect(reasons).toEqual([SETTLED_POSITION_SKIP_REASON]);
+    expect(rows.find((r) => r.asset === "a")).toBeUndefined();
+    expect(cash).toBe(380);
+  });
+
+  it("does not redefine ordinary (non-settled) closed positions as terminal", () => {
+    const existing = new Map<string, PaperPositionState>([
+      ["a", { shares: 0, costBasis: 0, avgPrice: 0, realizedPnl: 1.5 }],
+    ]);
+    const settlementStatus = new Map([["a", "closed"]]);
+    const { actions } = runBatch({
+      events: [{ asset: "a", side: "BUY", price: 0.5, shares: 10 }],
+      startingCash: 380,
+      cash: 380,
+      existing,
+      settlementStatus,
+    });
+    expect(actions).toEqual(["BUY"]);
+  });
+
+  it("ordinary BUY then SELL-to-zero on a non-terminal position is unaffected by the settlement guard", () => {
+    const { rows, actions } = runBatch({
+      events: [
+        { asset: "a", side: "BUY", price: 0.5, shares: 100 },
+        { asset: "a", side: "SELL", price: 0.8, shares: 100 },
+      ],
+      startingCash: 380,
+      cash: 380,
+    });
+    expect(actions).toEqual(["BUY", "SELL"]);
+    expect(rows).toHaveLength(1);
+    const row = rows[0] as Row;
+    expect(row.shares).toBe(0);
+    expect(row.settlement_status).toBe("closed");
+    expect(row.realized_pnl).toBeGreaterThan(0);
   });
 });

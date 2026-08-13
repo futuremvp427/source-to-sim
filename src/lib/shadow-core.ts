@@ -383,6 +383,26 @@ export function isPhantomClosedPosition(row: {
 }
 
 /* ------------------------------------------------------------------ */
+/* Settlement finality                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Once a paper position reaches one of these, it is a closed historical
+ * record: a later source event must never BUY, SELL, or otherwise mutate it.
+ * Ordinary "closed" (flat from paper trading, not settlement) is NOT terminal
+ * — that position may legitimately be reopened by a later source BUY.
+ */
+const TERMINAL_SETTLEMENT_STATUSES: ReadonlySet<string> = new Set(["settled_won", "settled_lost"]);
+
+export function isTerminalSettlementStatus(status: string | null | undefined): boolean {
+  return status != null && TERMINAL_SETTLEMENT_STATUSES.has(status);
+}
+
+/** Reason recorded on the paper_trades row for a late source event against an already-settled position. */
+export const SETTLED_POSITION_SKIP_REASON =
+  "Paper position already settled — late source event ignored";
+
+/* ------------------------------------------------------------------ */
 /* Atomic commit payload for process_source_event_atomic               */
 /* ------------------------------------------------------------------ */
 

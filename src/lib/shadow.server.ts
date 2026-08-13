@@ -28,11 +28,17 @@ import {
   resolveMark,
   roundShares,
   roundUsd,
+  type FollowerDecision,
   type NormalizedEvent,
   type PaperPositionState,
   type Side,
 } from "./shadow-core";
-import { isPhantomClosedPosition, shouldPersistPaperPosition } from "./shadow-core";
+import {
+  SETTLED_POSITION_SKIP_REASON,
+  isPhantomClosedPosition,
+  isTerminalSettlementStatus,
+  shouldPersistPaperPosition,
+} from "./shadow-core";
 import {
   V2_REFERENCE_NAME,
   isEligibleForV2Copy,
@@ -45,8 +51,7 @@ export const EXPERIMENT_NAME = "SHADOW";
 export const WORKER_ID = "ingest";
 
 const DATA_API = "https://data-api.polymarket.com";
-const PAGE_SIZE = 250;
-const LIVE_PAGES = 2; // bounded incremental window per poll
+export const PAGE_SIZE = 250;
 const BOOTSTRAP_PAGES = 4;
 const LEASE_SECONDS = 180;
 /** Exposed for the lease regression tests only. */
@@ -314,7 +319,8 @@ export function buildTradesUrl(limit: number, offset: number, wallet: string = T
   return `${DATA_API}/trades?user=${wallet}&${TAKER_ONLY_PARAM}&limit=${limit}&offset=${offset}`;
 }
 
-async function fetchSourceWindow(
+/** Bounded page walk: used only for a fixed number of newest pages. */
+async function fetchFixedPages(
   wallet: string,
   pages: number,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
@@ -327,6 +333,90 @@ async function fetchSourceWindow(
     if (page.length < PAGE_SIZE) break;
   }
   return { raw, pagesFetched };
+}
+
+/**
+ * Checkpoint-driven catch-up: walk pages newest-to-oldest until the previous
+ * checkpoint is fully covered, or the API's available history is exhausted.
+ *
+ * Coverage is proven by either:
+ *  - a page containing an event strictly OLDER than checkpointTs (a page
+ *    whose oldest event is exactly == checkpointTs does NOT prove coverage —
+ *    more events sharing that same second may sit on the next page), or
+ *  - the API returning fewer than pageSize rows (history exhausted).
+ *
+ * No artificial page cap is applied: a real backlog must be fully covered or
+ * the caller's own deadline aborts the cycle (fail closed — see
+ * runExperimentCycle, which only advances the checkpoint and processes
+ * events once this promise resolves).
+ *
+ * Exported so the stopping semantics can be tested directly against an
+ * injected page fetcher, without mocking the network.
+ */
+export async function fetchUntilCheckpointCovered(
+  fetchPage: (offset: number) => Promise<Json[]>,
+  checkpointTs: number,
+  pageSize: number = PAGE_SIZE,
+): Promise<{ raw: Json[]; pagesFetched: number }> {
+  const raw: Json[] = [];
+  let pagesFetched = 0;
+  let offset = 0;
+  for (;;) {
+    const page = await fetchPage(offset);
+    pagesFetched += 1;
+    raw.push(...page);
+    const exhausted = page.length < pageSize;
+    // A malformed timestamp (null, "", non-numeric) must never falsely prove
+    // coverage: Number(null) === 0 and Number("") === 0 would otherwise look
+    // like a genuine event older than any positive checkpoint.
+    const coversCheckpoint = page.some((r) => {
+      const ts = Number(r["timestamp"]);
+      return Number.isFinite(ts) && ts > 0 && ts < checkpointTs;
+    });
+    if (exhausted || coversCheckpoint) return { raw, pagesFetched };
+    offset += pageSize;
+  }
+}
+
+/** Raised when a bootstrapped worker has no valid boundary to catch up against. */
+export class MissingCatchupBoundaryError extends Error {}
+
+/**
+ * A first-ever bootstrap stays a bounded fixed-page fetch (never an unlimited
+ * history download). Once bootstrapped, catchupBoundary (the previous
+ * checkpoint, or experiment.follow_from_ts when there is no real checkpoint
+ * yet — e.g. a newly followed wallet whose first bootstrap saw zero trades)
+ * drives how far back this poll must catch up, so a backlog larger than the
+ * old fixed window can never leave older unseen events permanently out of
+ * reach. If neither boundary exists, this fails closed rather than silently
+ * falling back to a bounded window: the caller's existing error/lease-release
+ * path handles it, exactly like a deadline timeout.
+ */
+async function fetchSourceWindow(
+  wallet: string,
+  bootstrapped: boolean,
+  catchupBoundary: number | null,
+): Promise<{ raw: Json[]; pagesFetched: number }> {
+  if (!bootstrapped) return fetchFixedPages(wallet, BOOTSTRAP_PAGES);
+  if (catchupBoundary === null) {
+    throw new MissingCatchupBoundaryError(
+      "Bootstrapped worker has neither a checkpoint nor a follow_from_ts to catch up against",
+    );
+  }
+  return fetchUntilCheckpointCovered(
+    (offset) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet)),
+    catchupBoundary,
+  );
+}
+
+/** Previous checkpoint, falling back to go-live when there is no real checkpoint yet. */
+export function resolveCatchupBoundary(
+  checkpointTs: number | null | undefined,
+  followFromTs: number | null | undefined,
+): number | null {
+  if (Number(checkpointTs) > 0) return Number(checkpointTs);
+  if (Number(followFromTs) > 0) return Number(followFromTs);
+  return null;
 }
 
 /**
@@ -392,6 +482,7 @@ type PaperPositionRow = {
   cost_basis: number;
   avg_price: number;
   realized_pnl: number;
+  settlement_status: string;
 };
 
 type ExperimentSourcePositionRow = {
@@ -516,10 +607,11 @@ async function processPendingEvents(
 
   const { data: paperRows } = await supabaseAdmin
     .from("paper_positions")
-    .select("asset, shares, cost_basis, avg_price, realized_pnl")
+    .select("asset, shares, cost_basis, avg_price, realized_pnl, settlement_status")
     .eq("experiment_id", experiment.id)
     .in("asset", assets);
   const paper = new Map<string, PaperPositionState>();
+  const settlementStatusByAsset = new Map<string, string>();
   for (const r of (paperRows ?? []) as PaperPositionRow[]) {
     paper.set(r.asset, {
       shares: Number(r.shares),
@@ -527,6 +619,7 @@ async function processPendingEvents(
       avgPrice: Number(r.avg_price),
       realizedPnl: Number(r.realized_pnl),
     });
+    settlementStatusByAsset.set(r.asset, r.settlement_status);
   }
 
   let cash = Number(experiment.cash);
@@ -581,8 +674,12 @@ async function processPendingEvents(
       continue;
     }
 
-    const decision =
-      side === "BUY"
+    // A late source event must never reopen a paper position that already
+    // reached final settlement: that row is a closed historical record.
+    const isTerminal = isTerminalSettlementStatus(settlementStatusByAsset.get(row.asset));
+    const decision: FollowerDecision = isTerminal
+      ? { action: "SKIP", shares: 0, notional: 0, price, reason: SETTLED_POSITION_SKIP_REASON }
+      : side === "BUY"
         ? decideDynamicBuy({
             price,
             startingCash: Number(experiment.starting_cash),
@@ -650,10 +747,15 @@ async function processPendingEvents(
     });
 
     const nextSourceShares = roundShares(nextSourceForRow);
-    const persistPosition = shouldPersistPaperPosition({
-      hadExistingRow: existingPaperAssets.has(row.asset),
-      tradedThisBatch: tradedAssets.has(row.asset),
-    });
+    // Terminal positions are never written, even with unchanged values: the
+    // existing paper_positions row (including settlement_status) must stay
+    // byte-for-byte untouched by a late source event.
+    const persistPosition =
+      !isTerminal &&
+      shouldPersistPaperPosition({
+        hadExistingRow: existingPaperAssets.has(row.asset),
+        tradedThisBatch: tradedAssets.has(row.asset),
+      });
 
     const commit = await commitEventAtomically(
       lease,
@@ -1201,7 +1303,11 @@ export async function runExperimentCycle(
     const stages = await withDeadline(
       (async () => {
         const window = await timed("source_ingest", () =>
-          fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES),
+          fetchSourceWindow(
+            wallet,
+            bootstrapped,
+            resolveCatchupBoundary(checkpoint?.last_source_ts, experiment.follow_from_ts),
+          ),
         );
         const events = normalizeSourceEvents(window.raw, wallet);
         const inserted = await timed("persist_events", () =>
