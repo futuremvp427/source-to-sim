@@ -28,11 +28,17 @@ import {
   resolveMark,
   roundShares,
   roundUsd,
+  type FollowerDecision,
   type NormalizedEvent,
   type PaperPositionState,
   type Side,
 } from "./shadow-core";
-import { isPhantomClosedPosition, shouldPersistPaperPosition } from "./shadow-core";
+import {
+  SETTLED_POSITION_SKIP_REASON,
+  isPhantomClosedPosition,
+  isTerminalSettlementStatus,
+  shouldPersistPaperPosition,
+} from "./shadow-core";
 import {
   V2_REFERENCE_NAME,
   isEligibleForV2Copy,
@@ -449,6 +455,7 @@ type PaperPositionRow = {
   cost_basis: number;
   avg_price: number;
   realized_pnl: number;
+  settlement_status: string;
 };
 
 type ExperimentSourcePositionRow = {
@@ -573,10 +580,11 @@ async function processPendingEvents(
 
   const { data: paperRows } = await supabaseAdmin
     .from("paper_positions")
-    .select("asset, shares, cost_basis, avg_price, realized_pnl")
+    .select("asset, shares, cost_basis, avg_price, realized_pnl, settlement_status")
     .eq("experiment_id", experiment.id)
     .in("asset", assets);
   const paper = new Map<string, PaperPositionState>();
+  const settlementStatusByAsset = new Map<string, string>();
   for (const r of (paperRows ?? []) as PaperPositionRow[]) {
     paper.set(r.asset, {
       shares: Number(r.shares),
@@ -584,6 +592,7 @@ async function processPendingEvents(
       avgPrice: Number(r.avg_price),
       realizedPnl: Number(r.realized_pnl),
     });
+    settlementStatusByAsset.set(r.asset, r.settlement_status);
   }
 
   let cash = Number(experiment.cash);
@@ -638,8 +647,12 @@ async function processPendingEvents(
       continue;
     }
 
-    const decision =
-      side === "BUY"
+    // A late source event must never reopen a paper position that already
+    // reached final settlement: that row is a closed historical record.
+    const isTerminal = isTerminalSettlementStatus(settlementStatusByAsset.get(row.asset));
+    const decision: FollowerDecision = isTerminal
+      ? { action: "SKIP", shares: 0, notional: 0, price, reason: SETTLED_POSITION_SKIP_REASON }
+      : side === "BUY"
         ? decideDynamicBuy({
             price,
             startingCash: Number(experiment.starting_cash),
@@ -707,10 +720,15 @@ async function processPendingEvents(
     });
 
     const nextSourceShares = roundShares(nextSourceForRow);
-    const persistPosition = shouldPersistPaperPosition({
-      hadExistingRow: existingPaperAssets.has(row.asset),
-      tradedThisBatch: tradedAssets.has(row.asset),
-    });
+    // Terminal positions are never written, even with unchanged values: the
+    // existing paper_positions row (including settlement_status) must stay
+    // byte-for-byte untouched by a late source event.
+    const persistPosition =
+      !isTerminal &&
+      shouldPersistPaperPosition({
+        hadExistingRow: existingPaperAssets.has(row.asset),
+        tradedThisBatch: tradedAssets.has(row.asset),
+      });
 
     const commit = await commitEventAtomically(
       lease,
