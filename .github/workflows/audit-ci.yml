@@ -41,6 +41,10 @@ jobs:
         env:
           SCHEMA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
         run: python3 scripts/verify_schema_contract.py
+      - name: Verify experiment-scoped event isolation
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/experiment_event_isolation.sql
       - name: Stop local Supabase
         if: always()
         run: supabase stop --no-backup
