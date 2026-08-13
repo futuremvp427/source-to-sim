@@ -57,9 +57,7 @@ function SeriesBlock({ series }: { series: ObservationSeries }) {
           <dd className={`tabular-nums ${tone(series.realizedPnl)}`}>{formatUsd(series.realizedPnl)}</dd>
         </div>
         <div>
-          <dt className="text-muted-foreground">
-            Est. slippage-adjusted ({series.observedSlippageCents === null ? "—" : `${series.observedSlippageCents}¢`})
-          </dt>
+          <dt className="text-muted-foreground">Est. slippage-adjusted (prior UTC-day basis)</dt>
           <dd className={`tabular-nums ${tone(series.slippageAdjustedCumulativePnl)}`}>
             {usd(series.slippageAdjustedCumulativePnl)}
           </dd>
@@ -158,7 +156,7 @@ export function ObservationLogSection() {
   return (
     <Panel
       title="Out-of-sample observation log"
-      subtitle="PAPER SIMULATION / DERIVED. Daily statistics preserved while V2 and V3 keep running unchanged. Milestones are research flags only — they do not qualify or promote a wallet, and live allocation stays $0."
+      subtitle="PAPER SIMULATION / DERIVED. Historical adjusted P&L uses a no-lookahead prior-UTC-day slippage basis. Milestones are research flags only — they do not qualify or promote a wallet, and live allocation stays $0."
     >
       {isPending ? (
         <RowSkeleton rows={4} />

@@ -1,11 +1,10 @@
 /**
  * READ-ONLY out-of-sample observation log.
  *
- * Every value here is derived from already-persisted, append-only paper rows
+ * Every value here is derived from already-persisted paper rows
  * (paper_settlements, paper_trades, paper_positions, copyability_observations,
- * worker_status). This module writes nothing, seeds nothing, resizes nothing and
- * changes no qualification rule: it exists purely so daily statistics survive
- * and stay inspectable while the cohorts keep running untouched.
+ * worker_status). Historical slippage-adjusted figures use a precommitted
+ * prior-day cutoff, so later observations cannot rewrite an older settled day.
  */
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
@@ -17,6 +16,11 @@ import { V2_PREFIX, isV2Name } from "../v2-cohort";
 import { V3_PREFIX, isV3Name } from "../v3-cohort";
 import { classifyWorker, type WorkerRow } from "../worker-health";
 import { buildMilestones, estimateSlippageAdjustedPnl, type Milestone } from "./milestones";
+import {
+  SLIPPAGE_METHODOLOGY_VERSION,
+  SLIPPAGE_SAMPLE_LIMIT,
+  priorUtcDayCutoff,
+} from "./slippage-asof";
 
 export type ObservationDay = {
   day: string;
@@ -32,7 +36,7 @@ export type ObservationSeries = {
   name: string;
   cohort: "V2" | "V3";
   handle: string;
-  /** Median observed entry slippage in cents used for the adjusted estimates. */
+  /** Current descriptive median; historical adjusted estimates do not reuse it. */
   observedSlippageCents: number | null;
   fillabilityPct: number | null;
   copyabilityCompletenessPct: number | null;
@@ -59,7 +63,7 @@ export type ObservationLogData = {
 };
 
 const NOTE =
-  "PAPER SIMULATION / DERIVED. Out-of-sample observation only: no strategy, sizing, bankroll or qualification change is driven by anything on this panel. Milestones are research flags and never promote a wallet or enable live execution — live allocation stays $0 with the kill switch engaged. Slippage-adjusted figures are estimates built from observed entry slippage, not realized results.";
+  `PAPER SIMULATION / DERIVED. Out-of-sample observation only: no strategy, sizing, bankroll or qualification change is driven by anything on this panel. Historical slippage-adjusted figures use ${SLIPPAGE_METHODOLOGY_VERSION}: each settled UTC day uses at most the ${SLIPPAGE_SAMPLE_LIMIT.toLocaleString("en-US")} most recent observed entry-slippage samples strictly before 00:00 UTC that day. Samples collected during or after a settled day cannot retrospectively change that day's estimate. The current observed slippage median is descriptive only. Milestones are research flags and never promote a wallet or enable live execution.`;
 
 const OBSERVED_HANDLE = "Poligarch";
 
@@ -90,12 +94,8 @@ async function loadSettlements(experimentId: string): Promise<SettlementRow[]> {
 
 /**
  * Copyability aggregates without a full-table read: counts come from indexed
- * head queries and the median entry slippage is taken from the most recent
- * SLIPPAGE_SAMPLE observations, which keeps this panel cheap even after tens of
- * thousands of samples accumulate.
+ * head queries and the current descriptive median uses the latest sample window.
  */
-const SLIPPAGE_SAMPLE = 2000;
-
 async function loadSlippageCents(experimentId: string): Promise<{
   medianCents: number | null;
   fillabilityPct: number | null;
@@ -118,7 +118,7 @@ async function loadSlippageCents(experimentId: string): Promise<{
       .eq("status", "observed")
       .not("slippage_cents", "is", null)
       .order("observed_at", { ascending: false })
-      .limit(SLIPPAGE_SAMPLE),
+      .limit(SLIPPAGE_SAMPLE_LIMIT),
   ]);
 
   const totalRows = total.count ?? 0;
@@ -136,6 +136,40 @@ async function loadSlippageCents(experimentId: string): Promise<{
   };
 }
 
+/**
+ * Historical execution basis for each settlement day. This intentionally reads
+ * the same copyability table as the existing observation panel, but applies the
+ * no-lookahead cutoff before selecting the most recent sample window. Apart
+ * from that time boundary, the slippage sample population is unchanged.
+ */
+async function loadHistoricalSlippageByDay(
+  experimentId: string,
+  days: string[],
+): Promise<Map<string, number | null>> {
+  const uniqueDays = [...new Set(days)].sort();
+  const entries = await Promise.all(
+    uniqueDays.map(async (day) => {
+      const cutoffAt = priorUtcDayCutoff(day);
+      const { data, error } = await supabaseAdmin
+        .from("copyability_observations")
+        .select("slippage_cents")
+        .eq("experiment_id", experimentId)
+        .eq("status", "observed")
+        .not("slippage_cents", "is", null)
+        .lt("observed_at", cutoffAt)
+        .order("observed_at", { ascending: false })
+        .order("id", { ascending: false })
+        .limit(SLIPPAGE_SAMPLE_LIMIT);
+      if (error) throw new Error(error.message);
+      const cents = (data ?? [])
+        .map((row) => Number(row.slippage_cents))
+        .filter((value) => Number.isFinite(value));
+      return [day, median(cents)] as const;
+    }),
+  );
+  return new Map(entries);
+}
+
 async function buildSeries(experiment: {
   id: string;
   name: string;
@@ -143,9 +177,14 @@ async function buildSeries(experiment: {
   const cohort: "V2" | "V3" = isV3Name(experiment.name) ? "V3" : "V2";
   const handle = experiment.name.slice((cohort === "V3" ? V3_PREFIX : V2_PREFIX).length);
 
-  const [settlements, slippage, positions, buys, skips, workers] = await Promise.all([
-    loadSettlements(experiment.id),
+  const settlements = await loadSettlements(experiment.id);
+  const settlementDays = settlements.flatMap((row) =>
+    row.resolution_ts ? [dayKey(row.resolution_ts)] : [],
+  );
+
+  const [slippage, historicalSlippage, positions, buys, skips, workers] = await Promise.all([
     loadSlippageCents(experiment.id),
+    loadHistoricalSlippageByDay(experiment.id, settlementDays),
     supabaseAdmin
       .from("paper_positions")
       .select("shares, mark, mark_ts")
@@ -193,7 +232,7 @@ async function buildSeries(experiment: {
       shares: Number(row.shares ?? 0),
       costBasis: Number(row.cost_basis ?? 0),
       payout: Number(row.payout ?? 0),
-      slippageCents: slippage.medianCents,
+      slippageCents: historicalSlippage.get(key) ?? null,
     });
     if (adjusted !== null) {
       bucket.adjusted += adjusted;
@@ -204,7 +243,7 @@ async function buildSeries(experiment: {
 
   const days: ObservationDay[] = [];
   let cumulative = 0;
-  let cumulativeAdjusted: number | null = slippage.medianCents === null ? null : 0;
+  let cumulativeAdjusted: number | null = byDay.size === 0 ? null : 0;
   for (const key of [...byDay.keys()].sort()) {
     const bucket = byDay.get(key)!;
     cumulative += bucket.realized;
