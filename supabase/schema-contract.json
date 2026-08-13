@@ -1,0 +1,258 @@
+{
+  "version": 2,
+  "purpose": "Safety/correctness-critical PostgreSQL invariants. Update this file in the same change as any intentional migration that changes a tracked object.",
+  "indexes": [
+    {
+      "schema": "public",
+      "table": "paper_experiments",
+      "name": "paper_experiments_one_enabled_per_wallet",
+      "must_exist": false
+    },
+    {
+      "schema": "public",
+      "table": "experiment_event_state",
+      "name": "experiment_event_state_processed_idx",
+      "must_exist": true,
+      "definition_contains": ["experiment_id", "processed_at desc"]
+    },
+    {
+      "schema": "public",
+      "table": "experiment_source_position_state",
+      "name": "experiment_source_position_wallet_idx",
+      "must_exist": true,
+      "definition_contains": ["wallet", "experiment_id"]
+    },
+    {
+      "schema": "public",
+      "table": "source_events",
+      "name": "source_events_wallet_order_idx",
+      "must_exist": true,
+      "definition_contains": ["wallet", "source_ts", "event_key"]
+    },
+    {
+      "schema": "public",
+      "table": "alerts",
+      "name": "alerts_notification_retry_idx",
+      "must_exist": true,
+      "definition_contains": ["notification_status, notification_attempted_at, created_at", "where (notified_at is null)"]
+    },
+    {
+      "schema": "public",
+      "table": "source_events",
+      "name": "source_events_wallet_ts_idx",
+      "must_exist": true,
+      "definition_contains": ["wallet, source_ts desc"]
+    },
+    {
+      "schema": "public",
+      "table": "paper_trades",
+      "name": "paper_trades_experiment_created_idx",
+      "must_exist": true,
+      "definition_contains": ["experiment_id, created_at desc"]
+    }
+  ],
+  "constraints": [
+    {
+      "schema": "public",
+      "table": "experiment_event_state",
+      "name": "experiment_event_state_pkey",
+      "definition_contains": ["primary key (experiment_id, source_event_id)"]
+    },
+    {
+      "schema": "public",
+      "table": "experiment_event_state",
+      "name": "experiment_event_state_experiment_id_event_key_key",
+      "definition_contains": ["unique (experiment_id, event_key)"]
+    },
+    {
+      "schema": "public",
+      "table": "experiment_source_position_state",
+      "name": "experiment_source_position_state_pkey",
+      "definition_contains": ["primary key (experiment_id, asset)"]
+    },
+    {
+      "schema": "public",
+      "table": "source_events",
+      "name": "source_events_wallet_event_key_key",
+      "definition_contains": ["unique (wallet, event_key)"]
+    },
+    {
+      "schema": "public",
+      "table": "paper_trades",
+      "name": "paper_trades_experiment_id_event_key_key",
+      "definition_contains": ["unique (experiment_id, event_key)"]
+    },
+    {
+      "schema": "public",
+      "table": "paper_positions",
+      "name": "paper_positions_experiment_id_asset_key",
+      "definition_contains": ["unique (experiment_id, asset)"]
+    },
+    {
+      "schema": "public",
+      "table": "live_safety_state",
+      "name": "live_safety_stage_check",
+      "definition_contains": ["activation_stage", "locked", "armed", "activated"]
+    },
+    {
+      "schema": "public",
+      "table": "live_safety_state",
+      "name": "live_safety_single_row",
+      "definition_contains": ["id = 'global'"]
+    }
+  ],
+  "columns": [
+    {
+      "schema": "public",
+      "table": "alerts",
+      "name": "notification_status",
+      "type": "text",
+      "not_null": true,
+      "default_contains": ["'pending'"]
+    },
+    {
+      "schema": "public",
+      "table": "alerts",
+      "name": "notification_attempted_at",
+      "type": "timestamp with time zone",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "alerts",
+      "name": "notification_error",
+      "type": "text",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "paper_experiments",
+      "name": "settlement_cursor_asset",
+      "type": "text",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "live_safety_state",
+      "name": "kill_switch_engaged",
+      "type": "boolean",
+      "not_null": true,
+      "default_contains": ["true"]
+    },
+    {
+      "schema": "public",
+      "table": "live_safety_state",
+      "name": "max_live_notional_usd",
+      "type": "numeric",
+      "not_null": true,
+      "default_contains": ["0"]
+    },
+    {
+      "schema": "public",
+      "table": "live_safety_state",
+      "name": "max_live_exposure_usd",
+      "type": "numeric",
+      "not_null": true,
+      "default_contains": ["0"]
+    }
+  ],
+  "functions": [
+    {
+      "schema": "public",
+      "name": "get_pending_experiment_source_events",
+      "identity_args": "uuid, integer",
+      "security_definer": true,
+      "config_contains": ["search_path=public"],
+      "definition_contains": ["from public.paper_experiments", "join public.source_events", "from public.experiment_event_state", "source_event_id = se.id"],
+      "execute_allowed": ["service_role"],
+      "execute_denied": ["PUBLIC", "anon", "authenticated"]
+    },
+    {
+      "schema": "public",
+      "name": "get_experiment_source_positions",
+      "identity_args": "uuid, text[]",
+      "security_definer": true,
+      "config_contains": ["search_path=public"],
+      "definition_contains": ["from public.experiment_source_position_state", "experiment_id = p_experiment_id"],
+      "execute_allowed": ["service_role"],
+      "execute_denied": ["PUBLIC", "anon", "authenticated"]
+    },
+    {
+      "schema": "public",
+      "name": "process_source_event_atomic",
+      "identity_args": "text, text, integer, uuid, jsonb",
+      "security_definer": true,
+      "config_contains": ["search_path=public"],
+      "definition_contains": ["from public.worker_status", "insert into public.experiment_event_state", "on conflict (experiment_id, source_event_id) do nothing", "insert into public.experiment_source_position_state", "on conflict (experiment_id, event_key) do nothing"],
+      "execute_allowed": ["service_role"],
+      "execute_denied": ["PUBLIC", "anon", "authenticated"]
+    },
+    {
+      "schema": "public",
+      "name": "apply_verified_paper_settlement",
+      "identity_args": "uuid, text, text, text, text, timestamp with time zone, numeric, jsonb",
+      "security_definer": true,
+      "config_contains": ["search_path=public"],
+      "definition_contains": ["on conflict (experiment_id, asset) do nothing", "update public.paper_positions as pp", "update public.paper_experiments as pe"],
+      "execute_allowed": ["service_role"],
+      "execute_denied": ["PUBLIC", "anon", "authenticated"]
+    },
+    {
+      "schema": "public",
+      "name": "acquire_worker_lease",
+      "identity_args": "text, text, integer",
+      "security_definer": true,
+      "config_contains": ["search_path=public"],
+      "definition_contains": ["public.worker_status.lease_expires_at <= now()", "public.worker_status.fence + 1"],
+      "execute_allowed": ["service_role"],
+      "execute_denied": ["PUBLIC", "anon", "authenticated"]
+    },
+    {
+      "schema": "public",
+      "name": "has_role",
+      "identity_args": "uuid, public.app_role",
+      "security_definer": true,
+      "config_contains": ["search_path=public"],
+      "definition_contains": ["from public.user_roles", "user_id = _user_id", "role = _role"],
+      "execute_allowed": ["authenticated", "service_role"],
+      "execute_denied": ["PUBLIC", "anon"]
+    }
+  ],
+  "rls": [
+    {"schema": "public", "table": "experiment_event_state", "enabled": true},
+    {"schema": "public", "table": "experiment_source_position_state", "enabled": true},
+    {"schema": "public", "table": "paper_experiments", "enabled": true},
+    {"schema": "public", "table": "source_events", "enabled": true},
+    {"schema": "public", "table": "paper_trades", "enabled": true},
+    {"schema": "public", "table": "paper_positions", "enabled": true},
+    {"schema": "public", "table": "worker_status", "enabled": true},
+    {"schema": "public", "table": "worker_checkpoints", "enabled": true},
+    {"schema": "public", "table": "alerts", "enabled": true},
+    {"schema": "public", "table": "user_roles", "enabled": true},
+    {"schema": "public", "table": "live_safety_state", "enabled": true}
+  ],
+  "policies": [
+    {
+      "schema": "public",
+      "table": "user_roles",
+      "name": "Users can read their own roles",
+      "command": "SELECT",
+      "roles": ["authenticated"],
+      "using_contains": ["auth.uid() = user_id"]
+    },
+    {
+      "schema": "public",
+      "table": "live_safety_state",
+      "name": "Admins can read live safety state",
+      "command": "SELECT",
+      "roles": ["authenticated"],
+      "using_contains": ["has_role(auth.uid(), 'admin'"]
+    }
+  ],
+  "table_grants": [
+    {"schema": "public", "table": "user_roles", "role": "authenticated", "privilege": "SELECT", "allowed": true},
+    {"schema": "public", "table": "live_safety_state", "role": "authenticated", "privilege": "SELECT", "allowed": true},
+    {"schema": "public", "table": "experiment_event_state", "role": "service_role", "privilege": "SELECT", "allowed": true},
+    {"schema": "public", "table": "experiment_source_position_state", "role": "service_role", "privilege": "SELECT", "allowed": true}
+  ]
+}
