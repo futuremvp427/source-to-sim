@@ -52,7 +52,6 @@ export const WORKER_ID = "ingest";
 
 const DATA_API = "https://data-api.polymarket.com";
 export const PAGE_SIZE = 250;
-const LIVE_PAGES = 2; // fallback window when a bootstrapped worker has no checkpoint yet
 const BOOTSTRAP_PAGES = 4;
 const LEASE_SECONDS = 180;
 /** Exposed for the lease regression tests only. */
@@ -367,29 +366,57 @@ export async function fetchUntilCheckpointCovered(
     pagesFetched += 1;
     raw.push(...page);
     const exhausted = page.length < pageSize;
-    const coversCheckpoint = page.some((r) => Number(r["timestamp"]) < checkpointTs);
+    // A malformed timestamp (null, "", non-numeric) must never falsely prove
+    // coverage: Number(null) === 0 and Number("") === 0 would otherwise look
+    // like a genuine event older than any positive checkpoint.
+    const coversCheckpoint = page.some((r) => {
+      const ts = Number(r["timestamp"]);
+      return Number.isFinite(ts) && ts > 0 && ts < checkpointTs;
+    });
     if (exhausted || coversCheckpoint) return { raw, pagesFetched };
     offset += pageSize;
   }
 }
 
+/** Raised when a bootstrapped worker has no valid boundary to catch up against. */
+export class MissingCatchupBoundaryError extends Error {}
+
 /**
  * A first-ever bootstrap stays a bounded fixed-page fetch (never an unlimited
- * history download). Once bootstrapped, the previous checkpoint drives how
- * far back this poll must catch up, so a backlog larger than the old fixed
- * window can never leave older unseen events permanently out of reach.
+ * history download). Once bootstrapped, catchupBoundary (the previous
+ * checkpoint, or experiment.follow_from_ts when there is no real checkpoint
+ * yet — e.g. a newly followed wallet whose first bootstrap saw zero trades)
+ * drives how far back this poll must catch up, so a backlog larger than the
+ * old fixed window can never leave older unseen events permanently out of
+ * reach. If neither boundary exists, this fails closed rather than silently
+ * falling back to a bounded window: the caller's existing error/lease-release
+ * path handles it, exactly like a deadline timeout.
  */
 async function fetchSourceWindow(
   wallet: string,
   bootstrapped: boolean,
-  checkpointTs: number | null,
+  catchupBoundary: number | null,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
   if (!bootstrapped) return fetchFixedPages(wallet, BOOTSTRAP_PAGES);
-  if (checkpointTs === null || !(checkpointTs > 0)) return fetchFixedPages(wallet, LIVE_PAGES);
+  if (catchupBoundary === null) {
+    throw new MissingCatchupBoundaryError(
+      "Bootstrapped worker has neither a checkpoint nor a follow_from_ts to catch up against",
+    );
+  }
   return fetchUntilCheckpointCovered(
     (offset) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet)),
-    checkpointTs,
+    catchupBoundary,
   );
+}
+
+/** Previous checkpoint, falling back to go-live when there is no real checkpoint yet. */
+export function resolveCatchupBoundary(
+  checkpointTs: number | null | undefined,
+  followFromTs: number | null | undefined,
+): number | null {
+  if (Number(checkpointTs) > 0) return Number(checkpointTs);
+  if (Number(followFromTs) > 0) return Number(followFromTs);
+  return null;
 }
 
 /**
@@ -1276,7 +1303,11 @@ export async function runExperimentCycle(
     const stages = await withDeadline(
       (async () => {
         const window = await timed("source_ingest", () =>
-          fetchSourceWindow(wallet, bootstrapped, checkpoint?.last_source_ts ?? null),
+          fetchSourceWindow(
+            wallet,
+            bootstrapped,
+            resolveCatchupBoundary(checkpoint?.last_source_ts, experiment.follow_from_ts),
+          ),
         );
         const events = normalizeSourceEvents(window.raw, wallet);
         const inserted = await timed("persist_events", () =>

@@ -5,7 +5,7 @@ const src = readFileSync(new URL("./shadow.server.ts", import.meta.url), "utf8")
 
 vi.mock("@/integrations/supabase/client.server", () => ({ supabaseAdmin: {} }));
 
-const { fetchUntilCheckpointCovered, PAGE_SIZE } = await import("./shadow.server");
+const { fetchUntilCheckpointCovered, resolveCatchupBoundary, PAGE_SIZE } = await import("./shadow.server");
 
 type Json = Record<string, unknown>;
 
@@ -95,5 +95,65 @@ describe("checkpoint-driven source catch-up", () => {
     const { pagesFetched } = await fetchUntilCheckpointCovered(fetchPage, checkpointTs);
     expect(calls).toEqual([0]);
     expect(pagesFetched).toBe(1);
+  });
+
+  it("a full page of malformed timestamps does not falsely establish coverage", async () => {
+    const checkpointTs = 1000;
+    // Number(null) === 0, Number("") === 0, Number("not-a-number") === NaN — none may
+    // count as a genuine event below the checkpoint.
+    const page0: Json[] = [
+      { timestamp: null },
+      { timestamp: "" },
+      { timestamp: "not-a-number" },
+      ...Array.from({ length: PAGE_SIZE - 3 }, () => ({ timestamp: 5000 })),
+    ];
+    const page1: Json[] = [{ timestamp: 500 }];
+    const calls: number[] = [];
+    const fetchPage = async (offset: number) => {
+      calls.push(offset);
+      if (offset === 0) return page0;
+      if (offset === PAGE_SIZE) return page1;
+      return [];
+    };
+    const { pagesFetched } = await fetchUntilCheckpointCovered(fetchPage, checkpointTs);
+    expect(calls).toEqual([0, PAGE_SIZE]);
+    expect(pagesFetched).toBe(2);
+  });
+});
+
+describe("catch-up boundary fallback", () => {
+  it("prefers a real positive checkpoint over follow_from_ts", () => {
+    expect(resolveCatchupBoundary(500, 100)).toBe(500);
+  });
+
+  it("falls back to follow_from_ts when there is no positive checkpoint", () => {
+    expect(resolveCatchupBoundary(0, 900)).toBe(900);
+    expect(resolveCatchupBoundary(null, 900)).toBe(900);
+  });
+
+  it("fails closed (null) when neither a checkpoint nor follow_from_ts is valid", () => {
+    expect(resolveCatchupBoundary(null, null)).toBeNull();
+    expect(resolveCatchupBoundary(0, 0)).toBeNull();
+    expect(resolveCatchupBoundary(undefined, undefined)).toBeNull();
+  });
+
+  it("a bootstrapped worker with no checkpoint pages against follow_from_ts until it is covered", async () => {
+    const followFromTs = 900;
+    const boundary = resolveCatchupBoundary(0, followFromTs);
+    expect(boundary).toBe(followFromTs);
+
+    const pages: Json[][] = [
+      Array.from({ length: PAGE_SIZE }, (_, i) => ({ timestamp: 5000 - i })), // page 0 (newest)
+      Array.from({ length: PAGE_SIZE }, (_, i) => ({ timestamp: 3000 - i })), // page 1: still > boundary
+      [{ timestamp: 899 }], // page 2: crosses AND is short
+    ];
+    const calls: number[] = [];
+    const fetchPage = async (offset: number) => {
+      calls.push(offset);
+      return pages[offset / PAGE_SIZE] ?? [];
+    };
+    const { pagesFetched } = await fetchUntilCheckpointCovered(fetchPage, boundary as number);
+    expect(pagesFetched).toBeGreaterThan(2);
+    expect(calls).toEqual([0, PAGE_SIZE, PAGE_SIZE * 2]);
   });
 });
