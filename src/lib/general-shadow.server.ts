@@ -8,6 +8,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { fetchAllRows } from "./db-pagination";
 import {
   GS_GO_LIVE_ISO,
   GS_GO_LIVE_TS,
@@ -219,57 +220,112 @@ async function loadWallet(experiment: {
   const goLiveMs = goLiveTs * 1000;
   const nowMs = Date.now();
 
-  const [totalEvents, postEvents, positionsRes, tradesRes, settlementsRes, activityRes, obsRes, auditRes, workerRes, catRes] =
-    await Promise.all([
-      supabaseAdmin.from("source_events").select("id", { count: "exact", head: true }).eq("wallet", wallet),
-      supabaseAdmin
-        .from("source_events")
-        .select("id", { count: "exact", head: true })
-        .eq("wallet", wallet)
-        .gte("source_ts", goLiveTs),
-      supabaseAdmin
-        .from("paper_positions")
-        .select("asset, shares, cost_basis, mark, mark_ts, settlement_status")
-        .eq("experiment_id", experiment.id)
-        .gt("shares", 0),
-      supabaseAdmin
+  type TradeRow = { action: string; reason: string | null; realized_pnl: number; created_at: string };
+  type SettlementRow = { realized_pnl: number; settled_at: string };
+  type ActivityRow = { activity_type: string };
+  type ObsRow = { status: string; sample_delay: string; slippage_cents: number | null; fillable: boolean | null };
+  type CatRow = { market_title: string | null; slug: string | null };
+
+  const [
+    totalEvents,
+    postEvents,
+    positionsRes,
+    tradesPaged,
+    settlementsPaged,
+    activityPaged,
+    obsPaged,
+    auditRes,
+    workerRes,
+    catPaged,
+  ] = await Promise.all([
+    supabaseAdmin.from("source_events").select("id", { count: "exact", head: true }).eq("wallet", wallet),
+    supabaseAdmin
+      .from("source_events")
+      .select("id", { count: "exact", head: true })
+      .eq("wallet", wallet)
+      .gte("source_ts", goLiveTs),
+    supabaseAdmin
+      .from("paper_positions")
+      .select("asset, shares, cost_basis, mark, mark_ts, settlement_status")
+      .eq("experiment_id", experiment.id)
+      .gt("shares", 0),
+    // Full history: every paper trade decision feeds buy/sell/skip counts and
+    // daily realized results, so a bounded window would silently understate
+    // both once an experiment passed ~5000 trades.
+    fetchAllRows<TradeRow>(async (from, to) => {
+      const { data, error } = await supabaseAdmin
         .from("paper_trades")
         .select("action, reason, realized_pnl, created_at")
         .eq("experiment_id", experiment.id)
         .order("created_at", { ascending: false })
-        .limit(5000),
-      supabaseAdmin
+        .order("id", { ascending: false })
+        .range(from, to);
+      if (error) throw new Error(error.message);
+      return data ?? [];
+    }),
+    fetchAllRows<SettlementRow>(async (from, to) => {
+      const { data, error } = await supabaseAdmin
         .from("paper_settlements")
         .select("realized_pnl, settled_at")
         .eq("experiment_id", experiment.id)
         .order("settled_at", { ascending: false })
-        .limit(5000),
-      supabaseAdmin.from("general_activity").select("activity_type").eq("wallet", wallet).limit(5000),
-      supabaseAdmin
+        .order("id", { ascending: false })
+        .range(from, to);
+      if (error) throw new Error(error.message);
+      return data ?? [];
+    }),
+    fetchAllRows<ActivityRow>(async (from, to) => {
+      const { data, error } = await supabaseAdmin
+        .from("general_activity")
+        .select("activity_type")
+        .eq("wallet", wallet)
+        .order("id", { ascending: true })
+        .range(from, to);
+      if (error) throw new Error(error.message);
+      return data ?? [];
+    }),
+    fetchAllRows<ObsRow>(async (from, to) => {
+      const { data, error } = await supabaseAdmin
         .from("copyability_observations")
         .select("status, sample_delay, slippage_cents, fillable")
         .eq("experiment_id", experiment.id)
         .order("created_at", { ascending: false })
-        .limit(3000),
-      supabaseAdmin
-        .from("pipeline_audit")
-        .select("detection_latency_seconds, decision_latency_seconds")
-        .eq("experiment_id", experiment.id)
-        .order("created_at", { ascending: false })
-        .limit(1000),
-      supabaseAdmin
-        .from("worker_status")
-        .select("state, last_success_at, last_error")
-        .eq("id", `ingest:${experiment.id}`)
-        .maybeSingle(),
-      supabaseAdmin
+        .order("id", { ascending: false })
+        .range(from, to);
+      if (error) throw new Error(error.message);
+      return data ?? [];
+    }),
+    // Intentionally bounded: the latest-1000-sample latency window, not a
+    // full-history read. Widening this would change what it measures.
+    supabaseAdmin
+      .from("pipeline_audit")
+      .select("detection_latency_seconds, decision_latency_seconds")
+      .eq("experiment_id", experiment.id)
+      .order("created_at", { ascending: false })
+      .limit(1000),
+    supabaseAdmin
+      .from("worker_status")
+      .select("state, last_success_at, last_error")
+      .eq("id", `ingest:${experiment.id}`)
+      .maybeSingle(),
+    fetchAllRows<CatRow>(async (from, to) => {
+      const { data, error } = await supabaseAdmin
         .from("source_events")
         .select("market_title, slug")
         .eq("wallet", wallet)
         .gte("source_ts", goLiveTs)
         .order("source_ts", { ascending: false })
-        .limit(3000),
-    ]);
+        .order("id", { ascending: false })
+        .range(from, to);
+      if (error) throw new Error(error.message);
+      return data ?? [];
+    }),
+  ]);
+  const tradesRes = { data: tradesPaged.rows };
+  const settlementsRes = { data: settlementsPaged.rows };
+  const activityRes = { data: activityPaged.rows };
+  const obsRes = { data: obsPaged.rows };
+  const catRes = { data: catPaged.rows };
 
   /* ---- positions / marks ---- */
   const positions = positionsRes.data ?? [];
