@@ -8,7 +8,14 @@ import type { DashboardData } from "./shadow.server";
 export const getShadowDashboard = createServerFn({ method: "GET" }).handler(
   async (): Promise<DashboardData> => {
     const { loadDashboard } = await import("./shadow.server");
-    return loadDashboard();
+    const dashboard = await loadDashboard();
+    return {
+      ...dashboard,
+      // Phase 1 no longer uses source_events.processed_at as current processing
+      // state. Suppress the old wallet-global "pending" UI signal rather than
+      // presenting it as if it were experiment-specific.
+      events: dashboard.events.map((event) => ({ ...event, processed: true })),
+    };
   },
 );
 
