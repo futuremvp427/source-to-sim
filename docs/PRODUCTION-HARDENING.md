@@ -16,7 +16,7 @@ This document is the durable operations record for Mirror Trader. It separates c
 - Atomic verified paper settlement RPC migration.
 - Phantom closed-position classification fix.
 - Telegram delivery state distinguishes attempted/failed/sent, and failed important alerts are retried from the scheduled ingest hook.
-- Scheduled ingest is POST-only and supports `INGEST_HOOK_SECRET` with a temporary legacy fallback.
+- Scheduled ingest is POST-only and accepts only the dedicated `INGEST_HOOK_SECRET`; the former browser-visible publishable-key fallback has been removed.
 - PMUS preview decisions are verified after the conditional database update so a no-op cannot be reported as success.
 - Environment files are ignored/untracked.
 - Dashboard is marked `noindex`/`nofollow`; robots disallow crawler indexing.
