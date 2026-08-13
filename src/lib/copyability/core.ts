@@ -248,3 +248,48 @@ export function copyabilityScore(input: {
     reason: `Scored from ${observed.length} real observed sample(s) across ${usableEvents.size} post-go-live event(s).`,
   };
 }
+
+/* ------------------------------------------------------------------ */
+/* Scheduling cursor (durable backlog coverage)                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A latest-N-window scan can permanently strand older unscheduled trades once
+ * the backlog exceeds the window. The cursor instead walks the append-only
+ * paper_trades stream forward exactly once per row, in stable (created_at,
+ * id) order, so backlog of any size is eventually fully covered and newly
+ * inserted trades are always reached once the cursor catches up.
+ */
+export type CursorPosition = { createdAt: string; id: string };
+
+/** True when a row sorts strictly after the given cursor in (created_at, id) order. */
+export function isAfterCursor(
+  row: { createdAt: string; id: string },
+  cursor: CursorPosition | null,
+): boolean {
+  if (cursor === null) return true;
+  if (row.createdAt !== cursor.createdAt) return row.createdAt > cursor.createdAt;
+  return row.id > cursor.id;
+}
+
+/**
+ * Selects the next page after cursor, from rows already sorted ascending by
+ * (created_at, id). Mirrors the ORDER BY + tuple WHERE clause issued against
+ * paper_trades, so the resume/paging semantics are unit-testable without a
+ * database.
+ */
+export function selectCursorPage<T extends { createdAt: string; id: string }>(
+  sortedRows: T[],
+  cursor: CursorPosition | null,
+  limit: number,
+): T[] {
+  const startIndex = sortedRows.findIndex((row) => isAfterCursor(row, cursor));
+  if (startIndex === -1) return [];
+  return sortedRows.slice(startIndex, startIndex + limit);
+}
+
+/** Cursor to persist once a page has been successfully scanned: its last row. */
+export function nextCursorFor(page: { createdAt: string; id: string }[]): CursorPosition | null {
+  const last = page[page.length - 1];
+  return last ? { createdAt: last.createdAt, id: last.id } : null;
+}

@@ -15,7 +15,9 @@ import {
   computeObservation,
   copyabilityScore,
   median,
+  nextCursorFor,
   type CopyabilityScore,
+  type CursorPosition,
   type ObservationLite,
   type SampleDelay,
   type Side,
@@ -34,6 +36,7 @@ const SCHEDULE_BATCH = 40;
 const SAMPLE_BATCH = 200;
 
 type ScheduleSource = {
+  id: string;
   event_key: string;
   source_event_id: string | null;
   asset: string;
@@ -46,10 +49,28 @@ type ScheduleSource = {
 };
 
 /**
+ * Durable scheduling cursor stored on paper_experiments. A latest-N-window
+ * scan can permanently strand older unscheduled trades once backlog exceeds
+ * the window; the cursor instead walks paper_trades forward exactly once per
+ * row in stable (created_at, id) order, so any backlog size is eventually
+ * fully covered.
+ */
+async function loadScheduleCursor(experimentId: string): Promise<CursorPosition | null> {
+  const { data } = await supabaseAdmin
+    .from("paper_experiments")
+    .select("copyability_cursor_created_at, copyability_cursor_id")
+    .eq("id", experimentId)
+    .maybeSingle();
+  const row = data as { copyability_cursor_created_at?: string | null; copyability_cursor_id?: string | null } | null;
+  if (!row?.copyability_cursor_created_at || !row.copyability_cursor_id) return null;
+  return { createdAt: row.copyability_cursor_created_at, id: row.copyability_cursor_id };
+}
+
+/**
  * One pending row per (experiment, event, delay). The unique constraint makes
  * repeated cycles idempotent, and rows are never shared between experiments.
  */
-async function scheduleObservations(experiment: {
+export async function scheduleObservations(experiment: {
   id: string;
   starting_cash: number;
   cash: number;
@@ -59,12 +80,23 @@ async function scheduleObservations(experiment: {
   const wantedDelays = experiment.delays
     ? SAMPLE_DELAYS.filter((d) => experiment.delays!.includes(d.delay))
     : SAMPLE_DELAYS;
-  const { data: trades } = await supabaseAdmin
+
+  const cursor = await loadScheduleCursor(experiment.id);
+  let query = supabaseAdmin
     .from("paper_trades")
-    .select("event_key, source_event_id, asset, market_title, side, price, shares, source_ts, created_at")
+    .select("id, event_key, source_event_id, asset, market_title, side, price, shares, source_ts, created_at")
     .eq("experiment_id", experiment.id)
-    .order("created_at", { ascending: false })
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true })
     .limit(SCHEDULE_BATCH);
+  if (cursor) {
+    // Tuple cursor (created_at, id) > (cursor.createdAt, cursor.id), expressed as
+    // PostgREST's or(...)/and(...) combinator since a composite comparison has
+    // no direct .gt() equivalent on two columns.
+    query = query.or(`created_at.gt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.gt.${cursor.id})`);
+  }
+  const { data: trades, error } = await query;
+  if (error) throw new Error(error.message);
   const rows = (trades ?? []) as unknown as ScheduleSource[];
   if (rows.length === 0) return 0;
 
@@ -107,16 +139,37 @@ async function scheduleObservations(experiment: {
       });
     }
   }
-  if (inserts.length === 0) return 0;
-  const { data } = await supabaseAdmin
-    .from("copyability_observations")
-    .upsert(inserts as never, { onConflict: "experiment_id,event_key,sample_delay", ignoreDuplicates: true })
-    .select("id");
-  return data?.length ?? 0;
+
+  let insertedCount = 0;
+  if (inserts.length > 0) {
+    const { data, error: upsertError } = await supabaseAdmin
+      .from("copyability_observations")
+      .upsert(inserts as never, { onConflict: "experiment_id,event_key,sample_delay", ignoreDuplicates: true })
+      .select("id");
+    if (upsertError) throw new Error(upsertError.message);
+    insertedCount = data?.length ?? 0;
+  }
+
+  // Advance the cursor ONLY after this page's scheduling persistence succeeds
+  // (including the "nothing new to insert" case, which is still a fully
+  // scanned page — advancing here is what prevents rescanning it forever).
+  const nextCursor = nextCursorFor(rows.map((r) => ({ createdAt: r.created_at, id: r.id })));
+  if (nextCursor) {
+    const { error: cursorError } = await supabaseAdmin
+      .from("paper_experiments")
+      .update({
+        copyability_cursor_created_at: nextCursor.createdAt,
+        copyability_cursor_id: nextCursor.id,
+      } as never)
+      .eq("id", experiment.id);
+    if (cursorError) throw new Error(`Failed to persist copyability scheduling cursor: ${cursorError.message}`);
+  }
+
+  return insertedCount;
 }
 
 /** Take every due sample for this experiment. Failures persist as unavailable. */
-async function takeDueSamples(experimentId: string): Promise<{ sampled: number; unavailable: number }> {
+export async function takeDueSamples(experimentId: string): Promise<{ sampled: number; unavailable: number }> {
   const nowMs = Date.now();
   const { data: due } = await supabaseAdmin
     .from("copyability_observations")
@@ -142,20 +195,16 @@ async function takeDueSamples(experimentId: string): Promise<{ sampled: number; 
   for (const row of rows) {
     const lateBy = (nowMs - new Date(row.scheduled_at as string).getTime()) / 1000;
     if (lateBy > SAMPLE_TOLERANCE_SECONDS) {
-      await supabaseAdmin
-        .from("copyability_observations")
-        .update({ status: "unavailable", observed_at: new Date().toISOString() })
-        .eq("id", row.id);
-      unavailable += 1;
+      if (await claimObservationTransition(row.id, { status: "unavailable", observed_at: new Date().toISOString() })) {
+        unavailable += 1;
+      }
       continue;
     }
     const book = books.get(row.asset as string) ?? null;
     if (book === null) {
-      await supabaseAdmin
-        .from("copyability_observations")
-        .update({ status: "unavailable", observed_at: new Date().toISOString() })
-        .eq("id", row.id);
-      unavailable += 1;
+      if (await claimObservationTransition(row.id, { status: "unavailable", observed_at: new Date().toISOString() })) {
+        unavailable += 1;
+      }
       continue;
     }
     const side: Side = row.side === "SELL" ? "SELL" : "BUY";
@@ -170,27 +219,46 @@ async function takeDueSamples(experimentId: string): Promise<{ sampled: number; 
         visibleDepth: side === "BUY" ? book.askDepth : book.bidDepth,
       },
     });
-    await supabaseAdmin
-      .from("copyability_observations")
-      .update({
-        status: "observed",
-        observed_at: new Date().toISOString(),
-        best_bid: book.bid,
-        best_ask: book.ask,
-        midpoint: math.midpoint,
-        spread: math.spread,
-        follower_price: math.followerPrice,
-        visible_depth: side === "BUY" ? book.askDepth : book.bidDepth,
-        slippage_cents: math.slippageCents,
-        slippage_pct: math.slippagePct,
-        price_direction: math.priceDirection,
-        improved: math.improved,
-        fillable: math.fillable,
-      })
-      .eq("id", row.id);
-    sampled += 1;
+    const claimed = await claimObservationTransition(row.id, {
+      status: "observed",
+      observed_at: new Date().toISOString(),
+      best_bid: book.bid,
+      best_ask: book.ask,
+      midpoint: math.midpoint,
+      spread: math.spread,
+      follower_price: math.followerPrice,
+      visible_depth: side === "BUY" ? book.askDepth : book.bidDepth,
+      slippage_cents: math.slippageCents,
+      slippage_pct: math.slippagePct,
+      price_direction: math.priceDirection,
+      improved: math.improved,
+      fillable: math.fillable,
+    });
+    if (claimed) sampled += 1;
   }
   return { sampled, unavailable };
+}
+
+/**
+ * Compare-and-set: only a row still status='pending' may transition. Two
+ * overlapping observation workers can both select the same due row; the
+ * WHERE-status guard plus checking the returned row makes exactly one
+ * worker's write win. The loser's returned row set is empty, so it must not
+ * count the sample or overwrite the winner's observed_at/slippage/status.
+ * Exported so the race itself is directly testable without a database.
+ */
+export async function claimObservationTransition(
+  id: string,
+  patch: Record<string, unknown>,
+): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from("copyability_observations")
+    .update(patch as never)
+    .eq("id", id)
+    .eq("status", "pending")
+    .select("id");
+  if (error) throw new Error(error.message);
+  return (data?.length ?? 0) > 0;
 }
 
 export async function runCopyabilityPass(experiment: {
