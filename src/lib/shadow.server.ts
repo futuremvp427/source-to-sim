@@ -370,7 +370,7 @@ async function persistEvents(events: NormalizedEvent[], keepRaw = true): Promise
 }
 
 /* ------------------------------------------------------------------ */
-/* Follower pass over unprocessed events                               */
+/* Follower pass over experiment-scoped pending events                 */
 /* ------------------------------------------------------------------ */
 
 type SourceEventRow = {
@@ -392,6 +392,11 @@ type PaperPositionRow = {
   cost_basis: number;
   avg_price: number;
   realized_pnl: number;
+};
+
+type ExperimentSourcePositionRow = {
+  asset: string;
+  shares: number;
 };
 
 export type ProcessResult = {
@@ -482,28 +487,32 @@ async function processPendingEvents(
   lease: Lease,
 ): Promise<ProcessResult> {
   const wallet = experiment.wallet_address.toLowerCase();
-  const { data: pending, error } = await supabaseAdmin
-    .from("source_events")
-    .select("id, event_key, asset, market_title, outcome, side, shares, price, source_ts, first_seen_at")
-    .eq("wallet", wallet)
-    .is("processed_at", null)
-    .order("source_ts", { ascending: true })
-    .order("event_key", { ascending: true })
-    .limit(PROCESS_BATCH);
+
+  // Pending/consumed state belongs to (experiment, source_event). The source
+  // event row itself is immutable shared input and is never filtered by the
+  // legacy wallet-global processed_at bit here.
+  const { data: pending, error } = await supabaseAdmin.rpc(
+    "get_pending_experiment_source_events" as never,
+    { p_experiment_id: experiment.id, p_limit: PROCESS_BATCH } as never,
+  );
   if (error) throw new Error(error.message);
-  const rows = (pending ?? []) as SourceEventRow[];
+  const rows = (pending ?? []) as unknown as SourceEventRow[];
   if (rows.length === 0) return { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0 };
   const followFrom = experiment.follow_from_ts ?? 0;
 
   const assets = [...new Set(rows.map((r) => r.asset))];
 
-  const { data: sourceStateRows } = await supabaseAdmin
-    .from("source_position_state")
-    .select("asset, shares")
-    .eq("wallet", wallet)
-    .in("asset", assets);
+  // SourceSharesBefore must also be experiment-scoped. A wallet-global compact
+  // row can be ahead of another experiment and would distort proportional sells.
+  const { data: sourceStateRows, error: sourceStateError } = await supabaseAdmin.rpc(
+    "get_experiment_source_positions" as never,
+    { p_experiment_id: experiment.id, p_assets: assets } as never,
+  );
+  if (sourceStateError) throw new Error(sourceStateError.message);
   const sourceShares = new Map<string, number>();
-  for (const r of sourceStateRows ?? []) sourceShares.set(r.asset, Number(r.shares));
+  for (const r of (sourceStateRows ?? []) as unknown as ExperimentSourcePositionRow[]) {
+    sourceShares.set(r.asset, Number(r.shares));
+  }
 
   const { data: paperRows } = await supabaseAdmin
     .from("paper_positions")
@@ -679,7 +688,7 @@ async function processPendingEvents(
       }),
     );
 
-    // Source-side state always advances, even when the paper side skipped.
+    // This local source state is experiment-scoped and advances even for SKIP.
     sourceShares.set(row.asset, nextSourceShares);
 
     if (commit.applied) {
@@ -955,9 +964,10 @@ async function settleSafely(experimentId: string): Promise<typeof NO_SETTLEMENTS
 }
 
 /**
- * Iterates every ENABLED experiment. Each wallet has its own lease, checkpoint,
- * bankroll and paper book, so a slow or failing candidate can never stall or
- * corrupt the reference SHADOW experiment.
+ * Iterates every ENABLED experiment. Each experiment has its own lease,
+ * checkpoint, bankroll, paper book, event-consumption state and source-position
+ * state, so same-wallet experiments can evaluate the same immutable event stream
+ * independently without competing for a shared processing bit.
  */
 export async function runIngestCycle(workerId: string): Promise<MultiCycleResult> {
   const ranAt = new Date().toISOString();
@@ -1499,6 +1509,7 @@ export async function loadDashboard() {
       firstSeenAt: e.first_seen_at,
       identityBasis: e.identity_basis,
       identityDegraded: e.identity_degraded,
+      // Legacy wallet-global processing flags remain visible only as provenance.
       processed: e.processed_at !== null,
       backfilled: e.backfilled ?? false,
       txHash: e.tx_hash,
