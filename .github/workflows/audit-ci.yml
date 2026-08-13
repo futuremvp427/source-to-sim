@@ -25,3 +25,22 @@ jobs:
         run: bun ./node_modules/typescript/bin/tsc --noEmit
       - name: Production build
         run: bun run build
+
+  schema-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Start local Supabase
+        run: supabase start
+      - name: Replay migrations from a clean database
+        run: supabase db reset --local
+      - name: Verify safety-critical schema contract
+        env:
+          SCHEMA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+        run: python3 scripts/verify_schema_contract.py
+      - name: Stop local Supabase
+        if: always()
+        run: supabase stop --no-backup
