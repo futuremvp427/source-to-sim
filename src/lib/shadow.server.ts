@@ -45,8 +45,8 @@ export const EXPERIMENT_NAME = "SHADOW";
 export const WORKER_ID = "ingest";
 
 const DATA_API = "https://data-api.polymarket.com";
-const PAGE_SIZE = 250;
-const LIVE_PAGES = 2; // bounded incremental window per poll
+export const PAGE_SIZE = 250;
+const LIVE_PAGES = 2; // fallback window when a bootstrapped worker has no checkpoint yet
 const BOOTSTRAP_PAGES = 4;
 const LEASE_SECONDS = 180;
 /** Exposed for the lease regression tests only. */
@@ -314,7 +314,8 @@ export function buildTradesUrl(limit: number, offset: number, wallet: string = T
   return `${DATA_API}/trades?user=${wallet}&${TAKER_ONLY_PARAM}&limit=${limit}&offset=${offset}`;
 }
 
-async function fetchSourceWindow(
+/** Bounded page walk: used only for a fixed number of newest pages. */
+async function fetchFixedPages(
   wallet: string,
   pages: number,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
@@ -327,6 +328,62 @@ async function fetchSourceWindow(
     if (page.length < PAGE_SIZE) break;
   }
   return { raw, pagesFetched };
+}
+
+/**
+ * Checkpoint-driven catch-up: walk pages newest-to-oldest until the previous
+ * checkpoint is fully covered, or the API's available history is exhausted.
+ *
+ * Coverage is proven by either:
+ *  - a page containing an event strictly OLDER than checkpointTs (a page
+ *    whose oldest event is exactly == checkpointTs does NOT prove coverage —
+ *    more events sharing that same second may sit on the next page), or
+ *  - the API returning fewer than pageSize rows (history exhausted).
+ *
+ * No artificial page cap is applied: a real backlog must be fully covered or
+ * the caller's own deadline aborts the cycle (fail closed — see
+ * runExperimentCycle, which only advances the checkpoint and processes
+ * events once this promise resolves).
+ *
+ * Exported so the stopping semantics can be tested directly against an
+ * injected page fetcher, without mocking the network.
+ */
+export async function fetchUntilCheckpointCovered(
+  fetchPage: (offset: number) => Promise<Json[]>,
+  checkpointTs: number,
+  pageSize: number = PAGE_SIZE,
+): Promise<{ raw: Json[]; pagesFetched: number }> {
+  const raw: Json[] = [];
+  let pagesFetched = 0;
+  let offset = 0;
+  for (;;) {
+    const page = await fetchPage(offset);
+    pagesFetched += 1;
+    raw.push(...page);
+    const exhausted = page.length < pageSize;
+    const coversCheckpoint = page.some((r) => Number(r["timestamp"]) < checkpointTs);
+    if (exhausted || coversCheckpoint) return { raw, pagesFetched };
+    offset += pageSize;
+  }
+}
+
+/**
+ * A first-ever bootstrap stays a bounded fixed-page fetch (never an unlimited
+ * history download). Once bootstrapped, the previous checkpoint drives how
+ * far back this poll must catch up, so a backlog larger than the old fixed
+ * window can never leave older unseen events permanently out of reach.
+ */
+async function fetchSourceWindow(
+  wallet: string,
+  bootstrapped: boolean,
+  checkpointTs: number | null,
+): Promise<{ raw: Json[]; pagesFetched: number }> {
+  if (!bootstrapped) return fetchFixedPages(wallet, BOOTSTRAP_PAGES);
+  if (checkpointTs === null || !(checkpointTs > 0)) return fetchFixedPages(wallet, LIVE_PAGES);
+  return fetchUntilCheckpointCovered(
+    (offset) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet)),
+    checkpointTs,
+  );
 }
 
 /**
@@ -1201,7 +1258,7 @@ export async function runExperimentCycle(
     const stages = await withDeadline(
       (async () => {
         const window = await timed("source_ingest", () =>
-          fetchSourceWindow(wallet, bootstrapped ? LIVE_PAGES : BOOTSTRAP_PAGES),
+          fetchSourceWindow(wallet, bootstrapped, checkpoint?.last_source_ts ?? null),
         );
         const events = normalizeSourceEvents(window.raw, wallet);
         const inserted = await timed("persist_events", () =>
