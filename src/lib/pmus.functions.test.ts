@@ -95,12 +95,12 @@ async function runAuthChain(isAdmin: boolean) {
   const requireSupabaseAuth = middlewares[0];
 
   const authResult = await requireSupabaseAuth.options.server({
-    next: async (ctx: any) => ({ context: ctx }),
+    next: async (ctx: any) => ctx,
     context: {},
   } as any);
 
   const adminResult = await (requireAdmin as any).options.server({
-    next: async (ctx: any) => ({ context: ctx }),
+    next: async (ctx: any) => ctx,
     context: authResult.context,
   } as any);
 
