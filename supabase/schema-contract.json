@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "purpose": "Safety/correctness-critical PostgreSQL invariants. Update this file in the same change as any intentional migration that changes a tracked object.",
   "indexes": [
     {
@@ -28,6 +28,13 @@
       "name": "source_events_wallet_order_idx",
       "must_exist": true,
       "definition_contains": ["wallet", "source_ts", "event_key"]
+    },
+    {
+      "schema": "public",
+      "table": "copyability_observations",
+      "name": "copyability_observations_experiment_observed_slippage_idx",
+      "must_exist": true,
+      "definition_contains": ["experiment_id", "observed_at desc", "id desc", "include (slippage_cents)", "status = 'observed'", "observed_at is not null", "slippage_cents is not null"]
     },
     {
       "schema": "public",
