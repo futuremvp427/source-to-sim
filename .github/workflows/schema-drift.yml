@@ -1,0 +1,27 @@
+name: Production Schema Drift
+
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      SCHEMA_DATABASE_URL: ${{ secrets.PRODUCTION_SCHEMA_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Require read-only production schema connection
+        run: |
+          if [ -z "$SCHEMA_DATABASE_URL" ]; then
+            echo "::error::PRODUCTION_SCHEMA_DATABASE_URL is not configured"
+            exit 1
+          fi
+      - name: Verify production schema contract
+        run: python3 scripts/verify_schema_contract.py
