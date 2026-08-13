@@ -139,7 +139,8 @@ async function loadSlippageCents(experimentId: string): Promise<{
 /**
  * Historical execution basis for each settlement day. This intentionally reads
  * the same copyability table as the existing observation panel, but applies the
- * no-lookahead cutoff before selecting the most recent sample window.
+ * no-lookahead cutoff before selecting the most recent sample window. Apart
+ * from that time boundary, the slippage sample population is unchanged.
  */
 async function loadHistoricalSlippageByDay(
   experimentId: string,
@@ -162,7 +163,7 @@ async function loadHistoricalSlippageByDay(
       if (error) throw new Error(error.message);
       const cents = (data ?? [])
         .map((row) => Number(row.slippage_cents))
-        .filter((value) => Number.isFinite(value) && value >= 0);
+        .filter((value) => Number.isFinite(value));
       return [day, median(cents)] as const;
     }),
   );
