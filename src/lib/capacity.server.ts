@@ -10,12 +10,14 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 import {
   buildCapacityRow,
+  countFreshMarks,
   groupCapacityRows,
   type CapacityRow,
   type CapacityWalletGroup,
   type CashPoint,
 } from "./capacity-core";
 import { fetchAllRows } from "./db-pagination";
+import { MARK_MAX_AGE_MS } from "./shadow-core";
 import { V2_COHORT, V2_PREFIX, isV2Name } from "./v2-cohort";
 import { V3_PREFIX, V3_STARTING_CASH, isV3Name } from "./v3-cohort";
 
@@ -49,6 +51,7 @@ async function loadCashPoints(experimentId: string): Promise<CashPoint[]> {
 }
 
 export async function loadCapacityComparison(): Promise<CapacityComparisonData> {
+  const nowMs = Date.now();
   const { data: experimentRows } = await supabaseAdmin
     .from("paper_experiments")
     .select("id, name, wallet_address, starting_cash, cash, realized_pnl, enabled")
@@ -66,7 +69,7 @@ export async function loadCapacityComparison(): Promise<CapacityComparisonData> 
       await Promise.all([
         supabaseAdmin
           .from("paper_positions")
-          .select("shares, cost_basis, settlement_status, mark")
+          .select("shares, cost_basis, settlement_status, mark, mark_ts")
           .eq("experiment_id", experiment.id),
         supabaseAdmin
           .from("paper_trades")
@@ -89,7 +92,11 @@ export async function loadCapacityComparison(): Promise<CapacityComparisonData> 
 
     const openPositions = (positions ?? []).filter((p) => Number(p.shares) > 0);
     const openCostBasis = openPositions.reduce((sum, p) => sum + Number(p.cost_basis ?? 0), 0);
-    const markedOpenPositions = openPositions.filter((p) => p.mark !== null).length;
+    const markedOpenPositions = countFreshMarks(
+      openPositions.map((p) => ({ mark: p.mark, markTs: p.mark_ts })),
+      nowMs,
+      MARK_MAX_AGE_MS,
+    );
     const settledMarkets = (positions ?? []).filter(
       (p) => p.settlement_status === "settled_won" || p.settlement_status === "settled_lost",
     ).length;
