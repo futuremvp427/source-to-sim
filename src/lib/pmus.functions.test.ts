@@ -60,11 +60,7 @@ import { loadPmusPanel } from "./pmus/verify.server";
 const mockedGetRequest = vi.mocked(getRequest);
 const mockedCreateClient = vi.mocked(createClient);
 
-type AuthContext = Awaited<
-  ReturnType<
-    NonNullable<NonNullable<(typeof requireAdmin)["options"]["middleware"]>["options"]["server"]>
-  >
->["context"];
+type AuthContext = { supabase: any; userId: string; claims: any };
 
 function createMockSupabaseClient({ isAdmin }: { isAdmin: boolean }) {
   return {
