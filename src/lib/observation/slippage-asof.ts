@@ -26,7 +26,8 @@ export function priorUtcDayCutoff(settlementDay: string): string {
 /**
  * Pure reference implementation used by regression tests and offline checks.
  * Production queries apply the same cutoff in PostgreSQL before limiting to the
- * most recent sample window.
+ * most recent sample window. The sample population is otherwise unchanged from
+ * the prior metric: all finite observed slippage values remain eligible.
  */
 export function buildPriorDaySlippageBasis(
   settlementDay: string,
@@ -35,7 +36,8 @@ export function buildPriorDaySlippageBasis(
 ): SlippageDayBasis {
   const cutoffAt = priorUtcDayCutoff(settlementDay);
   const cutoffMs = new Date(cutoffAt).getTime();
-  const cappedLimit = Math.max(1, Math.min(Math.trunc(limit), SLIPPAGE_SAMPLE_LIMIT));
+  const requestedLimit = Number.isFinite(limit) ? Math.trunc(limit) : SLIPPAGE_SAMPLE_LIMIT;
+  const cappedLimit = Math.max(1, Math.min(requestedLimit, SLIPPAGE_SAMPLE_LIMIT));
 
   const eligible = samples
     .map((sample) => ({
@@ -47,8 +49,7 @@ export function buildPriorDaySlippageBasis(
         Number.isFinite(sample.observedMs) &&
         sample.observedMs < cutoffMs &&
         sample.slippageCents !== null &&
-        Number.isFinite(sample.slippageCents) &&
-        sample.slippageCents >= 0,
+        Number.isFinite(sample.slippageCents),
     )
     .sort((a, b) => b.observedMs - a.observedMs)
     .slice(0, cappedLimit)
