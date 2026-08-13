@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildCapacityRow,
   cashMaxDrawdown,
+  countFreshMarks,
   groupCapacityRows,
   reserveFor,
   type CapacityRowInput,
@@ -19,14 +20,14 @@ function baseInput(over: Partial<CapacityRowInput> = {}): CapacityRowInput {
     startingBankroll: 1000,
     cash: 950,
     realizedPnl: -20,
-  openCostBasis: 70,
-  openPositions: 4,
-  markedOpenPositions: 3,
-  buys: 10,
-  sells: 2,
-  insufficientCashSkips: 0,
-  settledMarkets: 1,
-  cashPoints: [],
+    openCostBasis: 70,
+    openPositions: 4,
+    markedOpenPositions: 3,
+    buys: 10,
+    sells: 2,
+    insufficientCashSkips: 0,
+    settledMarkets: 1,
+    cashPoints: [],
     ...over,
   };
 }
@@ -40,6 +41,40 @@ describe("reserveFor", () => {
 
   it("never goes negative", () => {
     expect(reserveFor(-5)).toBe(0);
+  });
+});
+
+describe("countFreshMarks", () => {
+  const now = Date.parse("2026-08-13T18:00:00.000Z");
+  const maxAge = 5 * 60 * 1000;
+
+  it("counts only present marks inside the freshness window", () => {
+    expect(
+      countFreshMarks(
+        [
+          { mark: 0.52, markTs: "2026-08-13T17:59:00.000Z" },
+          { mark: 0.48, markTs: "2026-08-13T17:55:00.000Z" },
+          { mark: 0.61, markTs: "2026-08-13T17:54:59.999Z" },
+          { mark: null, markTs: "2026-08-13T17:59:30.000Z" },
+          { mark: 0.4, markTs: null },
+        ],
+        now,
+        maxAge,
+      ),
+    ).toBe(2);
+  });
+
+  it("fails closed on invalid or future timestamps", () => {
+    expect(
+      countFreshMarks(
+        [
+          { mark: 0.5, markTs: "not-a-date" },
+          { mark: 0.5, markTs: "2026-08-13T18:00:00.001Z" },
+        ],
+        now,
+        maxAge,
+      ),
+    ).toBe(0);
   });
 });
 
