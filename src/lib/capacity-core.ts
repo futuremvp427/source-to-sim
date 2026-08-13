@@ -16,6 +16,11 @@ export type CashPoint = {
   cashAfter: number | null;
 };
 
+export type MarkCandidate = {
+  mark: unknown;
+  markTs: string | null;
+};
+
 export type CapacityRowInput = {
   id: string;
   name: string;
@@ -54,6 +59,25 @@ export type CapacityWalletGroup = {
 /** Reserved cash for an experiment: a fixed fraction of its starting bankroll. */
 export function reserveFor(startingBankroll: number): number {
   return roundUsd(Math.max(0, startingBankroll) * SIZING_RESERVE_FRACTION);
+}
+
+/**
+ * Count only marks that are both present and fresh at the measurement instant.
+ * Missing/invalid/future timestamps fail closed rather than making capacity
+ * coverage look more complete than it is.
+ */
+export function countFreshMarks(
+  candidates: MarkCandidate[],
+  nowMs: number,
+  maxAgeMs: number,
+): number {
+  return candidates.filter((candidate) => {
+    if (candidate.mark === null || candidate.mark === undefined || candidate.markTs === null) return false;
+    const markMs = new Date(candidate.markTs).getTime();
+    if (!Number.isFinite(markMs)) return false;
+    const ageMs = nowMs - markMs;
+    return ageMs >= 0 && ageMs <= maxAgeMs;
+  }).length;
 }
 
 /**
