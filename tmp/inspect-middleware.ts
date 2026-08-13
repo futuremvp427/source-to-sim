@@ -1,4 +1,5 @@
 import { requireAdmin } from "../src/lib/admin-auth";
-console.log("requireAdmin keys:", Object.keys(requireAdmin));
-console.log("requireAdmin prototype:", Object.getPrototypeOf(requireAdmin));
-console.log("requireAdmin", requireAdmin);
+console.log("options.server:", requireAdmin.options.server);
+console.log("typeof options.server:", typeof requireAdmin.options.server);
+console.log("options.server.toString():", requireAdmin.options.server.toString().slice(0, 200));
+console.log("options.server length:", requireAdmin.options.server.length);
