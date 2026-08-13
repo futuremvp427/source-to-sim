@@ -13,13 +13,13 @@ export const diagnosePmusAuthFn = createServerFn({ method: "POST" })
     return diagnosePmusAuth();
   });
 
-/** Account Setup + Approval Queue read model. Never returns credentials. */
-export const getPmusPanel = createServerFn({ method: "GET" }).handler(
-  async (): Promise<PmusPanelData> => {
+/** Account Setup + Approval Queue read model. Never returns credentials. Admin-only. */
+export const getPmusPanel = createServerFn({ method: "GET" })
+  .middleware([requireAdmin])
+  .handler(async (): Promise<PmusPanelData> => {
     const { loadPmusPanel } = await import("./pmus/verify.server");
     return loadPmusPanel();
-  },
-);
+  });
 
 /** Verify the Polymarket US connection with read-only balances + positions. */
 export const verifyPmusConnectionFn = createServerFn({ method: "POST" })
