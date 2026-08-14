@@ -882,6 +882,9 @@ async function processPendingEvents(
   return result;
 }
 
+/** Test-only alias so real paper_processing cancellation can be asserted. */
+export const processPendingEventsForTest = processPendingEvents;
+
 /* ------------------------------------------------------------------ */
 /* Marks from the public CLOB                                          */
 /* ------------------------------------------------------------------ */
