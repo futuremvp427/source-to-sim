@@ -180,3 +180,18 @@ describe("catch-up boundary fallback", () => {
     expect(calls).toEqual([0, PAGE_SIZE, PAGE_SIZE * 2]);
   });
 });
+
+describe("mark_refresh has its own bounded budget (production incident)", () => {
+  it("mark_refresh is wrapped in boundedStage with its own deadline and a neutral fallback, like every other auxiliary stage", () => {
+    expect(src).toMatch(
+      /boundedStage\(refreshMarks\(experiment\.id\), MARK_REFRESH_DEADLINE_MS, "mark_refresh", \{\s*updated: 0,\s*failed: 0,\s*\}\)/,
+    );
+  });
+
+  it("has exactly one refreshMarks call site, and it is the bounded one", () => {
+    const totalCalls = (src.match(/refreshMarks\(experiment\.id\)/g) ?? []).length;
+    const boundedCalls = (src.match(/boundedStage\(refreshMarks\(experiment\.id\)/g) ?? []).length;
+    expect(totalCalls).toBe(1);
+    expect(boundedCalls).toBe(1);
+  });
+});
