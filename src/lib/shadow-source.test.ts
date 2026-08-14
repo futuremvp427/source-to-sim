@@ -12,6 +12,8 @@ const {
   MAX_TRADES_OFFSET,
   CatchupProgressionError,
   buildTradesUrl,
+  fetchFixedPages,
+  CycleAbortedError,
 } = await import("./shadow.server");
 
 type Json = Record<string, unknown>;
@@ -339,16 +341,6 @@ describe("persist_events is really cancelled on cycle timeout (2026-08-14 system
  * reject an in-flight page request and stop any further page from starting.
  */
 describe("source ingest real cancellation", () => {
-  const { fetchFixedPages, CycleAbortedError } = (await import("./shadow.server")) as unknown as {
-    fetchFixedPages: (
-      fetchPage: (offset: number) => Promise<Json[]>,
-      pages: number,
-      pageSize?: number,
-      signal?: AbortSignal,
-    ) => Promise<{ raw: Json[]; pagesFetched: number }>;
-    CycleAbortedError: new () => Error;
-  };
-
   it("A: aborting while a page fetch is pending rejects it and starts no further page", async () => {
     const controller = new AbortController();
     const calls: number[] = [];
