@@ -1283,29 +1283,6 @@ export async function runExperimentCycle(
     };
   }
 
-  const { data: checkpoint } = await supabaseAdmin
-    .from("worker_checkpoints")
-    .select("*")
-    .eq("id", lockId)
-    .maybeSingle();
-  const bootstrapped = checkpoint?.bootstrap_complete ?? false;
-
-  // First ever run: shadow-copy only from go-live onwards.
-  if (experiment.follow_from_ts === null) {
-    const goLive = Math.floor(Date.now() / 1000);
-    await supabaseAdmin
-      .from("paper_experiments")
-      .update({ follow_from_ts: goLive, updated_at: new Date().toISOString() })
-      .eq("id", experiment.id);
-    experiment.follow_from_ts = goLive;
-    await raiseAlert(
-      "info",
-      "follower_started",
-      "Follower go-live recorded. Earlier fills are stored as history only and are not paper-copied.",
-      { follow_from_ts: goLive as never },
-    );
-  }
-
   /**
    * Per-stage durations, persisted with the worker row. This is how a slow
    * stage is identified in production instead of guessed at, and why the
@@ -1333,6 +1310,32 @@ export async function runExperimentCycle(
     // releases the lease) instead of being killed with the lease still claimed.
     const stages = await withDeadline(
       (async () => {
+        // Bounded so a hung checkpoint load (or the one-time first-run bootstrap
+        // write) can no longer strand the lease with no internal recovery: before
+        // this was moved inside the deadline race, a hang here left heartbeat_at
+        // advancing on lease acquisition but stage_ms/last_error/poll_failures
+        // frozen forever, indistinguishable in worker_status from a permanent hang.
+        const { data: checkpoint } = await timed("checkpoint_load", async () =>
+          supabaseAdmin.from("worker_checkpoints").select("*").eq("id", lockId).maybeSingle(),
+        );
+        const bootstrapped = checkpoint?.bootstrap_complete ?? false;
+
+        // First ever run: shadow-copy only from go-live onwards.
+        if (experiment.follow_from_ts === null) {
+          const goLive = Math.floor(Date.now() / 1000);
+          await supabaseAdmin
+            .from("paper_experiments")
+            .update({ follow_from_ts: goLive, updated_at: new Date().toISOString() })
+            .eq("id", experiment.id);
+          experiment.follow_from_ts = goLive;
+          await raiseAlert(
+            "info",
+            "follower_started",
+            "Follower go-live recorded. Earlier fills are stored as history only and are not paper-copied.",
+            { follow_from_ts: goLive as never },
+          );
+        }
+
         const window = await timed("source_ingest", () =>
           fetchSourceWindow(
             wallet,
@@ -1394,13 +1397,34 @@ export async function runExperimentCycle(
           }),
         );
         await timed("cash_alerts", () => raiseCashAlerts(experiment));
-        return { window, events, inserted, process, marks, reconciliation, settlements, previews, copyability };
+        return {
+          checkpoint,
+          window,
+          events,
+          inserted,
+          process,
+          marks,
+          reconciliation,
+          settlements,
+          previews,
+          copyability,
+        };
       })(),
       EXPERIMENT_DEADLINE_MS,
       `${experiment.name} ingest cycle`,
     );
-    const { window, events, inserted, process, marks, reconciliation, settlements, previews, copyability } =
-      stages;
+    const {
+      checkpoint,
+      window,
+      events,
+      inserted,
+      process,
+      marks,
+      reconciliation,
+      settlements,
+      previews,
+      copyability,
+    } = stages;
 
     const newest = events.length ? Math.max(...events.map((e) => e.sourceTs)) : 0;
     const lagSeconds = newest > 0 ? Math.max(0, Math.round(Date.now() / 1000 - newest)) : null;
