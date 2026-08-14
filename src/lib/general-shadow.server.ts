@@ -8,7 +8,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
-import { fetchAllRows } from "./db-pagination";
+import { fetchAllRows, fetchAllRowsAfterId } from "./db-pagination";
 import {
   GS_GO_LIVE_ISO,
   GS_GO_LIVE_TS,
@@ -284,14 +284,15 @@ async function loadWallet(experiment: {
       if (error) throw new Error(error.message);
       return data ?? [];
     }),
-    fetchAllRows<ObsRow>(async (from, to) => {
-      const { data, error } = await supabaseAdmin
+    // Keyset (not OFFSET) paging: these aggregates are order-insensitive, and
+    // deep OFFSET pages of this history exceed the role statement_timeout.
+    fetchAllRowsAfterId<ObsRow & { id: string }>(async (afterId, limit) => {
+      let query = supabaseAdmin
         .from("copyability_observations")
-        .select("status, sample_delay, slippage_cents, fillable")
-        .eq("experiment_id", experiment.id)
-        .order("created_at", { ascending: false })
-        .order("id", { ascending: false })
-        .range(from, to);
+        .select("id, status, sample_delay, slippage_cents, fillable")
+        .eq("experiment_id", experiment.id);
+      if (afterId !== null) query = query.gt("id", afterId);
+      const { data, error } = await query.order("id", { ascending: true }).limit(limit);
       if (error) throw new Error(error.message);
       return data ?? [];
     }),
