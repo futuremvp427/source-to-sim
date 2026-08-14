@@ -217,3 +217,39 @@ describe("checkpoint preamble has its own cycle budget (2026-08-14 production in
     expect(bootstrapIdx).toBeGreaterThan(deadlineCallIdx);
   });
 });
+
+describe("persist_events is really cancelled on cycle timeout (2026-08-14 systemic incident)", () => {
+  it("persistEvents accepts an AbortSignal and threads it into the source_events upsert", () => {
+    expect(src).toMatch(/async function persistEvents\([^)]*signal\?:\s*AbortSignal[^)]*\)/);
+    expect(src).toMatch(/\.abortSignal\(signal\)/);
+  });
+
+  it("the cycle creates its own AbortController tied to EXPERIMENT_DEADLINE_MS before the try block", () => {
+    const tryIdx = src.indexOf("  try {\n    // Bounded so a hung upstream call");
+    const controllerIdx = src.indexOf("const cycleAbort = new AbortController();");
+    const timerIdx = src.indexOf("setTimeout(() => cycleAbort.abort(), EXPERIMENT_DEADLINE_MS)");
+    expect(tryIdx).toBeGreaterThan(-1);
+    expect(controllerIdx).toBeGreaterThan(-1);
+    expect(timerIdx).toBeGreaterThan(-1);
+    // Must exist before the try block starts, so it covers the whole cycle attempt.
+    expect(controllerIdx).toBeLessThan(tryIdx);
+    expect(timerIdx).toBeLessThan(tryIdx);
+  });
+
+  it("the cycle passes its AbortSignal into persistEvents", () => {
+    expect(src).toMatch(/persistEvents\(events, !isGeneralShadowName\(experiment\.name\), cycleAbort\.signal\)/);
+  });
+
+  it("the abort timer is always cleared, on both the success and failure path", () => {
+    const controllerIdx = src.indexOf("const cycleAbort = new AbortController();");
+    const clearIdx = src.indexOf("clearTimeout(cycleAbortTimer)");
+    expect(controllerIdx).toBeGreaterThan(-1);
+    expect(clearIdx).toBeGreaterThan(-1);
+    // A leaked, never-cleared timer would call .abort() on a controller from a
+    // long-finished cycle, doing nothing useful but leaking a timer handle.
+    expect(clearIdx).toBeGreaterThan(controllerIdx);
+    // Must be in a finally so it runs on both the return and the catch path.
+    const finallyIdx = src.lastIndexOf("finally {", clearIdx + 20);
+    expect(finallyIdx).toBeGreaterThan(controllerIdx);
+  });
+});
