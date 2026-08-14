@@ -378,18 +378,28 @@ export function buildTradesUrl(
 /** Raised when a windowed catch-up cannot prove it moved backwards in time. */
 export class CatchupProgressionError extends Error {}
 
-/** Bounded page walk: used only for a fixed number of newest pages. */
-async function fetchFixedPages(
-  wallet: string,
+/**
+ * Bounded page walk: used only for a fixed number of newest pages.
+ *
+ * Exported (with an injected page fetcher, like fetchUntilCheckpointCovered)
+ * so its cancellation behaviour can be tested without mocking the network.
+ */
+export async function fetchFixedPages(
+  fetchPage: (offset: number) => Promise<Json[]>,
   pages: number,
+  pageSize: number = PAGE_SIZE,
+  signal?: AbortSignal,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
   const raw: Json[] = [];
   let pagesFetched = 0;
   for (let p = 0; p < pages; p += 1) {
-    const page = await getArray(buildTradesUrl(PAGE_SIZE, p * PAGE_SIZE, wallet));
+    // Before-each-page abort check, mirroring processPendingEvents: once the
+    // cycle deadline has fired, no NEW page request is started.
+    if (signal?.aborted) throw new CycleAbortedError();
+    const page = await fetchPage(p * pageSize);
     pagesFetched += 1;
     raw.push(...page);
-    if (page.length < PAGE_SIZE) break;
+    if (page.length < pageSize) break;
   }
   return { raw, pagesFetched };
 }
@@ -426,6 +436,7 @@ export async function fetchUntilCheckpointCovered(
   fetchPage: (offset: number, endTs?: number) => Promise<Json[]>,
   checkpointTs: number,
   pageSize: number = PAGE_SIZE,
+  signal?: AbortSignal,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
   const raw: Json[] = [];
   let pagesFetched = 0;
@@ -434,6 +445,8 @@ export async function fetchUntilCheckpointCovered(
     let offset = 0;
     let oldestValid: number | null = null;
     for (;;) {
+      // Before-each-page abort check, mirroring processPendingEvents.
+      if (signal?.aborted) throw new CycleAbortedError();
       const page = await fetchPage(offset, endTs);
       pagesFetched += 1;
       raw.push(...page);
@@ -485,16 +498,26 @@ async function fetchSourceWindow(
   wallet: string,
   bootstrapped: boolean,
   catchupBoundary: number | null,
+  signal?: AbortSignal,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
-  if (!bootstrapped) return fetchFixedPages(wallet, BOOTSTRAP_PAGES);
+  if (!bootstrapped) {
+    return fetchFixedPages(
+      (offset) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet), signal),
+      BOOTSTRAP_PAGES,
+      PAGE_SIZE,
+      signal,
+    );
+  }
   if (catchupBoundary === null) {
     throw new MissingCatchupBoundaryError(
       "Bootstrapped worker has neither a checkpoint nor a follow_from_ts to catch up against",
     );
   }
   return fetchUntilCheckpointCovered(
-    (offset, endTs) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet, endTs)),
+    (offset, endTs) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet, endTs), signal),
     catchupBoundary,
+    PAGE_SIZE,
+    signal,
   );
 }
 
