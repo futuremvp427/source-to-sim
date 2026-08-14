@@ -8,9 +8,12 @@
 -- Full source-event payloads are fetched only for the bounded pending result.
 --
 -- The MATERIALIZED boundary is intentional: it prevents the planner from
--- pulling the wide source_events payload back into the prefix scan.  The final
+-- pulling the wide source_events payload back into the prefix scan. The final
 -- source_event_id check is a cheap defensive re-check over <= p_limit rows and
 -- preserves source-event identity as the authoritative consumption invariant.
+--
+-- Keep the Phase-1 paper_experiments -> CROSS JOIN LATERAL contract intact so
+-- the schema contract continues to verify experiment/wallet isolation.
 
 CREATE OR REPLACE FUNCTION public.get_pending_experiment_source_events(
   p_experiment_id uuid,
@@ -33,49 +36,58 @@ STABLE
 SECURITY DEFINER
 SET search_path TO 'public'
 AS $function$
-  WITH experiment AS MATERIALIZED (
-    SELECT pe.id, lower(pe.wallet_address) AS wallet
-    FROM public.paper_experiments pe
-    WHERE pe.id = p_experiment_id
-  ),
-  pending_keys AS MATERIALIZED (
+  SELECT
+    pending.id,
+    pending.event_key,
+    pending.asset,
+    pending.market_title,
+    pending.outcome,
+    pending.side,
+    pending.shares,
+    pending.price,
+    pending.source_ts,
+    pending.first_seen_at
+  FROM public.paper_experiments pe
+  CROSS JOIN LATERAL (
+    WITH pending_keys AS MATERIALIZED (
+      SELECT
+        se.source_ts,
+        se.event_key
+      FROM public.source_events se
+      WHERE se.wallet = lower(pe.wallet_address)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM public.experiment_event_state ees
+          WHERE ees.experiment_id = pe.id
+            AND ees.event_key = se.event_key
+        )
+      ORDER BY se.source_ts ASC, se.event_key ASC
+      LIMIT GREATEST(1, LEAST(COALESCE(p_limit, 300), 2000))
+    )
     SELECT
-      exp.wallet,
+      se.id,
+      se.event_key,
+      se.asset,
+      se.market_title,
+      se.outcome,
+      se.side,
+      se.shares,
+      se.price,
       se.source_ts,
-      se.event_key
-    FROM experiment exp
+      se.first_seen_at
+    FROM pending_keys keys
     JOIN public.source_events se
-      ON se.wallet = exp.wallet
+      ON se.wallet = lower(pe.wallet_address)
+     AND se.event_key = keys.event_key
     WHERE NOT EXISTS (
       SELECT 1
       FROM public.experiment_event_state ees
-      WHERE ees.experiment_id = exp.id
-        AND ees.event_key = se.event_key
+      WHERE ees.experiment_id = pe.id
+        AND ees.source_event_id = se.id
     )
-    ORDER BY se.source_ts ASC, se.event_key ASC
-    LIMIT GREATEST(1, LEAST(COALESCE(p_limit, 300), 2000))
-  )
-  SELECT
-    se.id,
-    se.event_key,
-    se.asset,
-    se.market_title,
-    se.outcome,
-    se.side,
-    se.shares,
-    se.price,
-    se.source_ts,
-    se.first_seen_at
-  FROM pending_keys pending
-  JOIN public.source_events se
-    ON se.wallet = pending.wallet
-   AND se.event_key = pending.event_key
-  WHERE NOT EXISTS (
-    SELECT 1
-    FROM public.experiment_event_state ees
-    WHERE ees.experiment_id = p_experiment_id
-      AND ees.source_event_id = se.id
-  )
+    ORDER BY keys.source_ts ASC, keys.event_key ASC
+  ) AS pending
+  WHERE pe.id = p_experiment_id
   ORDER BY pending.source_ts ASC, pending.event_key ASC;
 $function$;
 
