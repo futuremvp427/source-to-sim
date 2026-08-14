@@ -1534,10 +1534,17 @@ export async function runExperimentCycle(
         }
 
         const window = await timed("source_ingest", () =>
+          // Real cancellation for source_ingest: the catch-up walk can issue
+          // many sequential page requests, so without the cycle signal it kept
+          // starting NEW HTTP requests (and retrying in-flight ones) long after
+          // the cycle deadline had released the lease -- the same class of bug
+          // already fixed for persistEvents/processPendingEvents. Pagination
+          // semantics are unchanged; only cancellability is added.
           fetchSourceWindow(
             wallet,
             bootstrapped,
             resolveCatchupBoundary(checkpoint?.last_source_ts, experiment.follow_from_ts),
+            cycleAbort.signal,
           ),
         );
         const events = normalizeSourceEvents(window.raw, wallet);
