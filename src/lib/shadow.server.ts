@@ -84,6 +84,21 @@ const EXPERIMENT_CONCURRENCY = 2;
 const EXPERIMENT_DEADLINE_MS = 40_000;
 const RESEARCH_DEADLINE_MS = 8_000;
 /** Auxiliary (non-accounting) stage budgets, so one slow stage cannot eat a cycle. */
+/**
+ * Unlike every other auxiliary stage below, mark_refresh previously had no
+ * budget of its own — only the outer EXPERIMENT_DEADLINE_MS bounded it. A
+ * single unreachable/stalled public CLOB /books chunk can legitimately
+ * consume up to ~37s across fetchBooksBatched's 3 retry attempts (each up to
+ * a 12s AbortSignal.timeout, plus backoff), which is dangerously close to —
+ * and for experiments needing more than one 100-asset chunk, can exceed —
+ * the 40s cycle deadline on its own. When that happens the platform's own
+ * hard request timeout can kill the invocation before our JS-level deadline
+ * ever gets a chance to run the catch block and release the lease, leaving
+ * the worker row stuck at state='running' indefinitely. Marks are
+ * measurement only, so mark_refresh gets the same bounded-with-safe-fallback
+ * treatment as reconciliation/settlement/previews/copyability.
+ */
+const MARK_REFRESH_DEADLINE_MS = 15_000;
 const SETTLEMENT_DEADLINE_MS = 8_000;
 const PREVIEW_DEADLINE_MS = 6_000;
 const COPYABILITY_DEADLINE_MS = 6_000;
@@ -251,6 +266,9 @@ async function releaseLease(
 
 /** Test-only alias so the lease fencing rules can be asserted directly. */
 export const releaseLeaseForTest = releaseLease;
+/** Test-only alias so the bounded-stage timeout/fallback mechanism can be asserted directly. */
+export const boundedStageForTest = boundedStage;
+export const MARK_REFRESH_DEADLINE_MS_FOR_TEST = MARK_REFRESH_DEADLINE_MS;
 
 /* ------------------------------------------------------------------ */
 /* Experiment / config                                                 */
@@ -1328,7 +1346,12 @@ export async function runExperimentCycle(
         );
         cycleEventsInserted = inserted;
         const process = await timed("paper_processing", () => processPendingEvents(experiment, lease));
-        const marks = await timed("mark_refresh", () => refreshMarks(experiment.id));
+        const marks = await timed("mark_refresh", () =>
+          boundedStage(refreshMarks(experiment.id), MARK_REFRESH_DEADLINE_MS, "mark_refresh", {
+            updated: 0,
+            failed: 0,
+          }),
+        );
         const reconciliation = await timed("reconciliation", () =>
           inserted > 0 || !bootstrapped
             ? boundedStage(reconcile(wallet), RECONCILE_DEADLINE_MS, "reconciliation", null)
