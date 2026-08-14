@@ -5,7 +5,14 @@ const src = readFileSync(new URL("./shadow.server.ts", import.meta.url), "utf8")
 
 vi.mock("@/integrations/supabase/client.server", () => ({ supabaseAdmin: {} }));
 
-const { fetchUntilCheckpointCovered, resolveCatchupBoundary, PAGE_SIZE } = await import("./shadow.server");
+const {
+  fetchUntilCheckpointCovered,
+  resolveCatchupBoundary,
+  PAGE_SIZE,
+  MAX_TRADES_OFFSET,
+  CatchupProgressionError,
+  buildTradesUrl,
+} = await import("./shadow.server");
 
 type Json = Record<string, unknown>;
 
@@ -186,6 +193,70 @@ describe("catch-up boundary fallback", () => {
     const { pagesFetched } = await fetchUntilCheckpointCovered(fetchPage, boundary as number);
     expect(pagesFetched).toBeGreaterThan(2);
     expect(calls).toEqual([0, PAGE_SIZE, PAGE_SIZE * 2]);
+  });
+});
+
+describe("windowed catch-up (Data API offset ceiling)", () => {
+  const full = (ts: number): Json[] => Array.from({ length: PAGE_SIZE }, () => ({ timestamp: ts }));
+
+  it("never requests an offset above the provider ceiling and rolls into an older end window", async () => {
+    const checkpointTs = 1000;
+    const calls: { offset: number; endTs: number | undefined }[] = [];
+    const fetchPage = async (offset: number, endTs?: number) => {
+      calls.push({ offset, endTs });
+      // First window: always full pages well above the checkpoint.
+      if (endTs === undefined) return full(5000 - offset / PAGE_SIZE);
+      // Second window: crosses the checkpoint immediately.
+      return [{ timestamp: 999 }];
+    };
+    const { raw } = await fetchUntilCheckpointCovered(fetchPage, checkpointTs);
+    expect(Math.max(...calls.map((c) => c.offset))).toBeLessThanOrEqual(MAX_TRADES_OFFSET);
+    expect(calls.filter((c) => c.endTs === undefined).length).toBe(MAX_TRADES_OFFSET / PAGE_SIZE + 1);
+    const second = calls.filter((c) => c.endTs !== undefined);
+    expect(second[0]).toEqual({ offset: 0, endTs: 5000 - MAX_TRADES_OFFSET / PAGE_SIZE });
+    expect(raw.length).toBeGreaterThan(MAX_TRADES_OFFSET);
+  });
+
+  it("uses an inclusive end boundary so same-second boundary events are re-fetched, not skipped", async () => {
+    const checkpointTs = 1000;
+    const boundarySecond = 4242;
+    const seen: (number | undefined)[] = [];
+    const fetchPage = async (offset: number, endTs?: number) => {
+      seen.push(endTs);
+      if (endTs === undefined) return full(boundarySecond);
+      // The older window re-serves the boundary second before older rows.
+      return offset === 0 ? [{ timestamp: boundarySecond }, { timestamp: 999 }] : [];
+    };
+    const { raw } = await fetchUntilCheckpointCovered(fetchPage, checkpointTs);
+    // end is the oldest observed timestamp itself (inclusive), not ts-1.
+    expect(seen.filter((e) => e !== undefined)[0]).toBe(boundarySecond);
+    const duplicates = raw.filter((r) => r["timestamp"] === boundarySecond).length;
+    expect(duplicates).toBeGreaterThan(PAGE_SIZE); // duplicates allowed; nothing dropped
+  });
+
+  it("malformed timestamps cannot establish coverage or window progression", async () => {
+    const checkpointTs = 1000;
+    const fetchPage = async () =>
+      Array.from({ length: PAGE_SIZE }, () => ({ timestamp: "not-a-number" })) as Json[];
+    await expect(fetchUntilCheckpointCovered(fetchPage, checkpointTs)).rejects.toBeInstanceOf(
+      CatchupProgressionError,
+    );
+  });
+
+  it("fails closed when the window cannot move strictly backwards", async () => {
+    const checkpointTs = 1000;
+    const fetchPage = async () => full(4242);
+    await expect(fetchUntilCheckpointCovered(fetchPage, checkpointTs)).rejects.toBeInstanceOf(
+      CatchupProgressionError,
+    );
+  });
+
+  it("buildTradesUrl keeps takerOnly=false explicit with and without a window end", () => {
+    expect(buildTradesUrl(PAGE_SIZE, 0, "0xaaa")).toContain("takerOnly=false");
+    expect(buildTradesUrl(PAGE_SIZE, 0, "0xaaa")).not.toContain("end=");
+    const windowed = buildTradesUrl(PAGE_SIZE, 250, "0xaaa", 4242);
+    expect(windowed).toContain("takerOnly=false");
+    expect(windowed).toContain("end=4242");
   });
 });
 
