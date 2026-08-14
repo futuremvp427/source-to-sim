@@ -105,6 +105,14 @@ const COPYABILITY_DEADLINE_MS = 6_000;
 /** General Shadow non-trade activity evidence stage. Bounded and isolated. */
 const GENERAL_ACTIVITY_DEADLINE_MS = 6_000;
 const RECONCILE_DEADLINE_MS = 8_000;
+/**
+ * Cleanup-path budgets. These run after the cycle budget is already exhausted,
+ * so each is independent and small, in strict priority order:
+ * lease release first, worker status second, alerting last.
+ */
+const CLEANUP_STATUS_DEADLINE_MS = 4_000;
+const CLEANUP_RELEASE_DEADLINE_MS = 5_000;
+const CLEANUP_ALERT_DEADLINE_MS = 4_000;
 
 class DeadlineError extends Error {}
 
@@ -597,14 +605,18 @@ async function commitEventAtomically(
   lease: Lease,
   experimentId: string,
   payload: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<{ applied: boolean }> {
-  const { data, error } = await supabaseAdmin.rpc("process_source_event_atomic", {
+  const call = supabaseAdmin.rpc("process_source_event_atomic", {
     p_lock_id: lease.lockId,
     p_worker_id: lease.workerId,
     p_fence: lease.fence,
     p_experiment_id: experimentId,
     p_event: payload as never,
   } as never);
+  // Real cancellation: an aborted request is cancelled server-side, and because
+  // the RPC is ONE transaction it rolls back rather than partially committing.
+  const { data, error } = await (signal ? call.abortSignal(signal) : call);
   if (error) {
     if (isStaleFenceMessage(error.message)) throw new StaleFenceError(error.message);
     throw new Error(error.message);
@@ -613,19 +625,28 @@ async function commitEventAtomically(
   return { applied };
 }
 
+/** Thrown when the cycle deadline fires mid-batch. Ends the loop cleanly. */
+export class CycleAbortedError extends Error {
+  constructor() {
+    super("cycle aborted before the next source event was started");
+  }
+}
+
 async function processPendingEvents(
   experiment: Experiment,
   lease: Lease,
+  signal?: AbortSignal,
 ): Promise<ProcessResult> {
   const wallet = experiment.wallet_address.toLowerCase();
 
   // Pending/consumed state belongs to (experiment, source_event). The source
   // event row itself is immutable shared input and is never filtered by the
   // legacy wallet-global processed_at bit here.
-  const { data: pending, error } = await supabaseAdmin.rpc(
+  const pendingCall = supabaseAdmin.rpc(
     "get_pending_experiment_source_events" as never,
     { p_experiment_id: experiment.id, p_limit: PROCESS_BATCH } as never,
   );
+  const { data: pending, error } = await (signal ? pendingCall.abortSignal(signal) : pendingCall);
   if (error) throw new Error(error.message);
   const rows = (pending ?? []) as unknown as SourceEventRow[];
   if (rows.length === 0) return { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0 };
@@ -635,21 +656,25 @@ async function processPendingEvents(
 
   // SourceSharesBefore must also be experiment-scoped. A wallet-global compact
   // row can be ahead of another experiment and would distort proportional sells.
-  const { data: sourceStateRows, error: sourceStateError } = await supabaseAdmin.rpc(
+  const sourceStateCall = supabaseAdmin.rpc(
     "get_experiment_source_positions" as never,
     { p_experiment_id: experiment.id, p_assets: assets } as never,
   );
+  const { data: sourceStateRows, error: sourceStateError } = await (signal
+    ? sourceStateCall.abortSignal(signal)
+    : sourceStateCall);
   if (sourceStateError) throw new Error(sourceStateError.message);
   const sourceShares = new Map<string, number>();
   for (const r of (sourceStateRows ?? []) as unknown as ExperimentSourcePositionRow[]) {
     sourceShares.set(r.asset, Number(r.shares));
   }
 
-  const { data: paperRows } = await supabaseAdmin
+  const paperCall = supabaseAdmin
     .from("paper_positions")
     .select("asset, shares, cost_basis, avg_price, realized_pnl, settlement_status")
     .eq("experiment_id", experiment.id)
     .in("asset", assets);
+  const { data: paperRows } = await (signal ? paperCall.abortSignal(signal) : paperCall);
   const paper = new Map<string, PaperPositionState>();
   const settlementStatusByAsset = new Map<string, string>();
   for (const r of (paperRows ?? []) as PaperPositionRow[]) {
@@ -674,6 +699,11 @@ async function processPendingEvents(
   const tradedAssets = new Set<string>();
 
   for (const row of rows) {
+    // Between-event abort check: once the cycle deadline has fired, no NEW
+    // event work is scheduled. Everything already committed stayed committed
+    // (each event is its own transaction), and the checkpoint is only advanced
+    // by the caller's success path, so the next poll safely resumes the rest.
+    if (signal?.aborted) throw new CycleAbortedError();
     const side = (row.side === "SELL" ? "SELL" : "BUY") as Side;
     const price = Number(row.price);
     const srcShares = Number(row.shares);
@@ -707,6 +737,7 @@ async function processPendingEvents(
           experiment: null,
           audit: null,
         }),
+        signal,
       );
       sourceShares.set(row.asset, nextShares);
       result.backfilled += 1;
@@ -828,6 +859,7 @@ async function processPendingEvents(
         experiment: { cash, realizedPnl: realizedTotal },
         audit: auditRow,
       }),
+      signal,
     );
 
     // This local source state is experiment-scoped and advances even for SKIP.
@@ -924,6 +956,49 @@ export async function refreshMarks(experimentId: string): Promise<{ updated: num
 
 export async function reconcile(
   wallet: string = TARGET_WALLET,
+  options: { expectAdvance?: boolean } = {},
+): Promise<{
+  ok: boolean;
+  mismatches: number;
+  replayComplete: boolean;
+  replayedEvents: number;
+  skipped?: boolean;
+}> {
+  /**
+   * source_position_state is WALLET-scoped, but V2 and V3 sibling experiments
+   * follow the same wallet and each call reconcile() within ~1s of each other
+   * every cron tick. Unfenced, their full-history replays raced on the same
+   * cache rows and produced an oscillating repair count (observed in
+   * production: 55 -> 111 -> 2 -> 20 -> 5 for one wallet in 13 minutes) while
+   * doubling the replay load on the database during the timeout wave. A short
+   * wallet-scoped lease makes the loser skip cheaply instead of racing.
+   */
+  const holder = `reconcile:${crypto.randomUUID()}`;
+  const { data: acquired, error: leaseError } = await supabaseAdmin.rpc(
+    "try_acquire_reconcile_lease" as never,
+    { p_wallet: wallet, p_holder: holder, p_seconds: 60 } as never,
+  );
+  if (leaseError) throw new Error(leaseError.message);
+  if (acquired !== true) {
+    // A sibling experiment is already reconciling this exact wallet. Its result
+    // is equally authoritative, so this is a no-op, not a failure.
+    return { ok: true, mismatches: 0, replayComplete: false, replayedEvents: 0, skipped: true };
+  }
+  try {
+    return await reconcileHeld(wallet, options);
+  } finally {
+    await supabaseAdmin
+      .rpc("release_reconcile_lease" as never, { p_wallet: wallet, p_holder: holder } as never)
+      .then(
+        () => undefined,
+        () => undefined,
+      );
+  }
+}
+
+async function reconcileHeld(
+  wallet: string,
+  options: { expectAdvance?: boolean },
 ): Promise<{ ok: boolean; mismatches: number; replayComplete: boolean; replayedEvents: number }> {
   // The replay MUST cover every persisted fill. PostgREST caps a single request
   // at 1000 rows, so a plain .limit(5000) silently replayed only the oldest
@@ -993,12 +1068,27 @@ export async function reconcile(
   }
 
   if (!result.ok) {
-    await raiseAlert(
-      "warn",
-      "reconciliation_mismatch",
-      `Reconciliation repaired ${result.mismatches.length} source position(s) from the persisted event replay.`,
-      { mismatches: result.mismatches.slice(0, 20) as never },
-    );
+    // Distinguish the two genuinely different causes instead of hiding either.
+    // expectAdvance means this cycle just ingested new source fills, so the
+    // wallet-level compact cache is EXPECTED to be one step behind the replay:
+    // that is routine advancement, not an integrity failure. Only a mismatch
+    // with no new ingestion is a real, unexplained divergence.
+    if (options.expectAdvance) {
+      await raiseAlert(
+        "info",
+        "reconciliation_advanced",
+        `Reconciliation advanced ${result.mismatches.length} source position(s) after newly ingested fills.`,
+        { wallet, advanced: result.mismatches.length as never },
+        `reconciliation_advanced:${wallet}`,
+      );
+    } else {
+      await raiseAlert(
+        "warn",
+        "reconciliation_mismatch",
+        `Reconciliation repaired ${result.mismatches.length} source position(s) from the persisted event replay.`,
+        { mismatches: result.mismatches.slice(0, 20) as never },
+      );
+    }
   }
   return {
     ok: result.ok,
@@ -1371,7 +1461,15 @@ export async function runExperimentCycle(
           persistEvents(events, !isGeneralShadowName(experiment.name), cycleAbort.signal),
         );
         cycleEventsInserted = inserted;
-        const process = await timed("paper_processing", () => processPendingEvents(experiment, lease));
+        const process = await timed("paper_processing", () =>
+          // Real cancellation for paper_processing: a 300-event batch commits
+          // sequentially, so without the signal the loop kept starting NEW
+          // event RPCs long after the 40s cycle deadline had already released
+          // the lease and let a fresh attempt start -- the same class of bug
+          // fixed for persistEvents. Atomicity is unchanged: each event is
+          // still one fenced transaction and an aborted one rolls back.
+          processPendingEvents(experiment, lease, cycleAbort.signal),
+        );
         const marks = await timed("mark_refresh", () =>
           boundedStage(refreshMarks(experiment.id), MARK_REFRESH_DEADLINE_MS, "mark_refresh", {
             updated: 0,
@@ -1380,7 +1478,12 @@ export async function runExperimentCycle(
         );
         const reconciliation = await timed("reconciliation", () =>
           inserted > 0 || !bootstrapped
-            ? boundedStage(reconcile(wallet), RECONCILE_DEADLINE_MS, "reconciliation", null)
+            ? boundedStage(
+                reconcile(wallet, { expectAdvance: inserted > 0 }),
+                RECONCILE_DEADLINE_MS,
+                "reconciliation",
+                null,
+              )
             : Promise.resolve(null),
         );
         const settlements = await timed("settlement", () =>
@@ -1509,24 +1612,48 @@ export async function runExperimentCycle(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
-    const { data: statusRow } = await supabaseAdmin
-      .from("worker_status")
-      .select("poll_failures")
-      .eq("id", lockId)
-      .maybeSingle();
+    // The cleanup path runs AFTER the cycle budget is already spent, so it gets
+    // its own small independent budgets in strict priority order. Releasing the
+    // lease must never be blocked by a slow status read or by Telegram.
+    const statusRow = await boundedStage(
+      (async () => {
+        const { data } = await supabaseAdmin
+          .from("worker_status")
+          .select("poll_failures")
+          .eq("id", lockId)
+          .maybeSingle();
+        return data;
+      })(),
+      CLEANUP_STATUS_DEADLINE_MS,
+      "cleanup_status_read",
+      null,
+    );
     const failures = (statusRow?.poll_failures ?? 0) + 1;
-    await releaseLease(lease, {
-      state: "error",
-      last_error: message,
-      poll_failures: failures,
-      stage_ms: stageMs as never,
-      last_poll_events_inserted: cycleEventsInserted,
-    });
+    await boundedStage(
+      releaseLease(lease, {
+        state: "error",
+        last_error: message,
+        poll_failures: failures,
+        stage_ms: stageMs as never,
+        last_poll_events_inserted: cycleEventsInserted,
+      }),
+      CLEANUP_RELEASE_DEADLINE_MS,
+      "cleanup_release_lease",
+      undefined,
+    );
     if (failures === 1 || failures % 5 === 0) {
-      await raiseAlert("error", "poll_failure", `${experiment.name}: ingestion poll failed: ${message}`, {
-        experiment: experiment.name as never,
-        failures: failures as never,
-      });
+      // Alerting is last and lowest priority: a stalled Telegram delivery can
+      // never hold the lease or the worker row hostage. The error itself is
+      // already persisted in last_error above, so nothing is suppressed.
+      await boundedStage(
+        raiseAlert("error", "poll_failure", `${experiment.name}: ingestion poll failed: ${message}`, {
+          experiment: experiment.name as never,
+          failures: failures as never,
+        }),
+        CLEANUP_ALERT_DEADLINE_MS,
+        "cleanup_alert",
+        undefined,
+      );
     }
     throw err;
   } finally {

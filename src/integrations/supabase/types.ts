@@ -1301,6 +1301,27 @@ export type Database = {
         }
         Relationships: []
       }
+      wallet_reconcile_leases: {
+        Row: {
+          holder: string
+          lease_expires_at: string
+          updated_at: string
+          wallet: string
+        }
+        Insert: {
+          holder: string
+          lease_expires_at: string
+          updated_at?: string
+          wallet: string
+        }
+        Update: {
+          holder?: string
+          lease_expires_at?: string
+          updated_at?: string
+          wallet?: string
+        }
+        Relationships: []
+      }
       worker_checkpoints: {
         Row: {
           bootstrap_complete: boolean
@@ -1453,6 +1474,14 @@ export type Database = {
           p_worker_id: string
         }
         Returns: Json
+      }
+      release_reconcile_lease: {
+        Args: { p_holder: string; p_wallet: string }
+        Returns: undefined
+      }
+      try_acquire_reconcile_lease: {
+        Args: { p_holder: string; p_seconds: number; p_wallet: string }
+        Returns: boolean
       }
     }
     Enums: {
