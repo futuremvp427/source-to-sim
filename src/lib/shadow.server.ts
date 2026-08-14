@@ -452,7 +452,19 @@ export function resolveCatchupBoundary(
  * dropping it keeps this cohort from crowding out the Weather observation
  * window. Weather rows are untouched.
  */
-async function persistEvents(events: NormalizedEvent[], keepRaw = true): Promise<number> {
+/**
+ * Accepts an optional AbortSignal so the cycle's own deadline can actually
+ * cancel this request instead of merely abandoning interest in its result.
+ * Proven necessary in production 2026-08-14: pg_stat_statements showed this
+ * exact upsert never exceeds ~8s of real query execution, yet stage_ms
+ * repeatedly recorded 44s-82s wall-clock for it -- the request was still
+ * outstanding, holding a connection/request slot, tens of seconds after the
+ * cycle's 40s deadline had already fired, released the lease, and let a new
+ * attempt start. Promise.race (withDeadline/boundedStage) never cancels its
+ * losing promise; this is the one call site with proven, repeated, extreme
+ * overruns, so it is the one given real cancellation here.
+ */
+async function persistEvents(events: NormalizedEvent[], keepRaw = true, signal?: AbortSignal): Promise<number> {
   if (events.length === 0) return 0;
   const rows = events.map((e) => ({
     event_key: e.eventKey,
@@ -473,15 +485,19 @@ async function persistEvents(events: NormalizedEvent[], keepRaw = true): Promise
     identity_degraded: e.identityDegraded,
     raw: (keepRaw ? e.raw : null) as never,
   }));
-  const { data, error } = await supabaseAdmin
+  const query = supabaseAdmin
     .from("source_events")
     // Event identity is wallet-scoped: two wallets may legitimately report the
     // same event_key, and one wallet can never record the same event twice.
     .upsert(rows, { onConflict: "wallet,event_key", ignoreDuplicates: true })
     .select("id");
+  const { data, error } = await (signal ? query.abortSignal(signal) : query);
   if (error) throw new Error(error.message);
   return data?.length ?? 0;
 }
+
+/** Test-only alias so real request cancellation can be asserted directly. */
+export const persistEventsForTest = persistEvents;
 
 /* ------------------------------------------------------------------ */
 /* Follower pass over experiment-scoped pending events                 */
@@ -1305,6 +1321,13 @@ export async function runExperimentCycle(
    */
   let cycleEventsInserted = 0;
 
+  // Real cancellation for the one proven-worst-offending call (persistEvents):
+  // Promise.race (withDeadline/boundedStage below) never cancels its losing
+  // promise, so without this a slow request just keeps running in the
+  // background, past when the cycle has already failed and moved on. See
+  // persistEvents' own doc comment for the production evidence.
+  const cycleAbort = new AbortController();
+  const cycleAbortTimer = setTimeout(() => cycleAbort.abort(), EXPERIMENT_DEADLINE_MS);
   try {
     // Bounded so a hung upstream call fails through the normal error path (which
     // releases the lease) instead of being killed with the lease still claimed.
@@ -1345,7 +1368,7 @@ export async function runExperimentCycle(
         );
         const events = normalizeSourceEvents(window.raw, wallet);
         const inserted = await timed("persist_events", () =>
-          persistEvents(events, !isGeneralShadowName(experiment.name)),
+          persistEvents(events, !isGeneralShadowName(experiment.name), cycleAbort.signal),
         );
         cycleEventsInserted = inserted;
         const process = await timed("paper_processing", () => processPendingEvents(experiment, lease));
@@ -1506,6 +1529,8 @@ export async function runExperimentCycle(
       });
     }
     throw err;
+  } finally {
+    clearTimeout(cycleAbortTimer);
   }
 }
 
