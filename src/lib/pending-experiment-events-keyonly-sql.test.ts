@@ -11,21 +11,28 @@ const migrationPath = resolve(
 const sql = readFileSync(migrationPath, "utf8");
 
 describe("pending-event key-only prefix scan", () => {
+  it("keeps the contracted experiment-scoped CROSS JOIN LATERAL shape", () => {
+    expect(sql).toMatch(/FROM public\.paper_experiments pe\s+CROSS JOIN LATERAL/i);
+    expect(sql).toMatch(/WHERE pe\.id = p_experiment_id/i);
+  });
+
   it("materializes a narrow key-only candidate set before fetching wide payload rows", () => {
     expect(sql).toMatch(/pending_keys AS MATERIALIZED/i);
-    expect(sql).toMatch(/SELECT\s+exp\.wallet,\s+se\.source_ts,\s+se\.event_key/i);
-    expect(sql).toMatch(/FROM pending_keys pending\s+JOIN public\.source_events se/i);
+    expect(sql).toMatch(
+      /SELECT\s+se\.source_ts,\s+se\.event_key\s+FROM public\.source_events se/i,
+    );
+    expect(sql).toMatch(/FROM pending_keys keys\s+JOIN public\.source_events se/i);
   });
 
   it("uses experiment-scoped event_key identity for the long prefix probe", () => {
     expect(sql).toMatch(
-      /FROM public\.experiment_event_state ees\s+WHERE ees\.experiment_id = exp\.id\s+AND ees\.event_key = se\.event_key/i,
+      /FROM public\.experiment_event_state ees\s+WHERE ees\.experiment_id = pe\.id\s+AND ees\.event_key = se\.event_key/i,
     );
   });
 
   it("retains a bounded source_event_id defensive re-check over the final result", () => {
     expect(sql).toMatch(
-      /WHERE ees\.experiment_id = p_experiment_id\s+AND ees\.source_event_id = se\.id/i,
+      /WHERE ees\.experiment_id = pe\.id\s+AND ees\.source_event_id = se\.id/i,
     );
   });
 
