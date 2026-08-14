@@ -28,20 +28,20 @@ This document is the durable operations record for Mirror Trader. It separates c
 - Dashboard is marked `noindex`/`nofollow`; robots disallow crawler indexing.
 - CI runs tests, TypeScript, a production build, and a schema-contract check (clean migration replay, tracked indexes/constraints/columns/functions/RLS, experiment-scoped-isolation SQL) on pull requests.
 - No autonomous live order submission, cancel, modify, close-position, or withdrawal path exists anywhere in the application; live execution remains unimplemented.
+- `mark_refresh` runs under its own bounded deadline (`MARK_REFRESH_DEADLINE_MS`), with a neutral zero fallback, so a stalled public CLOB `/books` chunk can no longer prevent a cycle from reaching `releaseLease()`. Regression: `mark-refresh-budget.test.ts`, `shadow-source.test.ts`.
+- `worker_status.last_poll_events_inserted` is populated directly from the cycle's own `persistEvents()` count on every lease release (success and error paths), replacing the previous timestamp-derived figure that structurally under-reported. Diagnostic telemetry only.
+
+## Completed in production (2026-08-14)
+
+Applied via `supabase/migrations/20260814050000_production_schema_reconciliation.sql` against the live Supabase project (`tltnlpsnikertqaxowal`), inside one explicit transaction, after a pre-mutation row-count/value snapshot and a full post-migration `schema-contract.json` re-verification (indexes, constraints, columns, function signatures/security/grants, RLS — all confirmed matching). No bankroll, cash, realized P&L, or historical source/trade/settlement row was modified or deleted; every change was additive (new nullable columns, new guarded indexes, legacy-seeded consumption rows for pre-existing history). Full detail, including the discovery that part of this schema (notably the Phase 6 copyability-cursor columns) had already been synced to production ahead of its recorded migration, is in the dated rollout report; see git history around this date for the exact investigation.
+
+The code at the deployed commit (`main` @ `974d518f79407deac086cecf556d22909ed30166`) was already live on the published Lovable project before this migration ran — Lovable's GitHub sync auto-publishes on merge to `main`, so no separate `deploy_project` action was needed or taken.
+
+Net effect observed directly in production after the migration: most previously wedged workers (stuck at `state='running'` for roughly 13.5 hours with `poll_failures` in the hundreds) self-recovered within minutes, confirming the missing Phase 1 schema objects (`experiment_event_state`, `process_source_event_atomic`, etc.) were at least one real, independent cause of that incident, separate from the `mark_refresh` timeout gap. **Not fully resolved as of this writing**: two experiments (`SHADOW V2: Poligarch`, `SHADOW V3 CAPACITY: Poligarch`) are now failing cleanly with `"ingest cycle exceeded 40000ms deadline"` — `mark_refresh` itself completes within budget, but `paper_processing` alone is taking 20+ seconds, plausibly a one-time backlog-catchup cost now that Phase 1 processing is live for events these experiments never processed during the incident. One experiment (`GENERAL SHADOW: RN1`) remains stuck earlier in the cycle with no stage progress observed yet. One experiment (`GENERAL SHADOW: swisstony`) has an unrelated external-API issue (`data-api.polymarket.com/trades` responding `400`) that predates and is independent of this rollout. These three are open items, not silently patched — see the rollout report for exact worker-by-worker state at time of writing.
 
 ## Live rollout required
 
-### 1. Apply pending database migrations
-
-Before publishing code that depends on a new migration:
-
-1. Inspect the live schema and data first.
-2. Apply the migration in a transaction where possible.
-3. Verify expected indexes/functions/permissions exist.
-4. Run one manual/read-only verification before allowing the minute cron to exercise the new path.
-5. Watch at least five real cron cycles after deployment.
-
-### 2. Rotate the scheduler secret
+### 1. Rotate the scheduler secret
 
 1. Generate a dedicated high-entropy `INGEST_HOOK_SECRET` in server secrets.
 2. Update the live `pg_cron` request header and any standalone worker to use it.
@@ -50,7 +50,9 @@ Before publishing code that depends on a new migration:
 
 Do not expose `INGEST_HOOK_SECRET` to browser code or a `VITE_*` environment variable.
 
-### 3. Add a real admin authentication boundary
+Note: as of 2026-08-14, the live `shadow-ingest` `pg_cron` job is already calling the ingest route successfully on a one-minute schedule (confirmed by direct observation of successful worker polls), so the currently configured secret is confirmed working. Rotation is optional hardening, not a blocker, and should not be done reactively without a reason — rotating a working secret carries its own risk of a self-inflicted outage.
+
+### 2. Add a real admin authentication boundary
 
 Mutating server functions currently depend on application obscurity rather than an explicit authenticated administrator session. Before treating the dashboard as Internet-hardened, protect control-plane operations including:
 
