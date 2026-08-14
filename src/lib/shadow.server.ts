@@ -155,26 +155,37 @@ function chunked<T>(items: T[], size: number): T[][] {
 /* HTTP helpers (public, unauthenticated)                              */
 /* ------------------------------------------------------------------ */
 
-async function getJson(url: string, attempts = 3): Promise<unknown> {
+/**
+ * Combines the caller's cancellation signal with this request's own timeout so
+ * either one aborts the individual fetch. When no cycle signal is supplied the
+ * behaviour is byte-identical to the previous timeout-only form.
+ */
+function requestSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(12_000);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+async function getJson(url: string, attempts = 3, signal?: AbortSignal): Promise<unknown> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i += 1) {
     try {
       const res = await fetch(url, {
         headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(12_000),
+        signal: requestSignal(signal),
       });
       if (!res.ok) throw new Error(`${url.split("?")[0]} responded ${res.status}`);
       return (await res.json()) as unknown;
     } catch (err) {
       lastErr = err;
+      if (signal?.aborted) break;
       if (i < attempts - 1) await new Promise((r) => setTimeout(r, 400 * 2 ** i));
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error("request failed");
 }
 
-async function getArray(url: string): Promise<Json[]> {
-  const json = await getJson(url);
+async function getArray(url: string, signal?: AbortSignal): Promise<Json[]> {
+  const json = await getJson(url, 3, signal);
   if (Array.isArray(json)) return json as Json[];
   if (json && typeof json === "object" && Array.isArray((json as { data?: unknown[] }).data)) {
     return (json as { data: Json[] }).data;
@@ -367,18 +378,28 @@ export function buildTradesUrl(
 /** Raised when a windowed catch-up cannot prove it moved backwards in time. */
 export class CatchupProgressionError extends Error {}
 
-/** Bounded page walk: used only for a fixed number of newest pages. */
-async function fetchFixedPages(
-  wallet: string,
+/**
+ * Bounded page walk: used only for a fixed number of newest pages.
+ *
+ * Exported (with an injected page fetcher, like fetchUntilCheckpointCovered)
+ * so its cancellation behaviour can be tested without mocking the network.
+ */
+export async function fetchFixedPages(
+  fetchPage: (offset: number) => Promise<Json[]>,
   pages: number,
+  pageSize: number = PAGE_SIZE,
+  signal?: AbortSignal,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
   const raw: Json[] = [];
   let pagesFetched = 0;
   for (let p = 0; p < pages; p += 1) {
-    const page = await getArray(buildTradesUrl(PAGE_SIZE, p * PAGE_SIZE, wallet));
+    // Before-each-page abort check, mirroring processPendingEvents: once the
+    // cycle deadline has fired, no NEW page request is started.
+    if (signal?.aborted) throw new CycleAbortedError();
+    const page = await fetchPage(p * pageSize);
     pagesFetched += 1;
     raw.push(...page);
-    if (page.length < PAGE_SIZE) break;
+    if (page.length < pageSize) break;
   }
   return { raw, pagesFetched };
 }
@@ -415,6 +436,7 @@ export async function fetchUntilCheckpointCovered(
   fetchPage: (offset: number, endTs?: number) => Promise<Json[]>,
   checkpointTs: number,
   pageSize: number = PAGE_SIZE,
+  signal?: AbortSignal,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
   const raw: Json[] = [];
   let pagesFetched = 0;
@@ -423,6 +445,8 @@ export async function fetchUntilCheckpointCovered(
     let offset = 0;
     let oldestValid: number | null = null;
     for (;;) {
+      // Before-each-page abort check, mirroring processPendingEvents.
+      if (signal?.aborted) throw new CycleAbortedError();
       const page = await fetchPage(offset, endTs);
       pagesFetched += 1;
       raw.push(...page);
@@ -474,16 +498,26 @@ async function fetchSourceWindow(
   wallet: string,
   bootstrapped: boolean,
   catchupBoundary: number | null,
+  signal?: AbortSignal,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
-  if (!bootstrapped) return fetchFixedPages(wallet, BOOTSTRAP_PAGES);
+  if (!bootstrapped) {
+    return fetchFixedPages(
+      (offset) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet), signal),
+      BOOTSTRAP_PAGES,
+      PAGE_SIZE,
+      signal,
+    );
+  }
   if (catchupBoundary === null) {
     throw new MissingCatchupBoundaryError(
       "Bootstrapped worker has neither a checkpoint nor a follow_from_ts to catch up against",
     );
   }
   return fetchUntilCheckpointCovered(
-    (offset, endTs) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet, endTs)),
+    (offset, endTs) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet, endTs), signal),
     catchupBoundary,
+    PAGE_SIZE,
+    signal,
   );
 }
 
@@ -1500,10 +1534,17 @@ export async function runExperimentCycle(
         }
 
         const window = await timed("source_ingest", () =>
+          // Real cancellation for source_ingest: the catch-up walk can issue
+          // many sequential page requests, so without the cycle signal it kept
+          // starting NEW HTTP requests (and retrying in-flight ones) long after
+          // the cycle deadline had released the lease -- the same class of bug
+          // already fixed for persistEvents/processPendingEvents. Pagination
+          // semantics are unchanged; only cancellability is added.
           fetchSourceWindow(
             wallet,
             bootstrapped,
             resolveCatchupBoundary(checkpoint?.last_source_ts, experiment.follow_from_ts),
+            cycleAbort.signal,
           ),
         );
         const events = normalizeSourceEvents(window.raw, wallet);
