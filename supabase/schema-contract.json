@@ -326,10 +326,16 @@
         "search_path=public"
       ],
       "definition_contains": [
-        "from public.paper_experiments",
-        "join public.source_events",
-        "from public.experiment_event_state",
-        "source_event_id = se.id"
+        "from public.paper_experiments pe",
+        "cross join lateral",
+        "from public.source_events se",
+        "where se.wallet = lower(pe.wallet_address)",
+        "not exists",
+        "from public.experiment_event_state ees",
+        "ees.experiment_id = pe.id",
+        "ees.source_event_id = se.id",
+        "order by se.source_ts asc, se.event_key asc",
+        "limit greatest(1, least(coalesce(p_limit, 300), 2000))"
       ],
       "execute_allowed": [
         "service_role"
