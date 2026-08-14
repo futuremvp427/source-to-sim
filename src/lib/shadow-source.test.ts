@@ -196,8 +196,6 @@ describe("catch-up boundary fallback", () => {
   });
 });
 
-describe("mark_refresh has its own bounded budget (production incident)", () => {
-
 describe("windowed catch-up (Data API offset ceiling)", () => {
   const full = (ts: number): Json[] => Array.from({ length: PAGE_SIZE }, () => ({ timestamp: ts }));
 
