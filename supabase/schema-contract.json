@@ -40,8 +40,21 @@
       "schema": "public",
       "table": "alerts",
       "name": "alerts_notification_retry_idx",
+      "must_exist": false
+    },
+    {
+      "schema": "public",
+      "table": "alerts",
+      "name": "alerts_notification_stale_sending_idx",
       "must_exist": true,
-      "definition_contains": ["notification_status, notification_attempted_at, created_at", "where (notified_at is null)"]
+      "definition_contains": ["(notification_attempted_at)", "notified_at is null", "notification_status = 'sending'"]
+    },
+    {
+      "schema": "public",
+      "table": "alerts",
+      "name": "alerts_notification_pending_retry_idx",
+      "must_exist": true,
+      "definition_contains": ["(created_at)", "notified_at is null", "notification_status = any", "'pending'", "'failed'"]
     },
     {
       "schema": "public",

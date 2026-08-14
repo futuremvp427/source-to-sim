@@ -41,9 +41,15 @@ export function isImportantAlertKind(kind: string): boolean {
 }
 
 /**
- * Delivery is idempotent and retryable. We atomically claim a pending/failed
- * alert before transport, but notified_at is written only after Telegram has
- * actually accepted the message. A failed attempt is released back to FAILED.
+ * Delivery is at-least-once, not exactly-once — this is a known, accepted
+ * limitation of the claim-then-send design, not something closed here. The
+ * claim step (pending/failed -> sending) is atomic, so two workers can never
+ * both attempt the same alert concurrently. But a crash after Telegram
+ * accepts the message and before the notified_at commit lands leaves the row
+ * claimable again (via the stale-sending sweep in retryPendingTelegramAlerts,
+ * or a fresh process), so the SAME message can be sent to Telegram more than
+ * once. Closing that window would need a transactional outbox or an
+ * idempotency key on the Telegram side; neither exists here.
  *
  * New migration columns are cast at the write boundary because the generated
  * Supabase types are refreshed by Lovable only after the migration is applied.
