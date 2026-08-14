@@ -356,9 +356,12 @@ async function loadWallet(experiment: {
   let cashStarved = 0;
   const reasonCounts = new Map<string, number>();
   for (const t of trades) {
+    // action="SETTLEMENT" is lifecycle audit evidence only (realized_pnl
+    // always 0, see apply_verified_paper_settlement) — never a trading
+    // decision, so it must not fall into the SKIP bucket below.
     if (t.action === "BUY") buys += 1;
     else if (t.action === "SELL") sells += 1;
-    else {
+    else if (t.action === "SKIP") {
       skips += 1;
       const reason = (t.reason ?? "unknown").split("(")[0]!.trim();
       reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
