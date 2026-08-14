@@ -8,7 +8,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
-import { fetchAllRows } from "./db-pagination";
+import { fetchAllRows, fetchAllRowsAfterId } from "./db-pagination";
 import {
   GS_GO_LIVE_ISO,
   GS_GO_LIVE_TS,

@@ -8,7 +8,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
-import { fetchAllRows } from "../db-pagination";
+import { fetchAllRowsAfterId } from "../db-pagination";
 import { computeBuySize } from "../shadow-core";
 import {
   SAMPLE_DELAYS,
