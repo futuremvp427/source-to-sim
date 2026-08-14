@@ -225,6 +225,12 @@ async function releaseLease(
     last_success_at: string;
     /** Per-stage durations (ms) for the cycle that is releasing the lease. */
     stage_ms: Record<string, number>;
+    /**
+     * Diagnostic telemetry only: how many source_events this specific
+     * COMPLETED poll attempt persisted, win or lose. Never affects paper
+     * accounting, sizing, bankroll, settlement or lease ownership.
+     */
+    last_poll_events_inserted: number;
   }>,
 ): Promise<void> {
   await supabaseAdmin
@@ -236,7 +242,7 @@ async function releaseLease(
       // Release immediately so the next scheduled poll is never blocked by a stale lease.
       lease_expires_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-    })
+    } as never)
     .eq("id", lease.lockId)
     .eq("fence", lease.fence)
     // A stale owner must not be able to clobber the worker that took over.
@@ -1297,6 +1303,13 @@ export async function runExperimentCycle(
     }
   };
 
+  /**
+   * How many source_events THIS poll attempt persisted, regardless of
+   * whether the cycle goes on to succeed or fail in a later stage. Stays 0
+   * if the cycle never reaches a successful persistEvents() result.
+   */
+  let cycleEventsInserted = 0;
+
   try {
     // Bounded so a hung upstream call fails through the normal error path (which
     // releases the lease) instead of being killed with the lease still claimed.
@@ -1313,6 +1326,7 @@ export async function runExperimentCycle(
         const inserted = await timed("persist_events", () =>
           persistEvents(events, !isGeneralShadowName(experiment.name)),
         );
+        cycleEventsInserted = inserted;
         const process = await timed("paper_processing", () => processPendingEvents(experiment, lease));
         const marks = await timed("mark_refresh", () => refreshMarks(experiment.id));
         const reconciliation = await timed("reconciliation", () =>
@@ -1392,6 +1406,7 @@ export async function runExperimentCycle(
       lag_seconds: lagSeconds,
       last_success_at: new Date().toISOString(),
       stage_ms: stageMs as never,
+      last_poll_events_inserted: cycleEventsInserted,
     });
 
     if (inserted > 0) {
@@ -1435,6 +1450,7 @@ export async function runExperimentCycle(
       last_error: message,
       poll_failures: failures,
       stage_ms: stageMs as never,
+      last_poll_events_inserted: cycleEventsInserted,
     });
     if (failures === 1 || failures % 5 === 0) {
       await raiseAlert("error", "poll_failure", `${experiment.name}: ingestion poll failed: ${message}`, {
@@ -1495,19 +1511,19 @@ export async function loadDashboard() {
 
   const status = statusRes.data;
 
-  // Lifetime + last-poll counts both come from source_events (the source of
-  // truth). The hand-maintained worker_status.events_ingested counter is not
-  // presented as authoritative.
+  // Lifetime count comes from source_events (the source of truth). The
+  // hand-maintained worker_status.events_ingested counter is not presented
+  // as authoritative for that figure.
   const totalEventsPersisted = countsRes.count ?? 0;
-  let lastPollEventsInserted: number | null = null;
-  if (status?.last_poll_at) {
-    const { count } = await supabaseAdmin
-      .from("source_events")
-      .select("*", { count: "exact", head: true })
-      .eq("wallet", TARGET_WALLET)
-      .gte("first_seen_at", status.last_poll_at);
-    lastPollEventsInserted = count ?? 0;
-  }
+  // last_poll_events_inserted is diagnostic telemetry persisted directly by
+  // the worker itself (see releaseLease in runExperimentCycle): the exact
+  // count persistEvents() returned for the most recently COMPLETED poll
+  // attempt, win or lose. Deriving this from first_seen_at >= last_poll_at
+  // was structurally wrong — last_poll_at is stamped at cycle END, strictly
+  // after that same cycle's own inserts, so the comparison always missed them.
+  const lastPollEventsInserted: number | null = status
+    ? Number((status as unknown as { last_poll_events_inserted?: number | null }).last_poll_events_inserted ?? 0)
+    : null;
 
   const positions = positionsRes.data ?? [];
   const open: DashboardOpenPosition[] = positions
