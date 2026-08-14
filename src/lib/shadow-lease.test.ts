@@ -9,7 +9,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * `calls` therefore asserts there is no SELECT-before-UPDATE.
  */
 
-type Row = { worker_id: string | null; fence: number; lease_expires_at: number | null };
+type Row = {
+  worker_id: string | null;
+  fence: number;
+  lease_expires_at: number | null;
+  last_poll_events_inserted?: number;
+};
 
 const state: { row: Row | null; now: number; calls: string[] } = {
   row: null,
@@ -42,6 +47,7 @@ function atomicAcquire(workerId: string, leaseSeconds: number): number | null {
 }
 
 const updateFilters: Record<string, unknown>[] = [];
+const updatePatches: Record<string, unknown>[] = [];
 
 vi.mock("@/integrations/supabase/client.server", () => ({
   supabaseAdmin: {
@@ -56,8 +62,12 @@ vi.mock("@/integrations/supabase/client.server", () => ({
     from: (table: string) => {
       state.calls.push(`from:${table}`);
       const filters: Record<string, unknown> = {};
+      let patch: Record<string, unknown> = {};
       const chain = {
-        update: () => chain,
+        update: (p: Record<string, unknown>) => {
+          patch = p;
+          return chain;
+        },
         eq: (col: string, val: unknown) => {
           filters[col] = val;
           return chain;
@@ -66,6 +76,7 @@ vi.mock("@/integrations/supabase/client.server", () => ({
         maybeSingle: async () => ({ data: null, error: null }),
         then: (resolve: (v: unknown) => unknown) => {
           updateFilters.push(filters);
+          updatePatches.push(patch);
           // Only the true owner (id + fence + worker_id) may write.
           if (
             state.row &&
@@ -73,6 +84,9 @@ vi.mock("@/integrations/supabase/client.server", () => ({
             filters["worker_id"] === state.row.worker_id
           ) {
             state.row.lease_expires_at = state.now;
+            if (typeof patch["last_poll_events_inserted"] === "number") {
+              state.row.last_poll_events_inserted = patch["last_poll_events_inserted"] as number;
+            }
           }
           return Promise.resolve(resolve({ data: null, error: null }));
         },
@@ -91,6 +105,7 @@ beforeEach(() => {
   state.now = 1_000_000;
   state.calls = [];
   updateFilters.length = 0;
+  updatePatches.length = 0;
 });
 
 describe("atomic lease acquisition", () => {
@@ -148,5 +163,49 @@ describe("atomic lease acquisition", () => {
     // The real owner can release.
     await releaseLeaseForTest(b, { state: "idle" });
     expect(state.row!.lease_expires_at).toBe(state.now);
+  });
+});
+
+describe("last_poll_events_inserted telemetry (Finding K)", () => {
+  it("a successful cycle that persisted N events records last_poll_events_inserted = N", async () => {
+    const a = (await acquireLease("A"))!;
+    await releaseLeaseForTest(a, { state: "idle", last_poll_events_inserted: 7 });
+    expect(state.row!.last_poll_events_inserted).toBe(7);
+  });
+
+  it("a later completed poll that inserted 0 overwrites the previous count, not preserves it", async () => {
+    const a = (await acquireLease("A"))!;
+    await releaseLeaseForTest(a, { state: "idle", last_poll_events_inserted: 7 });
+    expect(state.row!.last_poll_events_inserted).toBe(7);
+
+    const b = (await acquireLease("A"))!;
+    await releaseLeaseForTest(b, { state: "idle", last_poll_events_inserted: 0 });
+    expect(state.row!.last_poll_events_inserted).toBe(0);
+  });
+
+  it("a cycle that persisted N events but failed in a later stage still records N on the error release", async () => {
+    const a = (await acquireLease("A"))!;
+    await releaseLeaseForTest(a, { state: "error", last_error: "mark refresh failed", last_poll_events_inserted: 7 });
+    expect(state.row!.last_poll_events_inserted).toBe(7);
+  });
+
+  it("a cycle that failed before a successful persist records 0 on the error release", async () => {
+    const a = (await acquireLease("A"))!;
+    await releaseLeaseForTest(a, { state: "error", last_error: "source fetch failed", last_poll_events_inserted: 0 });
+    expect(state.row!.last_poll_events_inserted).toBe(0);
+  });
+
+  it("a stale owner cannot overwrite the new owner's telemetry either", async () => {
+    const a = (await acquireLease("A"))!;
+    await releaseLeaseForTest(a, { state: "idle", last_poll_events_inserted: 7 });
+    // A's lease is now released (lease_expires_at = state.now), so a fresh
+    // acquire by B succeeds and bumps the fence without needing staleness.
+    const b = (await acquireLease("B"))!;
+    await releaseLeaseForTest(b, { state: "idle", last_poll_events_inserted: 3 });
+    expect(state.row!.last_poll_events_inserted).toBe(3);
+
+    // A tries to release again with its now-stale fence; must not overwrite B's telemetry.
+    await releaseLeaseForTest(a, { state: "idle", last_poll_events_inserted: 999 });
+    expect(state.row!.last_poll_events_inserted).toBe(3);
   });
 });

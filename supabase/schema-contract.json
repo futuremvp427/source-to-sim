@@ -202,6 +202,14 @@
     },
     {
       "schema": "public",
+      "table": "worker_status",
+      "name": "last_poll_events_inserted",
+      "type": "integer",
+      "not_null": true,
+      "default_contains": ["0"]
+    },
+    {
+      "schema": "public",
       "table": "live_safety_state",
       "name": "kill_switch_engaged",
       "type": "boolean",

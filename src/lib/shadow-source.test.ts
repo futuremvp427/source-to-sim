@@ -30,6 +30,29 @@ describe("event counters", () => {
   });
 });
 
+describe("Finding K: latest-poll-inserted telemetry", () => {
+  it("the dashboard no longer derives lastPollEventsInserted from first_seen_at >= last_poll_at", () => {
+    expect(src).not.toMatch(/gte\(\s*"first_seen_at"\s*,\s*status\.last_poll_at\s*\)/);
+  });
+
+  it("the dashboard reads the persisted last_poll_events_inserted field from worker_status instead", () => {
+    expect(src).toContain("last_poll_events_inserted");
+    expect(src).toMatch(/lastPollEventsInserted:\s*number\s*\|\s*null\s*=\s*status/);
+  });
+
+  it("both the success and error lease releases record cycleEventsInserted", () => {
+    const releases = src.match(/await releaseLease\(lease, \{[^}]*\}\);/gs) ?? [];
+    expect(releases.length).toBeGreaterThanOrEqual(2);
+    for (const release of releases) {
+      expect(release).toContain("last_poll_events_inserted: cycleEventsInserted");
+    }
+  });
+
+  it("cycleEventsInserted is captured immediately after persistEvents resolves", () => {
+    expect(src).toMatch(/const inserted = await timed\("persist_events",[\s\S]*?\);\s*cycleEventsInserted = inserted;/);
+  });
+});
+
 describe("checkpoint-driven source catch-up", () => {
   it("Case A: keeps paging past the old fixed 2-page window until the checkpoint is covered", async () => {
     const checkpointTs = 1000;
