@@ -195,3 +195,25 @@ describe("mark_refresh has its own bounded budget (production incident)", () => 
     expect(boundedCalls).toBe(1);
   });
 });
+
+describe("checkpoint preamble has its own cycle budget (2026-08-14 production incident)", () => {
+  it("the worker_checkpoints load happens inside the withDeadline-bounded region, not before it", () => {
+    const deadlineCallIdx = src.indexOf('const stages = await withDeadline(');
+    const checkpointLoadIdx = src.indexOf('.from("worker_checkpoints").select("*")');
+    expect(deadlineCallIdx).toBeGreaterThan(-1);
+    expect(checkpointLoadIdx).toBeGreaterThan(-1);
+    // Before the fix, the checkpoint SELECT ran before `try` / withDeadline even
+    // started, so a hung query there stranded the lease with no internal bound
+    // and no recorded stage_ms/last_error — indistinguishable from a permanent
+    // hang. It must now run after the deadline race has already started.
+    expect(checkpointLoadIdx).toBeGreaterThan(deadlineCallIdx);
+  });
+
+  it("the first-run follow_from_ts bootstrap block also runs inside the bounded region", () => {
+    const deadlineCallIdx = src.indexOf('const stages = await withDeadline(');
+    const bootstrapIdx = src.indexOf("First ever run: shadow-copy only from go-live onwards.");
+    expect(deadlineCallIdx).toBeGreaterThan(-1);
+    expect(bootstrapIdx).toBeGreaterThan(-1);
+    expect(bootstrapIdx).toBeGreaterThan(deadlineCallIdx);
+  });
+});
