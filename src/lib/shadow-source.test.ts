@@ -201,7 +201,7 @@ describe("windowed catch-up (Data API offset ceiling)", () => {
 
   it("never requests an offset above the provider ceiling and rolls into an older end window", async () => {
     const checkpointTs = 1000;
-    const calls: { offset: number; endTs?: number }[] = [];
+    const calls: { offset: number; endTs: number | undefined }[] = [];
     const fetchPage = async (offset: number, endTs?: number) => {
       calls.push({ offset, endTs });
       // First window: always full pages well above the checkpoint.
