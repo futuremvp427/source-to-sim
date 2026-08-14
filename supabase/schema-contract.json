@@ -221,7 +221,14 @@
       "identity_args": "uuid, text, text, text, text, timestamp with time zone, numeric, jsonb",
       "security_definer": true,
       "config_contains": ["search_path=public"],
-      "definition_contains": ["on conflict (experiment_id, asset) do nothing", "update public.paper_positions as pp", "update public.paper_experiments as pe"],
+      "definition_contains": [
+        "on conflict (experiment_id, asset) do nothing",
+        "update public.paper_positions as pp",
+        "update public.paper_experiments as pe",
+        "insert into public.paper_trades",
+        "'settlement:' || p_asset",
+        "on conflict (experiment_id, event_key) do nothing"
+      ],
       "execute_allowed": ["service_role"],
       "execute_denied": ["PUBLIC", "anon", "authenticated"]
     },

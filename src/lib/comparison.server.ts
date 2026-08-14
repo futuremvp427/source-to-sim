@@ -185,7 +185,15 @@ export async function loadComparison(): Promise<ComparisonData> {
     const openCostBasis =
       Math.round(positions.reduce((sum, p) => sum + Number(p.cost_basis), 0) * 100) / 100;
 
-    const skipped = allTrades.filter((t) => String(t.action) === "SKIP");
+    // The SETTLEMENT-action paper_trades row is lifecycle audit evidence only
+    // (realized_pnl is always 0 — see apply_verified_paper_settlement). It is
+    // never an eligible trading decision: excluded from the decision
+    // denominator, skip rate, source-activity timestamp and the performance
+    // stream fed into summarizeExperiment. The real settlement P&L already
+    // enters that stream exactly once via settlementPerformanceEvents below,
+    // sourced from paper_settlements.
+    const decisionTrades = allTrades.filter((t) => String(t.action) !== "SETTLEMENT");
+    const skipped = decisionTrades.filter((t) => String(t.action) === "SKIP");
     const reasonCounts = new Map<string, number>();
     for (const t of skipped) {
       const raw = String(t.reason ?? "Unspecified");
@@ -197,7 +205,7 @@ export async function loadComparison(): Promise<ComparisonData> {
       .sort((a, b) => b.count - a.count)
       .slice(0, 3);
 
-    const tradePerformanceEvents: TradeLite[] = allTrades.map((t) => ({
+    const tradePerformanceEvents: TradeLite[] = decisionTrades.map((t) => ({
       action: String(t.action),
       realizedPnl: Number(t.realized_pnl ?? 0),
       createdAt: String(t.created_at),
@@ -223,7 +231,7 @@ export async function loadComparison(): Promise<ComparisonData> {
       startingCash: Number(experiment.starting_cash),
       cash: Number(experiment.cash),
     });
-    const lastSourceActivityTs = allTrades.reduce<number | null>((acc, t) => {
+    const lastSourceActivityTs = decisionTrades.reduce<number | null>((acc, t) => {
       const ts = t.source_ts === null ? null : Number(t.source_ts);
       return ts === null ? acc : acc === null ? ts : Math.max(acc, ts);
     }, null);
@@ -261,12 +269,12 @@ export async function loadComparison(): Promise<ComparisonData> {
       lastSuccessAt: statusRes.data?.last_success_at ?? null,
       lastError: statusRes.data?.last_error ?? null,
       postGoLiveSourceEvents: postGoLiveRes.count ?? null,
-      eligibleDecisions: allTrades.length,
+      eligibleDecisions: decisionTrades.length,
       totalPaperTrades: summary.buys + summary.sells,
       skipRatePct:
-        allTrades.length === 0 ? null : Math.round((skipped.length / allTrades.length) * 1000) / 10,
-      avgBuyUsd: meanNotional(allTrades, "BUY"),
-      avgSellUsd: meanNotional(allTrades, "SELL"),
+        decisionTrades.length === 0 ? null : Math.round((skipped.length / decisionTrades.length) * 1000) / 10,
+      avgBuyUsd: meanNotional(decisionTrades, "BUY"),
+      avgSellUsd: meanNotional(decisionTrades, "SELL"),
       nextBuyUsd: runway.nextBuyUsd,
       estimatedRemainingBuys: runway.estimatedRemainingBuys,
       medianDetectionLatencySeconds: median(

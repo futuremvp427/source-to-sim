@@ -47,4 +47,42 @@ describe("comparison metrics", () => {
     expect(maxDrawdown(100, [trade(20, "2026-01-01"), trade(-50, "2026-01-02"), trade(10, "2026-01-03")])).toBe(50);
     expect(maxDrawdown(100, [trade(5, "2026-01-01")])).toBe(0);
   });
+
+  it("a zero-realizedPnl SETTLEMENT lifecycle entry never affects wins/losses/drawdown", () => {
+    const withZeroSettlement = summarizeExperiment({
+      startingCash: 100,
+      cash: 100,
+      realizedPnl: 10,
+      openValue: 0,
+      trades: [trade(10, "2026-01-01"), trade(0, "2026-01-02", "SETTLEMENT")],
+      latencies: [],
+    });
+    const withoutIt = summarizeExperiment({
+      startingCash: 100,
+      cash: 100,
+      realizedPnl: 10,
+      openValue: 0,
+      trades: [trade(10, "2026-01-01")],
+      latencies: [],
+    });
+    expect(withZeroSettlement.wins).toBe(withoutIt.wins);
+    expect(withZeroSettlement.losses).toBe(withoutIt.losses);
+    expect(withZeroSettlement.maxDrawdown).toBe(withoutIt.maxDrawdown);
+    expect(withZeroSettlement.equity).toBe(withoutIt.equity);
+  });
+
+  it("the real settlement result (non-zero realizedPnl) counts exactly once", () => {
+    const s = summarizeExperiment({
+      startingCash: 100,
+      cash: 112,
+      realizedPnl: 12,
+      openValue: 0,
+      trades: [trade(12, "2026-01-01", "SETTLEMENT")],
+      latencies: [],
+    });
+    expect(s.wins).toBe(1);
+    expect(s.losses).toBe(0);
+    expect(s.equity).toBe(112);
+    expect(s.totalPnl).toBe(12);
+  });
 });
