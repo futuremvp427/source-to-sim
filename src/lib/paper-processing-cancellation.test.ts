@@ -11,7 +11,7 @@ import { describe, expect, it, vi } from "vitest";
  * timeout wave. processPendingEvents now takes an AbortSignal.
  */
 
-type Captured = { name: string; signal?: AbortSignal };
+type Captured = { name: string; signal: AbortSignal | undefined };
 
 const calls: Captured[] = [];
 let controller: AbortController;
