@@ -332,3 +332,95 @@ describe("persist_events is really cancelled on cycle timeout (2026-08-14 system
     expect(finallyIdx).toBeGreaterThan(controllerIdx);
   });
 });
+
+/**
+ * Real cancellation for the source-ingest HTTP chain (same pattern already
+ * proven for persistEvents/processPendingEvents): the cycle's AbortSignal must
+ * reject an in-flight page request and stop any further page from starting.
+ */
+describe("source ingest real cancellation", () => {
+  const { fetchFixedPages, CycleAbortedError } = (await import("./shadow.server")) as unknown as {
+    fetchFixedPages: (
+      fetchPage: (offset: number) => Promise<Json[]>,
+      pages: number,
+      pageSize?: number,
+      signal?: AbortSignal,
+    ) => Promise<{ raw: Json[]; pagesFetched: number }>;
+    CycleAbortedError: new () => Error;
+  };
+
+  it("A: aborting while a page fetch is pending rejects it and starts no further page", async () => {
+    const controller = new AbortController();
+    const calls: number[] = [];
+    const fetchPage = (offset: number) =>
+      new Promise<Json[]>((_resolve, reject) => {
+        calls.push(offset);
+        controller.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    const p = fetchUntilCheckpointCovered(fetchPage, 1000, PAGE_SIZE, controller.signal);
+    await Promise.resolve();
+    controller.abort();
+    await expect(p).rejects.toThrow(/aborted/i);
+    expect(calls).toEqual([0]);
+  });
+
+  it("B: page 1 resolves, page 2 pends then aborts, page 3 is never requested", async () => {
+    const controller = new AbortController();
+    const calls: number[] = [];
+    const fetchPage = (offset: number) => {
+      calls.push(offset);
+      if (offset === 0) {
+        return Promise.resolve(Array.from({ length: PAGE_SIZE }, () => ({ timestamp: 5000 })) as Json[]);
+      }
+      return new Promise<Json[]>((_resolve, reject) => {
+        controller.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    };
+    const p = fetchUntilCheckpointCovered(fetchPage, 1000, PAGE_SIZE, controller.signal);
+    await new Promise((r) => setTimeout(r, 0));
+    controller.abort();
+    await expect(p).rejects.toThrow(/aborted/i);
+    expect(calls).toEqual([0, PAGE_SIZE]);
+  });
+
+  it("C: fetchFixedPages cancels the in-flight page and blocks further pages", async () => {
+    const controller = new AbortController();
+    const calls: number[] = [];
+    const fetchPage = (offset: number) => {
+      calls.push(offset);
+      if (offset === 0) {
+        return Promise.resolve(Array.from({ length: PAGE_SIZE }, () => ({ timestamp: 5000 })) as Json[]);
+      }
+      return new Promise<Json[]>((_resolve, reject) => {
+        controller.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    };
+    const p = fetchFixedPages(fetchPage, 4, PAGE_SIZE, controller.signal);
+    await new Promise((r) => setTimeout(r, 0));
+    controller.abort();
+    await expect(p).rejects.toThrow(/aborted/i);
+    expect(calls).toEqual([0, PAGE_SIZE]);
+  });
+
+  it("checks the abort flag before starting each page, like processPendingEvents", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const calls: number[] = [];
+    const fetchPage = async (offset: number) => {
+      calls.push(offset);
+      return [] as Json[];
+    };
+    await expect(
+      fetchUntilCheckpointCovered(fetchPage, 1000, PAGE_SIZE, controller.signal),
+    ).rejects.toBeInstanceOf(CycleAbortedError);
+    await expect(fetchFixedPages(fetchPage, 2, PAGE_SIZE, controller.signal)).rejects.toBeInstanceOf(
+      CycleAbortedError,
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it("threads the cycle signal from runExperimentCycle's source_ingest into fetchSourceWindow", () => {
+    expect(src).toMatch(/fetchSourceWindow\([\s\S]{0,300}?cycleAbort\.signal,?\s*\)/);
+    expect(src).toContain("AbortSignal.timeout(12_000)");
+  });
+});
