@@ -41,11 +41,19 @@ describe("Finding K: latest-poll-inserted telemetry", () => {
   });
 
   it("both the success and error lease releases record cycleEventsInserted", () => {
-    const releases = src.match(/await releaseLease\(lease, \{[^}]*\}\);/gs) ?? [];
+    // The error path's release is wrapped in its own bounded cleanup budget, so
+    // it is no longer directly awaited; match the call itself either way.
+    const releases = src.match(/releaseLease\(lease, \{[^}]*\}\)/gs) ?? [];
     expect(releases.length).toBeGreaterThanOrEqual(2);
     for (const release of releases) {
       expect(release).toContain("last_poll_events_inserted: cycleEventsInserted");
     }
+  });
+
+  it("cleanup releases the lease before status reads or alerting can block it", () => {
+    expect(src).toContain("CLEANUP_RELEASE_DEADLINE_MS");
+    expect(src).toContain('"cleanup_release_lease"');
+    expect(src).toContain('"cleanup_alert"');
   });
 
   it("cycleEventsInserted is captured immediately after persistEvents resolves", () => {
