@@ -10,7 +10,10 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { median } from "./copyability/core";
 import { fetchAllRows } from "./db-pagination";
+import { utcDay } from "./general-shadow";
+import { SLIPPAGE_METHODOLOGY_VERSION, SLIPPAGE_SAMPLE_LIMIT, priorUtcDayCutoff } from "./observation/slippage-asof";
 import {
   decideResolution,
   decideResolutionWithGammaFallback,
@@ -21,6 +24,48 @@ import {
   type PublicMarketResolution,
 } from "./settlement-core";
 import { raiseAlert } from "./shadow.server";
+
+export type SettlementSlippageBasis = {
+  cutoffAt: string;
+  medianCents: number | null;
+  sampleCount: number;
+  methodologyVersion: typeof SLIPPAGE_METHODOLOGY_VERSION;
+};
+
+/**
+ * Settlement-time slippage basis, computed once and persisted onto the
+ * paper_settlements row. Uses the same prior-utc-day-v1 no-lookahead cutoff
+ * as the Phase 2 observation panel (see observation/slippage-asof.ts): only
+ * observations strictly before 00:00:00 UTC on the settlement's own day are
+ * eligible. This is never recomputed for an already-settled row — the
+ * paper_settlements (experiment_id, asset) uniqueness makes a re-run a no-op.
+ */
+export async function loadSettlementSlippageBasis(
+  experimentId: string,
+  resolutionTs: string,
+): Promise<SettlementSlippageBasis> {
+  const cutoffAt = priorUtcDayCutoff(utcDay(resolutionTs));
+  const { data, error } = await supabaseAdmin
+    .from("copyability_observations")
+    .select("slippage_cents")
+    .eq("experiment_id", experimentId)
+    .eq("status", "observed")
+    .not("slippage_cents", "is", null)
+    .lt("observed_at", cutoffAt)
+    .order("observed_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(SLIPPAGE_SAMPLE_LIMIT);
+  if (error) throw new Error(error.message);
+  const cents = (data ?? [])
+    .map((row) => Number(row.slippage_cents))
+    .filter((value) => Number.isFinite(value));
+  return {
+    cutoffAt,
+    medianCents: median(cents),
+    sampleCount: cents.length,
+    methodologyVersion: SLIPPAGE_METHODOLOGY_VERSION,
+  };
+}
 
 const CLOB_API = "https://clob.polymarket.com";
 const GAMMA_API = "https://gamma-api.polymarket.com";
@@ -360,6 +405,7 @@ export async function runSettlementPass(experimentId: string): Promise<Settlemen
     }
 
     const resolutionTs = new Date().toISOString();
+    const slippageBasis = await loadSettlementSlippageBasis(experimentId, resolutionTs);
     const { data: rpcData, error: rpcError } = await applyVerifiedSettlementRpc({
       p_experiment_id: experimentId,
       p_asset: position.asset,
@@ -373,6 +419,10 @@ export async function runSettlementPass(experimentId: string): Promise<Settlemen
         clob: { closed: market.closed, tokens: market.tokens },
         gamma: gammaEvidence,
       },
+      p_slippage_basis_cents: slippageBasis.medianCents,
+      p_slippage_sample_cutoff_at: slippageBasis.cutoffAt,
+      p_slippage_sample_count: slippageBasis.sampleCount,
+      p_slippage_method_version: slippageBasis.methodologyVersion,
     });
 
     if (rpcError) {
