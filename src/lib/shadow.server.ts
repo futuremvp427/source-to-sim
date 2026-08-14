@@ -347,9 +347,25 @@ export function workerIdFor(experiment: { id: string; name: string }): string {
  */
 export const TAKER_ONLY_PARAM = "takerOnly=false";
 
-export function buildTradesUrl(limit: number, offset: number, wallet: string = TARGET_WALLET): string {
-  return `${DATA_API}/trades?user=${wallet}&${TAKER_ONLY_PARAM}&limit=${limit}&offset=${offset}`;
+/**
+ * The public Data API rejects /trades offset > 10000 with HTTP 400. Deeper
+ * history must be read inside timestamp windows, each with its own offset
+ * budget (see fetchUntilCheckpointCovered).
+ */
+export const MAX_TRADES_OFFSET = 10_000;
+
+export function buildTradesUrl(
+  limit: number,
+  offset: number,
+  wallet: string = TARGET_WALLET,
+  endTs?: number,
+): string {
+  const window = endTs === undefined ? "" : `&end=${endTs}`;
+  return `${DATA_API}/trades?user=${wallet}&${TAKER_ONLY_PARAM}&limit=${limit}&offset=${offset}${window}`;
 }
+
+/** Raised when a windowed catch-up cannot prove it moved backwards in time. */
+export class CatchupProgressionError extends Error {}
 
 /** Bounded page walk: used only for a fixed number of newest pages. */
 async function fetchFixedPages(
@@ -382,31 +398,61 @@ async function fetchFixedPages(
  * runExperimentCycle, which only advances the checkpoint and processes
  * events once this promise resolves).
  *
+ * Offset ceiling: the provider rejects offset > MAX_TRADES_OFFSET (HTTP 400).
+ * When a window hits that ceiling without proving coverage or exhaustion, the
+ * walk restarts at offset 0 inside an older window whose INCLUSIVE end
+ * boundary is the oldest valid timestamp observed in the exhausted window.
+ * Inclusive is deliberate: events sharing that same second may straddle the
+ * boundary, so they are re-fetched (duplicates are absorbed by the unique
+ * event_key on persistence) rather than skipped. If no valid timestamp was
+ * observed, or the boundary would not move strictly backwards, this fails
+ * closed instead of truncating history.
+ *
  * Exported so the stopping semantics can be tested directly against an
  * injected page fetcher, without mocking the network.
  */
 export async function fetchUntilCheckpointCovered(
-  fetchPage: (offset: number) => Promise<Json[]>,
+  fetchPage: (offset: number, endTs?: number) => Promise<Json[]>,
   checkpointTs: number,
   pageSize: number = PAGE_SIZE,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
   const raw: Json[] = [];
   let pagesFetched = 0;
-  let offset = 0;
+  let endTs: number | undefined;
   for (;;) {
-    const page = await fetchPage(offset);
-    pagesFetched += 1;
-    raw.push(...page);
-    const exhausted = page.length < pageSize;
-    // A malformed timestamp (null, "", non-numeric) must never falsely prove
-    // coverage: Number(null) === 0 and Number("") === 0 would otherwise look
-    // like a genuine event older than any positive checkpoint.
-    const coversCheckpoint = page.some((r) => {
-      const ts = Number(r["timestamp"]);
-      return Number.isFinite(ts) && ts > 0 && ts < checkpointTs;
-    });
-    if (exhausted || coversCheckpoint) return { raw, pagesFetched };
-    offset += pageSize;
+    let offset = 0;
+    let oldestValid: number | null = null;
+    for (;;) {
+      const page = await fetchPage(offset, endTs);
+      pagesFetched += 1;
+      raw.push(...page);
+      const exhausted = page.length < pageSize;
+      // A malformed timestamp (null, "", non-numeric) must never falsely prove
+      // coverage or window progression: Number(null) === 0 and Number("") === 0
+      // would otherwise look like a genuine event older than any positive
+      // checkpoint.
+      let coversCheckpoint = false;
+      for (const r of page) {
+        const ts = Number(r["timestamp"]);
+        if (!Number.isFinite(ts) || ts <= 0) continue;
+        if (ts < checkpointTs) coversCheckpoint = true;
+        if (oldestValid === null || ts < oldestValid) oldestValid = ts;
+      }
+      if (exhausted || coversCheckpoint) return { raw, pagesFetched };
+      offset += pageSize;
+      if (offset > MAX_TRADES_OFFSET) break;
+    }
+    if (oldestValid === null) {
+      throw new CatchupProgressionError(
+        "Trades offset ceiling reached with no valid timestamp to move the window backward",
+      );
+    }
+    if (endTs !== undefined && oldestValid >= endTs) {
+      throw new CatchupProgressionError(
+        `Trades window did not progress backwards (end=${endTs}, oldest observed=${oldestValid})`,
+      );
+    }
+    endTs = oldestValid;
   }
 }
 
@@ -436,7 +482,7 @@ async function fetchSourceWindow(
     );
   }
   return fetchUntilCheckpointCovered(
-    (offset) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet)),
+    (offset, endTs) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet, endTs)),
     catchupBoundary,
   );
 }
