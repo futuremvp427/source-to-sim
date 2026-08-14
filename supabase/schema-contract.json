@@ -174,6 +174,34 @@
     },
     {
       "schema": "public",
+      "table": "paper_settlements",
+      "name": "slippage_basis_cents",
+      "type": "numeric",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "paper_settlements",
+      "name": "slippage_sample_cutoff_at",
+      "type": "timestamp with time zone",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "paper_settlements",
+      "name": "slippage_sample_count",
+      "type": "integer",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "paper_settlements",
+      "name": "slippage_method_version",
+      "type": "text",
+      "not_null": false
+    },
+    {
+      "schema": "public",
       "table": "live_safety_state",
       "name": "kill_switch_engaged",
       "type": "boolean",
@@ -231,7 +259,7 @@
     {
       "schema": "public",
       "name": "apply_verified_paper_settlement",
-      "identity_args": "uuid, text, text, text, text, timestamp with time zone, numeric, jsonb",
+      "identity_args": "uuid, text, text, text, text, timestamp with time zone, numeric, jsonb, numeric, timestamp with time zone, integer, text",
       "security_definer": true,
       "config_contains": ["search_path=public"],
       "definition_contains": [
@@ -240,7 +268,11 @@
         "update public.paper_experiments as pe",
         "insert into public.paper_trades",
         "'settlement:' || p_asset",
-        "on conflict (experiment_id, event_key) do nothing"
+        "on conflict (experiment_id, event_key) do nothing",
+        "slippage_basis_cents",
+        "slippage_sample_cutoff_at",
+        "slippage_sample_count",
+        "slippage_method_version"
       ],
       "execute_allowed": ["service_role"],
       "execute_denied": ["PUBLIC", "anon", "authenticated"]
