@@ -155,26 +155,37 @@ function chunked<T>(items: T[], size: number): T[][] {
 /* HTTP helpers (public, unauthenticated)                              */
 /* ------------------------------------------------------------------ */
 
-async function getJson(url: string, attempts = 3): Promise<unknown> {
+/**
+ * Combines the caller's cancellation signal with this request's own timeout so
+ * either one aborts the individual fetch. When no cycle signal is supplied the
+ * behaviour is byte-identical to the previous timeout-only form.
+ */
+function requestSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(12_000);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+async function getJson(url: string, attempts = 3, signal?: AbortSignal): Promise<unknown> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i += 1) {
     try {
       const res = await fetch(url, {
         headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(12_000),
+        signal: requestSignal(signal),
       });
       if (!res.ok) throw new Error(`${url.split("?")[0]} responded ${res.status}`);
       return (await res.json()) as unknown;
     } catch (err) {
       lastErr = err;
+      if (signal?.aborted) break;
       if (i < attempts - 1) await new Promise((r) => setTimeout(r, 400 * 2 ** i));
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error("request failed");
 }
 
-async function getArray(url: string): Promise<Json[]> {
-  const json = await getJson(url);
+async function getArray(url: string, signal?: AbortSignal): Promise<Json[]> {
+  const json = await getJson(url, 3, signal);
   if (Array.isArray(json)) return json as Json[];
   if (json && typeof json === "object" && Array.isArray((json as { data?: unknown[] }).data)) {
     return (json as { data: Json[] }).data;
