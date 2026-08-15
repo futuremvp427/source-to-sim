@@ -4,7 +4,23 @@ import {
   submitPoligarchLiveOrder,
   cancelPoligarchLiveOrder,
   getPoligarchLiveOrderStatus,
+  checkPilotOrderAllowlistAndNotional,
+  roundToPriceTick,
+  formatPriceForTick,
+  type PoligarchLiveOrderIntent,
 } from "./poligarch-submission.server";
+import { POLIGARCH_V2_EXPERIMENT_NAME, POLIGARCH_V2_WALLET } from "./poligarch-config";
+
+const baseOrder: PoligarchLiveOrderIntent = {
+  usMarketSlug: "chicago-snow",
+  side: "BUY",
+  limitPrice: 0.52,
+  shares: 3.8,
+  outcome: "YES",
+  experimentName: POLIGARCH_V2_EXPERIMENT_NAME,
+  wallet: POLIGARCH_V2_WALLET,
+  notionalUsd: 2,
+};
 
 const lockedState = {
   killSwitchEngaged: true,
@@ -37,7 +53,7 @@ describe("poligarch-submission.server", () => {
     const getPilotSafetyState = vi.fn(async () => fullyArmedState);
     const fetchImpl = vi.fn();
     const result = await submitPoligarchLiveOrder(
-      { usMarketSlug: "chicago-snow", side: "BUY", limitPrice: 0.52, shares: 3.8 },
+      baseOrder,
       { getPilotSafetyState, fetchImpl, now: () => 1_700_000_000 },
     );
     expect(result.ok).toBe(false);
@@ -50,7 +66,7 @@ describe("poligarch-submission.server", () => {
   it("still fails closed on a locked safety state, independent of the hard constant", async () => {
     const fetchImpl = vi.fn();
     const result = await submitPoligarchLiveOrder(
-      { usMarketSlug: "chicago-snow", side: "BUY", limitPrice: 0.52, shares: 3.8 },
+      baseOrder,
       { getPilotSafetyState: async () => lockedState, fetchImpl, now: () => 1_700_000_000 },
     );
     expect(result.ok).toBe(false);
@@ -79,7 +95,7 @@ describe("poligarch-submission.server", () => {
     // confirm isPmusConfigured()-equivalent MISSING_CREDENTIALS handling is reused, not reinvented.
     const fetchImpl = vi.fn();
     const result = await submitPoligarchLiveOrder(
-      { usMarketSlug: "chicago-snow", side: "BUY", limitPrice: 0.52, shares: 3.8 },
+      baseOrder,
       { getPilotSafetyState: async () => fullyArmedState, fetchImpl, now: () => 1_700_000_000 },
     );
     expect(result.ok).toBe(false);
@@ -97,5 +113,80 @@ describe("poligarch-submission.server", () => {
     });
     expect(cancelResult.ok).toBe(false);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("accepts a NO-outcome order the same way as a YES-outcome order (short-circuits identically on the hard constant)", async () => {
+    const fetchImpl = vi.fn();
+    const result = await submitPoligarchLiveOrder(
+      { ...baseOrder, outcome: "NO" },
+      { getPilotSafetyState: async () => fullyArmedState, fetchImpl, now: () => 1_700_000_000 },
+    );
+    expect(result.ok).toBe(false);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("checkPilotOrderAllowlistAndNotional (order-scoped defense-in-depth guard)", () => {
+  it("accepts the allowlisted experiment/wallet within the notional cap", () => {
+    const result = checkPilotOrderAllowlistAndNotional(
+      { experimentName: POLIGARCH_V2_EXPERIMENT_NAME, wallet: POLIGARCH_V2_WALLET, notionalUsd: 2 },
+      2,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects a wrong wallet even under the correct experiment name", () => {
+    const result = checkPilotOrderAllowlistAndNotional(
+      {
+        experimentName: POLIGARCH_V2_EXPERIMENT_NAME,
+        wallet: "0x044f334595a7fd42c143e11c8ec47f23c8d1d1f1",
+        notionalUsd: 2,
+      },
+      2,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/PILOT_SOURCE_NOT_ALLOWLISTED/);
+  });
+
+  it("rejects a wrong experiment name even under the correct wallet", () => {
+    const result = checkPilotOrderAllowlistAndNotional(
+      {
+        experimentName: "SHADOW V3 CAPACITY: Poligarch",
+        wallet: POLIGARCH_V2_WALLET,
+        notionalUsd: 2,
+      },
+      2,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/PILOT_SOURCE_NOT_ALLOWLISTED/);
+  });
+
+  it("rejects a notional that exceeds the DB-configured per-order cap", () => {
+    const result = checkPilotOrderAllowlistAndNotional(
+      { experimentName: POLIGARCH_V2_EXPERIMENT_NAME, wallet: POLIGARCH_V2_WALLET, notionalUsd: 2.01 },
+      2,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/NOTIONAL_EXCEEDS_CAP/);
+  });
+
+  it("accepts a notional exactly at the cap", () => {
+    const result = checkPilotOrderAllowlistAndNotional(
+      { experimentName: POLIGARCH_V2_EXPERIMENT_NAME, wallet: POLIGARCH_V2_WALLET, notionalUsd: 2 },
+      2,
+    );
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("price-tick rounding (submission)", () => {
+  it("rounds a limit price to the nearest actual price tick", () => {
+    expect(roundToPriceTick(0.517, 0.005)).toBeCloseTo(0.515, 10);
+    expect(roundToPriceTick(0.5199, 0.01)).toBeCloseTo(0.52, 10);
+  });
+
+  it("formats the rounded price with enough decimals to represent the tick exactly", () => {
+    expect(formatPriceForTick(0.515, 0.005)).toBe("0.515");
+    expect(formatPriceForTick(0.52, 0.01)).toBe("0.52");
   });
 });
