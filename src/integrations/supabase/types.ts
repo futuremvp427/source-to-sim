@@ -590,6 +590,183 @@ export type Database = {
         }
         Relationships: []
       }
+      // Manually added (not via `supabase gen types`): local Supabase/Docker
+      // codegen is unavailable in this environment (disk-space constrained)
+      // and this file must not be pointed at the live production project.
+      // live_order_intents and live_pilot_state below were hand-written from
+      // supabase/migrations/20260815120000_poligarch_live_pilot_schema.sql to
+      // mirror live_safety_state's Row/Insert/Update/Relationships shape.
+      // Reconcile against the real migration if this file is ever
+      // regenerated via `supabase gen types`.
+      live_order_intents: {
+        Row: {
+          avg_fill_price: number | null
+          created_at: string
+          decision_at: string | null
+          detected_at: string
+          fail_reason: string | null
+          fees_usd: number | null
+          filled_shares: number | null
+          id: string
+          live_price_snapshot: Json | null
+          market_mapping_status: string | null
+          pilot_id: string
+          requested_notional_usd: number | null
+          requested_shares: number | null
+          safety_checks: Json | null
+          source_asset: string | null
+          source_condition_id: string | null
+          source_event_id: string
+          source_event_key: string
+          source_experiment_id: string
+          source_price: number
+          source_side: string
+          source_ts: number
+          source_wallet: string
+          status: string
+          status_history: Json
+          submitted_order_id: string | null
+          updated_at: string
+          us_market_slug: string | null
+        }
+        Insert: {
+          avg_fill_price?: number | null
+          created_at?: string
+          decision_at?: string | null
+          detected_at?: string
+          fail_reason?: string | null
+          fees_usd?: number | null
+          filled_shares?: number | null
+          id?: string
+          live_price_snapshot?: Json | null
+          market_mapping_status?: string | null
+          pilot_id: string
+          requested_notional_usd?: number | null
+          requested_shares?: number | null
+          safety_checks?: Json | null
+          source_asset?: string | null
+          source_condition_id?: string | null
+          source_event_id: string
+          source_event_key: string
+          source_experiment_id: string
+          source_price: number
+          source_side: string
+          source_ts: number
+          source_wallet: string
+          status?: string
+          status_history?: Json
+          submitted_order_id?: string | null
+          updated_at?: string
+          us_market_slug?: string | null
+        }
+        Update: {
+          avg_fill_price?: number | null
+          created_at?: string
+          decision_at?: string | null
+          detected_at?: string
+          fail_reason?: string | null
+          fees_usd?: number | null
+          filled_shares?: number | null
+          id?: string
+          live_price_snapshot?: Json | null
+          market_mapping_status?: string | null
+          pilot_id?: string
+          requested_notional_usd?: number | null
+          requested_shares?: number | null
+          safety_checks?: Json | null
+          source_asset?: string | null
+          source_condition_id?: string | null
+          source_event_id?: string
+          source_event_key?: string
+          source_experiment_id?: string
+          source_price?: number
+          source_side?: string
+          source_ts?: number
+          source_wallet?: string
+          status?: string
+          status_history?: Json
+          submitted_order_id?: string | null
+          updated_at?: string
+          us_market_slug?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "live_order_intents_pilot_id_fkey"
+            columns: ["pilot_id"]
+            isOneToOne: false
+            referencedRelation: "live_pilot_state"
+            referencedColumns: ["pilot_id"]
+          },
+          {
+            foreignKeyName: "live_order_intents_source_experiment_id_fkey"
+            columns: ["source_experiment_id"]
+            isOneToOne: false
+            referencedRelation: "paper_experiments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "live_order_intents_source_event_id_fkey"
+            columns: ["source_event_id"]
+            isOneToOne: false
+            referencedRelation: "source_events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      live_pilot_state: {
+        Row: {
+          activated_at: string | null
+          activated_by: string | null
+          activation_stage: string
+          armed_at: string | null
+          armed_by: string | null
+          consecutive_failed_orders: number
+          kill_switch_engaged: boolean
+          last_action: string | null
+          last_action_at: string | null
+          max_daily_realized_loss_usd: number
+          max_order_notional_usd: number
+          max_total_exposure_usd: number
+          pilot_bankroll_usd: number
+          pilot_id: string
+          updated_at: string
+        }
+        Insert: {
+          activated_at?: string | null
+          activated_by?: string | null
+          activation_stage?: string
+          armed_at?: string | null
+          armed_by?: string | null
+          consecutive_failed_orders?: number
+          kill_switch_engaged?: boolean
+          last_action?: string | null
+          last_action_at?: string | null
+          max_daily_realized_loss_usd?: number
+          max_order_notional_usd?: number
+          max_total_exposure_usd?: number
+          pilot_bankroll_usd?: number
+          pilot_id: string
+          updated_at?: string
+        }
+        Update: {
+          activated_at?: string | null
+          activated_by?: string | null
+          activation_stage?: string
+          armed_at?: string | null
+          armed_by?: string | null
+          consecutive_failed_orders?: number
+          kill_switch_engaged?: boolean
+          last_action?: string | null
+          last_action_at?: string | null
+          max_daily_realized_loss_usd?: number
+          max_order_notional_usd?: number
+          max_total_exposure_usd?: number
+          pilot_bankroll_usd?: number
+          pilot_id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       live_safety_state: {
         Row: {
           activated_at: string | null
