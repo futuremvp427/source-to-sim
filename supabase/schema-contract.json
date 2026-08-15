@@ -76,6 +76,20 @@
       "name": "paper_trades_experiment_created_id_idx",
       "must_exist": true,
       "definition_contains": ["experiment_id, created_at, id"]
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "live_order_intents_pilot_created_idx",
+      "must_exist": true,
+      "definition_contains": ["pilot_id", "created_at desc"]
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "live_order_intents_source_unique",
+      "must_exist": true,
+      "definition_contains": ["source_experiment_id", "source_event_id"]
     }
   ],
   "constraints": [
