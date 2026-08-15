@@ -124,4 +124,107 @@ describe("previewPoligarchLiveOrder", () => {
       expect.any(Object),
     );
   });
+
+  it("populates currentPrice/book/ledgerSnapshot display fields on a PASS result", async () => {
+    const deps = baseDeps();
+    const result = await previewPoligarchLiveOrder(baseSourceEvent, deps as never);
+    expect(result.overall).toBe("PASS");
+    // side is BUY, so currentPrice should be the best ask from the injected book.
+    expect(result.currentPrice).toBe(0.51);
+    expect(result.book).toEqual({
+      bestBid: 0.49,
+      bestAsk: 0.51,
+      minimumTradeQty: 0.01,
+      tickSize: 0.005,
+    });
+    expect(result.ledgerSnapshot).toEqual({
+      remainingBankrollUsd: 25,
+      currentOpenExposureUsd: 0,
+      todayRealizedPnlUsd: 0,
+      consecutiveFailedOrders: 0,
+      openLivePositions: 0,
+    });
+  });
+
+  it("leaves currentPrice/book/ledgerSnapshot null on an early fail-fast path (allowlist rejection)", async () => {
+    const deps = baseDeps();
+    const result = await previewPoligarchLiveOrder(
+      { ...baseSourceEvent, experimentName: "SHADOW V3 CAPACITY: Poligarch" },
+      deps as never,
+    );
+    expect(result.overall).toBe("FAIL");
+    expect(result.currentPrice).toBeNull();
+    expect(result.book).toBeNull();
+    expect(result.ledgerSnapshot).toBeNull();
+  });
+
+  it("persists safety_checks and live_price_snapshot (not just fail_reason) when a risk check fails", async () => {
+    const deps = baseDeps({
+      getPilotLedgerSnapshot: vi.fn(async () => ({
+        remainingBankrollUsd: 25,
+        currentOpenExposureUsd: 0,
+        // Daily loss check should fail: |-10| >= maxDailyRealizedLossUsd (5).
+        todayRealizedPnlUsd: -10,
+        consecutiveFailedOrders: 0,
+        openLivePositions: 0,
+      })),
+    });
+    const result = await previewPoligarchLiveOrder(baseSourceEvent, deps as never);
+    expect(result.overall).toBe("FAIL");
+    expect(result.failReason).toMatch(/daily realized loss/i);
+    expect(deps.updateIntentStatus).toHaveBeenCalledWith(
+      "intent-1",
+      "SKIPPED",
+      expect.objectContaining({
+        fail_reason: expect.stringMatching(/daily realized loss/i),
+        live_price_snapshot: expect.objectContaining({ bestBid: 0.49, bestAsk: 0.51 }),
+        safety_checks: expect.arrayContaining([
+          expect.objectContaining({ label: expect.stringMatching(/daily realized loss/i) }),
+        ]),
+      }),
+    );
+  });
+
+  it("persists safety_checks and live_price_snapshot (not just fail_reason) when sizing is rejected", async () => {
+    const deps = baseDeps({
+      getPilotLedgerSnapshot: vi.fn(async () => ({
+        // No bankroll or exposure headroom at all -> sizing rejects.
+        remainingBankrollUsd: 0,
+        currentOpenExposureUsd: 0,
+        todayRealizedPnlUsd: 0,
+        consecutiveFailedOrders: 0,
+        openLivePositions: 0,
+      })),
+    });
+    const result = await previewPoligarchLiveOrder(baseSourceEvent, deps as never);
+    expect(result.overall).toBe("FAIL");
+    expect(result.failReason).toMatch(/bankroll|exposure/i);
+    expect(deps.updateIntentStatus).toHaveBeenCalledWith(
+      "intent-1",
+      "SKIPPED",
+      expect.objectContaining({
+        fail_reason: expect.stringMatching(/bankroll|exposure/i),
+        live_price_snapshot: expect.objectContaining({ bestBid: 0.49, bestAsk: 0.51 }),
+        safety_checks: expect.any(Array),
+      }),
+    );
+    // At least the checks that don't require a sized notional should be present.
+    const persistedFields = (deps.updateIntentStatus as ReturnType<typeof vi.fn>).mock
+      .calls[0]![2] as { safety_checks: Array<{ label: string }> };
+    expect(persistedFields.safety_checks.length).toBeGreaterThan(0);
+  });
+
+  it("converts a thrown error from an injected dependency into a structured FAIL instead of rejecting", async () => {
+    const deps = baseDeps({
+      getCurrentBook: vi.fn(async () => {
+        throw new Error("PMUS is down");
+      }),
+    });
+    const result = await previewPoligarchLiveOrder(baseSourceEvent, deps as never);
+    expect(result.overall).toBe("FAIL");
+    expect(result.failReason).toMatch(/^PIPELINE_ERROR:/);
+    expect(result.failReason).toMatch(/PMUS is down/);
+    expect(result.book).toBeNull();
+    expect(result.ledgerSnapshot).toBeNull();
+  });
 });

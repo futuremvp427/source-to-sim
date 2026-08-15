@@ -71,6 +71,25 @@ export type LivePilotPreviewResult = {
   sizing: { notionalUsd: number; shares: number } | null;
   checks: RiskCheck[];
   intentId: string | null;
+  // Display fields for the preview UI (prices, current balance/exposure/P&L).
+  // Populated only once actually fetched in the pipeline (book + ledger are
+  // fetched after signal-age passes); null on earlier fail-fast paths where
+  // no fetch happened yet (allowlist rejection, safety-gate closed,
+  // market-mapping SKIP, stale signal).
+  currentPrice: number | null;
+  book: {
+    bestBid: number;
+    bestAsk: number;
+    minimumTradeQty: number;
+    tickSize: number;
+  } | null;
+  ledgerSnapshot: {
+    remainingBankrollUsd: number;
+    currentOpenExposureUsd: number;
+    todayRealizedPnlUsd: number;
+    consecutiveFailedOrders: number;
+    openLivePositions: number;
+  } | null;
 };
 
 export type PreviewDeps = {
@@ -115,6 +134,9 @@ function fail(
     sizing: null,
     checks: [],
     intentId: null,
+    currentPrice: null,
+    book: null,
+    ledgerSnapshot: null,
     ...partial,
   };
 }
@@ -123,8 +145,26 @@ function fail(
  * Never submits an order. Only ever produces a PASS/FAIL preview and, once
  * an intent row exists (sizing rejected, a risk check failed, or full PASS),
  * persists its outcome via the Task 3 RPCs.
+ *
+ * Every injected dependency call is wrapped so a thrown error (e.g. PMUS
+ * down, a Supabase RPC failure — both RPC wrappers below already `throw new
+ * Error(...)` on failure) resolves to a structured FAIL result instead of an
+ * unhandled rejection. The `failReason` is prefixed `PIPELINE_ERROR:` in that
+ * case so it's distinguishable from a normal fail-closed rejection reason.
  */
 export async function previewPoligarchLiveOrder(
+  event: RawSourceEvent,
+  deps: PreviewDeps,
+): Promise<LivePilotPreviewResult> {
+  try {
+    return await runPreviewPipeline(event, deps);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return fail(event, `PIPELINE_ERROR: ${message}`);
+  }
+}
+
+async function runPreviewPipeline(
   event: RawSourceEvent,
   deps: PreviewDeps,
 ): Promise<LivePilotPreviewResult> {
@@ -172,6 +212,19 @@ export async function previewPoligarchLiveOrder(
   const slippageCheck = checkSlippage({ sourcePrice: event.price, currentPrice });
 
   const ledger = await deps.getPilotLedgerSnapshot();
+
+  // These three checks don't depend on order size, so they're computable
+  // even if sizing itself is rejected below — keeping them available means
+  // the sizing-rejected persist path below isn't limited to a bare
+  // fail_reason string; it can carry the same diagnostic detail the PASS
+  // path does, minus the one check (exposure caps) that genuinely can't run
+  // without a sized notional.
+  const sizeIndependentChecks: RiskCheck[] = [
+    checkDailyLoss({ todayRealizedPnlUsd: ledger.todayRealizedPnlUsd }),
+    checkConsecutiveFailures({ consecutiveFailedOrders: ledger.consecutiveFailedOrders }),
+    checkOpenPositions({ openLivePositions: ledger.openLivePositions }),
+  ];
+
   // Fixed-fraction-of-pilot-bankroll sizing signal: mirrors shadow-core.ts's
   // computeBuySize convention (1% of own cash, $1 floor), re-based onto the
   // pilot's own remaining bankroll rather than the paper-trading bankroll.
@@ -191,12 +244,19 @@ export async function previewPoligarchLiveOrder(
   const intent = await deps.createOrGetIntent(event);
 
   if (!sizing.ok) {
-    await deps.updateIntentStatus(intent.intentId, "SKIPPED", { fail_reason: sizing.reason });
+    await deps.updateIntentStatus(intent.intentId, "SKIPPED", {
+      fail_reason: sizing.reason,
+      live_price_snapshot: book,
+      safety_checks: [slippageCheck, ...sizeIndependentChecks],
+    });
     return fail(event, sizing.reason, {
       usMarketSlug: mapping.usMarketSlug,
       signalAgeSeconds: nowSeconds - event.sourceTs,
       slippageCheck,
       intentId: intent.intentId,
+      currentPrice,
+      book,
+      ledgerSnapshot: ledger,
     });
   }
 
@@ -206,14 +266,18 @@ export async function previewPoligarchLiveOrder(
       currentOpenExposureUsd: ledger.currentOpenExposureUsd,
       newOrderNotionalUsd: sizing.notionalUsd,
     }),
-    checkDailyLoss({ todayRealizedPnlUsd: ledger.todayRealizedPnlUsd }),
-    checkConsecutiveFailures({ consecutiveFailedOrders: ledger.consecutiveFailedOrders }),
-    checkOpenPositions({ openLivePositions: ledger.openLivePositions }),
+    ...sizeIndependentChecks,
   ];
 
   const failedCheck = checks.find((c) => !c.pass);
   if (failedCheck) {
-    await deps.updateIntentStatus(intent.intentId, "SKIPPED", { fail_reason: failedCheck.label });
+    await deps.updateIntentStatus(intent.intentId, "SKIPPED", {
+      fail_reason: failedCheck.label,
+      live_price_snapshot: book,
+      safety_checks: checks,
+      requested_shares: sizing.shares,
+      requested_notional_usd: sizing.notionalUsd,
+    });
     return fail(event, failedCheck.label, {
       usMarketSlug: mapping.usMarketSlug,
       signalAgeSeconds: nowSeconds - event.sourceTs,
@@ -221,6 +285,9 @@ export async function previewPoligarchLiveOrder(
       sizing: { notionalUsd: sizing.notionalUsd, shares: sizing.shares },
       checks,
       intentId: intent.intentId,
+      currentPrice,
+      book,
+      ledgerSnapshot: ledger,
     });
   }
 
@@ -242,6 +309,9 @@ export async function previewPoligarchLiveOrder(
     sizing: { notionalUsd: sizing.notionalUsd, shares: sizing.shares },
     checks,
     intentId: intent.intentId,
+    currentPrice,
+    book,
+    ledgerSnapshot: ledger,
   };
 }
 
