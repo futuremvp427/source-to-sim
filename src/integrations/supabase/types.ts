@@ -590,6 +590,175 @@ export type Database = {
         }
         Relationships: []
       }
+      live_order_intents: {
+        Row: {
+          avg_fill_price: number | null
+          created_at: string
+          decision_at: string | null
+          detected_at: string
+          fail_reason: string | null
+          fees_usd: number | null
+          filled_shares: number | null
+          id: string
+          live_price_snapshot: Json | null
+          market_mapping_status: string | null
+          pilot_id: string
+          requested_notional_usd: number | null
+          requested_shares: number | null
+          safety_checks: Json | null
+          source_asset: string | null
+          source_condition_id: string | null
+          source_event_id: string
+          source_event_key: string
+          source_experiment_id: string
+          source_price: number
+          source_side: string
+          source_ts: number
+          source_wallet: string
+          status: string
+          status_history: Json
+          submitted_order_id: string | null
+          updated_at: string
+          us_market_slug: string | null
+        }
+        Insert: {
+          avg_fill_price?: number | null
+          created_at?: string
+          decision_at?: string | null
+          detected_at?: string
+          fail_reason?: string | null
+          fees_usd?: number | null
+          filled_shares?: number | null
+          id?: string
+          live_price_snapshot?: Json | null
+          market_mapping_status?: string | null
+          pilot_id: string
+          requested_notional_usd?: number | null
+          requested_shares?: number | null
+          safety_checks?: Json | null
+          source_asset?: string | null
+          source_condition_id?: string | null
+          source_event_id: string
+          source_event_key: string
+          source_experiment_id: string
+          source_price: number
+          source_side: string
+          source_ts: number
+          source_wallet: string
+          status?: string
+          status_history?: Json
+          submitted_order_id?: string | null
+          updated_at?: string
+          us_market_slug?: string | null
+        }
+        Update: {
+          avg_fill_price?: number | null
+          created_at?: string
+          decision_at?: string | null
+          detected_at?: string
+          fail_reason?: string | null
+          fees_usd?: number | null
+          filled_shares?: number | null
+          id?: string
+          live_price_snapshot?: Json | null
+          market_mapping_status?: string | null
+          pilot_id?: string
+          requested_notional_usd?: number | null
+          requested_shares?: number | null
+          safety_checks?: Json | null
+          source_asset?: string | null
+          source_condition_id?: string | null
+          source_event_id?: string
+          source_event_key?: string
+          source_experiment_id?: string
+          source_price?: number
+          source_side?: string
+          source_ts?: number
+          source_wallet?: string
+          status?: string
+          status_history?: Json
+          submitted_order_id?: string | null
+          updated_at?: string
+          us_market_slug?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "live_order_intents_pilot_id_fkey"
+            columns: ["pilot_id"]
+            isOneToOne: false
+            referencedRelation: "live_pilot_state"
+            referencedColumns: ["pilot_id"]
+          },
+          {
+            foreignKeyName: "live_order_intents_source_event_id_fkey"
+            columns: ["source_event_id"]
+            isOneToOne: false
+            referencedRelation: "source_events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "live_order_intents_source_experiment_id_fkey"
+            columns: ["source_experiment_id"]
+            isOneToOne: false
+            referencedRelation: "paper_experiments"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      live_pilot_state: {
+        Row: {
+          activated_at: string | null
+          activated_by: string | null
+          activation_stage: string
+          armed_at: string | null
+          armed_by: string | null
+          consecutive_failed_orders: number
+          kill_switch_engaged: boolean
+          last_action: string | null
+          last_action_at: string | null
+          max_daily_realized_loss_usd: number
+          max_order_notional_usd: number
+          max_total_exposure_usd: number
+          pilot_bankroll_usd: number
+          pilot_id: string
+          updated_at: string
+        }
+        Insert: {
+          activated_at?: string | null
+          activated_by?: string | null
+          activation_stage?: string
+          armed_at?: string | null
+          armed_by?: string | null
+          consecutive_failed_orders?: number
+          kill_switch_engaged?: boolean
+          last_action?: string | null
+          last_action_at?: string | null
+          max_daily_realized_loss_usd?: number
+          max_order_notional_usd?: number
+          max_total_exposure_usd?: number
+          pilot_bankroll_usd?: number
+          pilot_id: string
+          updated_at?: string
+        }
+        Update: {
+          activated_at?: string | null
+          activated_by?: string | null
+          activation_stage?: string
+          armed_at?: string | null
+          armed_by?: string | null
+          consecutive_failed_orders?: number
+          kill_switch_engaged?: boolean
+          last_action?: string | null
+          last_action_at?: string | null
+          max_daily_realized_loss_usd?: number
+          max_order_notional_usd?: number
+          max_total_exposure_usd?: number
+          pilot_bankroll_usd?: number
+          pilot_id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       live_safety_state: {
         Row: {
           activated_at: string | null
@@ -1436,6 +1605,15 @@ export type Database = {
           realized_pnl: number
         }[]
       }
+      create_or_get_live_pilot_intent_atomic: {
+        Args: {
+          p_payload: Json
+          p_pilot_id: string
+          p_source_event_id: string
+          p_source_experiment_id: string
+        }
+        Returns: Json
+      }
       get_experiment_source_positions: {
         Args: { p_assets: string[]; p_experiment_id: string }
         Returns: {
@@ -1482,6 +1660,10 @@ export type Database = {
       try_acquire_reconcile_lease: {
         Args: { p_holder: string; p_seconds: number; p_wallet: string }
         Returns: boolean
+      }
+      update_live_pilot_intent_status_atomic: {
+        Args: { p_fields: Json; p_intent_id: string; p_new_status: string }
+        Returns: Json
       }
     }
     Enums: {
