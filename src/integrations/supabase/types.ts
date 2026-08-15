@@ -590,14 +590,6 @@ export type Database = {
         }
         Relationships: []
       }
-      // Manually added (not via `supabase gen types`): local Supabase/Docker
-      // codegen is unavailable in this environment (disk-space constrained)
-      // and this file must not be pointed at the live production project.
-      // live_order_intents and live_pilot_state below were hand-written from
-      // supabase/migrations/20260815120000_poligarch_live_pilot_schema.sql to
-      // mirror live_safety_state's Row/Insert/Update/Relationships shape.
-      // Reconcile against the real migration if this file is ever
-      // regenerated via `supabase gen types`.
       live_order_intents: {
         Row: {
           avg_fill_price: number | null
@@ -698,17 +690,17 @@ export type Database = {
             referencedColumns: ["pilot_id"]
           },
           {
-            foreignKeyName: "live_order_intents_source_experiment_id_fkey"
-            columns: ["source_experiment_id"]
-            isOneToOne: false
-            referencedRelation: "paper_experiments"
-            referencedColumns: ["id"]
-          },
-          {
             foreignKeyName: "live_order_intents_source_event_id_fkey"
             columns: ["source_event_id"]
             isOneToOne: false
             referencedRelation: "source_events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "live_order_intents_source_experiment_id_fkey"
+            columns: ["source_experiment_id"]
+            isOneToOne: false
+            referencedRelation: "paper_experiments"
             referencedColumns: ["id"]
           },
         ]
@@ -1613,6 +1605,15 @@ export type Database = {
           realized_pnl: number
         }[]
       }
+      create_or_get_live_pilot_intent_atomic: {
+        Args: {
+          p_payload: Json
+          p_pilot_id: string
+          p_source_event_id: string
+          p_source_experiment_id: string
+        }
+        Returns: Json
+      }
       get_experiment_source_positions: {
         Args: { p_assets: string[]; p_experiment_id: string }
         Returns: {
@@ -1659,6 +1660,10 @@ export type Database = {
       try_acquire_reconcile_lease: {
         Args: { p_holder: string; p_seconds: number; p_wallet: string }
         Returns: boolean
+      }
+      update_live_pilot_intent_status_atomic: {
+        Args: { p_fields: Json; p_intent_id: string; p_new_status: string }
+        Returns: Json
       }
     }
     Enums: {
