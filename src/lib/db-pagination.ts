@@ -39,3 +39,34 @@ export async function fetchAllRows<T>(
   }
   return { rows, pages, complete: false };
 }
+
+/**
+ * Keyset (seek) variant. `.range(from, to)` compiles to OFFSET, so page N still
+ * walks N*pageRows rows server-side: measured on production, a page at offset
+ * 50k of one experiment's copyability history took 22s against an 8s role
+ * statement_timeout even with a perfectly matching index, so deep pages of a
+ * large full-history read can NEVER complete. Paging by the last seen id
+ * instead keeps every page O(pageRows).
+ *
+ * `fetchPage` must order by the same ascending key it filters on (`id`), so the
+ * returned rows are a stable, gap-free sequence.
+ */
+export async function fetchAllRowsAfterId<T extends { id: string }>(
+  fetchPage: (afterId: string | null, limit: number) => Promise<T[]>,
+  options: { pageRows?: number; maxPages?: number } = {},
+): Promise<PagedResult<T>> {
+  const pageRows = options.pageRows ?? PAGE_ROWS;
+  const maxPages = options.maxPages ?? MAX_PAGES;
+  const rows: T[] = [];
+  let pages = 0;
+  let afterId: string | null = null;
+
+  while (pages < maxPages) {
+    const page = await fetchPage(afterId, pageRows);
+    pages += 1;
+    rows.push(...page);
+    if (page.length < pageRows) return { rows, pages, complete: true };
+    afterId = page[page.length - 1]!.id;
+  }
+  return { rows, pages, complete: false };
+}

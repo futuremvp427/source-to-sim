@@ -24,6 +24,9 @@ export type Database = {
           kind: string
           level: string
           message: string
+          notification_attempted_at: string | null
+          notification_error: string | null
+          notification_status: string
           notified_at: string | null
         }
         Insert: {
@@ -35,6 +38,9 @@ export type Database = {
           kind: string
           level?: string
           message: string
+          notification_attempted_at?: string | null
+          notification_error?: string | null
+          notification_status?: string
           notified_at?: string | null
         }
         Update: {
@@ -46,6 +52,9 @@ export type Database = {
           kind?: string
           level?: string
           message?: string
+          notification_attempted_at?: string | null
+          notification_error?: string | null
+          notification_status?: string
           notified_at?: string | null
         }
         Relationships: []
@@ -392,6 +401,92 @@ export type Database = {
             columns: ["source_event_id"]
             isOneToOne: false
             referencedRelation: "source_events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      experiment_event_state: {
+        Row: {
+          backfilled: boolean
+          event_key: string
+          experiment_id: string
+          legacy_seeded: boolean
+          processed_at: string
+          source_event_id: string
+        }
+        Insert: {
+          backfilled?: boolean
+          event_key: string
+          experiment_id: string
+          legacy_seeded?: boolean
+          processed_at?: string
+          source_event_id: string
+        }
+        Update: {
+          backfilled?: boolean
+          event_key?: string
+          experiment_id?: string
+          legacy_seeded?: boolean
+          processed_at?: string
+          source_event_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "experiment_event_state_experiment_id_fkey"
+            columns: ["experiment_id"]
+            isOneToOne: false
+            referencedRelation: "paper_experiments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "experiment_event_state_source_event_id_fkey"
+            columns: ["source_event_id"]
+            isOneToOne: false
+            referencedRelation: "source_events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      experiment_source_position_state: {
+        Row: {
+          asset: string
+          experiment_id: string
+          last_event_key: string | null
+          last_event_ts: number | null
+          market_title: string | null
+          outcome: string | null
+          shares: number
+          updated_at: string
+          wallet: string
+        }
+        Insert: {
+          asset: string
+          experiment_id: string
+          last_event_key?: string | null
+          last_event_ts?: number | null
+          market_title?: string | null
+          outcome?: string | null
+          shares?: number
+          updated_at?: string
+          wallet: string
+        }
+        Update: {
+          asset?: string
+          experiment_id?: string
+          last_event_key?: string | null
+          last_event_ts?: number | null
+          market_title?: string | null
+          outcome?: string | null
+          shares?: number
+          updated_at?: string
+          wallet?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "experiment_source_position_state_experiment_id_fkey"
+            columns: ["experiment_id"]
+            isOneToOne: false
+            referencedRelation: "paper_experiments"
             referencedColumns: ["id"]
           },
         ]
@@ -826,6 +921,8 @@ export type Database = {
         Row: {
           buy_amount: number
           cash: number
+          copyability_cursor_created_at: string | null
+          copyability_cursor_id: string | null
           created_at: string
           enabled: boolean
           follow_from_ts: number | null
@@ -845,6 +942,8 @@ export type Database = {
         Insert: {
           buy_amount?: number
           cash?: number
+          copyability_cursor_created_at?: string | null
+          copyability_cursor_id?: string | null
           created_at?: string
           enabled?: boolean
           follow_from_ts?: number | null
@@ -864,6 +963,8 @@ export type Database = {
         Update: {
           buy_amount?: number
           cash?: number
+          copyability_cursor_created_at?: string | null
+          copyability_cursor_id?: string | null
           created_at?: string
           enabled?: boolean
           follow_from_ts?: number | null
@@ -971,6 +1072,10 @@ export type Database = {
           resolution_ts: string | null
           settled_at: string
           shares: number
+          slippage_basis_cents: number | null
+          slippage_method_version: string | null
+          slippage_sample_count: number | null
+          slippage_sample_cutoff_at: string | null
           verified: boolean
         }
         Insert: {
@@ -990,6 +1095,10 @@ export type Database = {
           resolution_ts?: string | null
           settled_at?: string
           shares?: number
+          slippage_basis_cents?: number | null
+          slippage_method_version?: string | null
+          slippage_sample_count?: number | null
+          slippage_sample_cutoff_at?: string | null
           verified?: boolean
         }
         Update: {
@@ -1009,6 +1118,10 @@ export type Database = {
           resolution_ts?: string | null
           settled_at?: string
           shares?: number
+          slippage_basis_cents?: number | null
+          slippage_method_version?: string | null
+          slippage_sample_count?: number | null
+          slippage_sample_cutoff_at?: string | null
           verified?: boolean
         }
         Relationships: [
@@ -1365,6 +1478,27 @@ export type Database = {
         }
         Relationships: []
       }
+      wallet_reconcile_leases: {
+        Row: {
+          holder: string
+          lease_expires_at: string
+          updated_at: string
+          wallet: string
+        }
+        Insert: {
+          holder: string
+          lease_expires_at: string
+          updated_at?: string
+          wallet: string
+        }
+        Update: {
+          holder?: string
+          lease_expires_at?: string
+          updated_at?: string
+          wallet?: string
+        }
+        Relationships: []
+      }
       worker_checkpoints: {
         Row: {
           bootstrap_complete: boolean
@@ -1404,6 +1538,7 @@ export type Database = {
           lag_seconds: number | null
           last_error: string | null
           last_poll_at: string | null
+          last_poll_events_inserted: number
           last_success_at: string | null
           lease_expires_at: string | null
           poll_failures: number
@@ -1420,6 +1555,7 @@ export type Database = {
           lag_seconds?: number | null
           last_error?: string | null
           last_poll_at?: string | null
+          last_poll_events_inserted?: number
           last_success_at?: string | null
           lease_expires_at?: string | null
           poll_failures?: number
@@ -1436,6 +1572,7 @@ export type Database = {
           lag_seconds?: number | null
           last_error?: string | null
           last_poll_at?: string | null
+          last_poll_events_inserted?: number
           last_success_at?: string | null
           lease_expires_at?: string | null
           poll_failures?: number
@@ -1465,11 +1602,37 @@ export type Database = {
           p_resolution_outcome: string
           p_resolution_source: string
           p_resolution_ts: string
+          p_slippage_basis_cents?: number
+          p_slippage_method_version?: string
+          p_slippage_sample_count?: number
+          p_slippage_sample_cutoff_at?: string
         }
         Returns: {
           applied: boolean
           payout: number
           realized_pnl: number
+        }[]
+      }
+      get_experiment_source_positions: {
+        Args: { p_assets: string[]; p_experiment_id: string }
+        Returns: {
+          asset: string
+          shares: number
+        }[]
+      }
+      get_pending_experiment_source_events: {
+        Args: { p_experiment_id: string; p_limit?: number }
+        Returns: {
+          asset: string
+          event_key: string
+          first_seen_at: string
+          id: string
+          market_title: string
+          outcome: string
+          price: number
+          shares: number
+          side: string
+          source_ts: number
         }[]
       }
       has_role: {
@@ -1488,6 +1651,14 @@ export type Database = {
           p_worker_id: string
         }
         Returns: Json
+      }
+      release_reconcile_lease: {
+        Args: { p_holder: string; p_wallet: string }
+        Returns: undefined
+      }
+      try_acquire_reconcile_lease: {
+        Args: { p_holder: string; p_seconds: number; p_wallet: string }
+        Returns: boolean
       }
     }
     Enums: {

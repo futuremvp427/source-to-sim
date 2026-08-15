@@ -5,7 +5,16 @@ const src = readFileSync(new URL("./shadow.server.ts", import.meta.url), "utf8")
 
 vi.mock("@/integrations/supabase/client.server", () => ({ supabaseAdmin: {} }));
 
-const { fetchUntilCheckpointCovered, resolveCatchupBoundary, PAGE_SIZE } = await import("./shadow.server");
+const {
+  fetchUntilCheckpointCovered,
+  resolveCatchupBoundary,
+  PAGE_SIZE,
+  MAX_TRADES_OFFSET,
+  CatchupProgressionError,
+  buildTradesUrl,
+  fetchFixedPages,
+  CycleAbortedError,
+} = await import("./shadow.server");
 
 type Json = Record<string, unknown>;
 
@@ -41,11 +50,19 @@ describe("Finding K: latest-poll-inserted telemetry", () => {
   });
 
   it("both the success and error lease releases record cycleEventsInserted", () => {
-    const releases = src.match(/await releaseLease\(lease, \{[^}]*\}\);/gs) ?? [];
+    // The error path's release is wrapped in its own bounded cleanup budget, so
+    // it is no longer directly awaited; match the call itself either way.
+    const releases = src.match(/releaseLease\(lease, \{[^}]*\}\)/gs) ?? [];
     expect(releases.length).toBeGreaterThanOrEqual(2);
     for (const release of releases) {
       expect(release).toContain("last_poll_events_inserted: cycleEventsInserted");
     }
+  });
+
+  it("cleanup releases the lease before status reads or alerting can block it", () => {
+    expect(src).toContain("CLEANUP_RELEASE_DEADLINE_MS");
+    expect(src).toContain('"cleanup_release_lease"');
+    expect(src).toContain('"cleanup_alert"');
   });
 
   it("cycleEventsInserted is captured immediately after persistEvents resolves", () => {
@@ -181,6 +198,70 @@ describe("catch-up boundary fallback", () => {
   });
 });
 
+describe("windowed catch-up (Data API offset ceiling)", () => {
+  const full = (ts: number): Json[] => Array.from({ length: PAGE_SIZE }, () => ({ timestamp: ts }));
+
+  it("never requests an offset above the provider ceiling and rolls into an older end window", async () => {
+    const checkpointTs = 1000;
+    const calls: { offset: number; endTs: number | undefined }[] = [];
+    const fetchPage = async (offset: number, endTs?: number) => {
+      calls.push({ offset, endTs });
+      // First window: always full pages well above the checkpoint.
+      if (endTs === undefined) return full(5000 - offset / PAGE_SIZE);
+      // Second window: crosses the checkpoint immediately.
+      return [{ timestamp: 999 }];
+    };
+    const { raw } = await fetchUntilCheckpointCovered(fetchPage, checkpointTs);
+    expect(Math.max(...calls.map((c) => c.offset))).toBeLessThanOrEqual(MAX_TRADES_OFFSET);
+    expect(calls.filter((c) => c.endTs === undefined).length).toBe(MAX_TRADES_OFFSET / PAGE_SIZE + 1);
+    const second = calls.filter((c) => c.endTs !== undefined);
+    expect(second[0]).toEqual({ offset: 0, endTs: 5000 - MAX_TRADES_OFFSET / PAGE_SIZE });
+    expect(raw.length).toBeGreaterThan(MAX_TRADES_OFFSET);
+  });
+
+  it("uses an inclusive end boundary so same-second boundary events are re-fetched, not skipped", async () => {
+    const checkpointTs = 1000;
+    const boundarySecond = 4242;
+    const seen: (number | undefined)[] = [];
+    const fetchPage = async (offset: number, endTs?: number) => {
+      seen.push(endTs);
+      if (endTs === undefined) return full(boundarySecond);
+      // The older window re-serves the boundary second before older rows.
+      return offset === 0 ? [{ timestamp: boundarySecond }, { timestamp: 999 }] : [];
+    };
+    const { raw } = await fetchUntilCheckpointCovered(fetchPage, checkpointTs);
+    // end is the oldest observed timestamp itself (inclusive), not ts-1.
+    expect(seen.filter((e) => e !== undefined)[0]).toBe(boundarySecond);
+    const duplicates = raw.filter((r) => r["timestamp"] === boundarySecond).length;
+    expect(duplicates).toBeGreaterThan(PAGE_SIZE); // duplicates allowed; nothing dropped
+  });
+
+  it("malformed timestamps cannot establish coverage or window progression", async () => {
+    const checkpointTs = 1000;
+    const fetchPage = async () =>
+      Array.from({ length: PAGE_SIZE }, () => ({ timestamp: "not-a-number" })) as Json[];
+    await expect(fetchUntilCheckpointCovered(fetchPage, checkpointTs)).rejects.toBeInstanceOf(
+      CatchupProgressionError,
+    );
+  });
+
+  it("fails closed when the window cannot move strictly backwards", async () => {
+    const checkpointTs = 1000;
+    const fetchPage = async () => full(4242);
+    await expect(fetchUntilCheckpointCovered(fetchPage, checkpointTs)).rejects.toBeInstanceOf(
+      CatchupProgressionError,
+    );
+  });
+
+  it("buildTradesUrl keeps takerOnly=false explicit with and without a window end", () => {
+    expect(buildTradesUrl(PAGE_SIZE, 0, "0xaaa")).toContain("takerOnly=false");
+    expect(buildTradesUrl(PAGE_SIZE, 0, "0xaaa")).not.toContain("end=");
+    const windowed = buildTradesUrl(PAGE_SIZE, 250, "0xaaa", 4242);
+    expect(windowed).toContain("takerOnly=false");
+    expect(windowed).toContain("end=4242");
+  });
+});
+
 describe("mark_refresh has its own bounded budget (production incident)", () => {
   it("mark_refresh is wrapped in boundedStage with its own deadline and a neutral fallback, like every other auxiliary stage", () => {
     expect(src).toMatch(
@@ -251,5 +332,87 @@ describe("persist_events is really cancelled on cycle timeout (2026-08-14 system
     // Must be in a finally so it runs on both the return and the catch path.
     const finallyIdx = src.lastIndexOf("finally {", clearIdx + 20);
     expect(finallyIdx).toBeGreaterThan(controllerIdx);
+  });
+});
+
+/**
+ * Real cancellation for the source-ingest HTTP chain (same pattern already
+ * proven for persistEvents/processPendingEvents): the cycle's AbortSignal must
+ * reject an in-flight page request and stop any further page from starting.
+ */
+describe("source ingest real cancellation", () => {
+  it("A: aborting while a page fetch is pending rejects it and starts no further page", async () => {
+    const controller = new AbortController();
+    const calls: number[] = [];
+    const fetchPage = (offset: number) =>
+      new Promise<Json[]>((_resolve, reject) => {
+        calls.push(offset);
+        controller.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    const p = fetchUntilCheckpointCovered(fetchPage, 1000, PAGE_SIZE, controller.signal);
+    await Promise.resolve();
+    controller.abort();
+    await expect(p).rejects.toThrow(/aborted/i);
+    expect(calls).toEqual([0]);
+  });
+
+  it("B: page 1 resolves, page 2 pends then aborts, page 3 is never requested", async () => {
+    const controller = new AbortController();
+    const calls: number[] = [];
+    const fetchPage = (offset: number) => {
+      calls.push(offset);
+      if (offset === 0) {
+        return Promise.resolve(Array.from({ length: PAGE_SIZE }, () => ({ timestamp: 5000 })) as Json[]);
+      }
+      return new Promise<Json[]>((_resolve, reject) => {
+        controller.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    };
+    const p = fetchUntilCheckpointCovered(fetchPage, 1000, PAGE_SIZE, controller.signal);
+    await new Promise((r) => setTimeout(r, 0));
+    controller.abort();
+    await expect(p).rejects.toThrow(/aborted/i);
+    expect(calls).toEqual([0, PAGE_SIZE]);
+  });
+
+  it("C: fetchFixedPages cancels the in-flight page and blocks further pages", async () => {
+    const controller = new AbortController();
+    const calls: number[] = [];
+    const fetchPage = (offset: number) => {
+      calls.push(offset);
+      if (offset === 0) {
+        return Promise.resolve(Array.from({ length: PAGE_SIZE }, () => ({ timestamp: 5000 })) as Json[]);
+      }
+      return new Promise<Json[]>((_resolve, reject) => {
+        controller.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    };
+    const p = fetchFixedPages(fetchPage, 4, PAGE_SIZE, controller.signal);
+    await new Promise((r) => setTimeout(r, 0));
+    controller.abort();
+    await expect(p).rejects.toThrow(/aborted/i);
+    expect(calls).toEqual([0, PAGE_SIZE]);
+  });
+
+  it("checks the abort flag before starting each page, like processPendingEvents", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const calls: number[] = [];
+    const fetchPage = async (offset: number) => {
+      calls.push(offset);
+      return [] as Json[];
+    };
+    await expect(
+      fetchUntilCheckpointCovered(fetchPage, 1000, PAGE_SIZE, controller.signal),
+    ).rejects.toBeInstanceOf(CycleAbortedError);
+    await expect(fetchFixedPages(fetchPage, 2, PAGE_SIZE, controller.signal)).rejects.toBeInstanceOf(
+      CycleAbortedError,
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it("threads the cycle signal from runExperimentCycle's source_ingest into fetchSourceWindow", () => {
+    expect(src).toMatch(/fetchSourceWindow\([\s\S]{0,300}?cycleAbort\.signal,?\s*\)/);
+    expect(src).toContain("AbortSignal.timeout(12_000)");
   });
 });

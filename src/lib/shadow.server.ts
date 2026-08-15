@@ -105,6 +105,14 @@ const COPYABILITY_DEADLINE_MS = 6_000;
 /** General Shadow non-trade activity evidence stage. Bounded and isolated. */
 const GENERAL_ACTIVITY_DEADLINE_MS = 6_000;
 const RECONCILE_DEADLINE_MS = 8_000;
+/**
+ * Cleanup-path budgets. These run after the cycle budget is already exhausted,
+ * so each is independent and small, in strict priority order:
+ * lease release first, worker status second, alerting last.
+ */
+const CLEANUP_STATUS_DEADLINE_MS = 4_000;
+const CLEANUP_RELEASE_DEADLINE_MS = 5_000;
+const CLEANUP_ALERT_DEADLINE_MS = 4_000;
 
 class DeadlineError extends Error {}
 
@@ -147,26 +155,37 @@ function chunked<T>(items: T[], size: number): T[][] {
 /* HTTP helpers (public, unauthenticated)                              */
 /* ------------------------------------------------------------------ */
 
-async function getJson(url: string, attempts = 3): Promise<unknown> {
+/**
+ * Combines the caller's cancellation signal with this request's own timeout so
+ * either one aborts the individual fetch. When no cycle signal is supplied the
+ * behaviour is byte-identical to the previous timeout-only form.
+ */
+function requestSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(12_000);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+async function getJson(url: string, attempts = 3, signal?: AbortSignal): Promise<unknown> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i += 1) {
     try {
       const res = await fetch(url, {
         headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(12_000),
+        signal: requestSignal(signal),
       });
       if (!res.ok) throw new Error(`${url.split("?")[0]} responded ${res.status}`);
       return (await res.json()) as unknown;
     } catch (err) {
       lastErr = err;
+      if (signal?.aborted) break;
       if (i < attempts - 1) await new Promise((r) => setTimeout(r, 400 * 2 ** i));
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error("request failed");
 }
 
-async function getArray(url: string): Promise<Json[]> {
-  const json = await getJson(url);
+async function getArray(url: string, signal?: AbortSignal): Promise<Json[]> {
+  const json = await getJson(url, 3, signal);
   if (Array.isArray(json)) return json as Json[];
   if (json && typeof json === "object" && Array.isArray((json as { data?: unknown[] }).data)) {
     return (json as { data: Json[] }).data;
@@ -339,22 +358,48 @@ export function workerIdFor(experiment: { id: string; name: string }): string {
  */
 export const TAKER_ONLY_PARAM = "takerOnly=false";
 
-export function buildTradesUrl(limit: number, offset: number, wallet: string = TARGET_WALLET): string {
-  return `${DATA_API}/trades?user=${wallet}&${TAKER_ONLY_PARAM}&limit=${limit}&offset=${offset}`;
+/**
+ * The public Data API rejects /trades offset > 10000 with HTTP 400. Deeper
+ * history must be read inside timestamp windows, each with its own offset
+ * budget (see fetchUntilCheckpointCovered).
+ */
+export const MAX_TRADES_OFFSET = 10_000;
+
+export function buildTradesUrl(
+  limit: number,
+  offset: number,
+  wallet: string = TARGET_WALLET,
+  endTs?: number,
+): string {
+  const window = endTs === undefined ? "" : `&end=${endTs}`;
+  return `${DATA_API}/trades?user=${wallet}&${TAKER_ONLY_PARAM}&limit=${limit}&offset=${offset}${window}`;
 }
 
-/** Bounded page walk: used only for a fixed number of newest pages. */
-async function fetchFixedPages(
-  wallet: string,
+/** Raised when a windowed catch-up cannot prove it moved backwards in time. */
+export class CatchupProgressionError extends Error {}
+
+/**
+ * Bounded page walk: used only for a fixed number of newest pages.
+ *
+ * Exported (with an injected page fetcher, like fetchUntilCheckpointCovered)
+ * so its cancellation behaviour can be tested without mocking the network.
+ */
+export async function fetchFixedPages(
+  fetchPage: (offset: number) => Promise<Json[]>,
   pages: number,
+  pageSize: number = PAGE_SIZE,
+  signal?: AbortSignal,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
   const raw: Json[] = [];
   let pagesFetched = 0;
   for (let p = 0; p < pages; p += 1) {
-    const page = await getArray(buildTradesUrl(PAGE_SIZE, p * PAGE_SIZE, wallet));
+    // Before-each-page abort check, mirroring processPendingEvents: once the
+    // cycle deadline has fired, no NEW page request is started.
+    if (signal?.aborted) throw new CycleAbortedError();
+    const page = await fetchPage(p * pageSize);
     pagesFetched += 1;
     raw.push(...page);
-    if (page.length < PAGE_SIZE) break;
+    if (page.length < pageSize) break;
   }
   return { raw, pagesFetched };
 }
@@ -374,31 +419,64 @@ async function fetchFixedPages(
  * runExperimentCycle, which only advances the checkpoint and processes
  * events once this promise resolves).
  *
+ * Offset ceiling: the provider rejects offset > MAX_TRADES_OFFSET (HTTP 400).
+ * When a window hits that ceiling without proving coverage or exhaustion, the
+ * walk restarts at offset 0 inside an older window whose INCLUSIVE end
+ * boundary is the oldest valid timestamp observed in the exhausted window.
+ * Inclusive is deliberate: events sharing that same second may straddle the
+ * boundary, so they are re-fetched (duplicates are absorbed by the unique
+ * event_key on persistence) rather than skipped. If no valid timestamp was
+ * observed, or the boundary would not move strictly backwards, this fails
+ * closed instead of truncating history.
+ *
  * Exported so the stopping semantics can be tested directly against an
  * injected page fetcher, without mocking the network.
  */
 export async function fetchUntilCheckpointCovered(
-  fetchPage: (offset: number) => Promise<Json[]>,
+  fetchPage: (offset: number, endTs?: number) => Promise<Json[]>,
   checkpointTs: number,
   pageSize: number = PAGE_SIZE,
+  signal?: AbortSignal,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
   const raw: Json[] = [];
   let pagesFetched = 0;
-  let offset = 0;
+  let endTs: number | undefined;
   for (;;) {
-    const page = await fetchPage(offset);
-    pagesFetched += 1;
-    raw.push(...page);
-    const exhausted = page.length < pageSize;
-    // A malformed timestamp (null, "", non-numeric) must never falsely prove
-    // coverage: Number(null) === 0 and Number("") === 0 would otherwise look
-    // like a genuine event older than any positive checkpoint.
-    const coversCheckpoint = page.some((r) => {
-      const ts = Number(r["timestamp"]);
-      return Number.isFinite(ts) && ts > 0 && ts < checkpointTs;
-    });
-    if (exhausted || coversCheckpoint) return { raw, pagesFetched };
-    offset += pageSize;
+    let offset = 0;
+    let oldestValid: number | null = null;
+    for (;;) {
+      // Before-each-page abort check, mirroring processPendingEvents.
+      if (signal?.aborted) throw new CycleAbortedError();
+      const page = await fetchPage(offset, endTs);
+      pagesFetched += 1;
+      raw.push(...page);
+      const exhausted = page.length < pageSize;
+      // A malformed timestamp (null, "", non-numeric) must never falsely prove
+      // coverage or window progression: Number(null) === 0 and Number("") === 0
+      // would otherwise look like a genuine event older than any positive
+      // checkpoint.
+      let coversCheckpoint = false;
+      for (const r of page) {
+        const ts = Number(r["timestamp"]);
+        if (!Number.isFinite(ts) || ts <= 0) continue;
+        if (ts < checkpointTs) coversCheckpoint = true;
+        if (oldestValid === null || ts < oldestValid) oldestValid = ts;
+      }
+      if (exhausted || coversCheckpoint) return { raw, pagesFetched };
+      offset += pageSize;
+      if (offset > MAX_TRADES_OFFSET) break;
+    }
+    if (oldestValid === null) {
+      throw new CatchupProgressionError(
+        "Trades offset ceiling reached with no valid timestamp to move the window backward",
+      );
+    }
+    if (endTs !== undefined && oldestValid >= endTs) {
+      throw new CatchupProgressionError(
+        `Trades window did not progress backwards (end=${endTs}, oldest observed=${oldestValid})`,
+      );
+    }
+    endTs = oldestValid;
   }
 }
 
@@ -420,16 +498,26 @@ async function fetchSourceWindow(
   wallet: string,
   bootstrapped: boolean,
   catchupBoundary: number | null,
+  signal?: AbortSignal,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
-  if (!bootstrapped) return fetchFixedPages(wallet, BOOTSTRAP_PAGES);
+  if (!bootstrapped) {
+    return fetchFixedPages(
+      (offset) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet), signal),
+      BOOTSTRAP_PAGES,
+      PAGE_SIZE,
+      signal,
+    );
+  }
   if (catchupBoundary === null) {
     throw new MissingCatchupBoundaryError(
       "Bootstrapped worker has neither a checkpoint nor a follow_from_ts to catch up against",
     );
   }
   return fetchUntilCheckpointCovered(
-    (offset) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet)),
+    (offset, endTs) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet, endTs), signal),
     catchupBoundary,
+    PAGE_SIZE,
+    signal,
   );
 }
 
@@ -498,6 +586,7 @@ async function persistEvents(events: NormalizedEvent[], keepRaw = true, signal?:
 
 /** Test-only alias so real request cancellation can be asserted directly. */
 export const persistEventsForTest = persistEvents;
+
 
 /* ------------------------------------------------------------------ */
 /* Follower pass over experiment-scoped pending events                 */
@@ -597,14 +686,18 @@ async function commitEventAtomically(
   lease: Lease,
   experimentId: string,
   payload: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<{ applied: boolean }> {
-  const { data, error } = await supabaseAdmin.rpc("process_source_event_atomic", {
+  const call = supabaseAdmin.rpc("process_source_event_atomic", {
     p_lock_id: lease.lockId,
     p_worker_id: lease.workerId,
     p_fence: lease.fence,
     p_experiment_id: experimentId,
     p_event: payload as never,
   } as never);
+  // Real cancellation: an aborted request is cancelled server-side, and because
+  // the RPC is ONE transaction it rolls back rather than partially committing.
+  const { data, error } = await (signal ? call.abortSignal(signal) : call);
   if (error) {
     if (isStaleFenceMessage(error.message)) throw new StaleFenceError(error.message);
     throw new Error(error.message);
@@ -613,19 +706,28 @@ async function commitEventAtomically(
   return { applied };
 }
 
+/** Thrown when the cycle deadline fires mid-batch. Ends the loop cleanly. */
+export class CycleAbortedError extends Error {
+  constructor() {
+    super("cycle aborted before the next source event was started");
+  }
+}
+
 async function processPendingEvents(
   experiment: Experiment,
   lease: Lease,
+  signal?: AbortSignal,
 ): Promise<ProcessResult> {
   const wallet = experiment.wallet_address.toLowerCase();
 
   // Pending/consumed state belongs to (experiment, source_event). The source
   // event row itself is immutable shared input and is never filtered by the
   // legacy wallet-global processed_at bit here.
-  const { data: pending, error } = await supabaseAdmin.rpc(
+  const pendingCall = supabaseAdmin.rpc(
     "get_pending_experiment_source_events" as never,
     { p_experiment_id: experiment.id, p_limit: PROCESS_BATCH } as never,
   );
+  const { data: pending, error } = await (signal ? pendingCall.abortSignal(signal) : pendingCall);
   if (error) throw new Error(error.message);
   const rows = (pending ?? []) as unknown as SourceEventRow[];
   if (rows.length === 0) return { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0 };
@@ -635,21 +737,25 @@ async function processPendingEvents(
 
   // SourceSharesBefore must also be experiment-scoped. A wallet-global compact
   // row can be ahead of another experiment and would distort proportional sells.
-  const { data: sourceStateRows, error: sourceStateError } = await supabaseAdmin.rpc(
+  const sourceStateCall = supabaseAdmin.rpc(
     "get_experiment_source_positions" as never,
     { p_experiment_id: experiment.id, p_assets: assets } as never,
   );
+  const { data: sourceStateRows, error: sourceStateError } = await (signal
+    ? sourceStateCall.abortSignal(signal)
+    : sourceStateCall);
   if (sourceStateError) throw new Error(sourceStateError.message);
   const sourceShares = new Map<string, number>();
   for (const r of (sourceStateRows ?? []) as unknown as ExperimentSourcePositionRow[]) {
     sourceShares.set(r.asset, Number(r.shares));
   }
 
-  const { data: paperRows } = await supabaseAdmin
+  const paperCall = supabaseAdmin
     .from("paper_positions")
     .select("asset, shares, cost_basis, avg_price, realized_pnl, settlement_status")
     .eq("experiment_id", experiment.id)
     .in("asset", assets);
+  const { data: paperRows } = await (signal ? paperCall.abortSignal(signal) : paperCall);
   const paper = new Map<string, PaperPositionState>();
   const settlementStatusByAsset = new Map<string, string>();
   for (const r of (paperRows ?? []) as PaperPositionRow[]) {
@@ -674,6 +780,11 @@ async function processPendingEvents(
   const tradedAssets = new Set<string>();
 
   for (const row of rows) {
+    // Between-event abort check: once the cycle deadline has fired, no NEW
+    // event work is scheduled. Everything already committed stayed committed
+    // (each event is its own transaction), and the checkpoint is only advanced
+    // by the caller's success path, so the next poll safely resumes the rest.
+    if (signal?.aborted) throw new CycleAbortedError();
     const side = (row.side === "SELL" ? "SELL" : "BUY") as Side;
     const price = Number(row.price);
     const srcShares = Number(row.shares);
@@ -707,6 +818,7 @@ async function processPendingEvents(
           experiment: null,
           audit: null,
         }),
+        signal,
       );
       sourceShares.set(row.asset, nextShares);
       result.backfilled += 1;
@@ -828,6 +940,7 @@ async function processPendingEvents(
         experiment: { cash, realizedPnl: realizedTotal },
         audit: auditRow,
       }),
+      signal,
     );
 
     // This local source state is experiment-scoped and advances even for SKIP.
@@ -848,6 +961,9 @@ async function processPendingEvents(
 
   return result;
 }
+
+/** Test-only alias so real paper_processing cancellation can be asserted. */
+export const processPendingEventsForTest = processPendingEvents;
 
 /* ------------------------------------------------------------------ */
 /* Marks from the public CLOB                                          */
@@ -924,6 +1040,49 @@ export async function refreshMarks(experimentId: string): Promise<{ updated: num
 
 export async function reconcile(
   wallet: string = TARGET_WALLET,
+  options: { expectAdvance?: boolean } = {},
+): Promise<{
+  ok: boolean;
+  mismatches: number;
+  replayComplete: boolean;
+  replayedEvents: number;
+  skipped?: boolean;
+}> {
+  /**
+   * source_position_state is WALLET-scoped, but V2 and V3 sibling experiments
+   * follow the same wallet and each call reconcile() within ~1s of each other
+   * every cron tick. Unfenced, their full-history replays raced on the same
+   * cache rows and produced an oscillating repair count (observed in
+   * production: 55 -> 111 -> 2 -> 20 -> 5 for one wallet in 13 minutes) while
+   * doubling the replay load on the database during the timeout wave. A short
+   * wallet-scoped lease makes the loser skip cheaply instead of racing.
+   */
+  const holder = `reconcile:${crypto.randomUUID()}`;
+  const { data: acquired, error: leaseError } = await supabaseAdmin.rpc(
+    "try_acquire_reconcile_lease" as never,
+    { p_wallet: wallet, p_holder: holder, p_seconds: 60 } as never,
+  );
+  if (leaseError) throw new Error(leaseError.message);
+  if (acquired !== true) {
+    // A sibling experiment is already reconciling this exact wallet. Its result
+    // is equally authoritative, so this is a no-op, not a failure.
+    return { ok: true, mismatches: 0, replayComplete: false, replayedEvents: 0, skipped: true };
+  }
+  try {
+    return await reconcileHeld(wallet, options);
+  } finally {
+    await supabaseAdmin
+      .rpc("release_reconcile_lease" as never, { p_wallet: wallet, p_holder: holder } as never)
+      .then(
+        () => undefined,
+        () => undefined,
+      );
+  }
+}
+
+async function reconcileHeld(
+  wallet: string,
+  options: { expectAdvance?: boolean },
 ): Promise<{ ok: boolean; mismatches: number; replayComplete: boolean; replayedEvents: number }> {
   // The replay MUST cover every persisted fill. PostgREST caps a single request
   // at 1000 rows, so a plain .limit(5000) silently replayed only the oldest
@@ -993,12 +1152,27 @@ export async function reconcile(
   }
 
   if (!result.ok) {
-    await raiseAlert(
-      "warn",
-      "reconciliation_mismatch",
-      `Reconciliation repaired ${result.mismatches.length} source position(s) from the persisted event replay.`,
-      { mismatches: result.mismatches.slice(0, 20) as never },
-    );
+    // Distinguish the two genuinely different causes instead of hiding either.
+    // expectAdvance means this cycle just ingested new source fills, so the
+    // wallet-level compact cache is EXPECTED to be one step behind the replay:
+    // that is routine advancement, not an integrity failure. Only a mismatch
+    // with no new ingestion is a real, unexplained divergence.
+    if (options.expectAdvance) {
+      await raiseAlert(
+        "info",
+        "reconciliation_advanced",
+        `Reconciliation advanced ${result.mismatches.length} source position(s) after newly ingested fills.`,
+        { wallet, advanced: result.mismatches.length as never },
+        `reconciliation_advanced:${wallet}`,
+      );
+    } else {
+      await raiseAlert(
+        "warn",
+        "reconciliation_mismatch",
+        `Reconciliation repaired ${result.mismatches.length} source position(s) from the persisted event replay.`,
+        { mismatches: result.mismatches.slice(0, 20) as never },
+      );
+    }
   }
   return {
     ok: result.ok,
@@ -1360,10 +1534,17 @@ export async function runExperimentCycle(
         }
 
         const window = await timed("source_ingest", () =>
+          // Real cancellation for source_ingest: the catch-up walk can issue
+          // many sequential page requests, so without the cycle signal it kept
+          // starting NEW HTTP requests (and retrying in-flight ones) long after
+          // the cycle deadline had released the lease -- the same class of bug
+          // already fixed for persistEvents/processPendingEvents. Pagination
+          // semantics are unchanged; only cancellability is added.
           fetchSourceWindow(
             wallet,
             bootstrapped,
             resolveCatchupBoundary(checkpoint?.last_source_ts, experiment.follow_from_ts),
+            cycleAbort.signal,
           ),
         );
         const events = normalizeSourceEvents(window.raw, wallet);
@@ -1371,7 +1552,15 @@ export async function runExperimentCycle(
           persistEvents(events, !isGeneralShadowName(experiment.name), cycleAbort.signal),
         );
         cycleEventsInserted = inserted;
-        const process = await timed("paper_processing", () => processPendingEvents(experiment, lease));
+        const process = await timed("paper_processing", () =>
+          // Real cancellation for paper_processing: a 300-event batch commits
+          // sequentially, so without the signal the loop kept starting NEW
+          // event RPCs long after the 40s cycle deadline had already released
+          // the lease and let a fresh attempt start -- the same class of bug
+          // fixed for persistEvents. Atomicity is unchanged: each event is
+          // still one fenced transaction and an aborted one rolls back.
+          processPendingEvents(experiment, lease, cycleAbort.signal),
+        );
         const marks = await timed("mark_refresh", () =>
           boundedStage(refreshMarks(experiment.id), MARK_REFRESH_DEADLINE_MS, "mark_refresh", {
             updated: 0,
@@ -1380,7 +1569,12 @@ export async function runExperimentCycle(
         );
         const reconciliation = await timed("reconciliation", () =>
           inserted > 0 || !bootstrapped
-            ? boundedStage(reconcile(wallet), RECONCILE_DEADLINE_MS, "reconciliation", null)
+            ? boundedStage(
+                reconcile(wallet, { expectAdvance: inserted > 0 }),
+                RECONCILE_DEADLINE_MS,
+                "reconciliation",
+                null,
+              )
             : Promise.resolve(null),
         );
         const settlements = await timed("settlement", () =>
@@ -1509,24 +1703,48 @@ export async function runExperimentCycle(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
-    const { data: statusRow } = await supabaseAdmin
-      .from("worker_status")
-      .select("poll_failures")
-      .eq("id", lockId)
-      .maybeSingle();
+    // The cleanup path runs AFTER the cycle budget is already spent, so it gets
+    // its own small independent budgets in strict priority order. Releasing the
+    // lease must never be blocked by a slow status read or by Telegram.
+    const statusRow = await boundedStage(
+      (async () => {
+        const { data } = await supabaseAdmin
+          .from("worker_status")
+          .select("poll_failures")
+          .eq("id", lockId)
+          .maybeSingle();
+        return data;
+      })(),
+      CLEANUP_STATUS_DEADLINE_MS,
+      "cleanup_status_read",
+      null,
+    );
     const failures = (statusRow?.poll_failures ?? 0) + 1;
-    await releaseLease(lease, {
-      state: "error",
-      last_error: message,
-      poll_failures: failures,
-      stage_ms: stageMs as never,
-      last_poll_events_inserted: cycleEventsInserted,
-    });
+    await boundedStage(
+      releaseLease(lease, {
+        state: "error",
+        last_error: message,
+        poll_failures: failures,
+        stage_ms: stageMs as never,
+        last_poll_events_inserted: cycleEventsInserted,
+      }),
+      CLEANUP_RELEASE_DEADLINE_MS,
+      "cleanup_release_lease",
+      undefined,
+    );
     if (failures === 1 || failures % 5 === 0) {
-      await raiseAlert("error", "poll_failure", `${experiment.name}: ingestion poll failed: ${message}`, {
-        experiment: experiment.name as never,
-        failures: failures as never,
-      });
+      // Alerting is last and lowest priority: a stalled Telegram delivery can
+      // never hold the lease or the worker row hostage. The error itself is
+      // already persisted in last_error above, so nothing is suppressed.
+      await boundedStage(
+        raiseAlert("error", "poll_failure", `${experiment.name}: ingestion poll failed: ${message}`, {
+          experiment: experiment.name as never,
+          failures: failures as never,
+        }),
+        CLEANUP_ALERT_DEADLINE_MS,
+        "cleanup_alert",
+        undefined,
+      );
     }
     throw err;
   } finally {

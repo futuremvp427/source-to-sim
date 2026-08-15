@@ -45,6 +45,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/experiment_event_isolation.sql
+      - name: Verify pending experiment event scan semantics
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/pending_experiment_events.sql
       - name: Stop local Supabase
         if: always()
         run: supabase stop --no-backup

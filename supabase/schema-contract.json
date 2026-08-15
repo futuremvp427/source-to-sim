@@ -13,28 +13,46 @@
       "table": "experiment_event_state",
       "name": "experiment_event_state_processed_idx",
       "must_exist": true,
-      "definition_contains": ["experiment_id", "processed_at desc"]
+      "definition_contains": [
+        "experiment_id",
+        "processed_at desc"
+      ]
     },
     {
       "schema": "public",
       "table": "experiment_source_position_state",
       "name": "experiment_source_position_wallet_idx",
       "must_exist": true,
-      "definition_contains": ["wallet", "experiment_id"]
+      "definition_contains": [
+        "wallet",
+        "experiment_id"
+      ]
     },
     {
       "schema": "public",
       "table": "source_events",
       "name": "source_events_wallet_order_idx",
       "must_exist": true,
-      "definition_contains": ["wallet", "source_ts", "event_key"]
+      "definition_contains": [
+        "wallet",
+        "source_ts",
+        "event_key"
+      ]
     },
     {
       "schema": "public",
       "table": "copyability_observations",
       "name": "copyability_observations_experiment_observed_slippage_idx",
       "must_exist": true,
-      "definition_contains": ["experiment_id", "observed_at desc", "id desc", "include (slippage_cents)", "status = 'observed'", "observed_at is not null", "slippage_cents is not null"]
+      "definition_contains": [
+        "experiment_id",
+        "observed_at desc",
+        "id desc",
+        "include (slippage_cents)",
+        "status = 'observed'",
+        "observed_at is not null",
+        "slippage_cents is not null"
+      ]
     },
     {
       "schema": "public",
@@ -47,49 +65,91 @@
       "table": "alerts",
       "name": "alerts_notification_stale_sending_idx",
       "must_exist": true,
-      "definition_contains": ["(notification_attempted_at)", "notified_at is null", "notification_status = 'sending'"]
+      "definition_contains": [
+        "(notification_attempted_at)",
+        "notified_at is null",
+        "notification_status = 'sending'"
+      ]
     },
     {
       "schema": "public",
       "table": "alerts",
       "name": "alerts_notification_pending_retry_idx",
       "must_exist": true,
-      "definition_contains": ["(created_at)", "notified_at is null", "notification_status = any", "'pending'", "'failed'"]
+      "definition_contains": [
+        "(created_at)",
+        "notified_at is null",
+        "notification_status = any",
+        "'pending'",
+        "'failed'"
+      ]
     },
     {
       "schema": "public",
       "table": "source_events",
       "name": "source_events_wallet_ts_idx",
       "must_exist": true,
-      "definition_contains": ["wallet, source_ts desc"]
+      "definition_contains": [
+        "wallet, source_ts desc"
+      ]
     },
     {
       "schema": "public",
       "table": "paper_trades",
       "name": "paper_trades_experiment_created_idx",
       "must_exist": true,
-      "definition_contains": ["experiment_id, created_at desc"]
+      "definition_contains": [
+        "experiment_id, created_at desc"
+      ]
     },
     {
       "schema": "public",
       "table": "paper_trades",
       "name": "paper_trades_experiment_created_id_idx",
       "must_exist": true,
-      "definition_contains": ["experiment_id, created_at, id"]
+      "definition_contains": [
+        "experiment_id, created_at, id"
+      ]
     },
     {
       "schema": "public",
       "table": "live_order_intents",
       "name": "live_order_intents_pilot_created_idx",
       "must_exist": true,
-      "definition_contains": ["pilot_id", "created_at desc"]
+      "definition_contains": [
+        "pilot_id",
+        "created_at desc"
+      ]
     },
     {
       "schema": "public",
       "table": "live_order_intents",
       "name": "live_order_intents_source_unique",
       "must_exist": true,
-      "definition_contains": ["source_experiment_id", "source_event_id"]
+      "definition_contains": [
+        "source_experiment_id",
+        "source_event_id"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "copyability_observations",
+      "name": "copyability_observations_experiment_created_id_idx",
+      "must_exist": true,
+      "definition_contains": [
+        "experiment_id",
+        "created_at desc",
+        "id desc"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "copyability_observations",
+      "name": "copyability_observations_experiment_id_asc_idx",
+      "must_exist": true,
+      "definition_contains": [
+        "experiment_id, id"
+      ]
     }
   ],
   "constraints": [
@@ -97,97 +157,148 @@
       "schema": "public",
       "table": "experiment_event_state",
       "name": "experiment_event_state_pkey",
-      "definition_contains": ["primary key (experiment_id, source_event_id)"]
+      "definition_contains": [
+        "primary key (experiment_id, source_event_id)"
+      ]
     },
     {
       "schema": "public",
       "table": "experiment_event_state",
       "name": "experiment_event_state_experiment_id_event_key_key",
-      "definition_contains": ["unique (experiment_id, event_key)"]
+      "definition_contains": [
+        "unique (experiment_id, event_key)"
+      ]
     },
     {
       "schema": "public",
       "table": "experiment_source_position_state",
       "name": "experiment_source_position_state_pkey",
-      "definition_contains": ["primary key (experiment_id, asset)"]
+      "definition_contains": [
+        "primary key (experiment_id, asset)"
+      ]
     },
     {
       "schema": "public",
       "table": "source_events",
       "name": "source_events_wallet_event_key_key",
-      "definition_contains": ["unique (wallet, event_key)"]
+      "definition_contains": [
+        "unique (wallet, event_key)"
+      ]
     },
     {
       "schema": "public",
       "table": "paper_trades",
       "name": "paper_trades_experiment_id_event_key_key",
-      "definition_contains": ["unique (experiment_id, event_key)"]
+      "definition_contains": [
+        "unique (experiment_id, event_key)"
+      ]
     },
     {
       "schema": "public",
       "table": "paper_positions",
       "name": "paper_positions_experiment_id_asset_key",
-      "definition_contains": ["unique (experiment_id, asset)"]
+      "definition_contains": [
+        "unique (experiment_id, asset)"
+      ]
     },
     {
       "schema": "public",
       "table": "live_safety_state",
       "name": "live_safety_stage_check",
-      "definition_contains": ["activation_stage", "locked", "armed", "activated"]
+      "definition_contains": [
+        "activation_stage",
+        "locked",
+        "armed",
+        "activated"
+      ]
     },
     {
       "schema": "public",
       "table": "live_safety_state",
       "name": "live_safety_single_row",
-      "definition_contains": ["id = 'global'"]
+      "definition_contains": [
+        "id = 'global'"
+      ]
     },
     {
       "schema": "public",
       "table": "live_pilot_state",
       "name": "live_pilot_state_pkey",
-      "definition_contains": ["primary key (pilot_id)"]
+      "definition_contains": [
+        "primary key (pilot_id)"
+      ]
     },
     {
       "schema": "public",
       "table": "live_pilot_state",
       "name": "live_pilot_state_stage_check",
-      "definition_contains": ["activation_stage", "locked", "preview", "live_pilot"]
+      "definition_contains": [
+        "activation_stage",
+        "locked",
+        "preview",
+        "live_pilot"
+      ]
     },
     {
       "schema": "public",
       "table": "live_order_intents",
       "name": "live_order_intents_pkey",
-      "definition_contains": ["primary key (id)"]
+      "definition_contains": [
+        "primary key (id)"
+      ]
     },
     {
       "schema": "public",
       "table": "live_order_intents",
       "name": "live_order_intents_source_unique",
-      "definition_contains": ["unique (source_experiment_id, source_event_id)"]
+      "definition_contains": [
+        "unique (source_experiment_id, source_event_id)"
+      ]
     },
     {
       "schema": "public",
       "table": "live_order_intents",
       "name": "live_order_intents_status_check",
-      "definition_contains": ["status", "previewed", "skipped", "authorized", "submitting", "submitted", "partially_filled", "filled", "cancelled", "rejected", "failed"]
+      "definition_contains": [
+        "status",
+        "previewed",
+        "skipped",
+        "authorized",
+        "submitting",
+        "submitted",
+        "partially_filled",
+        "filled",
+        "cancelled",
+        "rejected",
+        "failed"
+      ]
     },
     {
       "schema": "public",
       "table": "live_order_intents",
       "name": "live_order_intents_pilot_id_fkey",
-      "definition_contains": ["foreign key (pilot_id)", "references live_pilot_state(pilot_id)"]
+      "definition_contains": [
+        "foreign key (pilot_id)",
+        "references live_pilot_state(pilot_id)"
+      ]
     },
     {
       "schema": "public",
       "table": "live_order_intents",
       "name": "live_order_intents_source_experiment_id_fkey",
-      "definition_contains": ["foreign key (source_experiment_id)", "references paper_experiments(id)"]
+      "definition_contains": [
+        "foreign key (source_experiment_id)",
+        "references paper_experiments(id)"
+      ]
     },
     {
       "schema": "public",
       "table": "live_order_intents",
       "name": "live_order_intents_source_event_id_fkey",
-      "definition_contains": ["foreign key (source_event_id)", "references source_events(id)"]
+      "definition_contains": [
+        "foreign key (source_event_id)",
+        "references source_events(id)"
+      ]
     }
   ],
   "columns": [
@@ -197,7 +308,9 @@
       "name": "notification_status",
       "type": "text",
       "not_null": true,
-      "default_contains": ["'pending'"]
+      "default_contains": [
+        "'pending'"
+      ]
     },
     {
       "schema": "public",
@@ -268,7 +381,9 @@
       "name": "last_poll_events_inserted",
       "type": "integer",
       "not_null": true,
-      "default_contains": ["0"]
+      "default_contains": [
+        "0"
+      ]
     },
     {
       "schema": "public",
@@ -276,7 +391,9 @@
       "name": "kill_switch_engaged",
       "type": "boolean",
       "not_null": true,
-      "default_contains": ["true"]
+      "default_contains": [
+        "true"
+      ]
     },
     {
       "schema": "public",
@@ -284,7 +401,9 @@
       "name": "max_live_notional_usd",
       "type": "numeric",
       "not_null": true,
-      "default_contains": ["0"]
+      "default_contains": [
+        "0"
+      ]
     },
     {
       "schema": "public",
@@ -292,7 +411,9 @@
       "name": "max_live_exposure_usd",
       "type": "numeric",
       "not_null": true,
-      "default_contains": ["0"]
+      "default_contains": [
+        "0"
+      ]
     },
     {
       "schema": "public",
@@ -307,7 +428,9 @@
       "name": "kill_switch_engaged",
       "type": "boolean",
       "not_null": true,
-      "default_contains": ["true"]
+      "default_contains": [
+        "true"
+      ]
     },
     {
       "schema": "public",
@@ -315,7 +438,9 @@
       "name": "activation_stage",
       "type": "text",
       "not_null": true,
-      "default_contains": ["'locked'"]
+      "default_contains": [
+        "'locked'"
+      ]
     },
     {
       "schema": "public",
@@ -351,7 +476,9 @@
       "name": "pilot_bankroll_usd",
       "type": "numeric",
       "not_null": true,
-      "default_contains": ["0"]
+      "default_contains": [
+        "0"
+      ]
     },
     {
       "schema": "public",
@@ -359,7 +486,9 @@
       "name": "max_order_notional_usd",
       "type": "numeric",
       "not_null": true,
-      "default_contains": ["0"]
+      "default_contains": [
+        "0"
+      ]
     },
     {
       "schema": "public",
@@ -367,7 +496,9 @@
       "name": "max_total_exposure_usd",
       "type": "numeric",
       "not_null": true,
-      "default_contains": ["0"]
+      "default_contains": [
+        "0"
+      ]
     },
     {
       "schema": "public",
@@ -375,7 +506,9 @@
       "name": "max_daily_realized_loss_usd",
       "type": "numeric",
       "not_null": true,
-      "default_contains": ["0"]
+      "default_contains": [
+        "0"
+      ]
     },
     {
       "schema": "public",
@@ -383,7 +516,9 @@
       "name": "consecutive_failed_orders",
       "type": "integer",
       "not_null": true,
-      "default_contains": ["0"]
+      "default_contains": [
+        "0"
+      ]
     },
     {
       "schema": "public",
@@ -405,7 +540,9 @@
       "name": "updated_at",
       "type": "timestamp with time zone",
       "not_null": true,
-      "default_contains": ["now("]
+      "default_contains": [
+        "now("
+      ]
     },
     {
       "schema": "public",
@@ -476,7 +613,9 @@
       "name": "status",
       "type": "text",
       "not_null": true,
-      "default_contains": ["'previewed'"]
+      "default_contains": [
+        "'previewed'"
+      ]
     },
     {
       "schema": "public",
@@ -484,7 +623,9 @@
       "name": "status_history",
       "type": "jsonb",
       "not_null": true,
-      "default_contains": ["[]"]
+      "default_contains": [
+        "[]"
+      ]
     },
     {
       "schema": "public",
@@ -492,7 +633,9 @@
       "name": "created_at",
       "type": "timestamp with time zone",
       "not_null": true,
-      "default_contains": ["now("]
+      "default_contains": [
+        "now("
+      ]
     },
     {
       "schema": "public",
@@ -500,7 +643,9 @@
       "name": "updated_at",
       "type": "timestamp with time zone",
       "not_null": true,
-      "default_contains": ["now("]
+      "default_contains": [
+        "now("
+      ]
     }
   ],
   "functions": [
@@ -509,37 +654,83 @@
       "name": "get_pending_experiment_source_events",
       "identity_args": "uuid, integer",
       "security_definer": true,
-      "config_contains": ["search_path=public"],
-      "definition_contains": ["from public.paper_experiments", "join public.source_events", "from public.experiment_event_state", "source_event_id = se.id"],
-      "execute_allowed": ["service_role"],
-      "execute_denied": ["PUBLIC", "anon", "authenticated"]
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "from public.paper_experiments pe",
+        "cross join lateral",
+        "from public.source_events se",
+        "where se.wallet = lower(pe.wallet_address)",
+        "not exists",
+        "from public.experiment_event_state ees",
+        "ees.experiment_id = pe.id",
+        "ees.source_event_id = se.id",
+        "order by se.source_ts asc, se.event_key asc",
+        "limit greatest(1, least(coalesce(p_limit, 300), 2000))"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
     },
     {
       "schema": "public",
       "name": "get_experiment_source_positions",
       "identity_args": "uuid, text[]",
       "security_definer": true,
-      "config_contains": ["search_path=public"],
-      "definition_contains": ["from public.experiment_source_position_state", "experiment_id = p_experiment_id"],
-      "execute_allowed": ["service_role"],
-      "execute_denied": ["PUBLIC", "anon", "authenticated"]
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "from public.experiment_source_position_state",
+        "experiment_id = p_experiment_id"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
     },
     {
       "schema": "public",
       "name": "process_source_event_atomic",
       "identity_args": "text, text, integer, uuid, jsonb",
       "security_definer": true,
-      "config_contains": ["search_path=public"],
-      "definition_contains": ["from public.worker_status", "insert into public.experiment_event_state", "on conflict (experiment_id, source_event_id) do nothing", "insert into public.experiment_source_position_state", "on conflict (experiment_id, event_key) do nothing"],
-      "execute_allowed": ["service_role"],
-      "execute_denied": ["PUBLIC", "anon", "authenticated"]
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "from public.worker_status",
+        "insert into public.experiment_event_state",
+        "on conflict (experiment_id, source_event_id) do nothing",
+        "insert into public.experiment_source_position_state",
+        "on conflict (experiment_id, event_key) do nothing"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
     },
     {
       "schema": "public",
       "name": "apply_verified_paper_settlement",
       "identity_args": "uuid, text, text, text, text, timestamp with time zone, numeric, jsonb, numeric, timestamp with time zone, integer, text",
       "security_definer": true,
-      "config_contains": ["search_path=public"],
+      "config_contains": [
+        "search_path=public"
+      ],
       "definition_contains": [
         "on conflict (experiment_id, asset) do nothing",
         "update public.paper_positions as pp",
@@ -552,74 +743,213 @@
         "slippage_sample_count",
         "slippage_method_version"
       ],
-      "execute_allowed": ["service_role"],
-      "execute_denied": ["PUBLIC", "anon", "authenticated"]
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
     },
     {
       "schema": "public",
       "name": "acquire_worker_lease",
       "identity_args": "text, text, integer",
       "security_definer": true,
-      "config_contains": ["search_path=public"],
-      "definition_contains": ["public.worker_status.lease_expires_at <= now()", "public.worker_status.fence + 1"],
-      "execute_allowed": ["service_role"],
-      "execute_denied": ["PUBLIC", "anon", "authenticated"]
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "public.worker_status.lease_expires_at <= now()",
+        "public.worker_status.fence + 1"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
     },
     {
       "schema": "public",
       "name": "has_role",
       "identity_args": "uuid, public.app_role",
       "security_definer": true,
-      "config_contains": ["search_path=public"],
-      "definition_contains": ["from public.user_roles", "user_id = _user_id", "role = _role"],
-      "execute_allowed": ["authenticated", "service_role"],
-      "execute_denied": ["PUBLIC", "anon"]
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "from public.user_roles",
+        "user_id = _user_id",
+        "role = _role"
+      ],
+      "execute_allowed": [
+        "authenticated",
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon"
+      ]
     },
     {
       "schema": "public",
       "name": "create_or_get_live_pilot_intent_atomic",
       "identity_args": "text, uuid, uuid, jsonb",
       "security_definer": true,
-      "config_contains": ["search_path=public"],
+      "config_contains": [
+        "search_path=public"
+      ],
       "definition_contains": [
         "insert into public.live_order_intents",
         "on conflict (source_experiment_id, source_event_id) do nothing",
         "select id, status into v_id, v_status",
         "from public.live_order_intents"
       ],
-      "execute_allowed": ["service_role"],
-      "execute_denied": ["PUBLIC", "anon", "authenticated"]
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
     },
     {
       "schema": "public",
       "name": "update_live_pilot_intent_status_atomic",
       "identity_args": "uuid, text, jsonb",
       "security_definer": true,
-      "config_contains": ["search_path=public"],
+      "config_contains": [
+        "search_path=public"
+      ],
       "definition_contains": [
         "select * into v_row from public.live_order_intents where id = p_intent_id for update",
         "update public.live_order_intents",
         "status_history = status_history || jsonb_build_object",
         "raise exception 'invalid status %'"
       ],
-      "execute_allowed": ["service_role"],
-      "execute_denied": ["PUBLIC", "anon", "authenticated"]
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "try_acquire_reconcile_lease",
+      "identity_args": "text, text, integer",
+      "security_definer": true,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "public.wallet_reconcile_leases",
+        "lease_expires_at <= now()"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "release_reconcile_lease",
+      "identity_args": "text, text",
+      "security_definer": true,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "public.wallet_reconcile_leases",
+        "holder = p_holder"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
     }
   ],
   "rls": [
-    {"schema": "public", "table": "experiment_event_state", "enabled": true},
-    {"schema": "public", "table": "experiment_source_position_state", "enabled": true},
-    {"schema": "public", "table": "paper_experiments", "enabled": true},
-    {"schema": "public", "table": "source_events", "enabled": true},
-    {"schema": "public", "table": "paper_trades", "enabled": true},
-    {"schema": "public", "table": "paper_positions", "enabled": true},
-    {"schema": "public", "table": "worker_status", "enabled": true},
-    {"schema": "public", "table": "worker_checkpoints", "enabled": true},
-    {"schema": "public", "table": "alerts", "enabled": true},
-    {"schema": "public", "table": "user_roles", "enabled": true},
-    {"schema": "public", "table": "live_safety_state", "enabled": true},
-    {"schema": "public", "table": "live_pilot_state", "enabled": true},
-    {"schema": "public", "table": "live_order_intents", "enabled": true}
+    {
+      "schema": "public",
+      "table": "experiment_event_state",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "experiment_source_position_state",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "paper_experiments",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "source_events",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "paper_trades",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "paper_positions",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "worker_status",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "worker_checkpoints",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "alerts",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "user_roles",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "live_safety_state",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "enabled": true
+    }
   ],
   "policies": [
     {
@@ -627,48 +957,148 @@
       "table": "user_roles",
       "name": "Users can read their own roles",
       "command": "SELECT",
-      "roles": ["authenticated"],
-      "using_contains": ["auth.uid() = user_id"]
+      "roles": [
+        "authenticated"
+      ],
+      "using_contains": [
+        "auth.uid() = user_id"
+      ]
     },
     {
       "schema": "public",
       "table": "live_safety_state",
       "name": "Admins can read live safety state",
       "command": "SELECT",
-      "roles": ["authenticated"],
-      "using_contains": ["has_role(auth.uid(), 'admin'"]
+      "roles": [
+        "authenticated"
+      ],
+      "using_contains": [
+        "has_role(auth.uid(), 'admin'"
+      ]
     },
     {
       "schema": "public",
       "table": "live_pilot_state",
       "name": "Admins can read live pilot state",
       "command": "SELECT",
-      "roles": ["authenticated"],
-      "using_contains": ["has_role(auth.uid(), 'admin'"]
+      "roles": [
+        "authenticated"
+      ],
+      "using_contains": [
+        "has_role(auth.uid(), 'admin'"
+      ]
     },
     {
       "schema": "public",
       "table": "live_order_intents",
       "name": "Admins can read live pilot intents",
       "command": "SELECT",
-      "roles": ["authenticated"],
-      "using_contains": ["has_role(auth.uid(), 'admin'"]
+      "roles": [
+        "authenticated"
+      ],
+      "using_contains": [
+        "has_role(auth.uid(), 'admin'"
+      ]
     }
   ],
   "table_grants": [
-    {"schema": "public", "table": "user_roles", "role": "authenticated", "privilege": "SELECT", "allowed": true},
-    {"schema": "public", "table": "live_safety_state", "role": "authenticated", "privilege": "SELECT", "allowed": true},
-    {"schema": "public", "table": "experiment_event_state", "role": "service_role", "privilege": "SELECT", "allowed": true},
-    {"schema": "public", "table": "experiment_source_position_state", "role": "service_role", "privilege": "SELECT", "allowed": true},
-    {"schema": "public", "table": "live_pilot_state", "role": "authenticated", "privilege": "SELECT", "allowed": true},
-    {"schema": "public", "table": "live_pilot_state", "role": "service_role", "privilege": "SELECT", "allowed": true},
-    {"schema": "public", "table": "live_pilot_state", "role": "service_role", "privilege": "INSERT", "allowed": true},
-    {"schema": "public", "table": "live_pilot_state", "role": "service_role", "privilege": "UPDATE", "allowed": true},
-    {"schema": "public", "table": "live_pilot_state", "role": "service_role", "privilege": "DELETE", "allowed": true},
-    {"schema": "public", "table": "live_order_intents", "role": "authenticated", "privilege": "SELECT", "allowed": true},
-    {"schema": "public", "table": "live_order_intents", "role": "service_role", "privilege": "SELECT", "allowed": true},
-    {"schema": "public", "table": "live_order_intents", "role": "service_role", "privilege": "INSERT", "allowed": true},
-    {"schema": "public", "table": "live_order_intents", "role": "service_role", "privilege": "UPDATE", "allowed": true},
-    {"schema": "public", "table": "live_order_intents", "role": "service_role", "privilege": "DELETE", "allowed": true}
+    {
+      "schema": "public",
+      "table": "user_roles",
+      "role": "authenticated",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "live_safety_state",
+      "role": "authenticated",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "experiment_event_state",
+      "role": "service_role",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "experiment_source_position_state",
+      "role": "service_role",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "role": "authenticated",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "role": "service_role",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "role": "service_role",
+      "privilege": "INSERT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "role": "service_role",
+      "privilege": "UPDATE",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "role": "service_role",
+      "privilege": "DELETE",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "role": "authenticated",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "role": "service_role",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "role": "service_role",
+      "privilege": "INSERT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "role": "service_role",
+      "privilege": "UPDATE",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "role": "service_role",
+      "privilege": "DELETE",
+      "allowed": true
+    }
   ]
 }
