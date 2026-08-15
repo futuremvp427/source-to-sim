@@ -25,6 +25,18 @@ export type HealthReport = {
 
 const PUBLIC_DATA_API = "https://data-api.polymarket.com/trades?limit=1";
 const HEALTH_HTTP_TIMEOUT_MS = 8_000;
+/**
+ * Every open dashboard tab polls runSelfCheck on its own client-side timer
+ * (independent of, and uncoordinated with, the server-side ingest cron), so
+ * without a shared cache N open tabs means N independent pings against
+ * data-api.polymarket.com every minute — pure overhead, since this check
+ * only cares whether the host is reachable, not what it returns. A cache
+ * held just under the dashboard's own refetch interval collapses any number
+ * of concurrent callers in this process down to one upstream probe per
+ * window.
+ */
+const PUBLIC_API_PROBE_TTL_MS = 55_000;
+let cachedPublicApiProbe: { at: number; status: CheckStatus; detail: string } | null = null;
 
 function ageSeconds(iso: string | null | undefined): number | null {
   if (!iso) return null;
@@ -186,21 +198,25 @@ export async function runSelfCheck(): Promise<HealthReport> {
         : `${fresh}/${open.length} open positions marked within ${Math.round(MARK_MAX_AGE_MS / 1000)}s (${coverage}%)`,
   });
 
-  // 9. Public Polymarket data API
-  let publicStatus: CheckStatus = "PASS";
-  let publicDetail = "Public trades API reachable";
-  try {
-    const res = await fetch(PUBLIC_DATA_API, {
-      headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(HEALTH_HTTP_TIMEOUT_MS),
-    });
-    if (!res.ok) {
-      publicStatus = "WARN";
-      publicDetail = `Public trades API returned HTTP ${res.status}`;
+  // 9. Public Polymarket data API (shared across concurrent callers — see PUBLIC_API_PROBE_TTL_MS)
+  let publicStatus: CheckStatus;
+  let publicDetail: string;
+  if (cachedPublicApiProbe && Date.now() - cachedPublicApiProbe.at < PUBLIC_API_PROBE_TTL_MS) {
+    publicStatus = cachedPublicApiProbe.status;
+    publicDetail = cachedPublicApiProbe.detail;
+  } else {
+    try {
+      const res = await fetch(PUBLIC_DATA_API, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(HEALTH_HTTP_TIMEOUT_MS),
+      });
+      publicStatus = res.ok ? "PASS" : "WARN";
+      publicDetail = res.ok ? "Public trades API reachable" : `Public trades API returned HTTP ${res.status}`;
+    } catch (err) {
+      publicStatus = "FAIL";
+      publicDetail = err instanceof Error ? err.message : "Public trades API unreachable";
     }
-  } catch (err) {
-    publicStatus = "FAIL";
-    publicDetail = err instanceof Error ? err.message : "Public trades API unreachable";
+    cachedPublicApiProbe = { at: Date.now(), status: publicStatus, detail: publicDetail };
   }
   checks.push({ id: "public_api", label: "Polymarket public API", status: publicStatus, detail: publicDetail });
 
