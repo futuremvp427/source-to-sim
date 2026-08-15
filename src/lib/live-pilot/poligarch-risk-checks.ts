@@ -16,7 +16,7 @@ export type SizingResult =
   | { ok: false; reason: string };
 
 function roundToTick(value: number, tick: number): number {
-  return Math.round(value / tick) * tick;
+  return Math.floor(value / tick) * tick;
 }
 
 /**

@@ -46,6 +46,21 @@ describe("computeLivePilotOrderSize", () => {
     });
     expect(result.notionalUsd).toBeLessThanOrEqual(1.5);
   });
+
+  it("never lets tick-rounding push notional above the computed cap", () => {
+    const result = computeLivePilotOrderSize({
+      proportionalNotionalUsd: 50,
+      remainingBankrollUsd: 25,
+      remainingExposureUsd: 10,
+      price: 0.33,
+      minimumTradeQty: 0.01,
+      tickSize: 0.1,
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.notionalUsd).toBeLessThanOrEqual(2);
+    }
+  });
 });
 
 describe("checkSignalAge", () => {
