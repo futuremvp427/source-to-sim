@@ -19,7 +19,10 @@ describe("computeLivePilotOrderSize", () => {
       minimumTradeQty: 0.01,
       tickSize: 0.005,
     });
-    expect(result.notionalUsd).toBeLessThanOrEqual(2);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.notionalUsd).toBeLessThanOrEqual(2);
+    }
   });
 
   it("SKIPs rather than increasing size when $2 cannot clear minimumTradeQty", () => {
@@ -32,7 +35,9 @@ describe("computeLivePilotOrderSize", () => {
       tickSize: 0.005,
     });
     expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/minimum/i);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/minimum/i);
+    }
   });
 
   it("respects remaining bankroll and exposure headroom, whichever is smaller", () => {
@@ -44,7 +49,10 @@ describe("computeLivePilotOrderSize", () => {
       minimumTradeQty: 0.01,
       tickSize: 0.005,
     });
-    expect(result.notionalUsd).toBeLessThanOrEqual(1.5);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.notionalUsd).toBeLessThanOrEqual(1.5);
+    }
   });
 
   it("never lets tick-rounding push notional above the computed cap", () => {
