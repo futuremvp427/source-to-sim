@@ -165,6 +165,50 @@ function requestSignal(signal?: AbortSignal): AbortSignal {
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
+/**
+ * Parses a Retry-After header (either delay-seconds or an HTTP-date, per
+ * RFC 9110 10.2.3) into a millisecond wait. Returns null when absent or
+ * unparseable so the caller falls back to its own backoff schedule.
+ */
+export function parseRetryAfterMs(value: string | null, now: number = Date.now()): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const when = Date.parse(value);
+  if (Number.isFinite(when)) return Math.max(0, when - now);
+  return null;
+}
+
+/**
+ * Raised on HTTP 429 so callers can special-case rate limiting (e.g. to
+ * avoid alert spam or to short-circuit sibling requests) without parsing
+ * error messages.
+ */
+export class RateLimitedError extends Error {
+  constructor(message: string, readonly retryAfterMs: number | null) {
+    super(message);
+  }
+}
+
+const RETRY_BASE_MS = 500;
+const RETRY_MAX_MS = 8_000;
+
+/**
+ * Backoff for a retryable failure: honors a server-supplied Retry-After
+ * verbatim (never shortened), otherwise full-jitter exponential backoff
+ * (random(0, min(RETRY_MAX_MS, base * 2^attempt))). Full jitter — rather than
+ * a fixed schedule — is deliberate: with EXPERIMENT_CONCURRENCY workers (and,
+ * in production, several sibling experiments sharing a wallet) all retrying
+ * the same upstream 429 at once, a fixed 400ms/800ms schedule makes every
+ * retry collide again on the same tick; independent random delays spread
+ * retries out instead of resonating with each other.
+ */
+function backoffDelayMs(attempt: number, retryAfterMs: number | null): number {
+  if (retryAfterMs !== null) return retryAfterMs;
+  const ceiling = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** attempt);
+  return Math.random() * ceiling;
+}
+
 async function getJson(url: string, attempts = 3, signal?: AbortSignal): Promise<unknown> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i += 1) {
@@ -173,24 +217,66 @@ async function getJson(url: string, attempts = 3, signal?: AbortSignal): Promise
         headers: { accept: "application/json" },
         signal: requestSignal(signal),
       });
-      if (!res.ok) throw new Error(`${url.split("?")[0]} responded ${res.status}`);
+      if (!res.ok) {
+        const label = `${url.split("?")[0]} responded ${res.status}`;
+        if (res.status === 429) {
+          throw new RateLimitedError(label, parseRetryAfterMs(res.headers.get("retry-after")));
+        }
+        throw new Error(label);
+      }
       return (await res.json()) as unknown;
     } catch (err) {
       lastErr = err;
       if (signal?.aborted) break;
-      if (i < attempts - 1) await new Promise((r) => setTimeout(r, 400 * 2 ** i));
+      if (i < attempts - 1) {
+        const retryAfterMs = err instanceof RateLimitedError ? err.retryAfterMs : null;
+        await new Promise((r) => setTimeout(r, backoffDelayMs(i, retryAfterMs)));
+      }
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error("request failed");
 }
 
-async function getArray(url: string, signal?: AbortSignal): Promise<Json[]> {
-  const json = await getJson(url, 3, signal);
-  if (Array.isArray(json)) return json as Json[];
-  if (json && typeof json === "object" && Array.isArray((json as { data?: unknown[] }).data)) {
-    return (json as { data: Json[] }).data;
-  }
-  throw new Error(`${url.split("?")[0]} returned an unexpected shape`);
+/**
+ * In-flight/completed response cache for one runIngestCycle invocation,
+ * keyed by request URL. V2 and V3 experiments follow identical wallets and
+ * would otherwise issue byte-identical /trades requests independently every
+ * cycle; sharing one promise per URL for the lifetime of a single cycle
+ * halves that duplicate traffic with no change to per-experiment checkpoint
+ * or accounting logic (each experiment still evaluates its own copy of the
+ * same fetched page). Never persisted or reused across cycles.
+ */
+export type TradesRequestCache = Map<string, Promise<Json[]>>;
+
+async function getArray(url: string, signal?: AbortSignal, cache?: TradesRequestCache): Promise<Json[]> {
+  const fetchOnce = async (fetchSignal?: AbortSignal): Promise<Json[]> => {
+    const json = await getJson(url, 3, fetchSignal);
+    if (Array.isArray(json)) return json as Json[];
+    if (json && typeof json === "object" && Array.isArray((json as { data?: unknown[] }).data)) {
+      return (json as { data: Json[] }).data;
+    }
+    throw new Error(`${url.split("?")[0]} returned an unexpected shape`);
+  };
+  if (!cache) return fetchOnce(signal);
+  const existing = cache.get(url);
+  if (existing) return existing;
+  // Deliberately NOT bound to this caller's own cycle-abort signal: the
+  // promise stored here may be awaited by a sibling experiment (same wallet,
+  // different cycle deadline/AbortController) via the cache hit above, and
+  // that sibling's request must not be cancelled just because the first
+  // caller's cycle happened to time out first. Each experiment's own
+  // deadline race (withDeadline in runExperimentCycle) still bounds how long
+  // IT waits; only the underlying shared network call stays un-cancelled by
+  // an unrelated caller, consistent with every other stage in this file
+  // except the one call site (persistEvents) proven to need real
+  // cancellation.
+  const promise = fetchOnce(undefined);
+  // A failed fetch must not poison the cache for the cycle's remaining
+  // batches: each sibling gets its own chance to retry rather than all
+  // inheriting one experiment's failure.
+  promise.catch(() => cache.delete(url));
+  cache.set(url, promise);
+  return promise;
 }
 
 /* ------------------------------------------------------------------ */
@@ -288,6 +374,10 @@ export const releaseLeaseForTest = releaseLease;
 /** Test-only alias so the bounded-stage timeout/fallback mechanism can be asserted directly. */
 export const boundedStageForTest = boundedStage;
 export const MARK_REFRESH_DEADLINE_MS_FOR_TEST = MARK_REFRESH_DEADLINE_MS;
+/** Test-only aliases so the per-cycle /trades request dedup and backoff can be asserted directly. */
+export const getArrayForTest = getArray;
+export const fetchSourceWindowForTest = fetchSourceWindow;
+export const backoffDelayMsForTest = backoffDelayMs;
 
 /* ------------------------------------------------------------------ */
 /* Experiment / config                                                 */
@@ -499,10 +589,11 @@ async function fetchSourceWindow(
   bootstrapped: boolean,
   catchupBoundary: number | null,
   signal?: AbortSignal,
+  cache?: TradesRequestCache,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
   if (!bootstrapped) {
     return fetchFixedPages(
-      (offset) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet), signal),
+      (offset) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet), signal, cache),
       BOOTSTRAP_PAGES,
       PAGE_SIZE,
       signal,
@@ -514,7 +605,7 @@ async function fetchSourceWindow(
     );
   }
   return fetchUntilCheckpointCovered(
-    (offset, endTs) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet, endTs), signal),
+    (offset, endTs) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet, endTs), signal, cache),
     catchupBoundary,
     PAGE_SIZE,
     signal,
@@ -1293,6 +1384,14 @@ export async function runIngestCycle(workerId: string): Promise<MultiCycleResult
   const ordered = await orderExperimentsForCycle(experiments);
   const cycles: CycleResult[] = [];
   let deferred = 0;
+  // Shared across every batch in this cycle only: V2 and V3 experiments follow
+  // identical wallets, so without this, two experiments in the same or
+  // different batches would each fire their own byte-identical /trades
+  // request every tick. One cache per runIngestCycle invocation collapses
+  // those duplicates to a single upstream request while leaving each
+  // experiment's own checkpoint/accounting fully independent (see
+  // TradesRequestCache doc comment). Never carried across cycles.
+  const tradesCache: TradesRequestCache = new Map();
   // Experiments hold independent leases, checkpoints and books, so a small
   // concurrent batch cannot overlap execution for the same experiment. Batching
   // lets every enabled experiment finish inside one scheduler cycle, which is
@@ -1311,7 +1410,7 @@ export async function runIngestCycle(workerId: string): Promise<MultiCycleResult
       continue;
     }
     const settled = await Promise.allSettled(
-      batch.map((experiment) => runExperimentCycle(experiment, workerId)),
+      batch.map((experiment) => runExperimentCycle(experiment, workerId, tradesCache)),
     );
     settled.forEach((result, index) => {
       if (result.status === "fulfilled") {
@@ -1452,6 +1551,7 @@ async function refreshCandidateResearchSafely(): Promise<{ ran: boolean; detail:
 export async function runExperimentCycle(
   experiment: Experiment,
   baseWorkerId: string,
+  tradesCache?: TradesRequestCache,
 ): Promise<CycleResult> {
   const ranAt = new Date().toISOString();
   const lockId = workerIdFor(experiment);
@@ -1545,6 +1645,7 @@ export async function runExperimentCycle(
             bootstrapped,
             resolveCatchupBoundary(checkpoint?.last_source_ts, experiment.follow_from_ts),
             cycleAbort.signal,
+            tradesCache,
           ),
         );
         const events = normalizeSourceEvents(window.raw, wallet);
@@ -1736,10 +1837,15 @@ export async function runExperimentCycle(
       // Alerting is last and lowest priority: a stalled Telegram delivery can
       // never hold the lease or the worker row hostage. The error itself is
       // already persisted in last_error above, so nothing is suppressed.
+      // rateLimited/retryAfterMs are recorded so a future 429 incident can be
+      // diagnosed from the alerts table alone, without re-deriving it from
+      // the error string.
       await boundedStage(
         raiseAlert("error", "poll_failure", `${experiment.name}: ingestion poll failed: ${message}`, {
           experiment: experiment.name as never,
           failures: failures as never,
+          rateLimited: (err instanceof RateLimitedError) as never,
+          retryAfterMs: (err instanceof RateLimitedError ? err.retryAfterMs : null) as never,
         }),
         CLEANUP_ALERT_DEADLINE_MS,
         "cleanup_alert",

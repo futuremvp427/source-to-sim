@@ -67,6 +67,61 @@ None of the above required or received any bankroll, cash, P&L, sizing, qualific
 
 *Operational note: all dates/times in this document and in `V2_V3_VALIDITY.md` are sourced from production PostgreSQL (`SELECT now()`) and the GitHub API, per a standing instruction that the executing host's shell clock is not authoritative for production timestamps. In this specific session the shell clock, production `now()`, and the GitHub API `Date` header all agreed within seconds; a prior session reported a several-day discrepancy that was not reproduced here.*
 
+## Incident: data-api.polymarket.com 429 burst (2026-08-15)
+
+Simultaneous `poll_failure` alerts (HTTP 429 from `https://data-api.polymarket.com/trades`) were reported across multiple V2/V3-cohort experiments (Poligarch V2/V3, badatmath V3, HighTempTation V2) and possibly the full 10-experiment cohort. This session's investigation was code-only: this sandbox has no network path to the live Supabase project and no production log/alerts access, so the exact first/last 429 timestamps, per-worker failure counts, and confirmed source-event gap could not be pulled directly. The queries below answer those questions from the live database; they were written but not run here.
+
+```sql
+-- Which experiments/workers hit 429s, when, how often, still occurring?
+select
+  context->>'experiment' as experiment,
+  min(created_at) as first_alert,
+  max(created_at) as last_alert,
+  count(*) as alert_count,
+  max((context->>'failures')::int) as max_consecutive_failures
+from alerts
+where kind = 'poll_failure' and message ilike '%429%'
+group by 1
+order by 2;
+
+-- Current worker state for anything that has ever failed
+select id, state, poll_failures, last_error, last_success_at, last_poll_at, heartbeat_at
+from worker_status
+where poll_failures > 0 or last_error ilike '%429%'
+order by last_poll_at desc;
+
+-- Is it still occurring right now? (state='error' with a recent heartbeat)
+select id, state, last_error, heartbeat_at
+from worker_status
+where state = 'error' and heartbeat_at > now() - interval '15 minutes';
+```
+
+**Root cause (confirmed by code reading, `shadow.server.ts`).** `runIngestCycle` fans out over every enabled `paper_experiments` row once per ~1-minute `pg_cron` tick. The V2 and V3 cohorts each follow the identical 5 wallets (`v3-cohort.ts` reuses `V2_COHORT` verbatim), so 10 experiments issue what is architecturally 5 unique `/trades` requests' worth of data — but every experiment fetched independently, with no shared cache, doubling the identical-wallet request volume. Retries (`getJson`, 3 attempts) used a fixed 400ms/800ms backoff with no jitter and never read the `Retry-After` header, so a 429 on one worker and its retries had no mechanism to avoid re-colliding with the next tick or with sibling workers hitting the same limit at the same moment. Two additional, uncoordinated contributors to the same host's request volume: `candidates/research.server.ts` runs its own independent `/trades` fetcher (throttled to every 6h, lower impact) and `health.server.ts`'s dashboard self-check pings `/trades?limit=1` once a minute **per open browser tab**, entirely decoupled from the server-side cron.
+
+**Telegram "74.7 KB trades.json attachment" claim — not reproducible in this codebase.** `notify.server.ts` sends only a plain-text Telegram `sendMessage` (`chat_id`, `text`); there is no `sendDocument`/multipart/attachment code path anywhere in this repository, and the `poll_failure` message body is a short string (`"<experiment>: ingestion poll failed: <url> responded 429"`), not a raw API payload. If a file attachment was actually observed on a real alert, it did not originate from this app's code — worth checking any Telegram-side integration configured outside this repository (bot commands, a browser extension, etc.) before assuming this app needs a fix here. (A 250-trade `/trades` page is very plausibly ~75 KB, which may explain the number if what was actually seen was a raw API response captured elsewhere, not something this app attached.)
+
+**Fix applied (`shadow.server.ts`, `health.server.ts`):**
+- A per-`runIngestCycle` shared request cache (`TradesRequestCache`, keyed by request URL) so sibling V2/V3 experiments on the same wallet reuse one in-flight/completed `/trades` fetch instead of issuing duplicate requests. Never persisted or reused across cycles; a failed shared fetch doesn't poison the cache for the next retry. Each experiment still independently evaluates its own checkpoint/accounting from the shared page — no change to paper-trading logic.
+- `getJson` now reads `Retry-After` (delay-seconds or HTTP-date) and honors it verbatim; absent that header, backoff is full-jitter exponential (`random(0, min(8s, 500ms * 2^attempt))`) instead of the old fixed 400ms/800ms schedule, so concurrent retries spread out instead of re-colliding.
+- `poll_failure` alerts now record `rateLimited`/`retryAfterMs` in `alerts.context` so a future 429 incident is diagnosable directly from the alerts table.
+- `health.server.ts`'s dashboard self-check now caches the public-API reachability probe for 55s, so any number of concurrently open dashboard tabs collapse to one upstream ping per window instead of one each.
+
+Not changed in this pass (identified, out of scope for a minimal fix): `general-shadow.server.ts`'s `/activity` fetch has no retry at all, and `candidates/research.server.ts` has its own separate, weaker retry implementation. Both hit the same host and would benefit from the same Retry-After/jitter treatment, but touching them was not necessary to address the reported burst and is left for a follow-up pass.
+
+**Backfill / gap assessment.** `fetchUntilCheckpointCovered` means a failed cycle never advances `worker_checkpoints.last_source_ts`; the next successful cycle walks pages backward until it re-proves coverage of that checkpoint, so a transient 429 outage self-heals automatically as long as the gap stays within the API's `offset <= 10,000` ceiling per wallet (see `MAX_TRADES_OFFSET`) — true for any realistic single-incident 429 window. No manual backfill tool is needed for a transient rate-limit incident under this mechanism. Confirm post-incident with:
+
+```sql
+-- Any experiment whose checkpoint stalled during the incident window and
+-- hasn't advanced since should show up here.
+select id, last_source_ts, to_timestamp(last_source_ts) as last_source_at, updated_at
+from worker_checkpoints
+order by updated_at desc;
+```
+
+Regression tests: `src/lib/trades-request-storm.test.ts` (dedup collapses 10 V2/V3-style workers over 5 unique wallets to 5 upstream requests; Retry-After parsing; jittered backoff bounds; a poisoned cache entry doesn't block a later retry).
+
+No bankroll, cash, P&L, checkpoint, source-event, or live-trading-safety control was reset or modified as part of this fix.
+
 ## Live rollout required
 
 ### 1. Rotate the scheduler secret
