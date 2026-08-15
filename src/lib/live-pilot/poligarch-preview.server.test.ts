@@ -4,6 +4,7 @@ import { POLIGARCH_V2_WALLET, POLIGARCH_V2_EXPERIMENT_NAME } from "./poligarch-c
 
 const baseSourceEvent = {
   id: "evt-1",
+  eventKey: "evt-1-key",
   experimentId: "exp-1",
   experimentName: POLIGARCH_V2_EXPERIMENT_NAME,
   wallet: POLIGARCH_V2_WALLET,

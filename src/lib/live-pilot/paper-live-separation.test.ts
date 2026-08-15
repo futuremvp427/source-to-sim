@@ -16,6 +16,7 @@ import { POLIGARCH_V2_WALLET, POLIGARCH_V2_EXPERIMENT_NAME } from "./poligarch-c
 
 const baseSourceEvent = {
   id: "evt-1",
+  eventKey: "evt-1-key",
   experimentId: "exp-1",
   experimentName: POLIGARCH_V2_EXPERIMENT_NAME,
   wallet: POLIGARCH_V2_WALLET,
@@ -107,7 +108,16 @@ describe("paper/live accounting separation", () => {
     const fetchImpl = vi.fn();
 
     const result = await submitPoligarchLiveOrder(
-      { usMarketSlug: "chicago-snow", side: "BUY", limitPrice: 0.52, shares: 3.8 },
+      {
+        usMarketSlug: "chicago-snow",
+        side: "BUY",
+        limitPrice: 0.52,
+        shares: 3.8,
+        outcome: "YES",
+        experimentName: POLIGARCH_V2_EXPERIMENT_NAME,
+        wallet: POLIGARCH_V2_WALLET,
+        notionalUsd: 2,
+      },
       { getPilotSafetyState, fetchImpl, now: () => 1_700_000_000 },
     );
 

@@ -56,6 +56,15 @@ import type { PilotSafetyState } from "./poligarch-safety-core";
 
 export type RawSourceEvent = PoligarchSourceEvent & {
   id: string;
+  /**
+   * `source_events.event_key` — a separate text field from `id` (the
+   * source event's UUID primary key). This is what the audit trail on
+   * `live_order_intents.source_event_key` must be populated from; sending
+   * the UUID here instead would silently corrupt the audit trail (see
+   * `create_or_get_live_pilot_intent_atomic`'s `p_payload->>'source_event_key'`
+   * in supabase/migrations/20260815121000_poligarch_live_pilot_intent_rpc.sql).
+   */
+  eventKey: string;
   experimentId: string;
   experimentName: string;
   wallet: string;
@@ -339,7 +348,7 @@ export async function createOrGetLivePilotIntent(
       p_source_experiment_id: event.experimentId,
       p_source_event_id: event.id,
       p_payload: {
-        source_event_key: event.id,
+        source_event_key: event.eventKey,
         source_wallet: event.wallet,
         source_condition_id: event.conditionId,
         source_asset: event.asset,
