@@ -102,13 +102,14 @@ where state = 'error' and heartbeat_at > now() - interval '15 minutes';
 
 **Fix applied (`shadow.server.ts`, `health.server.ts`):**
 - A per-`runIngestCycle` shared request cache (`TradesRequestCache`, keyed by request URL) so sibling V2/V3 experiments on the same wallet reuse one in-flight/completed `/trades` fetch instead of issuing duplicate requests. Never persisted or reused across cycles; a failed shared fetch doesn't poison the cache for the next retry. Each experiment still independently evaluates its own checkpoint/accounting from the shared page — no change to paper-trading logic.
-- `getJson` now reads `Retry-After` (delay-seconds or HTTP-date) and honors it verbatim; absent that header, backoff is full-jitter exponential (`random(0, min(8s, 500ms * 2^attempt))`) instead of the old fixed 400ms/800ms schedule, so concurrent retries spread out instead of re-colliding.
+- The cache-populating fetch is deliberately **not** bound to any individual experiment's own cycle-abort signal — an early first version of this fix did tie it to the first caller's signal, which risked reintroducing the exact "outer deadline stops waiting, inner fetch keeps running" failure mode already proven in production for `persistEvents` (see that stage's own doc comment above). Instead, the shared fetch gets its own independent `AbortController` and hard deadline (`SHARED_TRADES_FETCH_DEADLINE_MS`, 45s — bounded below `CYCLE_BUDGET_MS` so it can never outlive the whole scheduler invocation), so no sibling can cancel a request another sibling still needs, and a genuinely stuck upstream response is still really aborted once every experiment's own deadline has passed, not merely abandoned by `Promise.race`. `Retry-After` waits are honored but clamped to whatever budget remains before that hard deadline, so a pathological Retry-After value cannot extend a shared request indefinitely.
+- `getJson` now reads `Retry-After` (delay-seconds or HTTP-date) and honors it verbatim (subject to the shared-deadline clamp above); absent that header, backoff is full-jitter exponential (`random(0, min(8s, 500ms * 2^attempt))`) instead of the old fixed 400ms/800ms schedule, so concurrent retries spread out instead of re-colliding.
 - `poll_failure` alerts now record `rateLimited`/`retryAfterMs` in `alerts.context` so a future 429 incident is diagnosable directly from the alerts table.
 - `health.server.ts`'s dashboard self-check now caches the public-API reachability probe for 55s, so any number of concurrently open dashboard tabs collapse to one upstream ping per window instead of one each.
 
 Not changed in this pass (identified, out of scope for a minimal fix): `general-shadow.server.ts`'s `/activity` fetch has no retry at all, and `candidates/research.server.ts` has its own separate, weaker retry implementation. Both hit the same host and would benefit from the same Retry-After/jitter treatment, but touching them was not necessary to address the reported burst and is left for a follow-up pass.
 
-**Backfill / gap assessment.** `fetchUntilCheckpointCovered` means a failed cycle never advances `worker_checkpoints.last_source_ts`; the next successful cycle walks pages backward until it re-proves coverage of that checkpoint, so a transient 429 outage self-heals automatically as long as the gap stays within the API's `offset <= 10,000` ceiling per wallet (see `MAX_TRADES_OFFSET`) — true for any realistic single-incident 429 window. No manual backfill tool is needed for a transient rate-limit incident under this mechanism. Confirm post-incident with:
+**Backfill / gap assessment — mechanism confirmed by code, actual gap NOT yet measured.** `fetchUntilCheckpointCovered` means a failed cycle never advances `worker_checkpoints.last_source_ts`; the next successful cycle walks pages backward until it re-proves coverage of that checkpoint, so a transient 429 outage is architecturally self-healing as long as the gap stays within the API's `offset <= 10,000` ceiling per wallet (see `MAX_TRADES_OFFSET`). This is a description of the mechanism, not a proof that this specific incident stayed inside it: the actual duration of the 429 window, how many events accumulated per affected wallet during it, and whether every affected experiment's checkpoint has since caught up were not measured from this sandbox (no production access) and must be confirmed by running the queries below before this incident is considered closed.
 
 ```sql
 -- Any experiment whose checkpoint stalled during the incident window and
@@ -116,9 +117,20 @@ Not changed in this pass (identified, out of scope for a minimal fix): `general-
 select id, last_source_ts, to_timestamp(last_source_ts) as last_source_at, updated_at
 from worker_checkpoints
 order by updated_at desc;
+
+-- How many source events landed per wallet during/after the incident window,
+-- to size the actual gap against the 10,000-offset ceiling instead of
+-- assuming it fits.
+select wallet, count(*) as events_in_window
+from source_events
+where source_ts >= extract(epoch from '<incident_start>'::timestamptz)
+group by 1
+order by 2 desc;
 ```
 
-Regression tests: `src/lib/trades-request-storm.test.ts` (dedup collapses 10 V2/V3-style workers over 5 unique wallets to 5 upstream requests; Retry-After parsing; jittered backoff bounds; a poisoned cache entry doesn't block a later retry).
+**August 14 clean epoch (`T_clean`) / August 21 checkpoint (`T_7d`) — provisionally preserved, not confirmed.** No code, migration, or data in this fix touched `T_clean` (2026-08-14 11:29:19.638 UTC per `V2_V3_VALIDITY.md`) or `T_7d` (2026-08-21 11:29:19.638 UTC); nothing here resets a checkpoint, bankroll, or paper-trading history. That is a true but narrower claim than "still valid": whether August 21 can definitively stand as the qualification checkpoint depends on the production gap measurement above, which was not run from this sandbox. Treat both dates as **provisionally preserved pending production verification** — run the diagnostic queries in this section first; only report August 21 as definitively valid once they confirm every affected V2/V3 experiment's checkpoint fully caught up and no event count during the outage exceeded what checkpoint replay could recover.
+
+Regression tests: `src/lib/trades-request-storm.test.ts` — dedup collapses 10 V2/V3-style workers over 5 unique wallets to 5 upstream requests; one sibling's own AbortSignal aborting never cancels a shared request another sibling still needs (asserted directly on the signal handed to `fetch`); the shared fetch does not settle merely because every experiment's own 40s deadline has passed, but does terminate — with the underlying fetch signal genuinely aborted, not just abandoned — at its own independent hard deadline; a 429 on every attempt rejects, clears the cache entry, and a later caller performs a genuinely new fetch sequence; Retry-After parsing and jittered-backoff bounds; a pathological Retry-After is clamped to the remaining shared-deadline budget instead of honored in full.
 
 No bankroll, cash, P&L, checkpoint, source-event, or live-trading-safety control was reset or modified as part of this fix.
 

@@ -209,9 +209,46 @@ function backoffDelayMs(attempt: number, retryAfterMs: number | null): number {
   return Math.random() * ceiling;
 }
 
-async function getJson(url: string, attempts = 3, signal?: AbortSignal): Promise<unknown> {
+/**
+ * Sleeps for `ms`, but resolves early (never rejects) if `signal` aborts
+ * first. Used for the inter-attempt backoff delay so a pathological
+ * Retry-After value (or any long delay) cannot keep a retry loop waiting
+ * past its own hard deadline: the caller's AbortController firing wakes this
+ * up immediately instead of leaving a dangling timer to fire on its own
+ * schedule, possibly minutes later.
+ */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * `deadlineAt` (absolute ms epoch) is an optional hard ceiling on the whole
+ * multi-attempt sequence, independent of `signal`: even a huge
+ * server-supplied Retry-After is clamped to whatever budget remains before
+ * `deadlineAt`, and once that budget is exhausted no further attempt starts.
+ * This is what stops a pathological Retry-After from extending a request
+ * past its bounded operational envelope (see SHARED_TRADES_FETCH_DEADLINE_MS).
+ */
+async function getJson(
+  url: string,
+  attempts = 3,
+  signal?: AbortSignal,
+  deadlineAt?: number,
+): Promise<unknown> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i += 1) {
+    if (signal?.aborted) break;
     try {
       const res = await fetch(url, {
         headers: { accept: "application/json" },
@@ -230,7 +267,13 @@ async function getJson(url: string, attempts = 3, signal?: AbortSignal): Promise
       if (signal?.aborted) break;
       if (i < attempts - 1) {
         const retryAfterMs = err instanceof RateLimitedError ? err.retryAfterMs : null;
-        await new Promise((r) => setTimeout(r, backoffDelayMs(i, retryAfterMs)));
+        let delay = backoffDelayMs(i, retryAfterMs);
+        if (deadlineAt !== undefined) {
+          const remaining = deadlineAt - Date.now();
+          if (remaining <= 0) break;
+          delay = Math.min(delay, remaining);
+        }
+        await sleep(delay, signal);
       }
     }
   }
@@ -248,9 +291,27 @@ async function getJson(url: string, attempts = 3, signal?: AbortSignal): Promise
  */
 export type TradesRequestCache = Map<string, Promise<Json[]>>;
 
+/**
+ * Hard ceiling on one shared (cache-populating) /trades fetch, independent of
+ * any individual experiment's own cycle deadline or AbortSignal. Bounded
+ * strictly below CYCLE_BUDGET_MS (50s) so a stuck shared request can never
+ * outlive the whole scheduler invocation, and comfortably above
+ * EXPERIMENT_DEADLINE_MS (40s) so a legitimate retry sequence isn't cut off
+ * merely because the first caller's own deadline happened to be tight. This
+ * is the fix for a real risk in the first version of this cache: binding the
+ * shared fetch to nothing meant it could run indefinitely once every waiting
+ * experiment had already timed out and moved on -- the exact
+ * "outer deadline stops waiting, inner fetch keeps running" failure mode
+ * already proven in production for persistEvents (see its own doc comment)
+ * and fixed there with real cancellation. The shared fetch gets the same
+ * treatment here, via its own independent AbortController rather than any
+ * individual caller's signal (see getArray).
+ */
+const SHARED_TRADES_FETCH_DEADLINE_MS = 45_000;
+
 async function getArray(url: string, signal?: AbortSignal, cache?: TradesRequestCache): Promise<Json[]> {
-  const fetchOnce = async (fetchSignal?: AbortSignal): Promise<Json[]> => {
-    const json = await getJson(url, 3, fetchSignal);
+  const fetchOnce = async (fetchSignal?: AbortSignal, deadlineAt?: number): Promise<Json[]> => {
+    const json = await getJson(url, 3, fetchSignal, deadlineAt);
     if (Array.isArray(json)) return json as Json[];
     if (json && typeof json === "object" && Array.isArray((json as { data?: unknown[] }).data)) {
       return (json as { data: Json[] }).data;
@@ -266,11 +327,13 @@ async function getArray(url: string, signal?: AbortSignal, cache?: TradesRequest
   // that sibling's request must not be cancelled just because the first
   // caller's cycle happened to time out first. Each experiment's own
   // deadline race (withDeadline in runExperimentCycle) still bounds how long
-  // IT waits; only the underlying shared network call stays un-cancelled by
-  // an unrelated caller, consistent with every other stage in this file
-  // except the one call site (persistEvents) proven to need real
-  // cancellation.
-  const promise = fetchOnce(undefined);
+  // IT waits; the underlying shared network call instead gets its own
+  // independent hard deadline below, so it is bounded without being tied to
+  // any one caller's fate.
+  const ownController = new AbortController();
+  const deadlineAt = Date.now() + SHARED_TRADES_FETCH_DEADLINE_MS;
+  const hardTimer = setTimeout(() => ownController.abort(), SHARED_TRADES_FETCH_DEADLINE_MS);
+  const promise = fetchOnce(ownController.signal, deadlineAt).finally(() => clearTimeout(hardTimer));
   // A failed fetch must not poison the cache for the cycle's remaining
   // batches: each sibling gets its own chance to retry rather than all
   // inheriting one experiment's failure.
@@ -378,6 +441,9 @@ export const MARK_REFRESH_DEADLINE_MS_FOR_TEST = MARK_REFRESH_DEADLINE_MS;
 export const getArrayForTest = getArray;
 export const fetchSourceWindowForTest = fetchSourceWindow;
 export const backoffDelayMsForTest = backoffDelayMs;
+export const getJsonForTest = getJson;
+export const sleepForTest = sleep;
+export const SHARED_TRADES_FETCH_DEADLINE_MS_FOR_TEST = SHARED_TRADES_FETCH_DEADLINE_MS;
 
 /* ------------------------------------------------------------------ */
 /* Experiment / config                                                 */

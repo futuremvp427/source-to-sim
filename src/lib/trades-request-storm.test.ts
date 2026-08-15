@@ -6,12 +6,13 @@ const {
   getArrayForTest,
   fetchSourceWindowForTest,
   backoffDelayMsForTest,
+  getJsonForTest,
+  sleepForTest,
   parseRetryAfterMs,
   RateLimitedError,
   buildTradesUrl,
+  SHARED_TRADES_FETCH_DEADLINE_MS_FOR_TEST,
 } = await import("./shadow.server");
-
-type Json = Record<string, unknown>;
 
 function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), { status, headers });
@@ -20,6 +21,7 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("shared per-cycle /trades request cache (request-storm prevention)", () => {
@@ -37,8 +39,6 @@ describe("shared per-cycle /trades request cache (request-storm prevention)", ()
     const url = buildTradesUrl(250, 0, wallet);
     const cache = new Map();
 
-    // Simulate V2 and V3 both requesting the exact same wallet's first page
-    // concurrently within the same runIngestCycle invocation.
     const [a, b] = await Promise.all([
       getArrayForTest(url, undefined, cache),
       getArrayForTest(url, undefined, cache),
@@ -84,32 +84,166 @@ describe("shared per-cycle /trades request cache (request-storm prevention)", ()
 
     expect(calls).toBe(5);
   });
+});
 
-  it("a failed shared fetch does not poison the cache for the next batch's retry", async () => {
+describe("sibling isolation: a caller's own AbortSignal must never cancel a shared request another sibling still needs", () => {
+  it("aborting one sibling's signal has zero effect on the shared upstream request or the other sibling's result", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init?: RequestInit) => {
+        capturedSignal = init?.signal as AbortSignal | undefined;
+        return new Promise<Response>((resolve) => {
+          setTimeout(() => resolve(jsonResponse([{ timestamp: 1 }])), 5);
+        });
+      }),
+    );
+
+    const url = buildTradesUrl(250, 0, "0xsiblings");
+    const cache = new Map();
+    const siblingAAbort = new AbortController();
+
+    // V2's own cycle-abort signal; V3 uses no signal of its own.
+    const a = getArrayForTest(url, siblingAAbort.signal, cache);
+    const b = getArrayForTest(url, undefined, cache);
+
+    // Simulate V2's own EXPERIMENT_DEADLINE_MS firing early.
+    siblingAAbort.abort();
+
+    const [resultA, resultB] = await Promise.all([a, b]);
+    expect(resultA).toEqual(resultB);
+    expect(resultA).toEqual([{ timestamp: 1 }]);
+    // The request actually sent upstream must never have been tied to
+    // sibling A's own signal, so it must still be un-aborted here.
+    expect(capturedSignal?.aborted).toBe(false);
+  });
+});
+
+describe("the shared fetch has its own independent hard deadline", () => {
+  it("does not settle merely because every experiment's own 40s deadline has passed", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init?: RequestInit) => {
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal as AbortSignal | undefined;
+          signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+            once: true,
+          });
+        });
+      }),
+    );
+
+    const url = buildTradesUrl(250, 0, "0xstalled");
+    const cache = new Map();
+    let settled = false;
+    getArrayForTest(url, undefined, cache).then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+
+    // Past every experiment's own EXPERIMENT_DEADLINE_MS (40s) — the shared
+    // fetch's own bound is intentionally longer, so nothing should have
+    // settled yet purely from an individual experiment's perspective.
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(settled).toBe(false);
+  });
+
+  it("terminates (rejects) once its own hard deadline elapses, even though no individual caller ever aborted it", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init?: RequestInit) => {
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal as AbortSignal | undefined;
+          signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+            once: true,
+          });
+        });
+      }),
+    );
+
+    const url = buildTradesUrl(250, 0, "0xstalled2");
+    const cache = new Map();
+    let settled = false;
+    let rejected: unknown;
+    getArrayForTest(url, undefined, cache).then(
+      () => {
+        settled = true;
+      },
+      (err) => {
+        settled = true;
+        rejected = err;
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(SHARED_TRADES_FETCH_DEADLINE_MS_FOR_TEST + 1_000);
+    expect(settled).toBe(true);
+    expect(rejected).toBeDefined();
+  });
+
+  it("actually aborts the underlying fetch's signal at the hard deadline — real cancellation, not mere abandonment", async () => {
+    vi.useFakeTimers();
+    let capturedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init?: RequestInit) => {
+        capturedSignal = init?.signal as AbortSignal | undefined;
+        return new Promise<Response>((_resolve, reject) => {
+          capturedSignal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      }),
+    );
+
+    const url = buildTradesUrl(250, 0, "0xstalled3");
+    const cache = new Map();
+    getArrayForTest(url, undefined, cache).catch(() => {
+      /* expected */
+    });
+
+    expect(capturedSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(SHARED_TRADES_FETCH_DEADLINE_MS_FOR_TEST + 1_000);
+    // Real cancellation, proven directly on the signal handed to fetch — a
+    // Promise.race-only abandonment (the bug this replaces) would leave this
+    // false forever, exactly like the previously-proven persistEvents issue.
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+});
+
+describe("cache lifecycle on total failure", () => {
+  it("a 429 on every attempt rejects, clears the cache entry, and a later caller performs a genuinely new fetch", async () => {
     let calls = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
         calls += 1;
-        if (calls === 1) return jsonResponse({}, 429, { "retry-after": "0" });
-        return jsonResponse([{ timestamp: 1 }]);
+        return jsonResponse({}, 429, { "retry-after": "0" });
       }),
     );
 
-    const url = buildTradesUrl(250, 0, "0xabc");
+    const url = buildTradesUrl(250, 0, "0xexhausted");
     const cache = new Map();
 
-    // getJson retries internally (3 attempts) before the cached promise
-    // settles: the first attempt sees the 429, the second succeeds, so the
-    // single cache entry resolves successfully without any caller ever
-    // observing a poisoned/rejected cache entry.
-    const first = await getArrayForTest(url, undefined, cache);
-    expect(first).toEqual([{ timestamp: 1 }]);
-    expect(calls).toBe(2); // one 429, one retry inside getJson's own attempts
+    await expect(getArrayForTest(url, undefined, cache)).rejects.toBeInstanceOf(RateLimitedError);
+    expect(calls).toBe(3); // all 3 attempts exhausted
+    expect(cache.has(url)).toBe(false); // cleared, not left as a rejected entry
+
+    const secondCallCountBefore = calls;
+    await expect(getArrayForTest(url, undefined, cache)).rejects.toBeInstanceOf(RateLimitedError);
+    // A genuinely new 3-attempt sequence ran, not a cached rejection replayed.
+    expect(calls).toBe(secondCallCountBefore + 3);
   });
 });
 
-describe("Retry-After / jittered backoff (prevents retries from re-colliding on the same schedule)", () => {
+describe("Retry-After / jittered backoff", () => {
   it("parseRetryAfterMs reads a delay-seconds value", () => {
     expect(parseRetryAfterMs("2")).toBe(2000);
   });
@@ -137,8 +271,6 @@ describe("Retry-After / jittered backoff (prevents retries from re-colliding on 
       expect(s).toBeGreaterThanOrEqual(0);
       expect(s).toBeLessThanOrEqual(500);
     }
-    // Jitter means retries by concurrent siblings do not all land on the
-    // same instant, unlike the old fixed 400ms/800ms schedule.
     expect(new Set(samples).size).toBeGreaterThan(1);
   });
 
@@ -155,6 +287,53 @@ describe("Retry-After / jittered backoff (prevents retries from re-colliding on 
     const url = buildTradesUrl(250, 0, "0xabc");
     await expect(getArrayForTest(url)).rejects.toBeInstanceOf(RateLimitedError);
   });
+
+  it("sleepForTest resolves early when the given signal aborts before the delay elapses", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    let resolved = false;
+    sleepForTest(10_000, controller.signal).then(() => {
+      resolved = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(resolved).toBe(false);
+
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolved).toBe(true);
+  });
+
+  it("getJson clamps a pathological Retry-After to the remaining deadline budget instead of honoring it in full", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls += 1;
+        return jsonResponse({}, 429, { "retry-after": "3600" }); // 1 hour — pathological
+      }),
+    );
+
+    const url = buildTradesUrl(250, 0, "0xpathological");
+    const deadlineAt = Date.now() + 2_000;
+
+    let rejected: unknown;
+    const done = getJsonForTest(url, 3, undefined, deadlineAt).catch((err) => {
+      rejected = err;
+    });
+
+    // If the raw 3600s Retry-After were honored in full, the second attempt
+    // would not fire for another hour. The deadline clamp caps the actual
+    // wait to the remaining budget, so a second attempt fires promptly and
+    // the whole call gives up once that budget is exhausted — well short of
+    // an hour.
+    await vi.advanceTimersByTimeAsync(2_500);
+    await done;
+
+    expect(calls).toBe(2);
+    expect(rejected).toBeInstanceOf(RateLimitedError);
+  });
 });
 
 describe("fetchSourceWindow reuses the shared cache for a bootstrap fetch", () => {
@@ -164,7 +343,6 @@ describe("fetchSourceWindow reuses the shared cache for a bootstrap fetch", () =
       "fetch",
       vi.fn(async () => {
         calls += 1;
-        // Fewer than a full page ends the fixed-page walk immediately.
         return jsonResponse([{ timestamp: 1 }]);
       }),
     );
