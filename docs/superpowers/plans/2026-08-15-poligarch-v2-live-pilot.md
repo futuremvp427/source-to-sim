@@ -1498,8 +1498,16 @@ export async function previewPoligarchLiveOrder(
   const slippageCheck = checkSlippage({ sourcePrice: event.price, currentPrice });
 
   const ledger = await deps.getPilotLedgerSnapshot();
+  // Mirrors shadow-core.ts's computeBuySize fixed-fraction-of-own-cash
+  // convention (SIZING_CASH_FRACTION=0.01, SIZING_MIN_USD=1 floor) applied
+  // to the pilot's own bankroll instead of the $380 paper bankroll. The
+  // paper engine does not scale off the source trade's own notional either
+  // (computeBuySize takes no price/size input beyond price-for-shares), so
+  // this re-bases the same fixed-fraction rule rather than approximating a
+  // "proportional to source size" concept that doesn't exist upstream.
+  const proportionalNotionalUsd = Math.max(1, ledger.remainingBankrollUsd * 0.01);
   const sizing = computeLivePilotOrderSize({
-    proportionalNotionalUsd: event.price * 10, // proportional-to-source placeholder ratio confirmed against shadow-core's decideDynamicBuy sizing convention before finalizing
+    proportionalNotionalUsd,
     remainingBankrollUsd: ledger.remainingBankrollUsd,
     remainingExposureUsd: Math.max(0, 10 - ledger.currentOpenExposureUsd),
     price: currentPrice,
@@ -1559,8 +1567,6 @@ export async function previewPoligarchLiveOrder(
   };
 }
 ```
-
-Before finalizing, replace the `proportionalNotionalUsd: event.price * 10` line with the real proportional-sizing convention: read `decideDynamicBuy`/`computeBuySize` in `src/lib/shadow-core.ts` (already read during planning — `target = min($5, 1% of cash)`) and mirror the same *shape* of proportional calculation against the pilot's own bankroll (not the $380 paper bankroll), citing the source function in a comment.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1691,10 +1697,9 @@ Read `src/lib/pmus/signer.server.ts` and `src/lib/pmus/credentials.server.ts` in
 // src/lib/live-pilot/poligarch-submission.server.ts
 import { signRequest } from "../pmus/signer.server";
 import { loadPmusCredentials, isPmusConfigured } from "../pmus/credentials.server";
-import { POLIGARCH_LIVE_PILOT_SUBMISSION_ENABLED, isSubmissionReachable, type PilotSafetyState } from "./poligarch-safety-core";
-
-export const { POLIGARCH_LIVE_PILOT_SUBMISSION_ENABLED: _reexported } = { POLIGARCH_LIVE_PILOT_SUBMISSION_ENABLED };
-export { POLIGARCH_LIVE_PILOT_SUBMISSION_ENABLED };
+import { isSubmissionReachable, type PilotSafetyState } from "./poligarch-safety-core";
+export { POLIGARCH_LIVE_PILOT_SUBMISSION_ENABLED } from "./poligarch-safety-core";
+import { POLIGARCH_LIVE_PILOT_SUBMISSION_ENABLED } from "./poligarch-safety-core";
 
 export type SubmissionResult =
   | { ok: true; orderId: string; raw: unknown }
@@ -1801,8 +1806,6 @@ export async function getPoligarchLiveOrderStatus(orderId: string, deps: Submiss
   return attemptLivePilotOperation("GET", `/v1/order/${orderId}`, undefined, deps);
 }
 ```
-
-(Drop the placeholder `_reexported` re-export line above once written for real — it exists only to keep this plan's snippet self-contained; the actual file should just `export { POLIGARCH_LIVE_PILOT_SUBMISSION_ENABLED }` once, re-exported from `poligarch-safety-core.ts`, or simply imported and re-exported cleanly with a single `export` statement.)
 
 - [ ] **Step 4: Run test to verify it passes**
 
