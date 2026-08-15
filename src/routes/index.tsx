@@ -18,6 +18,7 @@ import { PmusSection } from "@/components/mirror/pmus-panels";
 import { ObservationLogSection } from "@/components/mirror/observation-panel";
 import { GeneralShadowSection } from "@/components/mirror/general-shadow-panel";
 import { LiveSafetySection } from "@/components/mirror/live-safety-panel";
+import { PoligarchLivePilotPanel } from "@/components/mirror/poligarch-live-pilot-panel";
 import { formatShares, formatTime, formatUsd, isWeatherMarket } from "@/lib/mirror-trader";
 import {
   acknowledgeAlerts,
@@ -256,6 +257,8 @@ function Dashboard() {
       <SelfCheckSection />
 
       <LiveSafetySection />
+
+      <PoligarchLivePilotPanel />
 
       <PmusSection />
 

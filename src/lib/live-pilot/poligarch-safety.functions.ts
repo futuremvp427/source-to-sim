@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
 import { requireAdmin } from "../admin-auth";
+import type { PoligarchLiveIntent } from "./poligarch-intents.server";
 import type { PilotSafetyState } from "./poligarch-safety-core";
 
 /** Read-only Poligarch V2 live-pilot safety state: kill switch, stage, caps. */
@@ -10,6 +11,19 @@ export const getPoligarchPilotSafety = createServerFn({ method: "GET" })
   .handler(async (): Promise<PilotSafetyState> => {
     const { loadPoligarchPilotSafety } = await import("./poligarch-safety.server");
     return loadPoligarchPilotSafety();
+  });
+
+/**
+ * Read-only: most recent Poligarch V2 live-pilot order-intent rows (preview
+ * results, skips, and any future order-status rows), newest first. Admin
+ * only. Never returns another pilot's or wallet's rows — see
+ * `poligarch-intents.server.ts`.
+ */
+export const getLatestPoligarchIntents = createServerFn({ method: "GET" })
+  .middleware([requireAdmin])
+  .handler(async (): Promise<PoligarchLiveIntent[]> => {
+    const { loadRecentPoligarchIntents } = await import("./poligarch-intents.server");
+    return loadRecentPoligarchIntents(20);
   });
 
 export const setPoligarchKillSwitch = createServerFn({ method: "POST" })
