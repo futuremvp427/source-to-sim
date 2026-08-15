@@ -69,6 +69,54 @@ describe("computeLivePilotOrderSize", () => {
       expect(result.notionalUsd).toBeLessThanOrEqual(2);
     }
   });
+
+  it("rejects a price below the platform's 0.01 lower bound", () => {
+    const result = computeLivePilotOrderSize({
+      proportionalNotionalUsd: 50,
+      remainingBankrollUsd: 25,
+      remainingExposureUsd: 10,
+      price: 0.005,
+      minimumTradeQty: 0.01,
+      tickSize: 0.005,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toMatch(/outside the allowed bounds/i);
+  });
+
+  it("rejects a price above the platform's 0.99 upper bound", () => {
+    const result = computeLivePilotOrderSize({
+      proportionalNotionalUsd: 50,
+      remainingBankrollUsd: 25,
+      remainingExposureUsd: 10,
+      price: 1,
+      minimumTradeQty: 0.01,
+      tickSize: 0.005,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toMatch(/outside the allowed bounds/i);
+  });
+
+  it("accepts prices exactly at the 0.01/0.99 bounds", () => {
+    const low = computeLivePilotOrderSize({
+      proportionalNotionalUsd: 50,
+      remainingBankrollUsd: 25,
+      remainingExposureUsd: 10,
+      price: 0.01,
+      minimumTradeQty: 0.01,
+      tickSize: 0.005,
+    });
+    expect(low.ok).toBe(true);
+
+    const high = computeLivePilotOrderSize({
+      proportionalNotionalUsd: 50,
+      remainingBankrollUsd: 25,
+      remainingExposureUsd: 10,
+      price: 0.99,
+      minimumTradeQty: 0.01,
+      tickSize: 0.005,
+    });
+    expect(high.ok).toBe(true);
+  });
 });
 
 describe("checkSignalAge", () => {

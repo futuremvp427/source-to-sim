@@ -8,6 +8,17 @@ export type SizingInput = {
   remainingExposureUsd: number;
   price: number;
   minimumTradeQty: number;
+  /**
+   * Polymarket US `orderPriceMinTickSize` — the platform's PRICE tick
+   * (e.g. 0.005), used elsewhere for price validation/rounding (see
+   * `roundToPriceTick`/`formatPriceForTick` in
+   * `poligarch-submission.server.ts`). NOT a share-quantity step. Share
+   * quantities below are rounded using `minimumTradeQty` instead, which is
+   * the actual "quantity granularity" concept Polymarket US exposes.
+   * `tickSize` is accepted here only so callers can carry a market's full
+   * spec through the sizing call in one place; it is not read by this
+   * function's rounding logic.
+   */
   tickSize: number;
 };
 
@@ -15,8 +26,11 @@ export type SizingResult =
   | { ok: true; notionalUsd: number; shares: number }
   | { ok: false; reason: string };
 
-function roundToTick(value: number, tick: number): number {
-  return Math.floor(value / tick) * tick;
+const MIN_ALLOWED_PRICE = 0.01;
+const MAX_ALLOWED_PRICE = 0.99;
+
+function roundToQuantityStep(value: number, step: number): number {
+  return Math.floor(value / step) * step;
 }
 
 /**
@@ -25,6 +39,13 @@ function roundToTick(value: number, tick: number): number {
  * cleared at that notional, SKIP — never increase size to compensate.
  */
 export function computeLivePilotOrderSize(input: SizingInput): SizingResult {
+  if (input.price < MIN_ALLOWED_PRICE || input.price > MAX_ALLOWED_PRICE) {
+    return {
+      ok: false,
+      reason: `Price $${input.price} is outside the allowed bounds [$${MIN_ALLOWED_PRICE}, $${MAX_ALLOWED_PRICE}].`,
+    };
+  }
+
   const cappedNotional = Math.min(
     input.proportionalNotionalUsd,
     PILOT_RISK_LIMITS.maxOrderNotionalUsd,
@@ -44,9 +65,9 @@ export function computeLivePilotOrderSize(input: SizingInput): SizingResult {
     };
   }
 
-  const shares = roundToTick(rawShares, input.tickSize);
+  const shares = roundToQuantityStep(rawShares, input.minimumTradeQty);
   if (shares < input.minimumTradeQty) {
-    return { ok: false, reason: "Tick-rounded size falls below minimumTradeQty." };
+    return { ok: false, reason: "Quantity-rounded size falls below minimumTradeQty." };
   }
 
   return { ok: true, notionalUsd: Number((shares * input.price).toFixed(2)), shares };
