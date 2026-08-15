@@ -140,6 +140,54 @@
       "table": "live_safety_state",
       "name": "live_safety_single_row",
       "definition_contains": ["id = 'global'"]
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "live_pilot_state_pkey",
+      "definition_contains": ["primary key (pilot_id)"]
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "live_pilot_state_stage_check",
+      "definition_contains": ["activation_stage", "locked", "preview", "live_pilot"]
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "live_order_intents_pkey",
+      "definition_contains": ["primary key (id)"]
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "live_order_intents_source_unique",
+      "definition_contains": ["unique (source_experiment_id, source_event_id)"]
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "live_order_intents_status_check",
+      "definition_contains": ["status", "previewed", "skipped", "authorized", "submitting", "submitted", "partially_filled", "filled", "cancelled", "rejected", "failed"]
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "live_order_intents_pilot_id_fkey",
+      "definition_contains": ["foreign key (pilot_id)", "references live_pilot_state(pilot_id)"]
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "live_order_intents_source_experiment_id_fkey",
+      "definition_contains": ["foreign key (source_experiment_id)", "references paper_experiments(id)"]
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "live_order_intents_source_event_id_fkey",
+      "definition_contains": ["foreign key (source_event_id)", "references source_events(id)"]
     }
   ],
   "columns": [
@@ -245,6 +293,214 @@
       "type": "numeric",
       "not_null": true,
       "default_contains": ["0"]
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "pilot_id",
+      "type": "text",
+      "not_null": true
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "kill_switch_engaged",
+      "type": "boolean",
+      "not_null": true,
+      "default_contains": ["true"]
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "activation_stage",
+      "type": "text",
+      "not_null": true,
+      "default_contains": ["'locked'"]
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "armed_at",
+      "type": "timestamp with time zone",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "armed_by",
+      "type": "uuid",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "activated_at",
+      "type": "timestamp with time zone",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "activated_by",
+      "type": "uuid",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "pilot_bankroll_usd",
+      "type": "numeric",
+      "not_null": true,
+      "default_contains": ["0"]
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "max_order_notional_usd",
+      "type": "numeric",
+      "not_null": true,
+      "default_contains": ["0"]
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "max_total_exposure_usd",
+      "type": "numeric",
+      "not_null": true,
+      "default_contains": ["0"]
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "max_daily_realized_loss_usd",
+      "type": "numeric",
+      "not_null": true,
+      "default_contains": ["0"]
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "consecutive_failed_orders",
+      "type": "integer",
+      "not_null": true,
+      "default_contains": ["0"]
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "last_action",
+      "type": "text",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "last_action_at",
+      "type": "timestamp with time zone",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_contains": ["now("]
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "id",
+      "type": "uuid",
+      "not_null": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "pilot_id",
+      "type": "text",
+      "not_null": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "source_experiment_id",
+      "type": "uuid",
+      "not_null": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "source_event_id",
+      "type": "uuid",
+      "not_null": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "source_event_key",
+      "type": "text",
+      "not_null": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "source_wallet",
+      "type": "text",
+      "not_null": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "source_side",
+      "type": "text",
+      "not_null": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "source_price",
+      "type": "numeric",
+      "not_null": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "source_ts",
+      "type": "bigint",
+      "not_null": true
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "status",
+      "type": "text",
+      "not_null": true,
+      "default_contains": ["'previewed'"]
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "status_history",
+      "type": "jsonb",
+      "not_null": true,
+      "default_contains": ["[]"]
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_contains": ["now("]
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "not_null": true,
+      "default_contains": ["now("]
     }
   ],
   "functions": [
@@ -318,6 +574,36 @@
       "definition_contains": ["from public.user_roles", "user_id = _user_id", "role = _role"],
       "execute_allowed": ["authenticated", "service_role"],
       "execute_denied": ["PUBLIC", "anon"]
+    },
+    {
+      "schema": "public",
+      "name": "create_or_get_live_pilot_intent_atomic",
+      "identity_args": "text, uuid, uuid, jsonb",
+      "security_definer": true,
+      "config_contains": ["search_path=public"],
+      "definition_contains": [
+        "insert into public.live_order_intents",
+        "on conflict (source_experiment_id, source_event_id) do nothing",
+        "select id, status into v_id, v_status",
+        "from public.live_order_intents"
+      ],
+      "execute_allowed": ["service_role"],
+      "execute_denied": ["PUBLIC", "anon", "authenticated"]
+    },
+    {
+      "schema": "public",
+      "name": "update_live_pilot_intent_status_atomic",
+      "identity_args": "uuid, text, jsonb",
+      "security_definer": true,
+      "config_contains": ["search_path=public"],
+      "definition_contains": [
+        "select * into v_row from public.live_order_intents where id = p_intent_id for update",
+        "update public.live_order_intents",
+        "status_history = status_history || jsonb_build_object",
+        "raise exception 'invalid status %'"
+      ],
+      "execute_allowed": ["service_role"],
+      "execute_denied": ["PUBLIC", "anon", "authenticated"]
     }
   ],
   "rls": [
@@ -331,7 +617,9 @@
     {"schema": "public", "table": "worker_checkpoints", "enabled": true},
     {"schema": "public", "table": "alerts", "enabled": true},
     {"schema": "public", "table": "user_roles", "enabled": true},
-    {"schema": "public", "table": "live_safety_state", "enabled": true}
+    {"schema": "public", "table": "live_safety_state", "enabled": true},
+    {"schema": "public", "table": "live_pilot_state", "enabled": true},
+    {"schema": "public", "table": "live_order_intents", "enabled": true}
   ],
   "policies": [
     {
@@ -349,12 +637,38 @@
       "command": "SELECT",
       "roles": ["authenticated"],
       "using_contains": ["has_role(auth.uid(), 'admin'"]
+    },
+    {
+      "schema": "public",
+      "table": "live_pilot_state",
+      "name": "Admins can read live pilot state",
+      "command": "SELECT",
+      "roles": ["authenticated"],
+      "using_contains": ["has_role(auth.uid(), 'admin'"]
+    },
+    {
+      "schema": "public",
+      "table": "live_order_intents",
+      "name": "Admins can read live pilot intents",
+      "command": "SELECT",
+      "roles": ["authenticated"],
+      "using_contains": ["has_role(auth.uid(), 'admin'"]
     }
   ],
   "table_grants": [
     {"schema": "public", "table": "user_roles", "role": "authenticated", "privilege": "SELECT", "allowed": true},
     {"schema": "public", "table": "live_safety_state", "role": "authenticated", "privilege": "SELECT", "allowed": true},
     {"schema": "public", "table": "experiment_event_state", "role": "service_role", "privilege": "SELECT", "allowed": true},
-    {"schema": "public", "table": "experiment_source_position_state", "role": "service_role", "privilege": "SELECT", "allowed": true}
+    {"schema": "public", "table": "experiment_source_position_state", "role": "service_role", "privilege": "SELECT", "allowed": true},
+    {"schema": "public", "table": "live_pilot_state", "role": "authenticated", "privilege": "SELECT", "allowed": true},
+    {"schema": "public", "table": "live_pilot_state", "role": "service_role", "privilege": "SELECT", "allowed": true},
+    {"schema": "public", "table": "live_pilot_state", "role": "service_role", "privilege": "INSERT", "allowed": true},
+    {"schema": "public", "table": "live_pilot_state", "role": "service_role", "privilege": "UPDATE", "allowed": true},
+    {"schema": "public", "table": "live_pilot_state", "role": "service_role", "privilege": "DELETE", "allowed": true},
+    {"schema": "public", "table": "live_order_intents", "role": "authenticated", "privilege": "SELECT", "allowed": true},
+    {"schema": "public", "table": "live_order_intents", "role": "service_role", "privilege": "SELECT", "allowed": true},
+    {"schema": "public", "table": "live_order_intents", "role": "service_role", "privilege": "INSERT", "allowed": true},
+    {"schema": "public", "table": "live_order_intents", "role": "service_role", "privilege": "UPDATE", "allowed": true},
+    {"schema": "public", "table": "live_order_intents", "role": "service_role", "privilege": "DELETE", "allowed": true}
   ]
 }
