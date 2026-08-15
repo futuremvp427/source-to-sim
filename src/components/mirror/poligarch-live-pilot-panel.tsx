@@ -7,6 +7,7 @@ import { EmptyState, Panel, RowSkeleton } from "@/components/mirror/panels";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import type { Json } from "@/integrations/supabase/types";
 import {
   abortPoligarchToLocked,
   enterPoligarchLivePilotStage,
@@ -16,6 +17,34 @@ import {
   setPoligarchKillSwitch,
 } from "@/lib/live-pilot/poligarch-safety.functions";
 import { formatUsd } from "@/lib/mirror-trader";
+
+type StatusHistoryEntry = { status: string; at: string };
+
+/**
+ * `status_history` is stored as jsonb — an array of
+ * `{ status, at, fields? }` objects appended by
+ * `update_live_pilot_intent_status_atomic` (see
+ * supabase/migrations/20260815121000_poligarch_live_pilot_intent_rpc.sql).
+ * Parsed defensively since it's typed as `Json` end-to-end.
+ */
+function parseStatusHistory(value: Json): StatusHistoryEntry[] {
+  if (!Array.isArray(value)) return [];
+  const entries: StatusHistoryEntry[] = [];
+  for (const item of value) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+    const status = item["status"];
+    const at = item["at"];
+    if (typeof status === "string" && typeof at === "string") {
+      entries.push({ status, at });
+    }
+  }
+  return entries;
+}
+
+function historyTimeLabel(at: string): string {
+  const d = new Date(at);
+  return Number.isNaN(d.getTime()) ? at : d.toLocaleTimeString("en-US");
+}
 
 function usd(v: number | null | undefined): string {
   return v === null || v === undefined ? "Unavailable" : formatUsd(v);
@@ -209,6 +238,7 @@ export function PoligarchLivePilotPanel() {
                     <tr>
                       <th className="py-1 pr-2 font-medium">Status</th>
                       <th className="py-1 pr-2 font-medium">Market</th>
+                      <th className="py-1 pr-2 font-medium">History</th>
                       <th className="py-1 pr-2 font-medium">Detected</th>
                       <th className="py-1 font-medium">Updated</th>
                     </tr>
@@ -223,6 +253,9 @@ export function PoligarchLivePilotPanel() {
                         </td>
                         <td className="py-1 pr-2 text-muted-foreground">
                           {i.usMarketSlug ?? "(unmapped)"}
+                        </td>
+                        <td className="py-1 pr-2">
+                          <StatusHistoryCell history={i.statusHistory} />
                         </td>
                         <td className="py-1 pr-2 whitespace-nowrap text-muted-foreground">
                           {new Date(i.detectedAt).toLocaleString("en-US")}
@@ -294,6 +327,42 @@ export function PoligarchLivePilotPanel() {
         </div>
       )}
     </Panel>
+  );
+}
+
+/**
+ * Compact, bounded rendering of an intent's status_history for the audit
+ * table: every transition if there are 4 or fewer, otherwise the first,
+ * a "+N more" marker, and the last (most recent) transition.
+ */
+function StatusHistoryCell({ history }: { history: Json }) {
+  const entries = parseStatusHistory(history);
+  if (entries.length === 0) {
+    return <span className="text-muted-foreground">—</span>;
+  }
+  const shown =
+    entries.length <= 4
+      ? entries.map((e, idx) => ({ entry: e, key: String(idx) }))
+      : [
+          { entry: entries[0]!, key: "first" },
+          { entry: null, key: "gap", gapCount: entries.length - 2 },
+          { entry: entries[entries.length - 1]!, key: "last" },
+        ];
+  return (
+    <ul className="space-y-0.5">
+      {shown.map((row) =>
+        row.entry ? (
+          <li key={row.key} className="whitespace-nowrap">
+            <span className="font-medium">{row.entry.status.replace(/_/g, " ")}</span>{" "}
+            <span className="text-muted-foreground">@ {historyTimeLabel(row.entry.at)}</span>
+          </li>
+        ) : (
+          <li key={row.key} className="text-muted-foreground">
+            ⋮ {row.gapCount} more
+          </li>
+        ),
+      )}
+    </ul>
   );
 }
 
