@@ -179,3 +179,20 @@ describe("poligarch-safety.server", () => {
     expect(fake.getRow()?.["kill_switch_engaged"]).toBe(false);
   });
 });
+
+describe("poligarch-safety.server write verification", () => {
+  it("throws instead of reporting success when the DB update returns an error", async () => {
+    fake.setRow(lockedRow({ kill_switch_engaged: false, activation_stage: "live_pilot" }));
+    fake.setUpdateError({ message: "connection reset" });
+
+    await expect(engagePoligarchKillSwitch("user-1")).rejects.toThrow(/live_pilot_state update failed/);
+
+    fake.setUpdateError(null);
+  });
+
+  it("throws when the update matches no pilot row (nothing persisted)", async () => {
+    fake.setRow(null);
+
+    await expect(engagePoligarchKillSwitch("user-1")).rejects.toThrow(/matched no row/);
+  });
+});
