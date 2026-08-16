@@ -20,6 +20,7 @@ import { GeneralShadowSection } from "@/components/mirror/general-shadow-panel";
 import { LiveSafetySection } from "@/components/mirror/live-safety-panel";
 import { PoligarchLivePilotPanel } from "@/components/mirror/poligarch-live-pilot-panel";
 import { formatShares, formatTime, formatUsd, isWeatherMarket } from "@/lib/mirror-trader";
+import { isWorkerHealthy } from "@/lib/worker-health";
 import {
   acknowledgeAlerts,
   getShadowDashboard,
@@ -131,7 +132,7 @@ function Dashboard() {
   const worker = data?.worker;
   const totals = data?.totals;
   const unackAlerts = (data?.alerts ?? []).filter((a) => !a.acknowledged);
-  const workerHealthy = worker ? (worker.heartbeatAgeSeconds ?? 1e9) < 300 && !worker.lastError : false;
+  const workerHealthy = isWorkerHealthy(worker);
 
   return (
     <main className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">

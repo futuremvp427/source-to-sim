@@ -60,4 +60,24 @@ Sibling experiments sharing a wallet (e.g. `SHADOW V2: gghff` / `SHADOW V3 CAPAC
 
 Phase 2 (prior-utc-day-v1) changed how the observation panel computes historical slippage-adjusted P&L: for a settled UTC day D, the adjusted estimate uses only entry-slippage samples observed strictly before `D 00:00:00 UTC` (capped at the most recent 2,000 eligible samples). A sample observed during or after day D can never retroactively change day D's adjusted figure. The current (today's) observed slippage median remains descriptive only and is never substituted into a historical day's adjusted estimate. This is a correctness fix to that one derived metric — it is unrelated to, and does not substitute for, the experiment-isolation clean epoch described above.
 
+## August 21 qualification methodology (documentation only — no logic change)
+
+T_7d (2026-08-21 11:29:19.638 UTC) is the **earliest** date at which any of the 10 V2/V3 cohort experiments may be evaluated for promotion out of the clean-epoch observation window. It is not a fixed evaluation date and it does not by itself imply enough evidence has accumulated. Calendar time elapsed since T_clean is a necessary but not sufficient condition: a bot must also have accumulated enough genuinely new post-T_clean trading evidence to support a promotion decision.
+
+**The post-T_clean sample is defined by the opening BUY, not by when a position settles.** Only positions whose opening BUY occurred strictly after T_clean (2026-08-14 11:29:19.638 UTC) count toward an experiment's clean promotion sample. A settlement observed after T_clean for a position that was opened *before* T_clean does not count as a complete clean post-fix lifecycle — that position's entry decision was made under the pre-fix (or transitional) consumption path this document's clean epoch exists to exclude, so its outcome cannot be attributed to post-fix behavior even if the outcome itself lands inside the clean window. Such positions must be reported separately, labeled as legacy/pre-clean evidence, and excluded from the clean promotion sample (see the read-only clean-window activity audit below for the concrete query that partitions the two populations).
+
+At or after T_7d, each of the 10 experiments must be classified into exactly one of three states — this is a reporting classification, not a change to the qualification criteria themselves:
+
+- **QUALIFIED** — the experiment has a sufficient, representative sample of complete post-T_clean lifecycles (opening BUY after T_clean, and enough of them across enough distinct trading days/markets to be representative) whose aggregate result meets the qualification bar.
+- **NOT QUALIFIED** — the experiment has a sufficient post-T_clean sample, but that sample's aggregate result does not meet the qualification bar.
+- **INSUFFICIENT NEW DATA** — calendar time has passed T_7d, but the experiment has not yet accumulated enough post-T_clean opening-BUY activity (too few positions, too few distinct trading days, or too little capital deployed) to support either a QUALIFIED or NOT QUALIFIED call. Passing T_7d does not force a premature verdict.
+
+This document deliberately does not fix a minimum sample-size threshold for "sufficient" above. That number should be set from the actual observed post-T_clean activity distribution across all 10 experiments (see the audit below) rather than guessed in advance.
+
+This section adds reporting/classification guidance only. It does not move T_clean or T_7d, does not change qualification math, sizing, accounting, settlement, or any other logic.
+
+## Read-only clean-window activity audit (prepared, not yet run)
+
+A read-only SQL audit bundle for measuring each of the 10 experiments' post-T_clean activity — the concrete data needed to apply the classification above — is prepared at `supabase/audits/clean_window_activity_audit.sql`. It is SELECT-only, safe to run against production at any time, and must be run **after** this PR merges, not before or as part of it. See that file's header comment for the full list of measures and the exact opening-BUY-after-T_clean partitioning logic.
+
 This document is reporting guidance only. It does not change sizing, accounting, settlement, leases/fencing, bankrolls, source-event identity, or live-order safety.

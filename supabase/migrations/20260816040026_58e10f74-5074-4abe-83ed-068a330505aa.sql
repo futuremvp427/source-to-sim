@@ -13,7 +13,19 @@
 -- Never touches paper accounting, checkpoints, bankrolls, settlements, or
 -- live-trading state -- this table exists purely to pace outbound HTTP
 -- requests to one external host.
-CREATE TABLE public.http_rate_limits (
+--
+-- IF NOT EXISTS (2026-08-16, reliability-cleanup-pre-aug21 PR): this file is
+-- a Lovable auto-sync duplicate of 20260815160000_http_rate_limit_cooldown.sql
+-- -- both were committed to this repo with the same CREATE TABLE content, so
+-- a clean migration replay (schema-contract CI, or any fresh environment)
+-- always failed on this statement with "relation already exists" once the
+-- earlier migration had already created the table. This guard makes replay
+-- idempotent without changing anything about what either migration actually
+-- creates; it is a no-op wherever this file previously succeeded (there is
+-- no evidence it ever ran as raw SQL against a database that already had
+-- this table -- the identical failure reproduced here on a byte-for-byte
+-- fresh replay), so this cannot alter production's already-applied schema.
+CREATE TABLE IF NOT EXISTS public.http_rate_limits (
   host text NOT NULL PRIMARY KEY,
   blocked_until timestamptz,
   reason text,
