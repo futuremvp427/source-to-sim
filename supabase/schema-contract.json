@@ -299,6 +299,14 @@
         "foreign key (source_event_id)",
         "references source_events(id)"
       ]
+    },
+    {
+      "schema": "public",
+      "table": "http_rate_limits",
+      "name": "http_rate_limits_pkey",
+      "definition_contains": [
+        "primary key (host)"
+      ]
     }
   ],
   "columns": [
@@ -882,6 +890,28 @@
         "anon",
         "authenticated"
       ]
+    },
+    {
+      "schema": "public",
+      "name": "record_http_rate_limit",
+      "identity_args": "text, timestamp with time zone, text",
+      "security_definer": true,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "insert into public.http_rate_limits",
+        "on conflict (host) do update set",
+        "greatest(public.http_rate_limits.blocked_until, excluded.blocked_until)"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
     }
   ],
   "rls": [
@@ -948,6 +978,11 @@
     {
       "schema": "public",
       "table": "live_order_intents",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "http_rate_limits",
       "enabled": true
     }
   ],
@@ -1098,6 +1133,13 @@
       "table": "live_order_intents",
       "role": "service_role",
       "privilege": "DELETE",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "http_rate_limits",
+      "role": "service_role",
+      "privilege": "SELECT",
       "allowed": true
     }
   ]

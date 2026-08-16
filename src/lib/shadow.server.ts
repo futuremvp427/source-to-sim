@@ -45,6 +45,14 @@ import {
   isV2Name,
 } from "./v2-cohort";
 import { isGeneralShadowName } from "./general-shadow";
+import {
+  DATA_API_HOST,
+  getHostCooldown,
+  parseRetryAfterMs,
+  recordHostRateLimit,
+} from "./http-rate-limit.server";
+/** Re-exported so existing external imports of parseRetryAfterMs from this module keep working. */
+export { parseRetryAfterMs } from "./http-rate-limit.server";
 
 export const TARGET_WALLET = "0x8fbd7cf5f806f563080864694415829f7229a959";
 export const EXPERIMENT_NAME = "SHADOW";
@@ -166,20 +174,6 @@ function requestSignal(signal?: AbortSignal): AbortSignal {
 }
 
 /**
- * Parses a Retry-After header (either delay-seconds or an HTTP-date, per
- * RFC 9110 10.2.3) into a millisecond wait. Returns null when absent or
- * unparseable so the caller falls back to its own backoff schedule.
- */
-export function parseRetryAfterMs(value: string | null, now: number = Date.now()): number | null {
-  if (!value) return null;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
-  const when = Date.parse(value);
-  if (Number.isFinite(when)) return Math.max(0, when - now);
-  return null;
-}
-
-/**
  * Raised on HTTP 429 so callers can special-case rate limiting (e.g. to
  * avoid alert spam or to short-circuit sibling requests) without parsing
  * error messages.
@@ -265,9 +259,18 @@ async function getJson(
     } catch (err) {
       lastErr = err;
       if (signal?.aborted) break;
+      // 429 gets zero in-process retries, regardless of attempts remaining:
+      // Phase 1 (jittered backoff) reduced collisions within one request's
+      // own retry loop, but production evidence showed bursts recurring
+      // every ~5-6 minutes across all 10 V2/V3 experiments even with that in
+      // place -- retrying inside a single request just rediscovers the same
+      // host-wide limit up to 3x per experiment per cycle, amplifying it.
+      // Pacing now happens at the shared host-cooldown level (below)
+      // instead, which survives across scheduler ticks; a non-429 transient
+      // failure (network blip, 5xx) keeps the existing bounded retry.
+      if (err instanceof RateLimitedError) break;
       if (i < attempts - 1) {
-        const retryAfterMs = err instanceof RateLimitedError ? err.retryAfterMs : null;
-        let delay = backoffDelayMs(i, retryAfterMs);
+        let delay = backoffDelayMs(i, null);
         if (deadlineAt !== undefined) {
           const remaining = deadlineAt - Date.now();
           if (remaining <= 0) break;
@@ -276,6 +279,9 @@ async function getJson(
         await sleep(delay, signal);
       }
     }
+  }
+  if (lastErr instanceof RateLimitedError) {
+    await recordHostRateLimit(new URL(url).host, lastErr.retryAfterMs);
   }
   throw lastErr instanceof Error ? lastErr : new Error("request failed");
 }
@@ -1636,6 +1642,26 @@ export async function runExperimentCycle(
     return {
       ...base,
       skipped: "Another worker holds the ingestion lease.",
+    };
+  }
+
+  // Read fresh every call (not threaded down from runIngestCycle) so a
+  // cooldown recorded by an earlier experiment IN THIS SAME cycle is seen
+  // immediately by a later one, not just on the next scheduler tick. Applies
+  // uniformly to every experiment -- including General Shadow, since it hits
+  // the same host via a different path (see general-shadow.server.ts) -- so
+  // one shared budget paces all of them together instead of each
+  // independently rediscovering the limit. Checked before any checkpoint or
+  // network work starts: a deferred cycle must never touch
+  // worker_checkpoints, so nothing here can advance a checkpoint.
+  const hostCooldown = await getHostCooldown(DATA_API_HOST);
+  if (hostCooldown.blocked) {
+    await releaseLease(lease, { state: "idle" });
+    return {
+      ...base,
+      skipped: `${DATA_API_HOST} rate-limit cooldown active${
+        hostCooldown.until ? ` until ${hostCooldown.until.toISOString()}` : ""
+      }${hostCooldown.reason ? ` (${hostCooldown.reason})` : ""}; deferring to next cycle.`,
     };
   }
 

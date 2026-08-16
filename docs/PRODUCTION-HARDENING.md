@@ -134,6 +134,36 @@ Regression tests: `src/lib/trades-request-storm.test.ts` — dedup collapses 10 
 
 No bankroll, cash, P&L, checkpoint, source-event, or live-trading-safety control was reset or modified as part of this fix.
 
+## Incident phase 2: host-level rate-limit cooldown (2026-08-16)
+
+Production evidence after the phase 1 dedup fix (above) landed showed it helped but did not eliminate the 429s: fresh 429s continued across all 10 V2/V3 experiments, recurring roughly every 5-6 minutes, `Retry-After` was absent, and — importantly — every continuity check (checkpoints, `experiment_event_state` anti-joins) came back clean, with no `CatchupProgressionError`, checkpoint, offset, statement-timeout, or 520 errors. This confirmed the remaining problem was **host/IP-level rate limiting plus retry amplification**, not a strategy, accounting, or checkpoint defect. General Shadow was also confirmed to hit the same upstream host.
+
+**Root cause of the residual bursts.** Phase 1's dedup cache is scoped to one `runIngestCycle` invocation; a fresh scheduler tick has no memory of the previous one. A 429 observed on tick N was therefore independently rediscovered by every experiment on tick N+1, N+2, etc. — nothing paced requests *across* ticks. Additionally, `getJson` still retried up to 3 times per request even on 429 (with jittered backoff from phase 1), so a single rate-limit event could still generate up to 3 upstream 429s per experiment per cycle.
+
+**Fix applied.**
+- `getJson` (`shadow.server.ts`) no longer retries in-process on a 429 at all, regardless of `Retry-After` — it fails that request immediately. A non-429 transient failure (network blip, 5xx) keeps its existing bounded 3-attempt retry with jittered backoff; that path is unchanged.
+- A new table, `http_rate_limits` (migration `20260815160000_http_rate_limit_cooldown.sql`), holds one row per host with a `blocked_until` timestamp. `getJson` records a cooldown there the moment it sees a 429 (`recordHostRateLimit`, `src/lib/http-rate-limit.server.ts`), via an atomic `GREATEST`-upsert RPC (`record_http_rate_limit`) that mirrors the existing `acquire_worker_lease` lease-fencing pattern — deliberately the smallest existing durable coordination mechanism in this repo, not a new subsystem. Two experiments recording a 429 for the same host in the same tick converge on the longer cooldown instead of one write clobbering the other.
+- `runExperimentCycle` reads that cooldown fresh (not threaded from `runIngestCycle`, so a cooldown recorded by an earlier experiment in the same cycle is seen immediately by a later one) right after acquiring its lease, **before any checkpoint or network work starts**. If the host is in cooldown, it releases the lease as `idle` (not `error` — no `poll_failures` increment, no alert) and returns a `skipped` result, exactly like the existing "another worker holds the lease" pattern. Because this check happens before `worker_checkpoints` is ever touched, a deferred cycle can never advance a checkpoint.
+- This single gate covers **every** experiment type uniformly, including General Shadow (which reaches `/activity` through the same `runExperimentCycle`), so General Shadow respects the same host budget without any special-casing. `general-shadow.server.ts`'s `getActivityPage` additionally records the cooldown itself (and also stops retrying on 429) if it happens to be the request that first discovers a fresh rate limit, so the shared budget is symmetric regardless of which endpoint (`/trades` or `/activity`) sees the 429 first.
+- `getHostCooldown` fails **closed**: if the cooldown row itself cannot be read (a query error), the host is treated as blocked rather than risking a request against an upstream that may already be limiting this app. The cost of deferring one cycle is far lower than the cost of amplifying a live storm.
+- Cooldown duration: `Retry-After` is honored when present, clamped to `[60s, 600s]` (`MIN_COOLDOWN_MS`/`MAX_COOLDOWN_MS`) so a pathological header value can neither fail to pace anything nor lock ingestion out indefinitely; absent `Retry-After` (the observed production case), a `90s` default is used.
+
+**429 retry behavior, before vs. after:**
+| | Before (phase 1) | After (phase 2) |
+|---|---|---|
+| In-process retries on 429 | Up to 3, jittered backoff | 0 — fails immediately |
+| Pacing mechanism | Per-request backoff only | Shared DB-backed cooldown, survives across ticks |
+| Scope | Per `runIngestCycle` invocation | All experiments (V2/V3 + General Shadow), across invocations |
+| Non-429 failures | 3 attempts, jittered backoff | Unchanged — 3 attempts, jittered backoff |
+
+**Checkpoint semantics unchanged.** The cooldown gate sits entirely before the `stages` pipeline that loads/writes `worker_checkpoints`; a deferred cycle never enters that pipeline, so `last_source_ts`/`bootstrap_complete` are untouched. When the cooldown lapses, the next cycle proceeds through the existing checkpoint-driven catch-up (`fetchUntilCheckpointCovered`) exactly as before — this mechanism itself was not modified.
+
+**Live-trading safety unchanged.** No change to strategy, sizing, bankrolls, P&L, positions, settlement logic, `T_clean`, `T_7d`, or Poligarch live-pilot safety state (kill switch, activation lock, $0 caps, submission disabled).
+
+**Trade-off, stated explicitly.** Gating the entire experiment cycle (not just the `/trades` fetch) means mark refresh, reconciliation, settlement, and preview generation for an experiment are also deferred while the host cooldown is active — bounded to the cooldown window (60-600s, one scheduler tick or so in practice), and resumed on the very next successful cycle. This was chosen over a narrower per-stage gate because partially gating only the network call while still writing `bootstrap_complete`/checkpoint state on a request that was never actually attempted risked exactly the kind of subtle correctness bug this whole incident is about avoiding; the simpler, coarser gate is easier to reason about and verify.
+
+Regression tests: `src/lib/http-rate-limit-cooldown.test.ts` — `clampCooldownMs` bounds; `getHostCooldown` fail-closed and normal read paths; `recordHostRateLimit` clamps duration and never throws even if the RPC fails; a single 429 gets zero retries while a non-429 failure still retries up to 3 times; `runExperimentCycle` defers before touching any table other than `http_rate_limits`/`worker_status`, releases the lease as `idle`, and suppresses upstream calls across repeated invocations while the cooldown is active; General Shadow's `getActivityPage` records the same cooldown and doesn't retry on 429. `src/lib/trades-request-storm.test.ts` was updated in place for the new zero-retry-on-429 behavior (previously asserted 3 attempts).
+
 ## Live rollout required
 
 ### 1. Rotate the scheduler secret
