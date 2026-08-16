@@ -3,14 +3,23 @@ import { describe, expect, it } from "vitest";
 import { isImportantAlertKind, shouldDisableTelegramNotification } from "./notify.server";
 
 describe("notification routing", () => {
-  it("notifies only important alert kinds", () => {
-    // Source-trade volume is dashboard-only: stored, but never pushed.
+  it("notifies only actionable alert kinds", () => {
+    // High-volume source activity remains stored/dashboard-visible only.
     expect(isImportantAlertKind("new_source_trades")).toBe(false);
+
+    // A reconciliation_mismatch row describes a repair that already completed
+    // from the authoritative persisted-event replay. Keep it visible in-app,
+    // but reserve Telegram for the unresolved/incomplete case.
+    expect(isImportantAlertKind("reconciliation_mismatch")).toBe(false);
+    expect(isImportantAlertKind("reconciliation_incomplete")).toBe(true);
+
     expect(isImportantAlertKind("paper_buy")).toBe(true);
+    expect(isImportantAlertKind("paper_sell")).toBe(true);
+    expect(isImportantAlertKind("settlement")).toBe(true);
+    expect(isImportantAlertKind("position_settled")).toBe(true);
     expect(isImportantAlertKind("LOW_SPENDABLE_CASH")).toBe(true);
     expect(isImportantAlertKind("CASH_RESERVE_REACHED")).toBe(true);
     expect(isImportantAlertKind("poll_failure")).toBe(true);
-    expect(isImportantAlertKind("reconciliation_mismatch")).toBe(true);
     expect(isImportantAlertKind("paper_copy_skips")).toBe(false);
     expect(isImportantAlertKind("follower_started")).toBe(false);
   });
