@@ -2,11 +2,11 @@
 
 ## Current authoritative status (read this first)
 
-**T_clean = 2026-08-14 11:29:19.638 UTC. T_7d = 2026-08-21 11:29:19.638 UTC.** Both are established and unchanged.
+**T_clean = 2026-08-16 12:09:43.355885 UTC. T_7d = 2026-08-23 12:09:43.355885 UTC. T_14d = 2026-08-30 12:09:43.355885 UTC.**
 
-T_clean was briefly withdrawn on 2026-08-14 (~12:20-13:25 UTC) after a second wave of statement-timeout failures, then re-established later the same day once the underlying cause was fixed — see "Production clean observation epoch" below for the full chronology, including the withdrawal, root-cause diagnosis, and fix. That withdrawal is historical and does not apply to the value above; nothing below this point in the document supersedes it.
+This is a **new, distinct epoch boundary**, established from a dedicated 2026-08-16 production audit — it is **not** a resurrection of the 2026-08-14 value discussed at length below. The earlier `T_clean = 2026-08-14 11:29:19.638 UTC` value remains **withdrawn and historical**; it was never re-established, a further full-cohort 429 storm occurred as recently as 2026-08-16 03:12–03:52 UTC (well after that value's own window), and nothing in this document should be read as reviving it. See `docs/CURRENT_OBSERVATION_STATUS.md` for the current authoritative status and the two documents' agreed relationship, and see "2026-08-16 production continuity audit: new T_clean established" below for the full evidence trail behind the new boundary.
 
-Since T_clean was established, production continuity audits have confirmed: V2/V3 checkpoint recovery after the 429 incidents, a zero-row V2/V3 anti-join (no missing source-event coverage), a zero-row Poligarch V2 anti-join, no unrecoverable catch-up gaps, and the host-level rate-limit cooldown operating as designed. The read-only clean-window activity audit has also now been run — see "Read-only clean-window activity audit" below for its results.
+Because this boundary was only just established, expect most or all of the 10 cohort experiments to read as **INSUFFICIENT NEW DATA** for some time — that is expected and correct, not a defect.
 
 ## Current status
 
@@ -32,7 +32,7 @@ On 2026-08-14, the Phase 1 schema (`experiment_event_state`, `experiment_source_
 
 The **V2/V3 comparison cohort is exactly 10 enabled experiments**: `SHADOW V2: badatmath.`, `SHADOW V2: gghff`, `SHADOW V2: HighTempTation`, `SHADOW V2: Poligarch`, `SHADOW V2: Weather-Guru`, `SHADOW V3 CAPACITY: badatmath.`, `SHADOW V3 CAPACITY: gghff`, `SHADOW V3 CAPACITY: HighTempTation`, `SHADOW V3 CAPACITY: Poligarch`, `SHADOW V3 CAPACITY: Weather-Guru`. `GENERAL SHADOW: *` experiments (including `RN1` and `swisstony`) are operationally relevant but are **not** members of this cohort and are never counted in the T_clean numerator or denominator.
 
-**[Historical, 2026-08-14 ~12:20 UTC] T_clean was WITHDRAWN and provisional at this point in the chronology.** This entry is preserved for audit continuity; it was superseded later the same day once T_clean was re-established (see "Both criteria for T_clean were satisfied" below and "Current authoritative status" at the top of this document). At the time, the previously recorded value (2026-08-14 11:29:19.638 UTC) did not hold: fresh production evidence showed a renewed wave of `canceling statement due to statement timeout` errors for multiple V2/V3 experiments (including `SHADOW V2: badatmath.` and Poligarch) from ~08:17 UTC onward, so criterion **B** (a sustained stable window after deploy) was not satisfied at that moment. No V2/V3 comparison window could be presented as controlled until a new T_clean was established under the same two criteria.
+**[Historical, 2026-08-14 ~12:20 UTC] T_clean was WITHDRAWN and provisional at this point in the chronology.** This entry is preserved for audit continuity. At the time, the previously recorded value (2026-08-14 11:29:19.638 UTC) did not hold: fresh production evidence showed a renewed wave of `canceling statement due to statement timeout` errors for multiple V2/V3 experiments (including `SHADOW V2: badatmath.` and Poligarch) from ~08:17 UTC onward, so criterion **B** (a sustained stable window after deploy) was not satisfied at that moment. No V2/V3 comparison window could be presented as controlled until a new T_clean was established under the same two criteria — see "[Historical, superseded] T_clean was believed re-established" below for what was thought to resolve this at the time, and "2026-08-16 production continuity audit" further below for the value that actually governs today.
 
 Root cause of this wave, proven directly on production rather than inferred: full-history reads of `copyability_observations` used PostgREST `.range()`, which compiles to SQL `OFFSET`. With that history now at 20k-55k rows per experiment, a deep page is structurally unservable — `explain (analyze)` of the page at offset 50,000 for the largest experiment took **22.3s** while walking 51,000 rows, even on a newly added exactly-matching index `(experiment_id, created_at desc, id desc)`, against the role `statement_timeout` of **8s**. Those reads therefore could never complete, retried every cycle across 10 experiments, and amplified the shared write-latency spikes already documented above.
 
@@ -50,15 +50,33 @@ Regression coverage: `src/lib/pending-experiment-events-sql.test.ts` (SQL shape,
 
 This required closing a second, broader-impact systemic gap beyond the checkpoint-load fix: a shared, external, infrastructure-level write-latency spike (proven via `pg_stat_statements` — even `pg_cron`'s own internal bookkeeping writes occasionally took 80-95s despite averaging under 500ms) was being amplified by `persistEvents`' request never being cancelled when the cycle's 40s deadline fired (`Promise.race` never cancels its losing promise), so a slow request kept consuming a connection/request slot for up to 82s while a *new* attempt started concurrently — compounding load exactly when the database was least able to absorb it. Fixed in `fix/real-cancellation-persist-events` (merge `30743529a6fec2bccef7839abc201bbf148241f2`): `persistEvents` now receives a real `AbortSignal` tied to the same deadline. This was the one call site with proven, repeated, extreme overruns (44s/67s/82s); no other stage showed this pattern, so no other call site was touched.
 
-**T_clean was re-established following this fix.** Both criteria for T_clean were satisfied and the later one governs — this is the resolution of the withdrawal above, and is the value that stands today (see "Current authoritative status" at the top of this document):
+**[Historical, superseded] T_clean was believed re-established following this fix, at this point in the chronology.** Both criteria appeared satisfied at the time and the later one appeared to govern:
 - **A.** All 10 cohort experiments completed at least one successful cycle after T_reconcile (2026-08-14 05:01:50.655580 UTC) — the last two to qualify, `SHADOW V2: badatmath.` and `SHADOW V3 CAPACITY: Poligarch`, first succeeded at 11:28:52 and 11:29:15 UTC respectively, essentially at the deploy boundary.
-- **B.** A sustained, verified stable window followed the fix's deploy (T_deploy = 2026-08-14 11:29:19.638 UTC, Lovable's own publish timestamp): ~8 minutes and 30+ scheduler invocations observed directly, covering the full cohort multiple times each, with all 10 reaching `poll_failures = 0` / `last_error = null` and only one isolated, non-cascading, self-resolved failure (a single `statement timeout` for one experiment that succeeded cleanly on its very next attempt) — within the master task's own tolerance for a bounded individual upstream failure that does not destabilize the cohort.
+- **B.** A sustained, verified stable window appeared to follow the fix's deploy (T_deploy = 2026-08-14 11:29:19.638 UTC, Lovable's own publish timestamp): ~8 minutes and 30+ scheduler invocations observed directly, covering the full cohort multiple times each, with all 10 reaching `poll_failures = 0` / `last_error = null` and only one isolated, non-cascading, self-resolved failure (a single `statement timeout` for one experiment that succeeded cleanly on its very next attempt).
 
-T_clean = max(A, B) = T_deploy = **2026-08-14 11:29:19.638 UTC**.
+At the time, this produced T_clean = max(A, B) = T_deploy = 2026-08-14 11:29:19.638 UTC, with derived T_7d = 2026-08-21 11:29:19.638 UTC and T_14d = 2026-08-28 11:29:19.638 UTC. **This conclusion did not hold.** `docs/CURRENT_OBSERVATION_STATUS.md` was published later the same day (2026-08-14, ~14:05 UTC) explicitly re-withdrawing this value, and a further full-cohort 429 storm occurred on 2026-08-16 (03:12–03:52 UTC) — well after this window — confirming the withdrawal was correct. **This 2026-08-14 value and its milestones are void and must not be used.** The current, separately-established T_clean is stated at the top of this document and in the next section.
+
+## 2026-08-16 production continuity audit: new T_clean established
+
+A dedicated read-only production audit was performed 2026-08-16 (~13:17 UTC) specifically to determine whether a new, independent T_clean could be established from current evidence — not to resurrect the 2026-08-14 value above. Findings, checked directly against live production data for all 10 V2/V3 cohort experiments:
+
+- **A full-cohort 429 storm occurred 2026-08-16 03:12–03:52 UTC**: repeated `data-api.polymarket.com/trades responded 429` failures recorded across all 10 experiments in multiple waves.
+- **The last failure of any kind for the cohort** was an isolated, non-cascading, self-resolved `ingest cycle exceeded 40000ms deadline` timeout affecting only `SHADOW V2: Poligarch` and `SHADOW V3 CAPACITY: Poligarch`, at **2026-08-16 12:04:47.381845 UTC** — not a 429, and not repeated. Both experiments completed a clean cycle by **2026-08-16 12:09:43.355885 UTC**, confirmed directly via `pipeline_audit` rows. No other experiment in the cohort failed at all between the storm's end and this point, or since.
+- **Zero poll failures of any kind** have been recorded for any of the 10 cohort experiments since 12:04:47.381845 UTC (checked against `poll_failure` alerts and all `level = 'error'` alerts for the cohort).
+- All 10 cohort experiments currently show `poll_failures = 0`, `last_error = null`, and a fresh heartbeat.
+- **`source_events` → `experiment_event_state` anti-join = zero** missing rows for all 10 experiments as of the new boundary, verified against non-trivial totals (1,483–32,932 events per experiment, all fully consumed) — including `SHADOW V2: Poligarch` specifically (32,932/32,932 consumed), satisfying the Poligarch-specific check separately.
+- **V2/V3 sibling checkpoints remain exactly aligned per wallet**: `badatmath.`, `gghff`, `HighTempTation`, `Poligarch`, and `Weather-Guru` each show an identical `last_source_ts` between their V2 and V3 CAPACITY rows.
+- No `CatchupProgressionError`, checkpoint/offset error, recurring statement-timeout, or abandoned-cycle instability was found for the cohort after the boundary.
+
+This satisfies the same two-criterion standard used (unsuccessfully, in hindsight) to establish the earlier value: (A) full-cohort successful-cycle completion after the boundary — satisfied at 12:09:43.355885 UTC — and (B) a sustained, verified stable window following it, which has held continuously (zero failures, checkpoints advancing, anti-join clean) from 12:09:43.355885 UTC through the audit time and beyond.
+
+**T_clean = 2026-08-16 12:09:43.355885 UTC** — the earliest point supported by this evidence: the moment the last two (of 10) cohort experiments proved recovery from the last known failure, with nothing having failed for any experiment since.
 
 Milestones (PostgreSQL-computed, not host-clock-derived):
-- **T_7d** = 2026-08-21 11:29:19.638 UTC = 2026-08-21 07:29:19.638 America/New_York
-- **T_14d** = 2026-08-28 11:29:19.638 UTC = 2026-08-28 07:29:19.638 America/New_York
+- **T_7d** = 2026-08-23 12:09:43.355885 UTC
+- **T_14d** = 2026-08-30 12:09:43.355885 UTC
+
+Separately, and not affecting this determination: the durable host-level rate-limit cooldown (`http_rate_limits` / `record_http_rate_limit`) is confirmed operating in production (earliest observed write 2026-08-16 10:32:09 UTC). A follow-up migration hardening that function's privileges has been merged to the repository but is **not yet deployed** to production as of this audit — production's live function definition still matches the original, pre-hardening version. This is a distinct, security-relevant deployment gap, tracked separately, and does not affect the T_clean determination above.
 
 ## Separately diagnosed, not a T_clean blocker: reconciliation cache oscillation
 
@@ -68,11 +86,11 @@ Sibling experiments sharing a wallet (e.g. `SHADOW V2: gghff` / `SHADOW V3 CAPAC
 
 Phase 2 (prior-utc-day-v1) changed how the observation panel computes historical slippage-adjusted P&L: for a settled UTC day D, the adjusted estimate uses only entry-slippage samples observed strictly before `D 00:00:00 UTC` (capped at the most recent 2,000 eligible samples). A sample observed during or after day D can never retroactively change day D's adjusted figure. The current (today's) observed slippage median remains descriptive only and is never substituted into a historical day's adjusted estimate. This is a correctness fix to that one derived metric — it is unrelated to, and does not substitute for, the experiment-isolation clean epoch described above.
 
-## August 21 qualification methodology (documentation only — no logic change)
+## T_7d qualification methodology (documentation only — no logic change)
 
-T_7d (2026-08-21 11:29:19.638 UTC) is the **earliest** date at which any of the 10 V2/V3 cohort experiments may be evaluated for promotion out of the clean-epoch observation window. It is not a fixed evaluation date and it does not by itself imply enough evidence has accumulated. Calendar time elapsed since T_clean is a necessary but not sufficient condition: a bot must also have accumulated enough genuinely new post-T_clean trading evidence to support a promotion decision.
+T_7d (2026-08-23 12:09:43.355885 UTC, derived from the T_clean established above) is the **earliest** date at which any of the 10 V2/V3 cohort experiments may be evaluated for promotion out of the clean-epoch observation window. It is not a fixed evaluation date and it does not by itself imply enough evidence has accumulated. Calendar time elapsed since T_clean is a necessary but not sufficient condition: a bot must also have accumulated enough genuinely new post-T_clean trading evidence to support a promotion decision.
 
-**The post-T_clean sample is defined by the opening BUY, not by when a position settles.** Only positions whose opening BUY occurred strictly after T_clean (2026-08-14 11:29:19.638 UTC) count toward an experiment's clean promotion sample. A settlement observed after T_clean for a position that was opened *before* T_clean does not count as a complete clean post-fix lifecycle — that position's entry decision was made under the pre-fix (or transitional) consumption path this document's clean epoch exists to exclude, so its outcome cannot be attributed to post-fix behavior even if the outcome itself lands inside the clean window. Such positions must be reported separately, labeled as legacy/pre-clean evidence, and excluded from the clean promotion sample (see the read-only clean-window activity audit below for the concrete query that partitions the two populations).
+**The post-T_clean sample is defined by the opening BUY, not by when a position settles.** Only positions whose opening BUY occurred strictly after T_clean (2026-08-16 12:09:43.355885 UTC) count toward an experiment's clean promotion sample. A settlement observed after T_clean for a position that was opened *before* T_clean does not count as a complete clean post-fix lifecycle — that position's entry decision was made under the pre-fix (or transitional) consumption path this document's clean epoch exists to exclude, so its outcome cannot be attributed to post-fix behavior even if the outcome itself lands inside the clean window. Such positions must be reported separately, labeled as legacy/pre-clean evidence, and excluded from the clean promotion sample (see the read-only clean-window activity audit below for the concrete query that partitions the two populations).
 
 At or after T_7d, each of the 10 experiments must be classified into exactly one of three states — this is a reporting classification, not a change to the qualification criteria themselves:
 
@@ -84,22 +102,25 @@ This document deliberately does not fix a minimum sample-size threshold for "suf
 
 This section adds reporting/classification guidance only. It does not move T_clean or T_7d, does not change qualification math, sizing, accounting, settlement, or any other logic.
 
-## Read-only clean-window activity audit (run)
+## Read-only clean-window activity audit (run against the current T_clean)
 
-The read-only SQL audit bundle at `supabase/audits/clean_window_activity_audit.sql` has now been run against production. It is SELECT-only and made no changes to sizing, accounting, settlement, leases/fencing, bankrolls, source-event identity, checkpoints, or live-order safety. See that file's header comment for the full list of measures and the exact opening-BUY-after-T_clean partitioning logic.
+The read-only SQL audit bundle at `supabase/audits/clean_window_activity_audit.sql` has been run against production against the current T_clean (2026-08-16 12:09:43.355885 UTC). It is SELECT-only and made no changes to sizing, accounting, settlement, leases/fencing, bankrolls, source-event identity, checkpoints, or live-order safety. See that file's header comment for the full list of measures and the exact opening-BUY-after-T_clean partitioning logic; the file's own boundary constant should be kept in sync with the T_clean stated at the top of this document.
 
-Observed high-level facts from that run:
+Observed high-level facts, measured against the **current** T_clean:
 
 - Exactly 10 enabled V2/V3 experiments were audited, matching the cohort defined above.
-- Post-T_clean clean lifecycles opened per experiment (V2 / V3 CAPACITY):
-  - `gghff`: 97 / 95
-  - `HighTempTation`: 59 / 59
-  - `Poligarch`: 542 / 585
-  - `Weather-Guru`: 79 / 73
-  - `badatmath.`: 0 / 0
-- Only **3 distinct trading days** with new post-T_clean BUY exposure so far.
-- `badatmath.` (both V2 and V3 CAPACITY) currently classifies as **INSUFFICIENT NEW DATA** under the "August 21 qualification methodology" above — it has zero post-T_clean opening-BUY lifecycles to evaluate.
+- Post-T_clean clean lifecycles opened per experiment so far (V2 / V3 CAPACITY): `gghff` 2/2, `HighTempTation` 1/1, `Poligarch` 0/0, `Weather-Guru` 0/0, `badatmath.` 0/0.
+- Only **1 distinct trading day** with new post-T_clean BUY exposure so far — expected, given T_clean was established only recently.
+- **All 10 experiments currently classify as INSUFFICIENT NEW DATA** under the qualification methodology above — none has a representative post-T_clean sample yet. This is expected this soon after establishment, not a defect.
 - **No experiment is being promoted yet.** This document does not fix a minimum sample-size threshold, and none is being asserted here — the counts above are reported as observed, not as a qualification verdict.
-- August 21 (T_7d) remains the **earliest** evaluation gate, not an automatic promotion date, per the qualification methodology above: passing T_7d does not by itself qualify, disqualify, or promote any experiment.
+- T_7d (2026-08-23 12:09:43.355885 UTC) remains the **earliest** evaluation gate, not an automatic promotion date, per the qualification methodology above: passing T_7d does not by itself qualify, disqualify, or promote any experiment.
+
+### Historical: audit results measured against the withdrawn 2026-08-14 boundary
+
+The counts below were measured in an earlier run of this audit against the **withdrawn** 2026-08-14 T_clean value. They are retained here as a historical record of that run only — **they are not the current clean sample and must not be presented as such**, since the boundary they were measured against was itself withdrawn (see "History" in `docs/CURRENT_OBSERVATION_STATUS.md` and the chronology above):
+
+- Post-(withdrawn-boundary) clean lifecycles opened per experiment (V2 / V3 CAPACITY): `gghff` 97/95, `HighTempTation` 59/59, `Poligarch` 542/585, `Weather-Guru` 79/73, `badatmath.` 0/0.
+- 3 distinct trading days with new BUY exposure were observed against that withdrawn boundary.
+- `badatmath.` classified as INSUFFICIENT NEW DATA against that withdrawn boundary.
 
 This document is reporting guidance only. It does not change sizing, accounting, settlement, leases/fencing, bankrolls, source-event identity, or live-order safety.
