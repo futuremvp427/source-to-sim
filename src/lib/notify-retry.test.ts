@@ -115,7 +115,14 @@ vi.mock("@/integrations/supabase/client.server", () => ({
   },
 }));
 
-const { notifyAlert, retryPendingTelegramAlerts, isImportantAlertKind, shouldDisableTelegramNotification } = await import("./notify.server");
+const {
+  notifyAlert,
+  retryPendingTelegramAlerts,
+  isImportantAlertKind,
+  isDurableAlertKind,
+  shouldDisableTelegramNotification,
+  TELEGRAM_RETRY_CUTOVER_AT,
+} = await import("./notify.server");
 
 const ALERT = { level: "info", kind: "paper_buy", message: "test" };
 
@@ -350,5 +357,54 @@ describe("two-tier retry priority", () => {
     expect(statusOf("buy-failed")).toBe("sent");
     const src = readFileSync(new URL("./notify.server.ts", import.meta.url), "utf8");
     expect(src).not.toMatch(/\.delete\(|truncate/i);
+  });
+});
+
+describe("hardening cutover + durable vs operational retry classes", () => {
+  it("does not replay a pre-cutover backlog alert, but keeps the row stored", async () => {
+    mockFetchOk();
+    const preCutover = new Date(new Date(TELEGRAM_RETRY_CUTOVER_AT).getTime() - HOUR).toISOString();
+    pushAlert({ id: "old-buy", kind: "paper_buy", created_at: preCutover });
+    pushAlert({ id: "old-settled", kind: "position_settled", created_at: preCutover });
+
+    expect(await retryPendingTelegramAlerts(20)).toEqual({ attempted: 0, sent: 0 });
+    expect(statusOf("old-buy")).toBe("pending");
+    expect(statusOf("old-settled")).toBe("pending");
+    expect(fake.tables["alerts"]!).toHaveLength(2);
+  });
+
+  it("keeps post-cutover settlement and cash alerts retryable well beyond 2 hours", async () => {
+    mockFetchOk();
+    pushAlert({ id: "settled", kind: "position_settled", created_at: iso(30 * HOUR) });
+    pushAlert({ id: "cash", kind: "LOW_SPENDABLE_CASH", created_at: iso(20 * HOUR) });
+    pushAlert({ id: "reserve", kind: "CASH_RESERVE_REACHED", created_at: iso(10 * HOUR) });
+
+    const result = await retryPendingTelegramAlerts(20);
+    expect(result.sent).toBe(3);
+    for (const id of ["settled", "cash", "reserve"]) expect(statusOf(id)).toBe("sent");
+  });
+
+  it("expires post-cutover operational diagnostics after the bounded 2-hour window", async () => {
+    mockFetchOk();
+    pushAlert({ id: "poll-stale", kind: "poll_failure", created_at: iso(3 * HOUR) });
+    expect(await retryPendingTelegramAlerts(20)).toEqual({ attempted: 0, sent: 0 });
+    expect(statusOf("poll-stale")).toBe("pending");
+  });
+
+  it("classifies durable vs operational kinds explicitly", () => {
+    expect(isDurableAlertKind("paper_buy")).toBe(true);
+    expect(isDurableAlertKind("position_settled")).toBe(true);
+    expect(isDurableAlertKind("LOW_SPENDABLE_CASH")).toBe(true);
+    expect(isDurableAlertKind("poll_failure")).toBe(false);
+  });
+
+  it("cannot starve paper_buy with durable tier-2 rows", async () => {
+    mockFetchOk();
+    for (let i = 0; i < 30; i += 1)
+      pushAlert({ id: `settled-${i}`, kind: "position_settled", created_at: iso(HOUR + i) });
+    pushAlert({ id: "buy-1", kind: "paper_buy", created_at: iso(60_000) });
+
+    expect(await retryPendingTelegramAlerts(1)).toEqual({ attempted: 1, sent: 1 });
+    expect(statusOf("buy-1")).toBe("sent");
   });
 });
