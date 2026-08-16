@@ -13,9 +13,11 @@ import { parseSourceSide } from "../shadow-core";
 
 import {
   RESEARCH_BATCH_SIZE,
-  RESEARCH_BUDGET_MS,
-  budgetExhausted,
+  ResearchBudgetExhaustedError,
+  UNRESOLVED_RESOLUTIONS_PER_RUN,
+  createResearchDeadline,
   selectResearchBatch,
+  selectUnresolvedForResolution,
 } from "./research-batch";
 
 import {
@@ -81,17 +83,39 @@ export const SEED_CANDIDATES: {
 
 type Json = Record<string, unknown>;
 
-async function getJson(url: string, attempts = 2): Promise<unknown> {
+/** Per-request timeout cap; always combined with the overall run deadline. */
+const REQUEST_TIMEOUT_MS = 15_000;
+
+function combineSignals(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+function isAbort(err: unknown): boolean {
+  return (
+    err instanceof ResearchBudgetExhaustedError ||
+    (err instanceof Error && (err.name === "AbortError" || err.name === "ResearchBudgetExhaustedError"))
+  );
+}
+
+export async function getJson(
+  url: string,
+  opts: { attempts?: number; signal?: AbortSignal } = {},
+): Promise<unknown> {
+  const attempts = opts.attempts ?? 2;
   let lastErr: unknown;
   for (let i = 0; i < attempts; i += 1) {
+    // The overall deadline wins over any remaining retry budget.
+    if (opts.signal?.aborted) throw new ResearchBudgetExhaustedError("research deadline reached");
     try {
       const res = await fetch(url, {
         headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(15_000),
+        signal: combineSignals(opts.signal, REQUEST_TIMEOUT_MS),
       });
       if (!res.ok) throw new Error(`${url.split("?")[0]} responded ${res.status}`);
       return (await res.json()) as unknown;
     } catch (err) {
+      if (opts.signal?.aborted) throw new ResearchBudgetExhaustedError("research deadline reached");
       lastErr = err;
       if (i < attempts - 1) await new Promise((r) => setTimeout(r, 400));
     }
@@ -117,10 +141,11 @@ function numOrNull(v: unknown): number | null {
 /* ------------------------------------------------------------------ */
 
 /** Resolves a handle to a proxy wallet via the PUBLIC profile search. Exact, case-insensitive match only — never a guess. */
-export async function resolveHandle(handle: string): Promise<string | null> {
+export async function resolveHandle(handle: string, signal?: AbortSignal): Promise<string | null> {
   try {
     const json = (await getJson(
       `${GAMMA_API}/public-search?q=${encodeURIComponent(handle)}&limit_per_type=10&search_profiles=true`,
+      { signal },
     )) as { profiles?: { name?: string; proxyWallet?: string }[] };
     const profiles = json.profiles ?? [];
     const exact = profiles.filter(
@@ -128,16 +153,19 @@ export async function resolveHandle(handle: string): Promise<string | null> {
     );
     if (exact.length !== 1) return null;
     return str(exact[0]?.proxyWallet).toLowerCase();
-  } catch {
+  } catch (err) {
+    // A deadline abort must stop the run, not look like "unresolved".
+    if (isAbort(err)) throw err;
     return null;
   }
 }
 
-export async function fetchPublicTrades(wallet: string): Promise<CandidateTrade[]> {
+export async function fetchPublicTrades(wallet: string, signal?: AbortSignal): Promise<CandidateTrade[]> {
   const out: CandidateTrade[] = [];
   for (let page = 0; page < TRADE_PAGES; page += 1) {
     const json = await getJson(
       `${DATA_API}/trades?user=${wallet}&takerOnly=false&limit=${TRADE_PAGE_SIZE}&offset=${page * TRADE_PAGE_SIZE}`,
+      { signal },
     );
     const rows = Array.isArray(json) ? (json as Json[]) : [];
     for (const r of rows) {
@@ -160,8 +188,8 @@ export async function fetchPublicTrades(wallet: string): Promise<CandidateTrade[
   return out;
 }
 
-export async function fetchPublicPositions(wallet: string): Promise<CandidatePosition[]> {
-  const json = await getJson(`${DATA_API}/positions?user=${wallet}&limit=${POSITION_LIMIT}`);
+export async function fetchPublicPositions(wallet: string, signal?: AbortSignal): Promise<CandidatePosition[]> {
+  const json = await getJson(`${DATA_API}/positions?user=${wallet}&limit=${POSITION_LIMIT}`, { signal });
   const rows = Array.isArray(json) ? (json as Json[]) : [];
   return rows.map((r) => ({
     asset: str(r["asset"]),
@@ -178,7 +206,10 @@ export async function fetchPublicPositions(wallet: string): Promise<CandidatePos
 }
 
 /** Bounded public price-history sampling used to estimate follower slippage. */
-export async function fetchSlippageSamples(trades: readonly CandidateTrade[]): Promise<SlippageSample[]> {
+export async function fetchSlippageSamples(
+  trades: readonly CandidateTrade[],
+  signal?: AbortSignal,
+): Promise<SlippageSample[]> {
   const recent = [...trades]
     .filter((t) => t.side === "BUY" && t.asset && t.price > 0)
     .sort((a, b) => b.ts - a.ts)
@@ -190,11 +221,13 @@ export async function fetchSlippageSamples(trades: readonly CandidateTrade[]): P
     try {
       const json = (await getJson(
         `${CLOB_API}/prices-history?market=${trade.asset}&interval=1w&fidelity=1`,
+        { signal },
       )) as { history?: { t?: number; p?: number }[] };
       history = (json.history ?? [])
         .map((h) => ({ t: num(h.t), p: num(h.p) }))
         .filter((h) => h.t > 0 && h.p > 0);
-    } catch {
+    } catch (err) {
+      if (isAbort(err)) throw err;
       history = [];
     }
     for (const delay of DELAYS) {
