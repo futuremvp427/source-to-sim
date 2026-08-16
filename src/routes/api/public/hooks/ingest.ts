@@ -38,16 +38,19 @@ async function handle(request: Request): Promise<Response> {
       }
     }
 
-    // Derive actual paper-BUY alerts only after the full ingest cycle has
-    // completed and all worker leases/accounting transactions are closed.
-    // This query reads persisted paper_trades; source BUYs that were skipped
-    // can never be mislabeled as an executed paper BUY.
-    let paperBuyNotifications = { buysFound: 0, alertsQueued: 0 };
+    // Queue actual paper-BUY alerts only after the full ingest cycle has
+    // completed and all worker leases/accounting transactions are closed. The
+    // producer scans the durable paper_trades ledger from its own cursor, not
+    // the current cycle summary, so a BUY remains recoverable even when a
+    // later stage of the cycle failed after paper processing committed it.
+    let paperBuyNotifications = { buysFound: 0, alertsQueued: 0, cursorAdvanced: false };
     try {
       const { queuePaperBuyNotifications } = await import("@/lib/paper-buy-notifications.server");
-      paperBuyNotifications = await queuePaperBuyNotifications(result.cycles);
+      paperBuyNotifications = await queuePaperBuyNotifications();
     } catch {
       // Notification production is best-effort and must never fail ingestion.
+      // The durable cursor stays behind, so the next scheduler run retries the
+      // same persisted BUYs instead of losing them.
     }
 
     // Notification delivery is deliberately failure-isolated from ingestion.
