@@ -40,6 +40,11 @@ export function isImportantAlertKind(kind: string): boolean {
   return IMPORTANT_KINDS.has(kind);
 }
 
+/** Actual paper BUYs are actionable and deliberately arrive as normal pushes. */
+export function shouldDisableTelegramNotification(level: string, kind: string): boolean {
+  return level === "info" && kind !== "paper_buy";
+}
+
 /**
  * Delivery is at-least-once, not exactly-once — this is a known, accepted
  * limitation of the claim-then-send design, not something closed here. The
@@ -85,7 +90,7 @@ export async function notifyAlert(alert: {
       body: JSON.stringify({
         chat_id: chatId,
         text: `[${alert.level.toUpperCase()}] ${alert.kind}\n${alert.message}`,
-        disable_notification: alert.level === "info",
+        disable_notification: shouldDisableTelegramNotification(alert.level, alert.kind),
       }),
       signal: AbortSignal.timeout(8000),
     });
