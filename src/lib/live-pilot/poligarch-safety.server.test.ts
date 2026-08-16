@@ -38,6 +38,7 @@ function lockedRow(overrides: Partial<Row> = {}): Row {
 
 function makeFakeDb() {
   let row: Row | null = lockedRow();
+  let updateError: { message: string } | null = null;
   const updateMock = vi.fn();
 
   function makeBuilder(table: string) {
@@ -66,8 +67,9 @@ function makeFakeDb() {
       },
       async maybeSingle() {
         if (mode === "update") {
-          if (row && row["pilot_id"] === eqPilotId) Object.assign(row, updatePatch);
-          return { data: null, error: null };
+          const matched = Boolean(row && row["pilot_id"] === eqPilotId);
+          if (matched) Object.assign(row as Row, updatePatch);
+          return { data: matched ? [{ pilot_id: eqPilotId }] : [], error: null };
         }
         const data = row && row["pilot_id"] === eqPilotId ? row : null;
         return { data, error: null };
@@ -76,8 +78,12 @@ function makeFakeDb() {
         // update() calls in the real module are awaited directly without
         // .maybeSingle(); resolve the pending update here the same way.
         if (mode === "update") {
-          if (row && row["pilot_id"] === eqPilotId) Object.assign(row, updatePatch);
-          return Promise.resolve({ data: null, error: null }).then(resolve, reject);
+          const matched = Boolean(row && row["pilot_id"] === eqPilotId);
+          if (matched) Object.assign(row as Row, updatePatch);
+          return Promise.resolve({
+            data: matched ? [{ pilot_id: eqPilotId }] : [],
+            error: updateError,
+          }).then(resolve, reject);
         }
         return Promise.resolve({ data: row, error: null }).then(resolve, reject);
       },
@@ -89,6 +95,9 @@ function makeFakeDb() {
     getRow: () => row,
     setRow: (r: Row | null) => {
       row = r;
+    },
+    setUpdateError: (e: { message: string } | null) => {
+      updateError = e;
     },
     updateMock,
     supabaseAdmin: {
