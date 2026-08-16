@@ -13,6 +13,7 @@ import { parseSourceSide } from "../shadow-core";
 
 import {
   RESEARCH_BATCH_SIZE,
+  RESEARCH_BUDGET_MS,
   ResearchBudgetExhaustedError,
   UNRESOLVED_RESOLUTIONS_PER_RUN,
   createResearchDeadline,
