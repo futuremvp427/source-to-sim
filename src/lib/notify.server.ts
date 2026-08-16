@@ -45,7 +45,7 @@ const PRIORITY_KIND = "paper_buy";
  * created at/after this instant participate in retry, which is what makes
  * durable (no expiry) retry semantics safe for future actionable kinds.
  */
-export const TELEGRAM_RETRY_CUTOVER_AT = "2026-08-16T20:00:00.000Z";
+export const TELEGRAM_RETRY_CUTOVER_AT = "2026-08-14T00:00:00.000Z";
 
 /**
  * Durable kinds: genuinely actionable, low volume. After the cutover these stay
