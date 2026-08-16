@@ -1,7 +1,8 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 const RESEARCH_WORKER_ID = "candidate_research";
-const FRESHNESS_SLOP_MS = 5_000;
+/** Artifacts written by one research pass land within a few seconds of each other. */
+export const ARTIFACT_ALIGNMENT_SLOP_MS = 5_000;
 
 export type CandidatePersistenceIssue = {
   candidateId: string;
@@ -29,26 +30,61 @@ type ComputedRow = {
 };
 
 /**
- * Verifies the persisted research invariant after a research pass:
- * every resolved candidate must have metrics, fingerprint and score rows whose
- * computed_at is at least as fresh as the recorded run timestamp.
+ * Pure per-candidate persistence invariant.
  *
- * This is intentionally separate from the research engine so it can guard both
- * manual and scheduled entry points without changing scoring math.
+ * Research is BOUNDED and resumable (oldest-first rotation), so a candidate
+ * being old is expected and valid. What is NOT valid is a candidate whose three
+ * artifacts come from different runs ("mixed version"), or a candidate missing
+ * an artifact entirely. Therefore the invariant is INTERNAL alignment of each
+ * candidate's own metrics/fingerprint/score timestamps, never freshness
+ * relative to the latest global worker run.
+ */
+export function evaluateCandidatePersistence(
+  artifacts: { metrics?: string | null; fingerprint?: string | null; score?: string | null },
+  slopMs: number = ARTIFACT_ALIGNMENT_SLOP_MS,
+): { missing: string[]; stale: string[] } {
+  const missing: string[] = [];
+  const times = new Map<string, number>();
+  for (const [label, value] of [
+    ["metrics", artifacts.metrics],
+    ["fingerprint", artifacts.fingerprint],
+    ["score", artifacts.score],
+  ] as const) {
+    if (!value) {
+      missing.push(label);
+      continue;
+    }
+    const ms = new Date(value).getTime();
+    if (!Number.isFinite(ms)) {
+      missing.push(label);
+      continue;
+    }
+    times.set(label, ms);
+  }
+  const stale: string[] = [];
+  if (missing.length === 0) {
+    const newest = Math.max(...times.values());
+    for (const [label, ms] of times) {
+      if (newest - ms > slopMs) stale.push(label);
+    }
+  }
+  return { missing, stale: stale.sort() };
+}
+
+/**
+ * Verifies the persisted research invariant across all resolved candidates,
+ * using the per-candidate internal alignment rule above. Intentionally separate
+ * from the research engine so it can guard both manual and scheduled entry
+ * points without changing scoring math.
  */
 export async function verifyCandidateResearchPersistence(options: {
   downgradeRunState?: boolean;
 } = {}): Promise<CandidatePersistenceCheck> {
-  const [watchRes, metricsRes, fingerprintRes, scoresRes, workerRes] = await Promise.all([
+  const [watchRes, metricsRes, fingerprintRes, scoresRes] = await Promise.all([
     supabaseAdmin.from("candidate_watchlist").select("id, handle, wallet"),
     supabaseAdmin.from("candidate_metrics").select("candidate_id, computed_at"),
     supabaseAdmin.from("candidate_fingerprint").select("candidate_id, computed_at"),
     supabaseAdmin.from("candidate_scores").select("candidate_id, computed_at"),
-    supabaseAdmin
-      .from("worker_status")
-      .select("last_poll_at")
-      .eq("id", RESEARCH_WORKER_ID)
-      .maybeSingle(),
   ]);
 
   for (const [label, res] of [
@@ -56,14 +92,11 @@ export async function verifyCandidateResearchPersistence(options: {
     ["candidate_metrics", metricsRes],
     ["candidate_fingerprint", fingerprintRes],
     ["candidate_scores", scoresRes],
-    ["worker_status", workerRes],
   ] as const) {
     if (res.error) throw new Error(`${label} consistency read failed: ${res.error.message}`);
   }
 
   const expected = ((watchRes.data ?? []) as WatchRow[]).filter((row) => Boolean(row.wallet));
-  const runAt = workerRes.data?.last_poll_at ? new Date(workerRes.data.last_poll_at).getTime() : null;
-  const freshnessFloor = runAt === null ? null : runAt - FRESHNESS_SLOP_MS;
 
   const mapByCandidate = (rows: unknown[] | null): Map<string, string> =>
     new Map(
@@ -76,23 +109,11 @@ export async function verifyCandidateResearchPersistence(options: {
   const issues: CandidatePersistenceIssue[] = [];
 
   for (const row of expected) {
-    const missing: string[] = [];
-    const stale: string[] = [];
-    for (const [label, map] of [
-      ["metrics", metrics],
-      ["fingerprint", fingerprints],
-      ["score", scores],
-    ] as const) {
-      const computedAt = map.get(row.id);
-      if (!computedAt) {
-        missing.push(label);
-        continue;
-      }
-      if (freshnessFloor !== null) {
-        const computedMs = new Date(computedAt).getTime();
-        if (!Number.isFinite(computedMs) || computedMs < freshnessFloor) stale.push(label);
-      }
-    }
+    const { missing, stale } = evaluateCandidatePersistence({
+      metrics: metrics.get(row.id),
+      fingerprint: fingerprints.get(row.id),
+      score: scores.get(row.id),
+    });
     if (missing.length > 0 || stale.length > 0) {
       issues.push({ candidateId: row.id, handle: row.handle, missing, stale });
     }
