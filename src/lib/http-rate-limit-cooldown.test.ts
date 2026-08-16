@@ -26,25 +26,46 @@ function chainable(result: { data: unknown; error: unknown }) {
 
 type CooldownRow = { blocked_until: string; reason: string } | null;
 
+/** A chainable whose terminal await never settles -- simulates a stalled query. */
+function hangingChainable() {
+  const builder: {
+    select: () => typeof builder;
+    eq: () => typeof builder;
+    maybeSingle: () => Promise<never>;
+  } = {
+    select: () => builder,
+    eq: () => builder,
+    maybeSingle: () => new Promise<never>(() => {}),
+  };
+  return builder;
+}
+
 function makeFakeSupabase(opts: {
-  cooldownRow: CooldownRow | "error";
+  cooldownRow: CooldownRow | "error" | "hang";
   leaseFence?: number | null;
+  rpcHangs?: boolean;
 }) {
   const rpcCalls: { name: string; args: unknown }[] = [];
   const fromCalls: string[] = [];
   const updateCalls: { table: string; patch: unknown }[] = [];
 
   const supabaseAdmin = {
-    rpc: async (name: string, args: unknown) => {
+    rpc: (name: string, args: unknown) => {
       rpcCalls.push({ name, args });
-      if (name === "acquire_worker_lease") {
-        return { data: opts.leaseFence === undefined ? 1 : opts.leaseFence, error: null };
+      if (opts.rpcHangs && name === "record_http_rate_limit") {
+        return new Promise<never>(() => {});
       }
-      return { data: null, error: null };
+      return (async () => {
+        if (name === "acquire_worker_lease") {
+          return { data: opts.leaseFence === undefined ? 1 : opts.leaseFence, error: null };
+        }
+        return { data: null, error: null };
+      })();
     },
     from: (table: string) => {
       fromCalls.push(table);
       if (table === "http_rate_limits") {
+        if (opts.cooldownRow === "hang") return hangingChainable();
         return chainable(
           opts.cooldownRow === "error"
             ? { data: null, error: { message: "connection reset" } }
@@ -88,8 +109,17 @@ const {
   DEFAULT_COOLDOWN_MS_FOR_TEST,
   MAX_COOLDOWN_MS_FOR_TEST,
 } = await import("./http-rate-limit.server");
-const { runExperimentCycle, getJsonForTest, buildTradesUrl } = await import("./shadow.server");
+const {
+  runExperimentCycle,
+  getJsonForTest,
+  buildTradesUrl,
+  HOST_COOLDOWN_CHECK_DEADLINE_MS_FOR_TEST,
+  candidateResearchIfCycleAndHostAllowForTest,
+  RateLimitedError,
+} = await import("./shadow.server");
 const { ingestGeneralActivity } = await import("./general-shadow.server");
+const { probePublicDataApiForTest, resetPublicApiProbeCacheForTest } =
+  await import("./health.server");
 
 function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), { status, headers });
@@ -307,5 +337,105 @@ describe("General Shadow respects the same host cooldown", () => {
     expect(calls).toBe(1);
     // And the shared host cooldown was recorded so /trades callers back off too.
     expect(rpcCalls.some((c) => c.name === "record_http_rate_limit")).toBe(true);
+  });
+});
+
+describe("the cooldown read itself is bounded (cannot strand the lease)", () => {
+  it("fails closed and still releases the lease as idle when the cooldown read hangs", async () => {
+    vi.useFakeTimers();
+    const { supabaseAdmin, updateCalls } = makeFakeSupabase({ cooldownRow: "hang" });
+    currentFake = supabaseAdmin;
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const promise = runExperimentCycle(baseExperiment(), "test-worker");
+    let result: Awaited<ReturnType<typeof runExperimentCycle>> | undefined;
+    promise.then((r) => {
+      result = r;
+    });
+
+    // Nothing should have resolved yet -- the read is still hanging.
+    await vi.advanceTimersByTimeAsync(HOST_COOLDOWN_CHECK_DEADLINE_MS_FOR_TEST - 500);
+    expect(result).toBeUndefined();
+
+    // Past its own bound, the call must resolve -- not hang for the life of
+    // the process the way the pre-Phase-1 checkpoint-load hang did.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(result).toBeDefined();
+    expect(result!.skipped).toMatch(/cooldown active/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // And the lease was actually released (idle), not left held.
+    expect(updateCalls).toHaveLength(1);
+    expect((updateCalls[0]!.patch as { state: string }).state).toBe("idle");
+  });
+});
+
+describe("the cooldown write does not extend getJson's own promise past its bound", () => {
+  it("getJson still rejects promptly on a 429 even if the best-effort cooldown RPC write hangs", async () => {
+    currentFake = makeFakeSupabase({ cooldownRow: null, rpcHangs: true }).supabaseAdmin;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({}, 429)),
+    );
+
+    const url = buildTradesUrl(250, 0, "0xwritehangs");
+    // No fake timers, no advancing needed: if the write were awaited, this
+    // would hang forever (the fake RPC never resolves). It must settle on
+    // its own regardless.
+    await expect(getJsonForTest(url, 3)).rejects.toBeInstanceOf(RateLimitedError);
+  });
+});
+
+describe("candidate research respects the shared host cooldown", () => {
+  it("defers with a clear reason instead of firing its own /trades requests while the host is in cooldown", async () => {
+    const until = new Date(Date.now() + 90_000).toISOString();
+    currentFake = makeFakeSupabase({
+      cooldownRow: { blocked_until: until, reason: "429 without Retry-After" },
+    }).supabaseAdmin;
+
+    const result = await candidateResearchIfCycleAndHostAllowForTest(Date.now());
+    expect(result.ran).toBe(false);
+    expect(result.detail).toMatch(/cooldown active/);
+  });
+});
+
+describe("the health probe shares one in-flight promise and respects the host cooldown", () => {
+  it("concurrent callers within the TTL await the same request instead of firing their own", async () => {
+    resetPublicApiProbeCacheForTest();
+    currentFake = makeFakeSupabase({ cooldownRow: null }).supabaseAdmin;
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls += 1;
+        return jsonResponse([]);
+      }),
+    );
+
+    const [a, b, c] = await Promise.all([
+      probePublicDataApiForTest(),
+      probePublicDataApiForTest(),
+      probePublicDataApiForTest(),
+    ]);
+
+    expect(calls).toBe(1);
+    expect(a).toEqual(b);
+    expect(b).toEqual(c);
+  });
+
+  it("skips the actual upstream probe and reports WARN while the shared host cooldown is active", async () => {
+    resetPublicApiProbeCacheForTest();
+    const until = new Date(Date.now() + 90_000).toISOString();
+    currentFake = makeFakeSupabase({
+      cooldownRow: { blocked_until: until, reason: "429 without Retry-After" },
+    }).supabaseAdmin;
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await probePublicDataApiForTest();
+
+    expect(result.status).toBe("WARN");
+    expect(result.detail).toMatch(/cooldown active/);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

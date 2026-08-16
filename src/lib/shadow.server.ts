@@ -121,6 +121,15 @@ const RECONCILE_DEADLINE_MS = 8_000;
 const CLEANUP_STATUS_DEADLINE_MS = 4_000;
 const CLEANUP_RELEASE_DEADLINE_MS = 5_000;
 const CLEANUP_ALERT_DEADLINE_MS = 4_000;
+/**
+ * The host-cooldown read happens after the lease is acquired but before the
+ * withDeadline-bounded stages pipeline starts, so without its own bound a
+ * stalled query here would recreate exactly the pre-Phase-1 checkpoint-load
+ * hang: heartbeat_at/fence advancing on retry while the lease is never
+ * released, stranding the worker at state='running' and blocking its
+ * Promise.allSettled batch. Short because this is a single-row PK lookup.
+ */
+const HOST_COOLDOWN_CHECK_DEADLINE_MS = 5_000;
 
 class DeadlineError extends Error {}
 
@@ -281,7 +290,15 @@ async function getJson(
     }
   }
   if (lastErr instanceof RateLimitedError) {
-    await recordHostRateLimit(new URL(url).host, lastErr.retryAfterMs);
+    // Deliberately NOT awaited: recordHostRateLimit is documented
+    // best-effort and never throws, but awaiting it here would let a stalled
+    // Supabase RPC extend this promise past SHARED_TRADES_FETCH_DEADLINE_MS
+    // -- that hard deadline only bounds the fetch() call above via
+    // ownController, not a write that happens after it. Firing this off
+    // without waiting means getJson still rejects promptly even if the
+    // cooldown write itself is slow; the write either lands shortly after or
+    // it doesn't; either way nothing here depends on its outcome.
+    void recordHostRateLimit(new URL(url).host, lastErr.retryAfterMs);
   }
   throw lastErr instanceof Error ? lastErr : new Error("request failed");
 }
@@ -450,6 +467,8 @@ export const backoffDelayMsForTest = backoffDelayMs;
 export const getJsonForTest = getJson;
 export const sleepForTest = sleep;
 export const SHARED_TRADES_FETCH_DEADLINE_MS_FOR_TEST = SHARED_TRADES_FETCH_DEADLINE_MS;
+export const HOST_COOLDOWN_CHECK_DEADLINE_MS_FOR_TEST = HOST_COOLDOWN_CHECK_DEADLINE_MS;
+export const candidateResearchIfCycleAndHostAllowForTest = candidateResearchIfCycleAndHostAllow;
 
 /* ------------------------------------------------------------------ */
 /* Experiment / config                                                 */
@@ -1502,11 +1521,40 @@ export async function runIngestCycle(workerId: string): Promise<MultiCycleResult
     reference: cycles.find((c) => c.experimentName === EXPERIMENT_NAME) ?? null,
     reclaimedWorkers: reclaimed,
     deferredExperiments: deferred,
-    candidateResearch:
-      Date.now() - startedMs > CYCLE_BUDGET_MS
-        ? { ran: false, detail: "deferred: cycle time budget reached" }
-        : await refreshCandidateResearchSafely(),
+    candidateResearch: await candidateResearchIfCycleAndHostAllow(startedMs),
   };
+}
+
+/**
+ * Candidate research (candidates/research.server.ts) has its own,
+ * independent /trades fetcher against the same data-api.polymarket.com host
+ * -- it is not routed through getJson/getArray in this file, so it does not
+ * automatically respect the shared cooldown on its own. Gated here instead:
+ * skip the whole (6-hour-throttled, so low-cost to defer) pass while the
+ * host is in cooldown, rather than let it keep rediscovering or prolonging
+ * the same rate limit the cooldown exists to stop.
+ */
+async function candidateResearchIfCycleAndHostAllow(
+  startedMs: number,
+): Promise<{ ran: boolean; detail: string | null }> {
+  if (Date.now() - startedMs > CYCLE_BUDGET_MS) {
+    return { ran: false, detail: "deferred: cycle time budget reached" };
+  }
+  const cooldown = await boundedStage(
+    getHostCooldown(DATA_API_HOST),
+    HOST_COOLDOWN_CHECK_DEADLINE_MS,
+    "candidate_research_cooldown_check",
+    { blocked: true, until: null, reason: "cooldown check timed out" },
+  );
+  if (cooldown.blocked) {
+    return {
+      ran: false,
+      detail: `deferred: ${DATA_API_HOST} rate-limit cooldown active${
+        cooldown.until ? ` until ${cooldown.until.toISOString()}` : ""
+      }`,
+    };
+  }
+  return refreshCandidateResearchSafely();
 }
 
 /**
@@ -1654,7 +1702,19 @@ export async function runExperimentCycle(
   // independently rediscovering the limit. Checked before any checkpoint or
   // network work starts: a deferred cycle must never touch
   // worker_checkpoints, so nothing here can advance a checkpoint.
-  const hostCooldown = await getHostCooldown(DATA_API_HOST);
+  //
+  // Bounded (not a bare await): this read runs before the withDeadline-wrapped
+  // stages pipeline below, so it has no deadline of its own otherwise -- a
+  // stalled query here would strand the lease exactly like the pre-Phase-1
+  // checkpoint-load hang. On timeout, fail closed (treat as blocked) rather
+  // than risk hammering an upstream that may already be rate-limiting this
+  // app; the lease is still released as idle either way.
+  const hostCooldown = await boundedStage(
+    getHostCooldown(DATA_API_HOST),
+    HOST_COOLDOWN_CHECK_DEADLINE_MS,
+    "host_cooldown_check",
+    { blocked: true, until: null, reason: "cooldown check timed out" },
+  );
   if (hostCooldown.blocked) {
     await releaseLease(lease, { state: "idle" });
     return {
