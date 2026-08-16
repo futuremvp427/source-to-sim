@@ -44,7 +44,7 @@ import {
   isEligibleForV2Copy,
   isV2Name,
 } from "./v2-cohort";
-import { isGeneralShadowName } from "./general-shadow";
+import { GENERAL_SHADOW_POLLING_ENABLED, isGeneralShadowName } from "./general-shadow";
 import {
   DATA_API_HOST,
   getHostCooldown,
@@ -1684,6 +1684,20 @@ export async function runExperimentCycle(
     return {
       ...base,
       skipped: "Follower is paused (enabled = false).",
+    };
+  }
+
+  // Explicit identity gate, not a strategy fix: pauses ONLY the two General
+  // Shadow wallets (GS_PREFIX-named experiments) while they are stalled and
+  // generating 429s. Checked before any lease/checkpoint/network work, so a
+  // paused cycle never touches worker_status, worker_checkpoints, or the
+  // upstream host at all. Every V2/V3 experiment name fails
+  // isGeneralShadowName and is completely unaffected. See
+  // GENERAL_SHADOW_POLLING_ENABLED's doc comment for how to resume.
+  if (isGeneralShadowName(experiment.name) && !GENERAL_SHADOW_POLLING_ENABLED) {
+    return {
+      ...base,
+      skipped: `General Shadow polling is paused (GENERAL_SHADOW_POLLING_ENABLED = false); ${experiment.name} deferred, no upstream request made.`,
     };
   }
 

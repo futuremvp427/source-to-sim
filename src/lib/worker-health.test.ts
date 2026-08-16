@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyWorker,
   findAbandonedWorkers,
+  isWorkerHealthy,
   orderByStaleness,
   type WorkerRow,
 } from "./worker-health";
@@ -53,6 +54,46 @@ describe("worker health classification", () => {
 
   it("warns between the warn and fail windows", () => {
     expect(classifyWorker(row({ last_success_at: iso(900), last_poll_at: iso(900) }), NOW).status).toBe("WARN");
+  });
+});
+
+describe("isWorkerHealthy (dashboard badge)", () => {
+  // Reproduces the production screenshot: "Worker idle · heartbeat 4s ago"
+  // rendered RED. A host-cooldown skip releases the lease with state:"idle"
+  // and a fresh heartbeat, but never clears the last_error left by an earlier
+  // 429 -- the old workerHealthy = fresh && !lastError check stayed false
+  // forever until the next FULL successful cycle, even though the worker was
+  // never stuck and nothing was currently failing.
+  it("1: a fresh, idle worker recovering from an old 429 (stale last_error) reads healthy", () => {
+    expect(
+      isWorkerHealthy({ state: "idle", heartbeatAgeSeconds: 4 }),
+    ).toBe(true);
+  });
+
+  it("2: an active error state reads unhealthy regardless of heartbeat freshness", () => {
+    expect(isWorkerHealthy({ state: "error", heartbeatAgeSeconds: 4 })).toBe(false);
+  });
+
+  it("3: a stale heartbeat reads unhealthy even in a normal state", () => {
+    expect(isWorkerHealthy({ state: "idle", heartbeatAgeSeconds: 301 })).toBe(false);
+    expect(isWorkerHealthy({ state: "idle", heartbeatAgeSeconds: null })).toBe(false);
+  });
+
+  it("4: a running worker with a fresh heartbeat reads healthy", () => {
+    expect(isWorkerHealthy({ state: "running", heartbeatAgeSeconds: 10 })).toBe(true);
+  });
+
+  it("5: a worker whose last real cycle fully succeeded (state idle, fresh heartbeat) is not rendered unhealthy", () => {
+    expect(isWorkerHealthy({ state: "idle", heartbeatAgeSeconds: 0 })).toBe(true);
+  });
+
+  it("an abandoned/reclaimed worker (state stale) reads unhealthy", () => {
+    expect(isWorkerHealthy({ state: "stale", heartbeatAgeSeconds: 4 })).toBe(false);
+  });
+
+  it("a missing worker row reads unhealthy", () => {
+    expect(isWorkerHealthy(null)).toBe(false);
+    expect(isWorkerHealthy(undefined)).toBe(false);
   });
 });
 

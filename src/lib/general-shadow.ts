@@ -45,6 +45,30 @@ export function isGeneralShadowName(name: string): boolean {
   return name.startsWith(GS_PREFIX);
 }
 
+/**
+ * PAUSED (2026-08-16): both General Shadow wallets (RN1, swisstony) are
+ * stalled around their 2026-08-13 checkpoints and continue generating
+ * upstream 429s against data-api.polymarket.com, independent of the 10
+ * V2/V3 qualification experiments (which are healthy and unaffected by this
+ * flag -- see isGeneralShadowName's use in runExperimentCycle, which is the
+ * ONLY place this constant is read).
+ *
+ * This pauses POLLING ONLY: no historical source_events/paper_trades/
+ * paper_positions/settlements/checkpoint row is mutated, reset, or deleted
+ * by this flag. runExperimentCycle short-circuits before acquiring a lease
+ * or touching worker_checkpoints/worker_status for any experiment whose
+ * name matches GS_PREFIX while this is false, so no upstream /trades or
+ * /activity request is made and no accounting state changes merely from
+ * being paused.
+ *
+ * To resume: flip this back to true. Nothing else needs to change -- this
+ * is deliberately the only switch. General Shadow's own underlying stall
+ * (the actual root cause of the 2026-08-13 checkpoint freeze) is NOT
+ * investigated or repaired by this flag; it only stops the symptom
+ * (repeated 429s) from continuing while that's out of scope.
+ */
+export const GENERAL_SHADOW_POLLING_ENABLED = false;
+
 export function gsHandleFromName(name: string): string | null {
   return isGeneralShadowName(name) ? name.slice(GS_PREFIX.length) : null;
 }

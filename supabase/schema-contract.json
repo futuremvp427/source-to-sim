@@ -900,6 +900,8 @@
         "search_path=public"
       ],
       "definition_contains": [
+        "auth.role() is not null and auth.role() <> 'service_role'",
+        "service_role required",
         "insert into public.http_rate_limits",
         "on conflict (host) do update set",
         "greatest(public.http_rate_limits.blocked_until, excluded.blocked_until)"

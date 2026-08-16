@@ -78,6 +78,35 @@ export function classifyWorker(row: WorkerRow | undefined, nowMs: number): Worke
   return { id: row.id, status, abandoned, successAgeSeconds: age, reason };
 }
 
+/** Heartbeat age beyond which a worker's dashboard badge reads stale/unhealthy. */
+export const WORKER_HEARTBEAT_STALE_SECONDS = 300;
+
+/**
+ * Dashboard badge health: judged on the CURRENT state and a fresh heartbeat,
+ * never on last_error/poll_failures. Those two fields are diagnostic history
+ * (surfaced separately in the dashboard's "Poll failures" row) and are
+ * deliberately NOT cleared by a benign rate-limit cooldown deferral --
+ * runExperimentCycle's host-cooldown skip releases the lease with
+ * state:"idle" but leaves last_error/poll_failures untouched, since deferring
+ * for an active cooldown is not itself a failure and no operation was
+ * attempted or failed that cycle. Gating on a non-null last_error instead of
+ * state made a fully idle, normally-heartbeating worker read as unhealthy for
+ * as long as an old, already-resolved error string remained on the row.
+ *
+ * "error" (an unhandled cycle exception) and "stale" (an abandoned cycle
+ * reclaimed by reclaimAbandonedWorkers) are the only states that represent a
+ * current, unresolved failure; a genuine current error must still render
+ * unhealthy.
+ */
+export function isWorkerHealthy(worker: {
+  state: string | null;
+  heartbeatAgeSeconds: number | null;
+} | null | undefined): boolean {
+  if (!worker) return false;
+  const age = worker.heartbeatAgeSeconds ?? Number.POSITIVE_INFINITY;
+  return age < WORKER_HEARTBEAT_STALE_SECONDS && worker.state !== "error" && worker.state !== "stale";
+}
+
 /** Worker rows that claim to be running while holding no live lease. */
 export function findAbandonedWorkers(rows: WorkerRow[], nowMs: number): WorkerRow[] {
   return rows.filter((row) => classifyWorker(row, nowMs).abandoned);
