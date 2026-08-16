@@ -25,6 +25,18 @@ export const DATA_API_HOST = "data-api.polymarket.com";
 const MIN_COOLDOWN_MS = 60_000;
 const DEFAULT_COOLDOWN_MS = 90_000;
 const MAX_COOLDOWN_MS = 600_000;
+/**
+ * Hard ceiling on the cooldown-recording RPC itself, enforced via
+ * postgrest-js's own .abortSignal() -- the same real-cancellation mechanism
+ * already used elsewhere in this codebase (see shadow.server.ts's
+ * process_source_event_atomic/persistEvents calls) -- rather than a bare
+ * Promise.race that would leave the underlying DB request running
+ * uncancelled. Short, because this is a single-row upsert: both the /trades
+ * (getJson) and General Shadow (getActivityPage) 429 paths await this
+ * directly, so it must return well within their own surrounding deadlines
+ * regardless of what the database is doing.
+ */
+const COOLDOWN_WRITE_DEADLINE_MS = 5_000;
 
 /**
  * Parses a Retry-After header (either delay-seconds or an HTTP-date, per
@@ -97,9 +109,16 @@ export async function getHostCooldown(host: string): Promise<HostCooldown> {
 
 /**
  * Records (extends, never shortens) a cooldown for a host after observing a
- * 429. Best-effort: a failure to WRITE the cooldown must never crash or
- * delay the caller's own error path -- the request that triggered this has
- * already failed regardless; the cooldown only paces the *next* attempt.
+ * 429. Bounded and safely awaitable by both 429 paths (/trades and
+ * /activity): a real AbortController + postgrest-js's .abortSignal() cancels
+ * the underlying request at COOLDOWN_WRITE_DEADLINE_MS instead of merely
+ * abandoning it, so a stalled RPC can never hold either caller open. Still
+ * best-effort in outcome -- a failure (including the deadline abort) is
+ * swallowed rather than thrown, since the request that triggered this has
+ * already failed regardless and the cooldown only paces the *next* attempt
+ * -- but bounded/best-effort are independent properties: this call always
+ * returns within COOLDOWN_WRITE_DEADLINE_MS, whether or not the write
+ * actually landed.
  */
 export async function recordHostRateLimit(
   host: string,
@@ -107,21 +126,28 @@ export async function recordHostRateLimit(
 ): Promise<void> {
   const durationMs = clampCooldownMs(retryAfterMs);
   const until = new Date(Date.now() + durationMs).toISOString();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COOLDOWN_WRITE_DEADLINE_MS);
   try {
     // Cast: record_http_rate_limit is defined in this session's migration;
     // generated Supabase types are refreshed only after the migration is
     // applied (same pattern as release_reconcile_lease in shadow.server.ts).
-    await supabaseAdmin.rpc(
-      "record_http_rate_limit" as never,
-      {
-        p_host: host,
-        p_blocked_until: until,
-        p_reason:
-          retryAfterMs !== null ? `Retry-After ${retryAfterMs}ms` : "429 without Retry-After",
-      } as never,
-    );
+    await supabaseAdmin
+      .rpc(
+        "record_http_rate_limit" as never,
+        {
+          p_host: host,
+          p_blocked_until: until,
+          p_reason:
+            retryAfterMs !== null ? `Retry-After ${retryAfterMs}ms` : "429 without Retry-After",
+        } as never,
+      )
+      .abortSignal(controller.signal);
   } catch {
-    // Best-effort only -- see doc comment above.
+    // Best-effort only -- see doc comment above. Covers both a genuine RPC
+    // failure and the deadline-triggered abort.
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -129,3 +155,4 @@ export async function recordHostRateLimit(
 export const MIN_COOLDOWN_MS_FOR_TEST = MIN_COOLDOWN_MS;
 export const DEFAULT_COOLDOWN_MS_FOR_TEST = DEFAULT_COOLDOWN_MS;
 export const MAX_COOLDOWN_MS_FOR_TEST = MAX_COOLDOWN_MS;
+export const COOLDOWN_WRITE_DEADLINE_MS_FOR_TEST = COOLDOWN_WRITE_DEADLINE_MS;

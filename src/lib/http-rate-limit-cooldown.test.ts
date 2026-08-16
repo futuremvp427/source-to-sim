@@ -40,10 +40,79 @@ function hangingChainable() {
   return builder;
 }
 
+/**
+ * Fake for supabase-js's RPC builder, which is a thenable that also exposes
+ * .abortSignal(signal) -- real postgrest-js ties that signal to the
+ * underlying fetch, so an abort actually rejects the in-flight request
+ * rather than merely being ignored. `behavior` selects between resolving
+ * normally, rejecting immediately (simulating a network error), or hanging
+ * until the attached AbortSignal fires (simulating a stalled request that
+ * only real cancellation -- not Promise.race abandonment -- can terminate).
+ */
+function chainableRpc(
+  behavior:
+    | { kind: "resolve"; result: { data: unknown; error: unknown } }
+    | { kind: "reject"; error: Error }
+    | { kind: "hang" },
+  onAbortSignalAttached?: (signal: AbortSignal) => void,
+) {
+  let capturedSignal: AbortSignal | undefined;
+  const builder: {
+    abortSignal: (signal: AbortSignal) => typeof builder;
+    then: (
+      resolve: (v: { data: unknown; error: unknown }) => void,
+      reject: (e: unknown) => void,
+    ) => void;
+  } = {
+    abortSignal: (signal: AbortSignal) => {
+      capturedSignal = signal;
+      onAbortSignalAttached?.(signal);
+      return builder;
+    },
+    then: (resolve, reject) => {
+      if (behavior.kind === "resolve") {
+        resolve(behavior.result);
+        return;
+      }
+      if (behavior.kind === "reject") {
+        reject(behavior.error);
+        return;
+      }
+      // hang: only settles if/when the attached signal aborts -- this is
+      // what proves real cancellation (vs. Promise.race abandonment, which
+      // would never touch this promise at all and leave it hanging forever).
+      if (capturedSignal?.aborted) {
+        reject(new DOMException("Aborted", "AbortError"));
+        return;
+      }
+      capturedSignal?.addEventListener(
+        "abort",
+        () => reject(new DOMException("Aborted", "AbortError")),
+        { once: true },
+      );
+    },
+  };
+  return builder;
+}
+
+/** A chainable that supports .eq() chaining but whose await never settles. */
+function hangingUpdateChainable() {
+  const builder: { eq: () => typeof builder; then: () => void } = {
+    eq: () => builder,
+    then: () => {
+      /* never resolves or rejects -- simulates a stalled worker_status update */
+    },
+  };
+  return builder;
+}
+
 function makeFakeSupabase(opts: {
   cooldownRow: CooldownRow | "error" | "hang";
   leaseFence?: number | null;
   rpcHangs?: boolean;
+  rpcThrows?: boolean;
+  onRecordRpcAbortSignal?: (signal: AbortSignal) => void;
+  workerStatusUpdateHangs?: boolean;
 }) {
   const rpcCalls: { name: string; args: unknown }[] = [];
   const fromCalls: string[] = [];
@@ -53,14 +122,18 @@ function makeFakeSupabase(opts: {
     rpc: (name: string, args: unknown) => {
       rpcCalls.push({ name, args });
       if (opts.rpcHangs && name === "record_http_rate_limit") {
-        return new Promise<never>(() => {});
+        return chainableRpc({ kind: "hang" }, opts.onRecordRpcAbortSignal);
       }
-      return (async () => {
-        if (name === "acquire_worker_lease") {
-          return { data: opts.leaseFence === undefined ? 1 : opts.leaseFence, error: null };
-        }
-        return { data: null, error: null };
-      })();
+      if (opts.rpcThrows && name === "record_http_rate_limit") {
+        return chainableRpc({ kind: "reject", error: new Error("network down") });
+      }
+      if (name === "acquire_worker_lease") {
+        return chainableRpc({
+          kind: "resolve",
+          result: { data: opts.leaseFence === undefined ? 1 : opts.leaseFence, error: null },
+        });
+      }
+      return chainableRpc({ kind: "resolve", result: { data: null, error: null } });
     },
     from: (table: string) => {
       fromCalls.push(table);
@@ -76,7 +149,9 @@ function makeFakeSupabase(opts: {
         return {
           update: (patch: unknown) => {
             updateCalls.push({ table, patch });
-            return chainable({ data: null, error: null });
+            return opts.workerStatusUpdateHangs
+              ? hangingUpdateChainable()
+              : chainable({ data: null, error: null });
           },
           select: () => chainable({ data: null, error: null }),
         };
@@ -108,12 +183,14 @@ const {
   MIN_COOLDOWN_MS_FOR_TEST,
   DEFAULT_COOLDOWN_MS_FOR_TEST,
   MAX_COOLDOWN_MS_FOR_TEST,
+  COOLDOWN_WRITE_DEADLINE_MS_FOR_TEST,
 } = await import("./http-rate-limit.server");
 const {
   runExperimentCycle,
   getJsonForTest,
   buildTradesUrl,
   HOST_COOLDOWN_CHECK_DEADLINE_MS_FOR_TEST,
+  CLEANUP_RELEASE_DEADLINE_MS_FOR_TEST,
   candidateResearchIfCycleAndHostAllowForTest,
   RateLimitedError,
 } = await import("./shadow.server");
@@ -214,14 +291,7 @@ describe("recordHostRateLimit", () => {
   });
 
   it("never throws even if the RPC itself fails (best-effort write)", async () => {
-    currentFake = {
-      rpc: async () => {
-        throw new Error("network down");
-      },
-      from: () => {
-        throw new Error("should not be called");
-      },
-    } as never;
+    currentFake = makeFakeSupabase({ cooldownRow: null, rpcThrows: true }).supabaseAdmin;
     await expect(recordHostRateLimit(DATA_API_HOST, null)).resolves.toBeUndefined();
   });
 });
@@ -370,19 +440,148 @@ describe("the cooldown read itself is bounded (cannot strand the lease)", () => 
   });
 });
 
-describe("the cooldown write does not extend getJson's own promise past its bound", () => {
-  it("getJson still rejects promptly on a 429 even if the best-effort cooldown RPC write hangs", async () => {
+describe("the cooldown write is bounded by real cancellation, safely awaited by both 429 paths", () => {
+  it("A: on a normal 429, the cooldown write actually completes (RPC observed) before /trades' own promise settles", async () => {
+    const { supabaseAdmin, rpcCalls } = makeFakeSupabase({ cooldownRow: null });
+    currentFake = supabaseAdmin;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({}, 429)),
+    );
+
+    const url = buildTradesUrl(250, 0, "0xwritecompletes");
+    await expect(getJsonForTest(url, 3)).rejects.toBeInstanceOf(RateLimitedError);
+
+    // The write is awaited (not fire-and-forget), so by the time the
+    // rejection is observed here, the RPC has already been issued.
+    expect(rpcCalls.some((c) => c.name === "record_http_rate_limit")).toBe(true);
+  });
+
+  it("B: a permanently stalled cooldown RPC is actually cancelled at COOLDOWN_WRITE_DEADLINE_MS, and the /trades path still terminates", async () => {
+    vi.useFakeTimers();
+    let capturedSignal: AbortSignal | undefined;
+    currentFake = makeFakeSupabase({
+      cooldownRow: null,
+      rpcHangs: true,
+      onRecordRpcAbortSignal: (signal) => {
+        capturedSignal = signal;
+      },
+    }).supabaseAdmin;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({}, 429)),
+    );
+
+    const url = buildTradesUrl(250, 0, "0xwritestalled");
+    let settled = false;
+    let rejected: unknown;
+    getJsonForTest(url, 3).then(
+      () => {
+        settled = true;
+      },
+      (err) => {
+        settled = true;
+        rejected = err;
+      },
+    );
+
+    // Still waiting on the bounded write just short of its own deadline.
+    await vi.advanceTimersByTimeAsync(COOLDOWN_WRITE_DEADLINE_MS_FOR_TEST - 500);
+    expect(settled).toBe(false);
+
+    // Past the write's own deadline, the whole call must terminate.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled).toBe(true);
+    expect(rejected).toBeInstanceOf(RateLimitedError);
+    // Real cancellation, not mere abandonment: the signal handed to the RPC
+    // builder actually transitioned to aborted.
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+
+  it("C: the same stalled-RPC scenario for General Shadow's /activity path -- ingestGeneralActivity still terminates, with real cancellation", async () => {
+    vi.useFakeTimers();
+    let capturedSignal: AbortSignal | undefined;
+    currentFake = makeFakeSupabase({
+      cooldownRow: null,
+      rpcHangs: true,
+      onRecordRpcAbortSignal: (signal) => {
+        capturedSignal = signal;
+      },
+    }).supabaseAdmin;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({}, 429, { "retry-after": "45" })),
+    );
+
+    let settled = false;
+    let outcome: Awaited<ReturnType<typeof ingestGeneralActivity>> | undefined;
+    ingestGeneralActivity("0xgeneralshadowstalled").then((r) => {
+      settled = true;
+      outcome = r;
+    });
+
+    await vi.advanceTimersByTimeAsync(COOLDOWN_WRITE_DEADLINE_MS_FOR_TEST - 500);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled).toBe(true);
+    expect(outcome?.truncated).toBe(true);
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+
+  it("D: no dangling/unbounded DB operation remains -- fake timers have nothing left pending once both paths above settle", async () => {
+    vi.useFakeTimers();
     currentFake = makeFakeSupabase({ cooldownRow: null, rpcHangs: true }).supabaseAdmin;
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => jsonResponse({}, 429)),
     );
 
-    const url = buildTradesUrl(250, 0, "0xwritehangs");
-    // No fake timers, no advancing needed: if the write were awaited, this
-    // would hang forever (the fake RPC never resolves). It must settle on
-    // its own regardless.
-    await expect(getJsonForTest(url, 3)).rejects.toBeInstanceOf(RateLimitedError);
+    const url = buildTradesUrl(250, 0, "0xnodangling");
+    const promise = getJsonForTest(url, 3).catch(() => {
+      /* expected */
+    });
+
+    await vi.advanceTimersByTimeAsync(COOLDOWN_WRITE_DEADLINE_MS_FOR_TEST + 1_000);
+    await promise;
+
+    // The only way this call settles at all is via the deadline's own
+    // setTimeout firing and aborting the stalled RPC (see test B) -- if
+    // anything were left as a truly dangling, uncancelled operation, this
+    // promise would never have resolved in fake-timer time at all, and the
+    // await above would hang the test itself.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("the cooldown-release lease update is also bounded", () => {
+  it("runExperimentCycle terminates within its cleanup bound even when the worker_status release update hangs, with no upstream request", async () => {
+    vi.useFakeTimers();
+    const until = new Date(Date.now() + 90_000).toISOString();
+    currentFake = makeFakeSupabase({
+      cooldownRow: { blocked_until: until, reason: "429 without Retry-After" },
+      workerStatusUpdateHangs: true,
+    }).supabaseAdmin;
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    let settled = false;
+    let result: Awaited<ReturnType<typeof runExperimentCycle>> | undefined;
+    runExperimentCycle(baseExperiment(), "test-worker").then((r) => {
+      settled = true;
+      result = r;
+    });
+
+    // Still waiting on the stalled release just short of its own cleanup bound.
+    await vi.advanceTimersByTimeAsync(CLEANUP_RELEASE_DEADLINE_MS_FOR_TEST - 500);
+    expect(settled).toBe(false);
+
+    // Past that bound, runExperimentCycle must still return -- fencing means
+    // a write that eventually lands late is safe regardless.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled).toBe(true);
+    expect(result!.skipped).toMatch(/cooldown active/);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

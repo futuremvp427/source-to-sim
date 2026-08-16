@@ -290,15 +290,16 @@ async function getJson(
     }
   }
   if (lastErr instanceof RateLimitedError) {
-    // Deliberately NOT awaited: recordHostRateLimit is documented
-    // best-effort and never throws, but awaiting it here would let a stalled
-    // Supabase RPC extend this promise past SHARED_TRADES_FETCH_DEADLINE_MS
-    // -- that hard deadline only bounds the fetch() call above via
-    // ownController, not a write that happens after it. Firing this off
-    // without waiting means getJson still rejects promptly even if the
-    // cooldown write itself is slow; the write either lands shortly after or
-    // it doesn't; either way nothing here depends on its outcome.
-    void recordHostRateLimit(new URL(url).host, lastErr.retryAfterMs);
+    // Safely awaited: recordHostRateLimit now has its own real
+    // AbortController-based hard deadline (COOLDOWN_WRITE_DEADLINE_MS, 5s),
+    // enforced via postgrest-js's .abortSignal() rather than mere
+    // Promise.race abandonment, so a stalled Supabase RPC can no longer
+    // extend this call indefinitely -- it returns within 5s regardless, well
+    // inside SHARED_TRADES_FETCH_DEADLINE_MS (45s). Awaiting (rather than
+    // fire-and-forget) means the cooldown is reliably recorded before this
+    // request's own failure is reported, instead of racing an unrelated
+    // caller that might check it a moment later.
+    await recordHostRateLimit(new URL(url).host, lastErr.retryAfterMs);
   }
   throw lastErr instanceof Error ? lastErr : new Error("request failed");
 }
@@ -468,6 +469,7 @@ export const getJsonForTest = getJson;
 export const sleepForTest = sleep;
 export const SHARED_TRADES_FETCH_DEADLINE_MS_FOR_TEST = SHARED_TRADES_FETCH_DEADLINE_MS;
 export const HOST_COOLDOWN_CHECK_DEADLINE_MS_FOR_TEST = HOST_COOLDOWN_CHECK_DEADLINE_MS;
+export const CLEANUP_RELEASE_DEADLINE_MS_FOR_TEST = CLEANUP_RELEASE_DEADLINE_MS;
 export const candidateResearchIfCycleAndHostAllowForTest = candidateResearchIfCycleAndHostAllow;
 
 /* ------------------------------------------------------------------ */
@@ -1716,7 +1718,21 @@ export async function runExperimentCycle(
     { blocked: true, until: null, reason: "cooldown check timed out" },
   );
   if (hostCooldown.blocked) {
-    await releaseLease(lease, { state: "idle" });
+    // Bounded via the same cleanup pattern used by the error path below
+    // (boundedStage + CLEANUP_RELEASE_DEADLINE_MS): releaseLease is an
+    // unbounded Supabase update, and a stalled worker_status write here
+    // would otherwise strand this function -- with the cooldown active and
+    // nothing else running, that's exactly the "worker never returns"
+    // failure mode this whole gate exists to avoid. A timeout still lets
+    // the function return promptly; fencing (fence/worker_id match) means a
+    // write that eventually lands late is still safe, and the next cycle's
+    // own lease acquisition is unaffected either way.
+    await boundedStage(
+      releaseLease(lease, { state: "idle" }),
+      CLEANUP_RELEASE_DEADLINE_MS,
+      "cooldown_release_lease",
+      undefined,
+    );
     return {
       ...base,
       skipped: `${DATA_API_HOST} rate-limit cooldown active${
