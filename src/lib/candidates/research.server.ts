@@ -261,8 +261,14 @@ export type WatchlistRow = {
   weekly_snapshot_pnl: number | null;
   promoted_experiment_id: string | null;
   added_at: string;
+  updated_at?: string | null;
 };
 
+/**
+ * Seeds watchlist METADATA ONLY — no network handle resolution. Resolution is a
+ * separate, bounded step so a scheduled run can never spend its whole budget
+ * re-resolving every unresolved handle serially.
+ */
 export async function seedWatchlist(): Promise<WatchlistRow[]> {
   const { data: existing, error: readError } = await supabaseAdmin
     .from("candidate_watchlist")
@@ -274,8 +280,7 @@ export async function seedWatchlist(): Promise<WatchlistRow[]> {
 
   for (const seed of SEED_CANDIDATES) {
     const current = byHandle.get(seed.handle);
-    let wallet = seed.wallet ?? current?.wallet ?? null;
-    if (!wallet) wallet = await resolveHandle(seed.handle);
+    const wallet = seed.wallet ?? current?.wallet ?? null;
 
     const payload = {
       handle: seed.handle,
@@ -291,6 +296,19 @@ export async function seedWatchlist(): Promise<WatchlistRow[]> {
       updated_at: new Date().toISOString(),
     };
 
+    // Skip no-op writes so updated_at stays a usable rotation cursor for the
+    // bounded unresolved-resolution queue below.
+    if (
+      current &&
+      current.wallet === wallet &&
+      current.wallet_resolved === Boolean(wallet) &&
+      current.source === SNAPSHOT_SOURCE &&
+      current.weekly_snapshot_rank === seed.rank &&
+      Number(current.weekly_snapshot_pnl) === Number(seed.pnl)
+    ) {
+      continue;
+    }
+
     // Idempotent: handle is unique, so a repeat run updates in place.
     const { error: writeError } = current
       ? await supabaseAdmin.from("candidate_watchlist").update(payload as never).eq("id", current.id)
@@ -303,6 +321,49 @@ export async function seedWatchlist(): Promise<WatchlistRow[]> {
     .select("*")
     .order("weekly_snapshot_rank", { ascending: true });
   return (data ?? []) as unknown as WatchlistRow[];
+}
+
+/**
+ * Resolves AT MOST `limit` unresolved handles per invocation, deterministically
+ * and inside the overall run deadline. Returns the rows with any newly resolved
+ * wallet applied in memory.
+ */
+export async function resolveBoundedUnresolved(
+  rows: readonly WatchlistRow[],
+  signal?: AbortSignal,
+  limit: number = UNRESOLVED_RESOLUTIONS_PER_RUN,
+): Promise<{ rows: WatchlistRow[]; attempted: string[]; resolved: string[] }> {
+  const targets = selectUnresolvedForResolution(rows, limit);
+  const out = [...rows];
+  const attempted: string[] = [];
+  const resolved: string[] = [];
+
+  for (const target of targets) {
+    attempted.push(target.handle);
+    const wallet = await resolveHandle(target.handle, signal);
+    const nowIso = new Date().toISOString();
+    const { error } = await supabaseAdmin
+      .from("candidate_watchlist")
+      .update({
+        wallet,
+        wallet_resolved: Boolean(wallet),
+        notes: wallet
+          ? null
+          : "wallet_unresolved: no single exact public profile match; address deliberately not guessed.",
+        updated_at: nowIso,
+      } as never)
+      .eq("id", target.id);
+    if (error) throw new Error(`candidate_watchlist resolution write failed: ${error.message}`);
+    if (wallet) {
+      resolved.push(target.handle);
+      const idx = out.findIndex((r) => r.id === target.id);
+      if (idx >= 0) out[idx] = { ...out[idx]!, wallet, wallet_resolved: true, updated_at: nowIso };
+    } else {
+      const idx = out.findIndex((r) => r.id === target.id);
+      if (idx >= 0) out[idx] = { ...out[idx]!, updated_at: nowIso };
+    }
+  }
+  return { rows: out, attempted, resolved };
 }
 
 /* ------------------------------------------------------------------ */
