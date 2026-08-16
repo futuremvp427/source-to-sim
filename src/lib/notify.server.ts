@@ -11,9 +11,15 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 export type TelegramStatus = "NOT_CONFIGURED" | "CONFIGURED";
 
-/** Alert kinds worth a push notification. Everything else stays in-app only. */
+/**
+ * Alert kinds worth a push notification. Everything else stays in-app only.
+ *
+ * new_source_trades is deliberately excluded: it fires on every cycle that
+ * detects any new source fill, which floods Telegram without being
+ * actionable on its own -- the row still persists in `alerts` for the
+ * dashboard/diagnostics, it just never reaches Telegram.
+ */
 const IMPORTANT_KINDS = new Set([
-  "new_source_trades",
   "paper_buy",
   "paper_sell",
   "LOW_SPENDABLE_CASH",

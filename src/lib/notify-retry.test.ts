@@ -111,7 +111,9 @@ vi.mock("@/integrations/supabase/client.server", () => ({
 
 const { notifyAlert, retryPendingTelegramAlerts } = await import("./notify.server");
 
-const ALERT = { level: "info", kind: "new_source_trades", message: "test" };
+// paper_buy is used as the generic "important alert kind" fixture here
+// (new_source_trades is no longer Telegram-important, see notify.server.ts).
+const ALERT = { level: "info", kind: "paper_buy", message: "test" };
 
 beforeEach(() => {
   fake.tables["alerts"]!.length = 0;

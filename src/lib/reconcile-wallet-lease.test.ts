@@ -14,6 +14,7 @@ type Write = { table: string; rows: unknown };
 let leaseHeldBy: string | null = null;
 const writes: Write[] = [];
 const alerts: { level: string; kind: string }[] = [];
+const raisedAlerts: { level: string; kind: string; dedupKey: string | null }[] = [];
 const sourceEvents = [
   { asset: "asset-a", side: "BUY", shares: 10 },
   { asset: "asset-a", side: "SELL", shares: 4 },
@@ -67,8 +68,14 @@ vi.mock("@/integrations/supabase/client.server", () => ({
       if (table === "source_position_state") return rowsThenable(table, compact);
       if (table === "alerts") {
         const chain = {
-          upsert: () => chain,
-          insert: () => chain,
+          upsert: (row: { level: string; kind: string; dedup_key: string | null }) => {
+            raisedAlerts.push({ level: row.level, kind: row.kind, dedupKey: row.dedup_key });
+            return chain;
+          },
+          insert: (row: { level: string; kind: string; dedup_key: string | null }) => {
+            raisedAlerts.push({ level: row.level, kind: row.kind, dedupKey: row.dedup_key });
+            return chain;
+          },
           select: () => chain,
           then: (resolve: (v: { data: unknown; error: unknown }) => void) =>
             resolve({ data: [], error: null }),
@@ -138,5 +145,48 @@ describe("wallet-scoped reconciliation serialization", () => {
         w.table,
       );
     }
+  });
+});
+
+describe("reconcile() alert classification (this fixture always finds a real mismatch: compact asset-a=99 vs replayed=6)", () => {
+  it("classifies as INFO reconciliation_advanced when expectAdvance is true (routine advancement)", async () => {
+    leaseHeldBy = null;
+    writes.length = 0;
+    raisedAlerts.length = 0;
+
+    await shadow.reconcile(WALLET, { expectAdvance: true });
+
+    expect(raisedAlerts).toHaveLength(1);
+    expect(raisedAlerts[0]).toMatchObject({ level: "info", kind: "reconciliation_advanced" });
+  });
+
+  it("classifies as WARN reconciliation_mismatch when expectAdvance is false (unexplained divergence)", async () => {
+    leaseHeldBy = null;
+    writes.length = 0;
+    raisedAlerts.length = 0;
+
+    await shadow.reconcile(WALLET, { expectAdvance: false });
+
+    expect(raisedAlerts).toHaveLength(1);
+    expect(raisedAlerts[0]).toMatchObject({ level: "warn", kind: "reconciliation_mismatch" });
+  });
+});
+
+describe("shouldExpectReconciliationAdvance (routine sibling advancement classification)", () => {
+  it("expects advancement when this experiment's own insert won the race", () => {
+    expect(shadow.shouldExpectReconciliationAdvance(3, 0)).toBe(true);
+    expect(shadow.shouldExpectReconciliationAdvance(3, 5)).toBe(true);
+  });
+
+  it("still expects advancement when a sibling won the insert race but this cycle saw the same upstream activity", () => {
+    // sibling A inserted; this experiment's own persistEvents returned 0
+    // (upsert already had the rows), but its own fetch still saw 5 events.
+    expect(shadow.shouldExpectReconciliationAdvance(0, 5)).toBe(true);
+  });
+
+  it("does NOT expect advancement when there was no insert and no observed upstream activity", () => {
+    // The only genuinely unexplained case: nothing new was persisted and
+    // nothing new was even seen from upstream this cycle.
+    expect(shadow.shouldExpectReconciliationAdvance(0, 0)).toBe(false);
   });
 });

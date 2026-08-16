@@ -1222,6 +1222,28 @@ export async function refreshMarks(experimentId: string): Promise<{ updated: num
 /* Reconciliation                                                      */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Whether a wallet-level reconciliation mismatch found this cycle should be
+ * classified as expected/routine advancement (reconciliation_advanced INFO)
+ * rather than an unexplained divergence (reconciliation_mismatch WARN).
+ *
+ * `insertedCount > 0` alone under-counts: V2/V3 siblings follow the same
+ * wallet and can poll within ~1s of each other, so whichever sibling's
+ * persistEvents commits first wins the insert (upsert with ignoreDuplicates
+ * returns 0 rows for the loser), even though the loser's own fetch this
+ * cycle genuinely saw that same new activity from upstream. `fetchedEventCount
+ * > 0` captures that: it is only ever consulted here while the experiment is
+ * still `!bootstrapped` (the caller's own gate), i.e. during catch-up, where
+ * seeing upstream activity is itself routine. A mismatch with neither a real
+ * insert nor any observed upstream activity still classifies as unexplained.
+ */
+export function shouldExpectReconciliationAdvance(
+  insertedCount: number,
+  fetchedEventCount: number,
+): boolean {
+  return insertedCount > 0 || fetchedEventCount > 0;
+}
+
 export async function reconcile(
   wallet: string = TARGET_WALLET,
   options: { expectAdvance?: boolean } = {},
@@ -1853,7 +1875,9 @@ export async function runExperimentCycle(
         const reconciliation = await timed("reconciliation", () =>
           inserted > 0 || !bootstrapped
             ? boundedStage(
-                reconcile(wallet, { expectAdvance: inserted > 0 }),
+                reconcile(wallet, {
+                  expectAdvance: shouldExpectReconciliationAdvance(inserted, events.length),
+                }),
                 RECONCILE_DEADLINE_MS,
                 "reconciliation",
                 null,
