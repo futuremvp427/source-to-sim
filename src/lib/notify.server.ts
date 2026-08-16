@@ -145,9 +145,17 @@ export async function notifyAlert(alert: {
 
 /**
  * Retry a small bounded set of important alerts that previously failed (or
- * were never attempted). Filtering by kind happens IN THE QUERY before the
- * limit is applied: permanently pending in-app-only alerts must never occupy
- * every retry slot and starve a newly queued paper_buy notification.
+ * were never attempted), using a strict two-tier priority policy.
+ *
+ * TIER 1 — actual paper BUYs, oldest first (FIFO), selected before any other
+ * kind is even queried. No operational alert can occupy a slot ahead of a
+ * pending paper_buy.
+ * TIER 2 — other currently-actionable kinds, only within
+ * NON_PAPER_BUY_MAX_RETRY_AGE_MS, newest first, using only the retry capacity
+ * left over after tier 1.
+ *
+ * `limit` is a TOTAL budget across both tiers. Nothing is ever deleted here:
+ * alerts outside the operational window simply stop being retry candidates.
  */
 export async function retryPendingTelegramAlerts(limit = 10): Promise<{ attempted: number; sent: number }> {
   if (telegramStatus() === "NOT_CONFIGURED") return { attempted: 0, sent: 0 };
@@ -161,19 +169,41 @@ export async function retryPendingTelegramAlerts(limit = 10): Promise<{ attempte
     .eq("notification_status" as never, "sending" as never)
     .lt("notification_attempted_at" as never, retryBefore as never);
 
-  const { data, error } = await supabaseAdmin
+  const total = Math.max(1, Math.min(limit, 50));
+
+  const { data: priority, error: priorityError } = await supabaseAdmin
     .from("alerts")
     .select("*")
     .is("notified_at", null)
     .in("notification_status" as never, ["pending", "failed"] as never)
-    .in("kind" as never, IMPORTANT_KIND_LIST as never)
+    .eq("kind" as never, PRIORITY_KIND as never)
     .order("created_at", { ascending: true })
-    .limit(Math.max(1, Math.min(limit, 50)));
-  if (error) return { attempted: 0, sent: 0 };
+    .limit(total);
+  if (priorityError) return { attempted: 0, sent: 0 };
+
+  const priorityRows = priority ?? [];
+  const remaining = total - priorityRows.length;
+  let otherRows: typeof priorityRows = [];
+  if (remaining > 0) {
+    const freshSince = new Date(Date.now() - NON_PAPER_BUY_MAX_RETRY_AGE_MS).toISOString();
+    const { data: others, error: othersError } = await supabaseAdmin
+      .from("alerts")
+      .select("*")
+      .is("notified_at", null)
+      .in("notification_status" as never, ["pending", "failed"] as never)
+      .in("kind" as never, TIER2_KIND_LIST as never)
+      .gte("created_at" as never, freshSince as never)
+      .order("created_at", { ascending: false })
+      .limit(remaining);
+    if (othersError) return { attempted: 0, sent: 0 };
+    otherRows = others ?? [];
+  }
+
+  const data = [...priorityRows, ...otherRows].slice(0, total);
 
   let attempted = 0;
   let sent = 0;
-  for (const raw of data ?? []) {
+  for (const raw of data) {
     const row = raw as typeof raw & { notification_status?: string | null };
     // Defense-in-depth in case storage/query semantics ever drift; the DB
     // filter above is the load-bearing anti-starvation fix.
