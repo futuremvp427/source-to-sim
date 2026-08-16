@@ -17,7 +17,8 @@ function makeFakeDb() {
     | { type: "eq"; col: string; val: unknown }
     | { type: "is"; col: string; val: null }
     | { type: "in"; col: string; val: unknown[] }
-    | { type: "lt"; col: string; val: string };
+    | { type: "lt"; col: string; val: string }
+    | { type: "gte"; col: string; val: string };
 
   function matches(row: Row, filters: Filter[]): boolean {
     for (const f of filters) {
@@ -25,6 +26,7 @@ function makeFakeDb() {
       if (f.type === "is" && row[f.col] !== null) return false;
       if (f.type === "in" && !f.val.includes(row[f.col])) return false;
       if (f.type === "lt" && !((row[f.col] as string | null) !== null && (row[f.col] as string) < f.val)) return false;
+      if (f.type === "gte" && !((row[f.col] as string | null) !== null && (row[f.col] as string) >= f.val)) return false;
     }
     return true;
   }
@@ -75,6 +77,10 @@ function makeFakeDb() {
         filters.push({ type: "lt", col, val });
         return builder;
       },
+      gte(col: string, val: string) {
+        filters.push({ type: "gte", col, val });
+        return builder;
+      },
       order(col: string, opts: { ascending: boolean }) {
         orderBys.push({ col, ascending: opts.ascending });
         return builder;
@@ -111,7 +117,7 @@ vi.mock("@/integrations/supabase/client.server", () => ({
 
 const { notifyAlert, retryPendingTelegramAlerts } = await import("./notify.server");
 
-const ALERT = { level: "info", kind: "new_source_trades", message: "test" };
+const ALERT = { level: "info", kind: "paper_buy", message: "test" };
 
 beforeEach(() => {
   fake.tables["alerts"]!.length = 0;
