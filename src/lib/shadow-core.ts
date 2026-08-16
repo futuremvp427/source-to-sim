@@ -40,6 +40,19 @@ function num(v: unknown): number {
 }
 
 /**
+ * FAIL-CLOSED side parsing. Only an explicit, case-insensitive "BUY" or "SELL"
+ * may become an executable normalized event. A missing, empty, malformed or
+ * unrecognized side used to silently default to BUY, which would have paper-
+ * copied an unknown source action as a purchase; such rows are now skipped.
+ */
+export function parseSourceSide(v: unknown): Side | null {
+  const raw = str(v).trim().toUpperCase();
+  if (raw === "BUY") return "BUY";
+  if (raw === "SELL") return "SELL";
+  return null;
+}
+
+/**
  * Deterministic, restart-safe event identity.
  * Preference: source-native id -> tx hash + log/event index -> tx hash + economic tuple + ordinal.
  *
@@ -58,7 +71,9 @@ export function normalizeSourceEvents(raw: RawTrade[], wallet: string): Normaliz
     const rawLogIndex = r["logIndex"] ?? r["eventIndex"] ?? r["logIdx"];
     const logIndex =
       typeof rawLogIndex === "number" || typeof rawLogIndex === "string" ? String(rawLogIndex) : "";
-    const side: Side = str(r["side"]).toUpperCase() === "SELL" ? "SELL" : "BUY";
+    // Unknown/missing side is never copied as BUY (fail closed): skip the row.
+    const side = parseSourceSide(r["side"]);
+    if (side === null) continue;
     const asset = str(r["asset"]);
     const shares = num(r["size"]);
     const price = num(r["price"]);

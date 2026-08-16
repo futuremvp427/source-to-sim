@@ -69,6 +69,22 @@ export function isGeneralShadowName(name: string): boolean {
  */
 export const GENERAL_SHADOW_POLLING_ENABLED = false;
 
+/**
+ * BOUNDED SAFE-RESUME GUARD.
+ *
+ * Flipping GENERAL_SHADOW_POLLING_ENABLED back to true must NOT let a single
+ * cycle unleash the entire RN1/swisstony backlog as one request storm (the
+ * 2026-08-13 stall left a very large gap, and unbounded catch-up is what
+ * produced the original 429 burst).
+ *
+ * General Shadow catch-up is therefore capped at this many upstream pages per
+ * cycle. If the backlog is not covered inside the budget the cycle fails
+ * closed: the checkpoint is NOT advanced and no events are processed, so a
+ * later cycle retries from the same boundary without ever skipping history.
+ * V2/V3 and candidate polling do not use this cap and are unaffected.
+ */
+export const GENERAL_SHADOW_CATCHUP_PAGE_BUDGET = 8;
+
 export function gsHandleFromName(name: string): string | null {
   return isGeneralShadowName(name) ? name.slice(GS_PREFIX.length) : null;
 }

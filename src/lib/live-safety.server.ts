@@ -122,8 +122,15 @@ export async function loadLiveSafety(): Promise<LiveSafetyData> {
   };
 }
 
+/**
+ * Persistence is PROVEN, never assumed: the update returns the affected row
+ * ids, so both a DB error and a zero-row (no matching control row) outcome
+ * throw instead of letting a caller report "kill switch engaged" / "armed" /
+ * "activated" for a write that never landed. Gates, caps and constants are
+ * unchanged.
+ */
 async function writeState(patch: Record<string, unknown>, action: string): Promise<void> {
-  await supabaseAdmin
+  const { data, error } = await supabaseAdmin
     .from("live_safety_state")
     .update({
       ...patch,
@@ -131,7 +138,12 @@ async function writeState(patch: Record<string, unknown>, action: string): Promi
       last_action_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     })
-    .eq("id", "global");
+    .eq("id", "global")
+    .select("id");
+  if (error) throw new Error(`live_safety_state update failed: ${error.message}`);
+  if (!data || data.length === 0) {
+    throw new Error("live_safety_state update matched no row; state was not persisted");
+  }
 }
 
 export type SafetyActionResult = { ok: boolean; message: string };

@@ -76,8 +76,14 @@ export async function loadPoligarchPilotSafety(): Promise<PilotSafetyState> {
   return readState();
 }
 
+/**
+ * Persistence is PROVEN, never assumed: the update returns the affected
+ * pilot_id, so a DB error or a zero-row (no matching pilot control row)
+ * outcome throws rather than letting a caller report an engaged kill switch or
+ * an advanced activation stage that never persisted. Gates and caps unchanged.
+ */
 async function writeState(patch: Record<string, unknown>, action: string): Promise<void> {
-  await supabaseAdmin
+  const { data, error } = await supabaseAdmin
     .from("live_pilot_state")
     .update({
       ...patch,
@@ -85,7 +91,12 @@ async function writeState(patch: Record<string, unknown>, action: string): Promi
       last_action_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     })
-    .eq("pilot_id", PILOT_ID);
+    .eq("pilot_id", PILOT_ID)
+    .select("pilot_id");
+  if (error) throw new Error(`live_pilot_state update failed: ${error.message}`);
+  if (!data || data.length === 0) {
+    throw new Error("live_pilot_state update matched no row; state was not persisted");
+  }
 }
 
 /** Emergency stop. Always allowed, and immediately resets activation to locked. */
