@@ -24,22 +24,30 @@ export const RESEARCH_BUDGET_MS = 120_000;
 export type BatchCandidate = { id: string; handle: string };
 
 /**
- * Oldest-first bounded batch. `lastComputedAt` maps candidate id -> ISO time of
- * its most recent metrics computation; missing/unparseable means "never", which
- * sorts first. Ties break on id so the order is fully deterministic.
+ * Bounded batch. Candidates with missing or mixed-version persistence
+ * (`repairIds`) are selected FIRST so partial historical records get repaired
+ * before ordinary refreshes; the remainder is oldest-computed-first.
+ * `lastComputedAt` maps candidate id -> ISO time of its most recent metrics
+ * computation; missing/unparseable means "never", which sorts first. Ties break
+ * on id so the order is fully deterministic.
  */
 export function selectResearchBatch<T extends BatchCandidate>(
   candidates: readonly T[],
   lastComputedAt: ReadonlyMap<string, string | null>,
   batchSize: number = RESEARCH_BATCH_SIZE,
+  repairIds: ReadonlySet<string> = new Set(),
 ): T[] {
   const rank = (c: T): number => {
     const raw = lastComputedAt.get(c.id);
     const t = raw ? new Date(raw).getTime() : NaN;
     return Number.isFinite(t) ? t : -1;
   };
+  const priority = (c: T): number => (repairIds.has(c.id) ? 0 : 1);
   return [...candidates]
-    .sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id))
+    .sort(
+      (a, b) =>
+        priority(a) - priority(b) || rank(a) - rank(b) || a.id.localeCompare(b.id),
+    )
     .slice(0, Math.max(1, batchSize));
 }
 
