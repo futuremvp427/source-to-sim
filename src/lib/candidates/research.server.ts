@@ -444,8 +444,8 @@ export async function loadResearchRunState(): Promise<ResearchRunState | null> {
   };
 }
 
-async function referenceFingerprint(): Promise<CandidateFingerprint> {
-  const trades = await fetchPublicTrades(REFERENCE_WALLET);
+export async function referenceFingerprint(signal?: AbortSignal): Promise<CandidateFingerprint> {
+  const trades = await fetchPublicTrades(REFERENCE_WALLET, signal);
   return computeFingerprint(trades);
 }
 
