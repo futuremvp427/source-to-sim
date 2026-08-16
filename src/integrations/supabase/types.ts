@@ -557,6 +557,27 @@ export type Database = {
         }
         Relationships: []
       }
+      http_rate_limits: {
+        Row: {
+          blocked_until: string | null
+          host: string
+          reason: string | null
+          updated_at: string
+        }
+        Insert: {
+          blocked_until?: string | null
+          host: string
+          reason?: string | null
+          updated_at?: string
+        }
+        Update: {
+          blocked_until?: string | null
+          host?: string
+          reason?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       integration_status: {
         Row: {
           account_summary: Json | null
@@ -1652,6 +1673,10 @@ export type Database = {
           p_worker_id: string
         }
         Returns: Json
+      }
+      record_http_rate_limit: {
+        Args: { p_blocked_until: string; p_host: string; p_reason: string }
+        Returns: undefined
       }
       release_reconcile_lease: {
         Args: { p_holder: string; p_wallet: string }
