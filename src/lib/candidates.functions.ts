@@ -2,7 +2,16 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
 import { requireAdmin } from "./admin-auth";
+import type { CandidateShadowPanelData } from "./candidate-shadow.server";
 import type { CandidatePanelData, PromotionResult, ResearchSummary } from "./candidates/research.server";
+
+/** Read model for active CANDIDATE: paper followers. Read-only. */
+export const getCandidateShadowPanel = createServerFn({ method: "GET" }).handler(
+  async (): Promise<CandidateShadowPanelData> => {
+    const { loadCandidateShadowPanel } = await import("./candidate-shadow.server");
+    return loadCandidateShadowPanel();
+  },
+);
 
 /** Read model for the Research / Candidate Watchlist panel. Read-only. */
 export const getCandidatePanel = createServerFn({ method: "GET" }).handler(
