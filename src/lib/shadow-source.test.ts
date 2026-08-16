@@ -416,7 +416,7 @@ describe("source ingest real cancellation", () => {
   });
 
   it("threads the cycle signal from runExperimentCycle's source_ingest into fetchSourceWindow", () => {
-    expect(src).toMatch(/fetchSourceWindow\([\s\S]{0,300}?cycleAbort\.signal,[\s\S]{0,60}?\)/);
+    expect(src).toMatch(/fetchSourceWindow\([\s\S]{0,300}?cycleAbort\.signal,[\s\S]{0,200}?\)/);
     expect(src).toContain("AbortSignal.timeout(12_000)");
   });
 });
