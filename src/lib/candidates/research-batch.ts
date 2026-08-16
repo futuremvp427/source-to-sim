@@ -71,14 +71,29 @@ export type ResearchDeadline = {
   dispose: () => void;
 };
 
-export function createResearchDeadline(budgetMs: number = RESEARCH_BUDGET_MS): ResearchDeadline {
+/**
+ * `parentSignal` is the CALLER's deadline (e.g. the ingest scheduler's ~8s
+ * budget). It is combined with the pass's own cap so a scheduler abort is a
+ * genuine cancellation of in-flight public HTTP, not an abandoned promise.
+ */
+export function createResearchDeadline(
+  budgetMs: number = RESEARCH_BUDGET_MS,
+  parentSignal?: AbortSignal,
+): ResearchDeadline {
   const controller = new AbortController();
   const startedAtMs = Date.now();
   const timer = setTimeout(() => {
     controller.abort(new ResearchBudgetExhaustedError());
   }, budgetMs);
+  const onParentAbort = (): void => controller.abort(new ResearchBudgetExhaustedError());
+  if (parentSignal) {
+    if (parentSignal.aborted) onParentAbort();
+    else parentSignal.addEventListener("abort", onParentAbort, { once: true });
+  }
   const expired = (): boolean =>
-    controller.signal.aborted || budgetExhausted(startedAtMs, Date.now(), budgetMs);
+    controller.signal.aborted ||
+    parentSignal?.aborted === true ||
+    budgetExhausted(startedAtMs, Date.now(), budgetMs);
   return {
     signal: controller.signal,
     startedAtMs,
@@ -91,7 +106,10 @@ export function createResearchDeadline(budgetMs: number = RESEARCH_BUDGET_MS): R
         throw new ResearchBudgetExhaustedError();
       }
     },
-    dispose: () => clearTimeout(timer),
+    dispose: () => {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener("abort", onParentAbort);
+    },
   };
 }
 
