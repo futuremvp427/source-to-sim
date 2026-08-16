@@ -6,7 +6,7 @@
 
 This is a **new, distinct epoch boundary**, established from a dedicated 2026-08-16 production audit — it is **not** a resurrection of the 2026-08-14 value discussed at length below. The earlier `T_clean = 2026-08-14 11:29:19.638 UTC` value remains **withdrawn and historical**; it was never re-established, a further full-cohort 429 storm occurred as recently as 2026-08-16 03:12–03:52 UTC (well after that value's own window), and nothing in this document should be read as reviving it. See `docs/CURRENT_OBSERVATION_STATUS.md` for the current authoritative status and the two documents' agreed relationship, and see "2026-08-16 production continuity audit: new T_clean established" below for the full evidence trail behind the new boundary.
 
-Because this boundary was only just established, expect most or all of the 10 cohort experiments to read as **INSUFFICIENT NEW DATA** for some time — that is expected and correct, not a defect.
+Because this boundary was only just established, expect the 10 cohort experiments' post-T_clean sample sizes to stay small until well after T_7d — the formal QUALIFIED / NOT QUALIFIED / INSUFFICIENT NEW DATA classification below does not apply until at or after T_7d (2026-08-23), per the methodology's own gate.
 
 ## Current status
 
@@ -111,8 +111,8 @@ Observed high-level facts, measured against the **current** T_clean:
 - Exactly 10 enabled V2/V3 experiments were audited, matching the cohort defined above.
 - Post-T_clean clean lifecycles opened per experiment so far (V2 / V3 CAPACITY): `gghff` 2/2, `HighTempTation` 1/1, `Poligarch` 0/0, `Weather-Guru` 0/0, `badatmath.` 0/0.
 - Only **1 distinct trading day** with new post-T_clean BUY exposure so far — expected, given T_clean was established only recently.
-- **All 10 experiments currently classify as INSUFFICIENT NEW DATA** under the qualification methodology above — none has a representative post-T_clean sample yet. This is expected this soon after establishment, not a defect.
-- **No experiment is being promoted yet.** This document does not fix a minimum sample-size threshold, and none is being asserted here — the counts above are reported as observed, not as a qualification verdict.
+- **No formal QUALIFIED / NOT QUALIFIED / INSUFFICIENT NEW DATA classification is being assigned yet.** Per the methodology above, that classification applies only at or after T_7d (2026-08-23 12:09:43.355885 UTC) — assigning it now, five-plus days early, would itself violate the gate. The counts above are reported as raw observed evidence only.
+- **No experiment is being promoted yet.** This document does not fix a minimum sample-size threshold, and none is being asserted here.
 - T_7d (2026-08-23 12:09:43.355885 UTC) remains the **earliest** evaluation gate, not an automatic promotion date, per the qualification methodology above: passing T_7d does not by itself qualify, disqualify, or promote any experiment.
 
 ### Historical: audit results measured against the withdrawn 2026-08-14 boundary
@@ -121,6 +121,6 @@ The counts below were measured in an earlier run of this audit against the **wit
 
 - Post-(withdrawn-boundary) clean lifecycles opened per experiment (V2 / V3 CAPACITY): `gghff` 97/95, `HighTempTation` 59/59, `Poligarch` 542/585, `Weather-Guru` 79/73, `badatmath.` 0/0.
 - 3 distinct trading days with new BUY exposure were observed against that withdrawn boundary.
-- `badatmath.` classified as INSUFFICIENT NEW DATA against that withdrawn boundary.
+- That earlier run's text described `badatmath.` as INSUFFICIENT NEW DATA; per the correction above, no formal classification should have been asserted before a T_7d gate regardless, so that label is also historical only and not a standing classification.
 
 This document is reporting guidance only. It does not change sizing, accounting, settlement, leases/fencing, bankrolls, source-event identity, or live-order safety.
