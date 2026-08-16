@@ -165,6 +165,37 @@ describe("failed retry", () => {
     const row = fake.tables["alerts"]!.find((r) => r["id"] === "a1")!;
     expect(row["notification_status"]).toBe("sent");
   });
+
+  it("filters non-important rows before LIMIT so old in-app alerts cannot starve a new paper BUY", async () => {
+    mockFetchOk();
+    for (let i = 0; i < 25; i += 1) {
+      fake.tables["alerts"]!.push({
+        id: `noise-${i}`,
+        level: "info",
+        kind: "paper_copy_skips",
+        message: "in-app only",
+        notified_at: null,
+        notification_status: "pending",
+        notification_attempted_at: null,
+        created_at: `2026-08-01T00:00:${String(i).padStart(2, "0")}.000Z`,
+      });
+    }
+    fake.tables["alerts"]!.push({
+      id: "buy-1",
+      level: "info",
+      kind: "paper_buy",
+      message: "actual paper buy",
+      notified_at: null,
+      notification_status: "pending",
+      notification_attempted_at: null,
+      created_at: "2026-08-16T17:30:00.000Z",
+    });
+
+    const result = await retryPendingTelegramAlerts(1);
+    expect(result).toEqual({ attempted: 1, sent: 1 });
+    expect(fake.tables["alerts"]!.find((r) => r["id"] === "buy-1")?.["notification_status"]).toBe("sent");
+    expect(fake.tables["alerts"]!.filter((r) => String(r["id"]).startsWith("noise-")).every((r) => r["notification_status"] === "pending")).toBe(true);
+  });
 });
 
 describe("status transition protection", () => {
@@ -209,6 +240,7 @@ describe("stale-sending recovery", () => {
       notified_at: null,
       notification_status: "sending",
       notification_attempted_at: "2020-01-01T00:00:00.000Z", // far in the past
+      created_at: "2020-01-01T00:00:00.000Z",
     });
     const result = await retryPendingTelegramAlerts();
     expect(result.attempted).toBe(1);
