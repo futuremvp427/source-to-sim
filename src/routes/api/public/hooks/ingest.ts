@@ -38,18 +38,39 @@ async function handle(request: Request): Promise<Response> {
       }
     }
 
+    // Queue actual paper-BUY alerts only after the full ingest cycle has
+    // completed and all worker leases/accounting transactions are closed. The
+    // producer scans the durable paper_trades ledger from its own cursor, not
+    // the current cycle summary, so a BUY remains recoverable even when a
+    // later stage of the cycle failed after paper processing committed it.
+    let paperBuyNotifications = { buysFound: 0, alertsQueued: 0, cursorAdvanced: false };
+    try {
+      const { queuePaperBuyNotifications } = await import("@/lib/paper-buy-notifications.server");
+      paperBuyNotifications = await queuePaperBuyNotifications();
+    } catch {
+      // Notification production is best-effort and must never fail ingestion.
+      // The durable cursor stays behind, so the next scheduler run retries the
+      // same persisted BUYs instead of losing them.
+    }
+
     // Notification delivery is deliberately failure-isolated from ingestion.
     // A Telegram outage must never make a successful source/paper cycle fail,
     // but failed important alerts should be retried automatically on later cron runs.
     let notifications = { attempted: 0, sent: 0 };
     try {
       const { retryPendingTelegramAlerts } = await import("@/lib/notify.server");
-      notifications = await retryPendingTelegramAlerts(10);
+      notifications = await retryPendingTelegramAlerts(20);
     } catch {
       // Best-effort only; delivery state remains pending/failed for a later retry.
     }
 
-    return Response.json({ ok: true, ...result, researchPersistence, notifications });
+    return Response.json({
+      ok: true,
+      ...result,
+      researchPersistence,
+      paperBuyNotifications,
+      notifications,
+    });
   } catch (err) {
     return Response.json(
       { ok: false, error: err instanceof Error ? err.message : "ingest failed" },
