@@ -126,13 +126,26 @@ const {
 
 const ALERT = { level: "info", kind: "paper_buy", message: "test" };
 
+/**
+ * All retry windows are anchored to the real hardening cutover instead of
+ * calendar dates, so the suite stays deterministic as wall-clock time moves on.
+ */
+const HOUR_MS = 60 * 60 * 1000;
+const CUTOVER_MS = new Date(TELEGRAM_RETRY_CUTOVER_AT).getTime();
+const NOW_MS = CUTOVER_MS + 10 * HOUR_MS;
+const afterCutover = (ms: number) => new Date(CUTOVER_MS + ms).toISOString();
+const beforeCutover = (ms: number) => new Date(CUTOVER_MS - ms).toISOString();
+
 beforeEach(() => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(NOW_MS);
   fake.tables["alerts"]!.length = 0;
   process.env["TELEGRAM_BOT_TOKEN"] = "test-token";
   process.env["TELEGRAM_CHAT_ID"] = "test-chat";
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   delete process.env["TELEGRAM_BOT_TOKEN"];
   delete process.env["TELEGRAM_CHAT_ID"];
   vi.unstubAllGlobals();
@@ -201,7 +214,7 @@ describe("failed retry", () => {
       notified_at: null,
       notification_status: "pending",
       notification_attempted_at: null,
-      created_at: "2026-08-16T17:30:00.000Z",
+      created_at: afterCutover(60_000),
     });
 
     const result = await retryPendingTelegramAlerts(1);
@@ -325,9 +338,9 @@ describe("two-tier retry priority", () => {
     expect(fake.tables["alerts"]!.filter((r) => r["kind"] === "poll_failure" && r["notification_status"] === "sent")).toHaveLength(13);
   });
 
-  it("never retries an operational alert older than the 2-hour window, but keeps the row stored", async () => {
+  it("never retries a pre-cutover durable alert, but keeps the row stored", async () => {
     mockFetchOk();
-    pushAlert({ id: "ancient", kind: "position_settled", created_at: iso(200 * HOUR) });
+    pushAlert({ id: "ancient", kind: "position_settled", created_at: beforeCutover(200 * HOUR) });
     expect(await retryPendingTelegramAlerts(20)).toEqual({ attempted: 0, sent: 0 });
     expect(statusOf("ancient")).toBe("pending");
     expect(fake.tables["alerts"]!).toHaveLength(1);
@@ -365,7 +378,7 @@ describe("two-tier retry priority", () => {
 describe("hardening cutover + durable vs operational retry classes", () => {
   it("does not replay a pre-cutover backlog alert, but keeps the row stored", async () => {
     mockFetchOk();
-    const preCutover = new Date(new Date(TELEGRAM_RETRY_CUTOVER_AT).getTime() - HOUR).toISOString();
+    const preCutover = beforeCutover(HOUR);
     pushAlert({ id: "old-buy", kind: "paper_buy", created_at: preCutover });
     pushAlert({ id: "old-settled", kind: "position_settled", created_at: preCutover });
 
@@ -377,13 +390,18 @@ describe("hardening cutover + durable vs operational retry classes", () => {
 
   it("keeps post-cutover settlement and cash alerts retryable well beyond 2 hours", async () => {
     mockFetchOk();
-    pushAlert({ id: "settled", kind: "position_settled", created_at: iso(30 * HOUR) });
-    pushAlert({ id: "cash", kind: "LOW_SPENDABLE_CASH", created_at: iso(20 * HOUR) });
-    pushAlert({ id: "reserve", kind: "CASH_RESERVE_REACHED", created_at: iso(10 * HOUR) });
+    // Created just after the cutover, i.e. ~10h old relative to "now".
+    pushAlert({ id: "settled", kind: "position_settled", created_at: afterCutover(0) });
+    pushAlert({ id: "cash", kind: "LOW_SPENDABLE_CASH", created_at: afterCutover(HOUR) });
+    pushAlert({ id: "reserve", kind: "CASH_RESERVE_REACHED", created_at: afterCutover(2 * HOUR) });
 
     const result = await retryPendingTelegramAlerts(20);
     expect(result.sent).toBe(3);
     for (const id of ["settled", "cash", "reserve"]) expect(statusOf(id)).toBe("sent");
+  });
+
+  it("uses the hardening deployment instant as the cutover, not an earlier calendar date", () => {
+    expect(TELEGRAM_RETRY_CUTOVER_AT).toBe("2026-08-16T20:26:30.000Z");
   });
 
   it("expires post-cutover operational diagnostics after the bounded 2-hour window", async () => {
