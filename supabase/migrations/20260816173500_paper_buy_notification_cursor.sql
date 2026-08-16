@@ -23,6 +23,13 @@ ALTER TABLE public.paper_buy_notification_cursor ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.paper_buy_notification_cursor FROM PUBLIC, anon, authenticated;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.paper_buy_notification_cursor TO service_role;
 
+-- Keep the cursor walk O(new BUY rows), not O(all paper history), as the
+-- paper_trades ledger grows. This index is notification-only and does not alter
+-- execution/accounting semantics.
+CREATE INDEX paper_trades_buy_notification_cursor_idx
+  ON public.paper_trades (created_at ASC, id ASC)
+  WHERE action = 'BUY';
+
 -- The all-FF UUID makes the migration timestamp an exclusive boundary even if
 -- a pre-existing trade happened to share that exact timestamp.
 INSERT INTO public.paper_buy_notification_cursor (
