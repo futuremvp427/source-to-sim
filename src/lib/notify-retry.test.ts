@@ -252,8 +252,10 @@ describe("stale-sending recovery", () => {
       ...ALERT,
       notified_at: null,
       notification_status: "sending",
-      notification_attempted_at: "2020-01-01T00:00:00.000Z", // far in the past
-      created_at: "2020-01-01T00:00:00.000Z",
+      notification_attempted_at: "2020-01-01T00:00:00.000Z", // claim is far in the past
+      // created_at stays post-cutover: this exercises stale-claim recovery,
+      // not replay of the pre-hardening backlog.
+      created_at: new Date(Date.now() - 60_000).toISOString(),
     });
     const result = await retryPendingTelegramAlerts();
     expect(result.attempted).toBe(1);
