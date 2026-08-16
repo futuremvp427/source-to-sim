@@ -27,6 +27,7 @@ const IMPORTANT_KINDS = new Set([
   "pmus_exact_match",
   "us_exact_match",
 ]);
+const IMPORTANT_KIND_LIST = [...IMPORTANT_KINDS];
 
 const RETRY_AFTER_MS = 60_000;
 
@@ -130,8 +131,9 @@ export async function notifyAlert(alert: {
 
 /**
  * Retry a small bounded set of important alerts that previously failed (or
- * were never attempted). This is intentionally exported so the scheduler can
- * invoke it once per cycle when the runtime wiring is refreshed.
+ * were never attempted). Filtering by kind happens IN THE QUERY before the
+ * limit is applied: permanently pending in-app-only alerts must never occupy
+ * every retry slot and starve a newly queued paper_buy notification.
  */
 export async function retryPendingTelegramAlerts(limit = 10): Promise<{ attempted: number; sent: number }> {
   if (telegramStatus() === "NOT_CONFIGURED") return { attempted: 0, sent: 0 };
@@ -150,6 +152,7 @@ export async function retryPendingTelegramAlerts(limit = 10): Promise<{ attempte
     .select("*")
     .is("notified_at", null)
     .in("notification_status" as never, ["pending", "failed"] as never)
+    .in("kind" as never, IMPORTANT_KIND_LIST as never)
     .order("created_at", { ascending: true })
     .limit(Math.max(1, Math.min(limit, 50)));
   if (error) return { attempted: 0, sent: 0 };
@@ -158,6 +161,8 @@ export async function retryPendingTelegramAlerts(limit = 10): Promise<{ attempte
   let sent = 0;
   for (const raw of data ?? []) {
     const row = raw as typeof raw & { notification_status?: string | null };
+    // Defense-in-depth in case storage/query semantics ever drift; the DB
+    // filter above is the load-bearing anti-starvation fix.
     if (!isImportantAlertKind(String(row.kind))) continue;
     attempted += 1;
     const result = await notifyAlert({
