@@ -230,6 +230,61 @@ describe("abortable network calls under the overall deadline", () => {
     expect(summary.detail).toMatch(/budget exhausted/i);
     expect(workerWrites().at(-1)!.payload["state"]).not.toBe("running");
   });
+
+  it("aborts a hung slippage (prices-history) fetch at the overall deadline", async () => {
+    mockFetch({
+      hangOn: "prices-history",
+      trades: [
+        {
+          asset: "0xasset",
+          size: 10,
+          price: 0.4,
+          timestamp: 1_760_000_000,
+          title: "Market",
+          slug: "market",
+          outcome: "Yes",
+          side: "BUY",
+        },
+      ],
+    });
+    config = { watchlist: [resolvedRow("aaa")] };
+
+    const run = runCandidateResearch();
+    await vi.advanceTimersByTimeAsync(RESEARCH_BUDGET_MS + 1);
+    const summary = await run;
+
+    expect(fetchCalls.some((u) => u.includes("prices-history"))).toBe(true);
+    expect(["error", "partial"]).toContain(summary.state);
+    expect(summary.detail).toMatch(/budget exhausted/i);
+    expect(workerWrites().at(-1)!.payload["state"]).not.toBe("running");
+  });
+});
+
+describe("terminal worker_status write failures are not swallowed", () => {
+  it("throws a combined error when the terminal run-state write fails", async () => {
+    mockFetch();
+    config = {
+      watchlist: [resolvedRow("aaa")],
+      onWatchlistRead: () => vi.advanceTimersByTime(RESEARCH_BUDGET_MS + 1),
+      workerWriteError: "worker write boom",
+    };
+
+    await expect(runCandidateResearch()).rejects.toThrow(/terminal worker_status write failed: worker_status update failed: worker write boom/);
+  });
+});
+
+describe("candidate research_error note write failures are surfaced", () => {
+  it("appends the note write failure to the candidate failure detail", async () => {
+    mockFetch();
+    config = {
+      watchlist: [resolvedRow("aaa")],
+      metricsWriteError: "metrics write boom",
+      watchlistNoteWriteError: "note write boom",
+    };
+
+    const summary = await runCandidateResearch();
+    expect(summary.failures.map((f) => f.error).join(" ")).toMatch(/note not stored: note write boom/);
+  });
 });
 
 describe("candidate_metrics errors are never silently ignored", () => {
