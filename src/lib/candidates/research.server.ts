@@ -486,17 +486,34 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
     };
   }
 
-  const rows = await seedWatchlist();
-  const reference = await referenceFingerprint();
+  // The overall wall-clock budget starts HERE — immediately after the lease and
+  // before any seeding, handle resolution, reference fingerprint or public HTTP
+  // call — and every network call below shares its AbortSignal.
+  const deadline = createResearchDeadline();
+
+  const unresolved: string[] = [];
+  const insufficient: string[] = [];
+  const failures: { handle: string; error: string }[] = [];
+  let researched = 0;
+  let deferred = 0;
+  let budgetHit = false;
+
+  try {
+  const seeded = await seedWatchlist();
+  // At most UNRESOLVED_RESOLUTIONS_PER_RUN network resolutions per invocation.
+  const { rows } = await resolveBoundedUnresolved(seeded, deadline.signal);
+  deadline.assertLive();
+  const reference = await referenceFingerprint(deadline.signal);
   const nowSeconds = Math.floor(Date.now() / 1000);
 
   // Bounded + resumable: only the oldest-computed slice is refreshed per
   // invocation, so one scheduled run finishes far inside the 300s lease and
   // repeated runs progress across the whole watchlist. Deterministic cursor:
   // candidate_metrics.computed_at (never-computed candidates first).
-  const { data: computedRows } = await supabaseAdmin
+  const { data: computedRows, error: computedError } = await supabaseAdmin
     .from("candidate_metrics")
     .select("candidate_id, computed_at");
+  if (computedError) throw new Error(`candidate_metrics read failed: ${computedError.message}`);
   const lastComputedAt = new Map<string, string | null>(
     ((computedRows ?? []) as { candidate_id: string; computed_at: string | null }[]).map((r) => [
       r.candidate_id,
@@ -506,13 +523,6 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
   const resolvedRows = rows.filter((r) => Boolean(r.wallet));
   const batch = selectResearchBatch(resolvedRows, lastComputedAt, RESEARCH_BATCH_SIZE);
   const batchIds = new Set(batch.map((r) => r.id));
-  const startedAtMs = Date.now();
-
-  const unresolved: string[] = [];
-  const insufficient: string[] = [];
-  const failures: { handle: string; error: string }[] = [];
-  let researched = 0;
-  let deferred = 0;
 
   for (const row of rows) {
     if (!row.wallet) {
@@ -523,7 +533,8 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
       deferred += 1;
       continue;
     }
-    if (budgetExhausted(startedAtMs, Date.now(), RESEARCH_BUDGET_MS)) {
+    if (deadline.expired()) {
+      budgetHit = true;
       deferred += 1;
       continue;
     }
@@ -531,8 +542,8 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
     try {
     let trades: CandidateTrade[] = [];
     let positions: CandidatePosition[] = [];
-    trades = await fetchPublicTrades(row.wallet);
-    positions = await fetchPublicPositions(row.wallet);
+    trades = await fetchPublicTrades(row.wallet, deadline.signal);
+    positions = await fetchPublicPositions(row.wallet, deadline.signal);
 
     const metrics = computeMetrics({ trades, positions, nowSeconds });
     const fingerprint = computeFingerprint(trades);
