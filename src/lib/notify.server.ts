@@ -13,8 +13,15 @@ export type TelegramStatus = "NOT_CONFIGURED" | "CONFIGURED";
 
 /**
  * Alert kinds worth a push notification. Everything else stays in-app only.
- * new_source_trades is deliberately absent: those rows stay in the database for
- * the dashboard, but source-trade volume is not actionable over Telegram.
+ *
+ * `new_source_trades` is deliberately absent: source-trade volume remains in
+ * the alerts table/dashboard but is not itself actionable over Telegram.
+ *
+ * `reconciliation_mismatch` is also deliberately absent. That alert is emitted
+ * only after the authoritative persisted-event replay has already repaired the
+ * wallet-level source_position_state cache. The repair remains fully visible in
+ * the database/dashboard, while the genuinely unresolved replay case
+ * (`reconciliation_incomplete`) stays Telegram-actionable.
  */
 const IMPORTANT_KINDS = new Set([
   "paper_buy",
@@ -24,7 +31,6 @@ const IMPORTANT_KINDS = new Set([
   "settlement_verified",
   "settlement",
   "position_settled",
-  "reconciliation_mismatch",
   "reconciliation_incomplete",
   "poll_failure",
   "pmus_exact_match",
