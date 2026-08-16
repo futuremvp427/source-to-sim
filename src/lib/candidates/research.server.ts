@@ -100,7 +100,7 @@ function isAbort(err: unknown): boolean {
 
 export async function getJson(
   url: string,
-  opts: { attempts?: number; signal?: AbortSignal } = {},
+  opts: { attempts?: number | undefined; signal?: AbortSignal | undefined } = {},
 ): Promise<unknown> {
   const attempts = opts.attempts ?? 2;
   let lastErr: unknown;
