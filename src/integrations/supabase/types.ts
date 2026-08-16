@@ -930,6 +930,27 @@ export type Database = {
           },
         ]
       }
+      paper_buy_notification_cursor: {
+        Row: {
+          cursor_name: string
+          last_created_at: string
+          last_trade_id: string
+          updated_at: string
+        }
+        Insert: {
+          cursor_name: string
+          last_created_at: string
+          last_trade_id: string
+          updated_at?: string
+        }
+        Update: {
+          cursor_name?: string
+          last_created_at?: string
+          last_trade_id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       paper_experiments: {
         Row: {
           buy_amount: number
@@ -1605,6 +1626,10 @@ export type Database = {
         Args: { p_id: string; p_lease_seconds: number; p_worker_id: string }
         Returns: number
       }
+      advance_paper_buy_notification_cursor: {
+        Args: { p_last_created_at: string; p_last_trade_id: string }
+        Returns: undefined
+      }
       apply_verified_paper_settlement: {
         Args: {
           p_asset: string
@@ -1655,6 +1680,23 @@ export type Database = {
           shares: number
           side: string
           source_ts: number
+        }[]
+      }
+      get_pending_paper_buy_notification_trades: {
+        Args: { p_limit?: number }
+        Returns: {
+          cash_after: number
+          created_at: string
+          event_key: string
+          experiment_id: string
+          experiment_name: string
+          market_title: string
+          notional: number
+          outcome: string
+          price: number
+          shares: number
+          source_ts: number
+          trade_id: string
         }[]
       }
       has_role: {
