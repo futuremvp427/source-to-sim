@@ -159,7 +159,9 @@ describe("scheduler deadline cancels candidate research", () => {
     mockHangingFetch("prices-history");
 
     const pending = refreshCandidateResearchSafely();
-    await vi.advanceTimersByTimeAsync(RESEARCH_DEADLINE_MS + 1);
+    // Let the pass progress to the slippage fetch before the scheduler budget fires.
+    await vi.advanceTimersByTimeAsync(RESEARCH_DEADLINE_MS - 1);
+    await vi.advanceTimersByTimeAsync(2);
     await pending;
 
     expect(fetchCalls.some((u) => u.includes("prices-history"))).toBe(true);
