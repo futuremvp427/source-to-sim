@@ -18,6 +18,8 @@ type DbConfig = {
   metricsRows?: Row[];
   metricsReadError?: string;
   metricsWriteError?: string;
+  workerWriteError?: string;
+  watchlistNoteWriteError?: string;
   /** Called when the watchlist read resolves — used to burn wall-clock time. */
   onWatchlistRead?: () => void;
 };
@@ -36,6 +38,12 @@ function result(table: string, op: string): { data: unknown; error: { message: s
   }
   if (table === "candidate_metrics" && op === "upsert" && config.metricsWriteError) {
     return { data: null, error: { message: config.metricsWriteError } };
+  }
+  if (table === "worker_status" && op === "update" && config.workerWriteError) {
+    return { data: null, error: { message: config.workerWriteError } };
+  }
+  if (table === "candidate_watchlist" && op === "update" && config.watchlistNoteWriteError) {
+    return { data: null, error: { message: config.watchlistNoteWriteError } };
   }
   if (table === "worker_status" && op === "select") return { data: null, error: null };
   return { data: [], error: null };
@@ -70,12 +78,12 @@ const { selectUnresolvedForResolution, UNRESOLVED_RESOLUTIONS_PER_RUN } = await 
 
 const fetchCalls: string[] = [];
 
-function mockFetch(opts: { hang?: boolean } = {}): void {
+function mockFetch(opts: { hang?: boolean; hangOn?: string; trades?: unknown[] } = {}): void {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: { signal?: AbortSignal }) => {
       fetchCalls.push(String(url));
-      if (opts.hang) {
+      if (opts.hang || (opts.hangOn && String(url).includes(opts.hangOn))) {
         return await new Promise((_resolve, reject) => {
           init?.signal?.addEventListener("abort", () => {
             const err = new Error("aborted");
@@ -88,7 +96,9 @@ function mockFetch(opts: { hang?: boolean } = {}): void {
         ? { profiles: [] }
         : String(url).includes("prices-history")
           ? { history: [] }
-          : [];
+          : String(url).includes("/trades?")
+            ? (opts.trades ?? [])
+            : [];
       return new Response(JSON.stringify(body), { status: 200 });
     }),
   );
