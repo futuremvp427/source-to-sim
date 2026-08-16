@@ -550,7 +550,7 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
     const mirror = mirrorSimilarity(fingerprint, reference);
     const profit = profitQuality(metrics);
 
-    const slippage = await fetchSlippageSamples(trades);
+    const slippage = await fetchSlippageSamples(trades, deadline.signal);
     const copy = copyabilityScore(slippage);
 
     const consistency = consistencyScore(metrics);
@@ -638,11 +638,15 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
       // A deadline abort is a run-level outcome, not a per-candidate failure.
       if (isAbort(err) || deadline.expired()) throw new ResearchBudgetExhaustedError();
       const message = err instanceof Error ? err.message : "public request failed";
-      failures.push({ handle: row.handle, error: message });
-      await supabaseAdmin
+      const { error: noteError } = await supabaseAdmin
         .from("candidate_watchlist")
         .update({ notes: `research_error: ${message}`.slice(0, 400), updated_at: new Date().toISOString() } as never)
         .eq("id", row.id);
+      // Diagnostic telemetry: never fatal, but never silently pretended-recorded.
+      failures.push({
+        handle: row.handle,
+        error: noteError ? `${message} (research_error note not stored: ${noteError.message})` : message,
+      });
     }
   }
 
@@ -693,8 +697,12 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
     };
     try {
       await recordRunState(summary);
-    } catch {
-      // Surfacing the original cause matters more than the bookkeeping write.
+    } catch (writeErr) {
+      // If the terminal state cannot be written, the run is NOT safely recorded.
+      const writeMessage = writeErr instanceof Error ? writeErr.message : "worker_status update failed";
+      throw new Error(
+        `Research pass failed and terminal worker_status write failed: ${writeMessage} (original cause: ${message})`,
+      );
     }
     return summary;
   } finally {

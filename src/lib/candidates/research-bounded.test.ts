@@ -18,6 +18,8 @@ type DbConfig = {
   metricsRows?: Row[];
   metricsReadError?: string;
   metricsWriteError?: string;
+  workerWriteError?: string;
+  watchlistNoteWriteError?: string;
   /** Called when the watchlist read resolves — used to burn wall-clock time. */
   onWatchlistRead?: () => void;
 };
@@ -36,6 +38,12 @@ function result(table: string, op: string): { data: unknown; error: { message: s
   }
   if (table === "candidate_metrics" && op === "upsert" && config.metricsWriteError) {
     return { data: null, error: { message: config.metricsWriteError } };
+  }
+  if (table === "worker_status" && op === "update" && config.workerWriteError) {
+    return { data: null, error: { message: config.workerWriteError } };
+  }
+  if (table === "candidate_watchlist" && op === "update" && config.watchlistNoteWriteError) {
+    return { data: null, error: { message: config.watchlistNoteWriteError } };
   }
   if (table === "worker_status" && op === "select") return { data: null, error: null };
   return { data: [], error: null };
@@ -70,12 +78,12 @@ const { selectUnresolvedForResolution, UNRESOLVED_RESOLUTIONS_PER_RUN } = await 
 
 const fetchCalls: string[] = [];
 
-function mockFetch(opts: { hang?: boolean } = {}): void {
+function mockFetch(opts: { hang?: boolean; hangOn?: string; trades?: unknown[] } = {}): void {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: { signal?: AbortSignal }) => {
       fetchCalls.push(String(url));
-      if (opts.hang) {
+      if (opts.hang || (opts.hangOn && String(url).includes(opts.hangOn))) {
         return await new Promise((_resolve, reject) => {
           init?.signal?.addEventListener("abort", () => {
             const err = new Error("aborted");
@@ -88,7 +96,9 @@ function mockFetch(opts: { hang?: boolean } = {}): void {
         ? { profiles: [] }
         : String(url).includes("prices-history")
           ? { history: [] }
-          : [];
+          : String(url).includes("/trades?")
+            ? (opts.trades ?? [])
+            : [];
       return new Response(JSON.stringify(body), { status: 200 });
     }),
   );
@@ -219,6 +229,61 @@ describe("abortable network calls under the overall deadline", () => {
     expect(["error", "partial"]).toContain(summary.state);
     expect(summary.detail).toMatch(/budget exhausted/i);
     expect(workerWrites().at(-1)!.payload["state"]).not.toBe("running");
+  });
+
+  it("aborts a hung slippage (prices-history) fetch at the overall deadline", async () => {
+    mockFetch({
+      hangOn: "prices-history",
+      trades: [
+        {
+          asset: "0xasset",
+          size: 10,
+          price: 0.4,
+          timestamp: 1_760_000_000,
+          title: "Market",
+          slug: "market",
+          outcome: "Yes",
+          side: "BUY",
+        },
+      ],
+    });
+    config = { watchlist: [resolvedRow("aaa")] };
+
+    const run = runCandidateResearch();
+    await vi.advanceTimersByTimeAsync(RESEARCH_BUDGET_MS + 1);
+    const summary = await run;
+
+    expect(fetchCalls.some((u) => u.includes("prices-history"))).toBe(true);
+    expect(["error", "partial"]).toContain(summary.state);
+    expect(summary.detail).toMatch(/budget exhausted/i);
+    expect(workerWrites().at(-1)!.payload["state"]).not.toBe("running");
+  });
+});
+
+describe("terminal worker_status write failures are not swallowed", () => {
+  it("throws a combined error when the terminal run-state write fails", async () => {
+    mockFetch();
+    config = {
+      watchlist: [resolvedRow("aaa")],
+      onWatchlistRead: () => vi.advanceTimersByTime(RESEARCH_BUDGET_MS + 1),
+      workerWriteError: "worker write boom",
+    };
+
+    await expect(runCandidateResearch()).rejects.toThrow(/terminal worker_status write failed: worker_status update failed: worker write boom/);
+  });
+});
+
+describe("candidate research_error note write failures are surfaced", () => {
+  it("appends the note write failure to the candidate failure detail", async () => {
+    mockFetch();
+    config = {
+      watchlist: [resolvedRow("aaa")],
+      metricsWriteError: "metrics write boom",
+      watchlistNoteWriteError: "note write boom",
+    };
+
+    const summary = await runCandidateResearch();
+    expect(summary.failures.map((f) => f.error).join(" ")).toMatch(/note not stored: note write boom/);
   });
 });
 
