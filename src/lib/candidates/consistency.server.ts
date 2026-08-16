@@ -110,9 +110,9 @@ export async function verifyCandidateResearchPersistence(options: {
 
   for (const row of expected) {
     const { missing, stale } = evaluateCandidatePersistence({
-      metrics: metrics.get(row.id),
-      fingerprint: fingerprints.get(row.id),
-      score: scores.get(row.id),
+      metrics: metrics.get(row.id) ?? null,
+      fingerprint: fingerprints.get(row.id) ?? null,
+      score: scores.get(row.id) ?? null,
     });
     if (missing.length > 0 || stale.length > 0) {
       issues.push({ candidateId: row.id, handle: row.handle, missing, stale });
