@@ -47,3 +47,72 @@ export function selectResearchBatch<T extends BatchCandidate>(
 export function budgetExhausted(startedAt: number, now: number, budgetMs = RESEARCH_BUDGET_MS): boolean {
   return now - startedAt >= budgetMs;
 }
+
+/** Thrown when the overall research wall-clock budget is consumed. */
+export class ResearchBudgetExhaustedError extends Error {
+  constructor(message = "research budget exhausted") {
+    super(message);
+    this.name = "ResearchBudgetExhaustedError";
+  }
+}
+
+/**
+ * One overall deadline for a whole research invocation. Every public HTTP call
+ * in the pass takes `signal`, so an exhausted budget aborts in-flight requests
+ * instead of leaving them running behind a Promise.race.
+ */
+export type ResearchDeadline = {
+  signal: AbortSignal;
+  startedAtMs: number;
+  budgetMs: number;
+  remainingMs: () => number;
+  expired: () => boolean;
+  assertLive: () => void;
+  dispose: () => void;
+};
+
+export function createResearchDeadline(budgetMs: number = RESEARCH_BUDGET_MS): ResearchDeadline {
+  const controller = new AbortController();
+  const startedAtMs = Date.now();
+  const timer = setTimeout(() => {
+    controller.abort(new ResearchBudgetExhaustedError());
+  }, budgetMs);
+  const expired = (): boolean =>
+    controller.signal.aborted || budgetExhausted(startedAtMs, Date.now(), budgetMs);
+  return {
+    signal: controller.signal,
+    startedAtMs,
+    budgetMs,
+    remainingMs: () => Math.max(0, budgetMs - (Date.now() - startedAtMs)),
+    expired,
+    assertLive: () => {
+      if (expired()) {
+        controller.abort(new ResearchBudgetExhaustedError());
+        throw new ResearchBudgetExhaustedError();
+      }
+    },
+    dispose: () => clearTimeout(timer),
+  };
+}
+
+/** At most this many unresolved handles are resolved over the network per run. */
+export const UNRESOLVED_RESOLUTIONS_PER_RUN = 1;
+
+/**
+ * Bounded, deterministic selection of unresolved candidates to resolve in one
+ * invocation. Oldest-touched first (never-touched first), tie-break on handle,
+ * so a failed attempt rotates to the back of the queue and the tail of the
+ * unresolved list is never starved.
+ */
+export function selectUnresolvedForResolution<
+  T extends { handle: string; wallet: string | null; updated_at?: string | null },
+>(rows: readonly T[], limit: number = UNRESOLVED_RESOLUTIONS_PER_RUN): T[] {
+  const rank = (r: T): number => {
+    const t = r.updated_at ? new Date(r.updated_at).getTime() : NaN;
+    return Number.isFinite(t) ? t : -1;
+  };
+  return rows
+    .filter((r) => !r.wallet)
+    .sort((a, b) => rank(a) - rank(b) || a.handle.localeCompare(b.handle))
+    .slice(0, Math.max(0, limit));
+}
