@@ -4,7 +4,8 @@ import { isImportantAlertKind, shouldDisableTelegramNotification } from "./notif
 
 describe("notification routing", () => {
   it("notifies only important alert kinds", () => {
-    expect(isImportantAlertKind("new_source_trades")).toBe(true);
+    // Source-trade volume is dashboard-only: stored, but never pushed.
+    expect(isImportantAlertKind("new_source_trades")).toBe(false);
     expect(isImportantAlertKind("paper_buy")).toBe(true);
     expect(isImportantAlertKind("LOW_SPENDABLE_CASH")).toBe(true);
     expect(isImportantAlertKind("CASH_RESERVE_REACHED")).toBe(true);
