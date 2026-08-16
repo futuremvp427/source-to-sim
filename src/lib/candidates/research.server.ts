@@ -585,6 +585,7 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
       } as never,
       { onConflict: "candidate_id" },
     );
+    if (candidate_metricsError) throw new Error(`candidate_metrics write failed: ${candidate_metricsError.message}`);
 
     const { error: candidate_fingerprintError } = await supabaseAdmin.from("candidate_fingerprint").upsert(
       {
@@ -634,6 +635,8 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
     if (metrics.sampleCount === 0) insufficient.push(row.handle);
     researched += 1;
     } catch (err) {
+      // A deadline abort is a run-level outcome, not a per-candidate failure.
+      if (isAbort(err) || deadline.expired()) throw new ResearchBudgetExhaustedError();
       const message = err instanceof Error ? err.message : "public request failed";
       failures.push({ handle: row.handle, error: message });
       await supabaseAdmin
@@ -660,12 +663,43 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
         ? failures.map((f) => `${f.handle}: ${f.error}`).join("; ").slice(0, 400)
         : unresolved.length > 0
           ? `Unresolved handles: ${unresolved.join(", ")}`
-          : deferred > 0
+          : budgetHit
+            ? `Bounded pass stopped at the ${deadline.budgetMs}ms budget: ${researched} researched, ${deferred} deferred.`
+            : deferred > 0
             ? `Bounded pass: ${researched} researched, ${deferred} deferred to the next scheduled run.`
             : null,
   };
   await recordRunState(summary);
   return summary;
+  } catch (err) {
+    // Deadline exhaustion or a top-level public-fetch failure must still leave a
+    // terminal state behind — never a worker_status row stuck at 'running'
+    // until the 300s lease expires.
+    const aborted = isAbort(err) || deadline.expired();
+    const message = err instanceof Error ? err.message : "research pass failed";
+    const summary: ResearchSummary = {
+      ranAt: new Date().toISOString(),
+      state: researched > 0 ? "partial" : "error",
+      researched,
+      resolvedCount: 0,
+      unresolvedCount: unresolved.length,
+      unresolved,
+      insufficient,
+      failures,
+      detail: (aborted
+        ? `Research budget exhausted after ${deadline.budgetMs}ms: ${researched} researched, ${deferred} deferred.`
+        : `Research pass failed: ${message}`
+      ).slice(0, 400),
+    };
+    try {
+      await recordRunState(summary);
+    } catch {
+      // Surfacing the original cause matters more than the bookkeeping write.
+    }
+    return summary;
+  } finally {
+    deadline.dispose();
+  }
 }
 
 /* ------------------------------------------------------------------ */
