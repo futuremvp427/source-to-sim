@@ -1,14 +1,12 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 const BUYS_PER_MESSAGE = 12;
-
-type CycleLike = {
-  ranAt: string;
-  experimentName: string;
-  process: { buys: number };
-};
+const MAX_BUYS_PER_SCAN = 120;
 
 type PaperBuyRow = {
+  trade_id: string;
+  experiment_id: string;
+  experiment_name: string;
   event_key: string;
   market_title: string | null;
   outcome: string | null;
@@ -26,7 +24,10 @@ function shortTitle(title: string): string {
 
 export function formatPaperBuyMessage(
   experimentName: string,
-  buys: readonly PaperBuyRow[],
+  buys: readonly Pick<
+    PaperBuyRow,
+    "market_title" | "outcome" | "price" | "shares" | "notional" | "cash_after"
+  >[],
   chunkNumber: number,
   chunkCount: number,
 ): string {
@@ -41,52 +42,59 @@ export function formatPaperBuyMessage(
 }
 
 /**
- * Creates Telegram-eligible `paper_buy` alerts only from BUY rows that are
- * already persisted in paper_trades. This runs after runIngestCycle returns,
- * so Telegram can never hold a worker lease, checkpoint advance, or accounting
- * transaction open. The normal notification retry pass sends the queued rows.
+ * Durable paper-BUY outbox producer.
+ *
+ * This deliberately does NOT trust the current cycle summary. Paper accounting
+ * can commit a BUY and then have a later best-effort stage/deadline fail, in
+ * which case runIngestCycle exposes an empty/error cycle even though the BUY is
+ * permanently present in paper_trades. The database cursor RPC reads directly
+ * from that durable ledger, so the next scheduler invocation still finds it.
+ *
+ * The cursor advances only after every alert for the returned batch has been
+ * durably upserted. A crash before cursor advance simply replays the same batch;
+ * deterministic dedup keys make that safe. Telegram delivery itself happens
+ * later through retryPendingTelegramAlerts, after all worker leases/accounting
+ * work is already closed.
  */
-export async function queuePaperBuyNotifications(
-  cycles: readonly CycleLike[],
-): Promise<{ buysFound: number; alertsQueued: number }> {
-  let buysFound = 0;
+export async function queuePaperBuyNotifications(): Promise<{
+  buysFound: number;
+  alertsQueued: number;
+  cursorAdvanced: boolean;
+}> {
+  const { data, error } = await supabaseAdmin.rpc(
+    "get_pending_paper_buy_notification_trades" as never,
+    { p_limit: MAX_BUYS_PER_SCAN } as never,
+  );
+  if (error) throw new Error(`paper BUY notification scan failed: ${error.message}`);
+
+  const buys = (data ?? []) as unknown as PaperBuyRow[];
+  if (buys.length === 0) return { buysFound: 0, alertsQueued: 0, cursorAdvanced: false };
+
+  // Group by experiment for readable Telegram messages. Map preserves first
+  // encounter order, and each experiment's rows remain in the RPC's stable
+  // (created_at, trade_id) order, so a replay before cursor advance produces
+  // byte-identical chunks/dedup keys.
+  const byExperiment = new Map<string, PaperBuyRow[]>();
+  for (const buy of buys) {
+    const rows = byExperiment.get(buy.experiment_id) ?? [];
+    rows.push(buy);
+    byExperiment.set(buy.experiment_id, rows);
+  }
+
   let alertsQueued = 0;
-
-  for (const cycle of cycles) {
-    if (cycle.process.buys <= 0) continue;
-
-    const { data: experiment, error: experimentError } = await supabaseAdmin
-      .from("paper_experiments")
-      .select("id")
-      .eq("name", cycle.experimentName)
-      .maybeSingle();
-    if (experimentError || !experiment?.id) continue;
-
-    const { data: rawBuys, error: buysError } = await supabaseAdmin
-      .from("paper_trades")
-      .select("event_key, market_title, outcome, price, shares, notional, cash_after, source_ts, created_at")
-      .eq("experiment_id", experiment.id)
-      .eq("action", "BUY")
-      .gte("created_at", cycle.ranAt)
-      .order("created_at", { ascending: true })
-      .limit(Math.max(1, Math.min(cycle.process.buys, 300)));
-    if (buysError) continue;
-
-    const buys = (rawBuys ?? []) as unknown as PaperBuyRow[];
-    if (buys.length === 0) continue;
-    buysFound += buys.length;
-
+  for (const [experimentId, experimentBuys] of byExperiment) {
     const chunks: PaperBuyRow[][] = [];
-    for (let i = 0; i < buys.length; i += BUYS_PER_MESSAGE) {
-      chunks.push(buys.slice(i, i + BUYS_PER_MESSAGE));
+    for (let i = 0; i < experimentBuys.length; i += BUYS_PER_MESSAGE) {
+      chunks.push(experimentBuys.slice(i, i + BUYS_PER_MESSAGE));
     }
 
     for (let i = 0; i < chunks.length; i += 1) {
       const chunk = chunks[i]!;
-      const firstKey = chunk[0]?.event_key ?? "none";
-      const lastKey = chunk.at(-1)?.event_key ?? firstKey;
-      const dedupKey = `paper_buy:${experiment.id}:${firstKey}:${lastKey}:${chunk.length}`;
-      const message = formatPaperBuyMessage(cycle.experimentName, chunk, i + 1, chunks.length);
+      const firstTradeId = chunk[0]!.trade_id;
+      const lastTradeId = chunk.at(-1)!.trade_id;
+      const dedupKey = `paper_buy:${experimentId}:${firstTradeId}:${lastTradeId}:${chunk.length}`;
+      const experimentName = chunk[0]!.experiment_name;
+      const message = formatPaperBuyMessage(experimentName, chunk, i + 1, chunks.length);
       const { data: inserted, error: alertError } = await supabaseAdmin
         .from("alerts")
         .upsert(
@@ -95,9 +103,10 @@ export async function queuePaperBuyNotifications(
             kind: "paper_buy",
             message,
             context: {
-              experiment: cycle.experimentName,
-              experiment_id: experiment.id,
+              experiment: experimentName,
+              experiment_id: experimentId,
               buy_count: chunk.length,
+              trade_ids: chunk.map((buy) => buy.trade_id),
               event_keys: chunk.map((buy) => buy.event_key),
             } as never,
             dedup_key: dedupKey,
@@ -105,9 +114,27 @@ export async function queuePaperBuyNotifications(
           { onConflict: "dedup_key", ignoreDuplicates: true },
         )
         .select("id");
-      if (!alertError && inserted?.length) alertsQueued += 1;
+      if (alertError) {
+        // Fail closed: do not advance the durable cursor past any BUY whose
+        // alert batch was not safely queued. Already-inserted chunks dedup on
+        // the next pass.
+        throw new Error(`paper BUY alert queue failed: ${alertError.message}`);
+      }
+      if (inserted?.length) alertsQueued += 1;
     }
   }
 
-  return { buysFound, alertsQueued };
+  const last = buys.at(-1)!;
+  const { error: advanceError } = await supabaseAdmin.rpc(
+    "advance_paper_buy_notification_cursor" as never,
+    {
+      p_last_created_at: last.created_at,
+      p_last_trade_id: last.trade_id,
+    } as never,
+  );
+  if (advanceError) {
+    throw new Error(`paper BUY notification cursor advance failed: ${advanceError.message}`);
+  }
+
+  return { buysFound: buys.length, alertsQueued, cursorAdvanced: true };
 }
