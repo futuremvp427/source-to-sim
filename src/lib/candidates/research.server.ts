@@ -397,8 +397,30 @@ async function acquireResearchLease(): Promise<boolean> {
   return data !== null && data !== undefined;
 }
 
+/**
+ * Terminal status writes must survive the abort that caused them, so they get
+ * their own small independent timeout and NEVER the (already aborted) parent
+ * research/scheduler signal.
+ */
+const STATUS_WRITE_TIMEOUT_MS = 5_000;
+
+async function withIndependentTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_r, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function recordRunState(summary: ResearchSummary): Promise<void> {
-  const { error } = await supabaseAdmin
+  const { data, error } = await withIndependentTimeout(
+    supabaseAdmin
     .from("worker_status")
     .update({
       state: summary.state === "skipped_locked" ? "running" : summary.state,
@@ -411,10 +433,18 @@ async function recordRunState(summary: ResearchSummary): Promise<void> {
       updated_at: new Date().toISOString(),
     } as never)
     .eq("id", RESEARCH_LOCK_ID)
-    .select("id");
+      .select("id") as unknown as Promise<{ data: { id: string }[] | null; error: { message: string } | null }>,
+    STATUS_WRITE_TIMEOUT_MS,
+    "worker_status update",
+  );
   // A silently dropped run-state write would leave the lease looking held and
   // the pass looking like it never ran, so surface it instead of ignoring it.
   if (error) throw new Error(`worker_status update failed: ${error.message}`);
+  // Zero matched rows means the candidate_research worker row is missing: the
+  // run was NOT persisted, so it must not look recorded.
+  if (!data || data.length === 0) {
+    throw new Error(`worker_status update failed: no ${RESEARCH_LOCK_ID} row matched`);
+  }
 }
 
 export type ResearchRunState = {
@@ -453,25 +483,39 @@ export async function referenceFingerprint(signal?: AbortSignal): Promise<Candid
 export const RESEARCH_REFRESH_HOURS = 6;
 
 /**
+ * A short scheduler budget can legitimately produce zero research. Turning that
+ * single clean budget exhaustion into a 6-hour dead period would stall the
+ * watchlist, so a zero-progress error run becomes retry-eligible on a bounded
+ * short cadence instead (the host rate-limit cooldown gate stays authoritative).
+ */
+export const RESEARCH_ZERO_PROGRESS_RETRY_MS = 15 * 60_000;
+
+/** Cadence for the next pass, given the previous terminal run state. */
+export function researchCadenceMs(state: Pick<ResearchRunState, "state" | "researchedCount"> | null): number {
+  if (state && state.state === "error" && state.researchedCount === 0) return RESEARCH_ZERO_PROGRESS_RETRY_MS;
+  return RESEARCH_REFRESH_HOURS * 3600_000;
+}
+
+/**
  * Called by the scheduled ingest cycle. Runs the bounded public research pass
  * at most once every RESEARCH_REFRESH_HOURS; otherwise it is a cheap no-op.
  */
-export async function refreshCandidateResearchIfDue(): Promise<{
+export async function refreshCandidateResearchIfDue(signal?: AbortSignal): Promise<{
   ran: boolean;
   detail: string | null;
 }> {
   const state = await loadResearchRunState();
   const lastRun = state?.lastRunAt ? new Date(state.lastRunAt).getTime() : 0;
-  const dueAt = lastRun + RESEARCH_REFRESH_HOURS * 3600_000;
+  const dueAt = lastRun + researchCadenceMs(state);
   if (state?.running) return { ran: false, detail: "A research pass is already running." };
   if (lastRun > 0 && Date.now() < dueAt) {
     return { ran: false, detail: `Next refresh due ${new Date(dueAt).toISOString()}` };
   }
-  const summary = await runCandidateResearch();
+  const summary = await runCandidateResearch(signal);
   return { ran: summary.state !== "skipped_locked", detail: summary.detail };
 }
 
-export async function runCandidateResearch(): Promise<ResearchSummary> {
+export async function runCandidateResearch(signal?: AbortSignal): Promise<ResearchSummary> {
   if (!(await acquireResearchLease())) {
     return {
       ranAt: new Date().toISOString(),
@@ -489,7 +533,9 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
   // The overall wall-clock budget starts HERE — immediately after the lease and
   // before any seeding, handle resolution, reference fingerprint or public HTTP
   // call — and every network call below shares its AbortSignal.
-  const deadline = createResearchDeadline();
+  // The scheduler's own signal (if any) is combined with the pass budget, so a
+  // scheduler abort cancels in-flight public HTTP instead of abandoning it.
+  const deadline = createResearchDeadline(RESEARCH_BUDGET_MS, signal);
 
   const unresolved: string[] = [];
   const insufficient: string[] = [];
