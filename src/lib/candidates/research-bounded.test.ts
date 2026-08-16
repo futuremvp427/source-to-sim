@@ -19,6 +19,8 @@ type DbConfig = {
   metricsReadError?: string;
   metricsWriteError?: string;
   workerWriteError?: string;
+  /** Simulates a missing candidate_research worker_status row (zero matched rows). */
+  workerRowMissing?: boolean;
   watchlistNoteWriteError?: string;
   /** Called when the watchlist read resolves — used to burn wall-clock time. */
   onWatchlistRead?: () => void;
@@ -41,6 +43,10 @@ function result(table: string, op: string): { data: unknown; error: { message: s
   }
   if (table === "worker_status" && op === "update" && config.workerWriteError) {
     return { data: null, error: { message: config.workerWriteError } };
+  }
+  if (table === "worker_status" && op === "update") {
+    // Mirrors the real `.select('id')`: one matched candidate_research row.
+    return { data: config.workerRowMissing ? [] : [{ id: "candidate_research" }], error: null };
   }
   if (table === "candidate_watchlist" && op === "update" && config.watchlistNoteWriteError) {
     return { data: null, error: { message: config.watchlistNoteWriteError } };
@@ -270,6 +276,17 @@ describe("terminal worker_status write failures are not swallowed", () => {
     };
 
     await expect(runCandidateResearch()).rejects.toThrow(/terminal worker_status write failed: worker_status update failed: worker write boom/);
+  });
+
+  it("treats a zero-row worker_status update as a failure, not a silent success", async () => {
+    mockFetch();
+    config = {
+      watchlist: [resolvedRow("aaa")],
+      onWatchlistRead: () => vi.advanceTimersByTime(RESEARCH_BUDGET_MS + 1),
+      workerRowMissing: true,
+    };
+
+    await expect(runCandidateResearch()).rejects.toThrow(/no candidate_research row matched/);
   });
 });
 
