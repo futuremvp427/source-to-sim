@@ -32,7 +32,7 @@ The earlier `T_clean = 2026-08-14 11:29:19.638 UTC` value was explicitly withdra
 
 ## Latest verified behavior
 
-The pending-event scan optimization (ordered `source_events` scan with an experiment-scoped correlated consumption probe, `CROSS JOIN LATERAL` + `NOT EXISTS`) is confirmed live in production (verified directly against the deployed function definition). The durable host-level rate-limit cooldown (`http_rate_limits` / `record_http_rate_limit`) is confirmed operating in production, with its earliest observed write at 2026-08-16 10:32:09 UTC. A follow-up privilege-hardening migration for that same function (adding a `service_role`-only runtime guard) has been merged to the repository but is **not yet deployed** to production as of this review — production's live function definition still matches the original, pre-hardening version. This is a separate, security-relevant deployment gap and does not affect the T_clean determination above.
+The pending-event scan optimization (ordered `source_events` scan with an experiment-scoped correlated consumption probe, `CROSS JOIN LATERAL` + `NOT EXISTS`) is confirmed live in production (verified directly against the deployed function definition). The durable host-level rate-limit cooldown (`http_rate_limits` / `record_http_rate_limit`) is confirmed operating in production, with its earliest observed write at 2026-08-16 10:32:09 UTC. The follow-up privilege hardening for that same function (a `service_role`-only runtime guard) is **confirmed deployed** in production: audited execute privileges are false for `anon`/`authenticated` and true for `service_role`. This does not affect the T_clean determination above.
 
 ## Reporting rule
 
