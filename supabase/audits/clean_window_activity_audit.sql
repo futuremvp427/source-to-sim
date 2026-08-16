@@ -107,122 +107,261 @@ GROUP BY pe.name
 ORDER BY pe.name;
 
 -- ------------------------------------------------------------------------
--- Clean-lifecycle base set: one row per (experiment, asset) whose FIRST BUY
--- ever recorded occurred strictly after T_clean. This is the load-bearing
--- definition used by every "post-T_clean position" query below.
+-- Clean-lifecycle base set: paper_positions is a single mutable row per
+-- (experiment_id, asset) -- it does NOT preserve history across a full
+-- sell-down-and-later-rebuy of the same asset, and a plain min(BUY) per
+-- (experiment_id, asset) would collapse every such reopening into the very
+-- first BUY ever recorded. paper_trades DOES retain the full BUY/SELL
+-- history, so lifecycles are reconstructed here: a new lifecycle starts at
+-- any BUY whose running share balance immediately before it is <= 0, and
+-- lifecycle boundaries are the zero-balance crossings in between. Only the
+-- MOST RECENT lifecycle for a given (experiment_id, asset) can still be open
+-- or ever receive a settlement, because paper_settlements has UNIQUE
+-- (experiment_id, asset) -- a market settles once, so an earlier lifecycle
+-- that was already fully sold down before a later reopen is always
+-- classified 'closed' here (it cannot be the one a later settlement
+-- belongs to).
+--
+-- The opening-BUY boundary uses source_ts (the source fill's real market
+-- time), NOT created_at (when this app's database row was written). A
+-- pre-T_clean fill that gets caught up and copied only after T_clean would
+-- otherwise show a created_at after T_clean and be misclassified as clean
+-- even though its entry decision predates the fix. source_ts is what the
+-- "opening BUY occurred after T_clean" rule in docs/V2_V3_VALIDITY.md
+-- actually means.
 -- ------------------------------------------------------------------------
-WITH first_buy AS (
+WITH buysell AS (
   SELECT
+    pt.id,
     pt.experiment_id,
     pt.asset,
-    min(pt.created_at) AS opening_buy_at
+    pt.action,
+    pt.shares,
+    pt.notional,
+    pt.realized_pnl,
+    to_timestamp(pt.source_ts) AS trade_ts
   FROM public.paper_trades pt
-  WHERE pt.action = 'BUY'
-  GROUP BY pt.experiment_id, pt.asset
+  WHERE pt.action IN ('BUY', 'SELL') AND pt.source_ts IS NOT NULL
 ),
-clean_positions AS (
-  SELECT fb.experiment_id, fb.asset, fb.opening_buy_at
-  FROM first_buy fb
-  WHERE fb.opening_buy_at >= :t_clean::timestamptz
+balances AS (
+  SELECT
+    b.*,
+    sum(CASE WHEN action = 'BUY' THEN shares ELSE -shares END) OVER (
+      PARTITION BY experiment_id, asset ORDER BY trade_ts, id
+      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ) AS balance_before
+  FROM buysell b
+),
+lifecycle_marks AS (
+  SELECT
+    *,
+    (action = 'BUY' AND coalesce(balance_before, 0) <= 0) AS opens_lifecycle
+  FROM balances
+),
+lifecycle_seqs AS (
+  SELECT
+    *,
+    sum(CASE WHEN opens_lifecycle THEN 1 ELSE 0 END) OVER (
+      PARTITION BY experiment_id, asset ORDER BY trade_ts, id
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS lifecycle_seq
+  FROM lifecycle_marks
+),
+lifecycles AS (
+  SELECT
+    experiment_id,
+    asset,
+    lifecycle_seq,
+    min(trade_ts) FILTER (WHERE opens_lifecycle) AS opening_buy_ts,
+    sum(CASE WHEN action = 'BUY' THEN shares ELSE -shares END) AS net_shares,
+    sum(CASE WHEN action = 'BUY' THEN notional ELSE 0 END) AS capital_deployed,
+    sum(CASE WHEN action = 'SELL' THEN realized_pnl ELSE 0 END) AS realized_pnl_from_sells
+  FROM lifecycle_seqs
+  GROUP BY experiment_id, asset, lifecycle_seq
+),
+lifecycles_marked AS (
+  SELECT
+    l.*,
+    (l.lifecycle_seq = max(l.lifecycle_seq) OVER (PARTITION BY l.experiment_id, l.asset)) AS is_latest_lifecycle
+  FROM lifecycles l
+),
+clean_lifecycles AS (
+  SELECT * FROM lifecycles_marked WHERE opening_buy_ts >= :t_clean::timestamptz
 )
 -- ------------------------------------------------------------------------
--- 7. Positions whose opening BUY occurred after T_clean (the clean sample)
+-- 7. Positions whose opening BUY occurred after T_clean (the clean sample) --
+-- one row per reconstructed lifecycle, not per (experiment, asset)
 -- ------------------------------------------------------------------------
 SELECT
   pe.name AS experiment,
-  count(*) AS post_t_clean_positions_opened
-FROM clean_positions cp
-JOIN public.paper_experiments pe ON pe.id = cp.experiment_id
+  count(*) AS post_t_clean_lifecycles_opened
+FROM clean_lifecycles cl
+JOIN public.paper_experiments pe ON pe.id = cl.experiment_id
 WHERE pe.name LIKE 'SHADOW V2: %' OR pe.name LIKE 'SHADOW V3 CAPACITY: %'
 GROUP BY pe.name
 ORDER BY pe.name;
 
 -- ------------------------------------------------------------------------
--- 8, 9, 10, 11. Post-T_clean positions: closed / settled won / settled lost /
--- still open (current paper_positions.settlement_status for the same
--- (experiment, asset) pairs that opened clean).
+-- 8, 9, 10, 11. Post-T_clean lifecycles: closed / settled won / settled lost
+-- / still open. A non-latest lifecycle for its (experiment, asset) is always
+-- 'closed' by construction (it was fully sold down before a later reopen).
+-- Only the latest lifecycle can carry paper_positions' live status or a
+-- paper_settlements row.
 -- ------------------------------------------------------------------------
-WITH first_buy AS (
-  SELECT pt.experiment_id, pt.asset, min(pt.created_at) AS opening_buy_at
+WITH buysell AS (
+  SELECT pt.id, pt.experiment_id, pt.asset, pt.action, pt.shares, pt.notional, pt.realized_pnl,
+    to_timestamp(pt.source_ts) AS trade_ts
   FROM public.paper_trades pt
-  WHERE pt.action = 'BUY'
-  GROUP BY pt.experiment_id, pt.asset
+  WHERE pt.action IN ('BUY', 'SELL') AND pt.source_ts IS NOT NULL
 ),
-clean_positions AS (
-  SELECT fb.experiment_id, fb.asset, fb.opening_buy_at
-  FROM first_buy fb
-  WHERE fb.opening_buy_at >= :t_clean::timestamptz
+balances AS (
+  SELECT b.*, sum(CASE WHEN action = 'BUY' THEN shares ELSE -shares END) OVER (
+    PARTITION BY experiment_id, asset ORDER BY trade_ts, id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+  ) AS balance_before
+  FROM buysell b
+),
+lifecycle_marks AS (
+  SELECT *, (action = 'BUY' AND coalesce(balance_before, 0) <= 0) AS opens_lifecycle FROM balances
+),
+lifecycle_seqs AS (
+  SELECT *, sum(CASE WHEN opens_lifecycle THEN 1 ELSE 0 END) OVER (
+    PARTITION BY experiment_id, asset ORDER BY trade_ts, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS lifecycle_seq
+  FROM lifecycle_marks
+),
+lifecycles AS (
+  SELECT experiment_id, asset, lifecycle_seq,
+    min(trade_ts) FILTER (WHERE opens_lifecycle) AS opening_buy_ts,
+    sum(CASE WHEN action = 'BUY' THEN shares ELSE -shares END) AS net_shares
+  FROM lifecycle_seqs
+  GROUP BY experiment_id, asset, lifecycle_seq
+),
+lifecycles_marked AS (
+  SELECT l.*, (l.lifecycle_seq = max(l.lifecycle_seq) OVER (PARTITION BY l.experiment_id, l.asset)) AS is_latest_lifecycle
+  FROM lifecycles l
+),
+clean_lifecycles AS (
+  SELECT * FROM lifecycles_marked WHERE opening_buy_ts >= :t_clean::timestamptz
+),
+classified AS (
+  SELECT
+    cl.experiment_id,
+    CASE
+      WHEN NOT cl.is_latest_lifecycle THEN 'closed'
+      ELSE coalesce(pp.settlement_status, 'closed')
+    END AS status,
+    CASE WHEN cl.is_latest_lifecycle THEN coalesce(pp.shares, 0) ELSE 0 END AS current_shares,
+    CASE WHEN cl.is_latest_lifecycle THEN coalesce(pp.cost_basis, 0) ELSE 0 END AS current_cost_basis
+  FROM clean_lifecycles cl
+  LEFT JOIN public.paper_positions pp ON pp.experiment_id = cl.experiment_id AND pp.asset = cl.asset
 )
 SELECT
   pe.name AS experiment,
-  pp.settlement_status,
-  count(*) AS position_count,
-  sum(pp.shares) AS open_shares,
-  sum(pp.cost_basis) AS open_cost_basis
-FROM clean_positions cp
-JOIN public.paper_experiments pe ON pe.id = cp.experiment_id
-JOIN public.paper_positions pp ON pp.experiment_id = cp.experiment_id AND pp.asset = cp.asset
+  c.status,
+  count(*) AS lifecycle_count,
+  sum(c.current_shares) AS open_shares,
+  sum(c.current_cost_basis) AS open_cost_basis
+FROM classified c
+JOIN public.paper_experiments pe ON pe.id = c.experiment_id
 WHERE pe.name LIKE 'SHADOW V2: %' OR pe.name LIKE 'SHADOW V3 CAPACITY: %'
-GROUP BY pe.name, pp.settlement_status
-ORDER BY pe.name, pp.settlement_status;
+GROUP BY pe.name, c.status
+ORDER BY pe.name, c.status;
 
 -- ------------------------------------------------------------------------
--- 12. Capital deployed into post-T_clean positions (sum of BUY notional for
--- clean-opened (experiment, asset) pairs, from T_clean forward)
+-- 12. Capital deployed into post-T_clean lifecycles (sum of BUY notional
+-- within each clean lifecycle)
 -- ------------------------------------------------------------------------
-WITH first_buy AS (
-  SELECT pt.experiment_id, pt.asset, min(pt.created_at) AS opening_buy_at
+WITH buysell AS (
+  SELECT pt.id, pt.experiment_id, pt.asset, pt.action, pt.shares, pt.notional, pt.realized_pnl,
+    to_timestamp(pt.source_ts) AS trade_ts
   FROM public.paper_trades pt
-  WHERE pt.action = 'BUY'
-  GROUP BY pt.experiment_id, pt.asset
+  WHERE pt.action IN ('BUY', 'SELL') AND pt.source_ts IS NOT NULL
 ),
-clean_positions AS (
-  SELECT fb.experiment_id, fb.asset, fb.opening_buy_at
-  FROM first_buy fb
-  WHERE fb.opening_buy_at >= :t_clean::timestamptz
+balances AS (
+  SELECT b.*, sum(CASE WHEN action = 'BUY' THEN shares ELSE -shares END) OVER (
+    PARTITION BY experiment_id, asset ORDER BY trade_ts, id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+  ) AS balance_before
+  FROM buysell b
+),
+lifecycle_marks AS (
+  SELECT *, (action = 'BUY' AND coalesce(balance_before, 0) <= 0) AS opens_lifecycle FROM balances
+),
+lifecycle_seqs AS (
+  SELECT *, sum(CASE WHEN opens_lifecycle THEN 1 ELSE 0 END) OVER (
+    PARTITION BY experiment_id, asset ORDER BY trade_ts, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS lifecycle_seq
+  FROM lifecycle_marks
+),
+lifecycles AS (
+  SELECT experiment_id, asset, lifecycle_seq,
+    min(trade_ts) FILTER (WHERE opens_lifecycle) AS opening_buy_ts,
+    sum(CASE WHEN action = 'BUY' THEN notional ELSE 0 END) AS capital_deployed
+  FROM lifecycle_seqs
+  GROUP BY experiment_id, asset, lifecycle_seq
+),
+clean_lifecycles AS (
+  SELECT * FROM lifecycles WHERE opening_buy_ts >= :t_clean::timestamptz
 )
 SELECT
   pe.name AS experiment,
-  sum(pt.notional) AS capital_deployed_post_t_clean
-FROM clean_positions cp
-JOIN public.paper_experiments pe ON pe.id = cp.experiment_id
-JOIN public.paper_trades pt
-  ON pt.experiment_id = cp.experiment_id
-  AND pt.asset = cp.asset
-  AND pt.action = 'BUY'
+  sum(cl.capital_deployed) AS capital_deployed_post_t_clean
+FROM clean_lifecycles cl
+JOIN public.paper_experiments pe ON pe.id = cl.experiment_id
 WHERE pe.name LIKE 'SHADOW V2: %' OR pe.name LIKE 'SHADOW V3 CAPACITY: %'
 GROUP BY pe.name
 ORDER BY pe.name;
 
 -- ------------------------------------------------------------------------
--- 13. Realized P&L attributable ONLY to positions opened after T_clean
--- (paper_trades.realized_pnl on SELL fills for clean (experiment, asset)
--- pairs, plus paper_settlements.realized_pnl for the same pairs).
+-- 13. Realized P&L attributable ONLY to post-T_clean lifecycles: SELL
+-- realized_pnl within each clean lifecycle, plus paper_settlements.realized_pnl
+-- where the settlement belongs to that (experiment, asset)'s latest -- and
+-- therefore only settleable -- lifecycle.
 -- ------------------------------------------------------------------------
-WITH first_buy AS (
-  SELECT pt.experiment_id, pt.asset, min(pt.created_at) AS opening_buy_at
+WITH buysell AS (
+  SELECT pt.id, pt.experiment_id, pt.asset, pt.action, pt.shares, pt.notional, pt.realized_pnl,
+    to_timestamp(pt.source_ts) AS trade_ts
   FROM public.paper_trades pt
-  WHERE pt.action = 'BUY'
-  GROUP BY pt.experiment_id, pt.asset
+  WHERE pt.action IN ('BUY', 'SELL') AND pt.source_ts IS NOT NULL
 ),
-clean_positions AS (
-  SELECT fb.experiment_id, fb.asset, fb.opening_buy_at
-  FROM first_buy fb
-  WHERE fb.opening_buy_at >= :t_clean::timestamptz
+balances AS (
+  SELECT b.*, sum(CASE WHEN action = 'BUY' THEN shares ELSE -shares END) OVER (
+    PARTITION BY experiment_id, asset ORDER BY trade_ts, id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+  ) AS balance_before
+  FROM buysell b
+),
+lifecycle_marks AS (
+  SELECT *, (action = 'BUY' AND coalesce(balance_before, 0) <= 0) AS opens_lifecycle FROM balances
+),
+lifecycle_seqs AS (
+  SELECT *, sum(CASE WHEN opens_lifecycle THEN 1 ELSE 0 END) OVER (
+    PARTITION BY experiment_id, asset ORDER BY trade_ts, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS lifecycle_seq
+  FROM lifecycle_marks
+),
+lifecycles AS (
+  SELECT experiment_id, asset, lifecycle_seq,
+    min(trade_ts) FILTER (WHERE opens_lifecycle) AS opening_buy_ts,
+    sum(CASE WHEN action = 'SELL' THEN realized_pnl ELSE 0 END) AS realized_pnl_from_sells
+  FROM lifecycle_seqs
+  GROUP BY experiment_id, asset, lifecycle_seq
+),
+lifecycles_marked AS (
+  SELECT l.*, (l.lifecycle_seq = max(l.lifecycle_seq) OVER (PARTITION BY l.experiment_id, l.asset)) AS is_latest_lifecycle
+  FROM lifecycles l
+),
+clean_lifecycles AS (
+  SELECT * FROM lifecycles_marked WHERE opening_buy_ts >= :t_clean::timestamptz
 ),
 sell_pnl AS (
-  SELECT cp.experiment_id, sum(pt.realized_pnl) AS realized_pnl_from_sells
-  FROM clean_positions cp
-  JOIN public.paper_trades pt
-    ON pt.experiment_id = cp.experiment_id AND pt.asset = cp.asset AND pt.action = 'SELL'
-  GROUP BY cp.experiment_id
+  SELECT experiment_id, sum(realized_pnl_from_sells) AS realized_pnl_from_sells
+  FROM clean_lifecycles GROUP BY experiment_id
 ),
 settlement_pnl AS (
-  SELECT cp.experiment_id, sum(ps.realized_pnl) AS realized_pnl_from_settlements
-  FROM clean_positions cp
-  JOIN public.paper_settlements ps
-    ON ps.experiment_id = cp.experiment_id AND ps.asset = cp.asset
-  GROUP BY cp.experiment_id
+  SELECT cl.experiment_id, sum(ps.realized_pnl) AS realized_pnl_from_settlements
+  FROM clean_lifecycles cl
+  JOIN public.paper_settlements ps ON ps.experiment_id = cl.experiment_id AND ps.asset = cl.asset
+  WHERE cl.is_latest_lifecycle
+  GROUP BY cl.experiment_id
 )
 SELECT
   pe.name AS experiment,
@@ -238,22 +377,41 @@ ORDER BY pe.name;
 -- ------------------------------------------------------------------------
 -- 14. Distinct markets (assets) with post-T_clean exposure
 -- ------------------------------------------------------------------------
-WITH first_buy AS (
-  SELECT pt.experiment_id, pt.asset, min(pt.created_at) AS opening_buy_at
+WITH buysell AS (
+  SELECT pt.id, pt.experiment_id, pt.asset, pt.action, pt.shares,
+    to_timestamp(pt.source_ts) AS trade_ts
   FROM public.paper_trades pt
-  WHERE pt.action = 'BUY'
-  GROUP BY pt.experiment_id, pt.asset
+  WHERE pt.action IN ('BUY', 'SELL') AND pt.source_ts IS NOT NULL
 ),
-clean_positions AS (
-  SELECT fb.experiment_id, fb.asset, fb.opening_buy_at
-  FROM first_buy fb
-  WHERE fb.opening_buy_at >= :t_clean::timestamptz
+balances AS (
+  SELECT b.*, sum(CASE WHEN action = 'BUY' THEN shares ELSE -shares END) OVER (
+    PARTITION BY experiment_id, asset ORDER BY trade_ts, id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+  ) AS balance_before
+  FROM buysell b
+),
+lifecycle_marks AS (
+  SELECT *, (action = 'BUY' AND coalesce(balance_before, 0) <= 0) AS opens_lifecycle FROM balances
+),
+lifecycle_seqs AS (
+  SELECT *, sum(CASE WHEN opens_lifecycle THEN 1 ELSE 0 END) OVER (
+    PARTITION BY experiment_id, asset ORDER BY trade_ts, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS lifecycle_seq
+  FROM lifecycle_marks
+),
+lifecycles AS (
+  SELECT experiment_id, asset, lifecycle_seq,
+    min(trade_ts) FILTER (WHERE opens_lifecycle) AS opening_buy_ts
+  FROM lifecycle_seqs
+  GROUP BY experiment_id, asset, lifecycle_seq
+),
+clean_lifecycles AS (
+  SELECT * FROM lifecycles WHERE opening_buy_ts >= :t_clean::timestamptz
 )
 SELECT
   pe.name AS experiment,
-  count(DISTINCT cp.asset) AS distinct_markets_with_post_t_clean_exposure
-FROM clean_positions cp
-JOIN public.paper_experiments pe ON pe.id = cp.experiment_id
+  count(DISTINCT cl.asset) AS distinct_markets_with_post_t_clean_exposure
+FROM clean_lifecycles cl
+JOIN public.paper_experiments pe ON pe.id = cl.experiment_id
 WHERE pe.name LIKE 'SHADOW V2: %' OR pe.name LIKE 'SHADOW V3 CAPACITY: %'
 GROUP BY pe.name
 ORDER BY pe.name;
@@ -314,23 +472,50 @@ ORDER BY pe.name;
 -- itself make a position's lifecycle "clean" if its opening BUY predates
 -- T_clean.
 -- ------------------------------------------------------------------------
-WITH first_buy AS (
-  SELECT pt.experiment_id, pt.asset, min(pt.created_at) AS opening_buy_at
+WITH buysell AS (
+  SELECT pt.id, pt.experiment_id, pt.asset, pt.action, pt.shares,
+    to_timestamp(pt.source_ts) AS trade_ts
   FROM public.paper_trades pt
-  WHERE pt.action = 'BUY'
-  GROUP BY pt.experiment_id, pt.asset
+  WHERE pt.action IN ('BUY', 'SELL') AND pt.source_ts IS NOT NULL
 ),
-legacy_positions AS (
-  SELECT fb.experiment_id, fb.asset, fb.opening_buy_at
-  FROM first_buy fb
-  WHERE fb.opening_buy_at < :t_clean::timestamptz
+balances AS (
+  SELECT b.*, sum(CASE WHEN action = 'BUY' THEN shares ELSE -shares END) OVER (
+    PARTITION BY experiment_id, asset ORDER BY trade_ts, id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+  ) AS balance_before
+  FROM buysell b
+),
+lifecycle_marks AS (
+  SELECT *, (action = 'BUY' AND coalesce(balance_before, 0) <= 0) AS opens_lifecycle FROM balances
+),
+lifecycle_seqs AS (
+  SELECT *, sum(CASE WHEN opens_lifecycle THEN 1 ELSE 0 END) OVER (
+    PARTITION BY experiment_id, asset ORDER BY trade_ts, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS lifecycle_seq
+  FROM lifecycle_marks
+),
+lifecycles AS (
+  SELECT experiment_id, asset, lifecycle_seq,
+    min(trade_ts) FILTER (WHERE opens_lifecycle) AS opening_buy_ts
+  FROM lifecycle_seqs
+  GROUP BY experiment_id, asset, lifecycle_seq
+),
+lifecycles_marked AS (
+  SELECT l.*, (l.lifecycle_seq = max(l.lifecycle_seq) OVER (PARTITION BY l.experiment_id, l.asset)) AS is_latest_lifecycle
+  FROM lifecycles l
+),
+-- Only the latest lifecycle for an (experiment, asset) can ever hold a
+-- settlement (paper_settlements is UNIQUE on experiment_id, asset), so a
+-- legacy settlement is one whose latest lifecycle opened before T_clean.
+legacy_settleable_lifecycles AS (
+  SELECT * FROM lifecycles_marked
+  WHERE is_latest_lifecycle AND opening_buy_ts < :t_clean::timestamptz
 )
 SELECT
   pe.name AS experiment,
   ps.resolution_outcome,
   count(*) AS legacy_settlement_count,
   sum(ps.realized_pnl) AS legacy_realized_pnl
-FROM legacy_positions lp
+FROM legacy_settleable_lifecycles lp
 JOIN public.paper_experiments pe ON pe.id = lp.experiment_id
 JOIN public.paper_settlements ps
   ON ps.experiment_id = lp.experiment_id AND ps.asset = lp.asset

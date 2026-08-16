@@ -7,9 +7,21 @@ DO $$
 DECLARE
   v_blocked_until timestamptz;
   v_reason text;
+  v_oid oid;
+  v_public_has_execute boolean;
 BEGIN
   -- 1. PUBLIC, anon, authenticated must not retain catalog-level EXECUTE.
-  IF has_function_privilege('public', 'public.record_http_rate_limit(text, timestamptz, text)', 'EXECUTE') THEN
+  -- PUBLIC is an ACL pseudo-grantee, not a real role, so has_function_privilege
+  -- rejects it with "role \"public\" does not exist" -- checked via aclexplode
+  -- instead (grantee=0 is PostgreSQL's ACL encoding for PUBLIC), the same
+  -- pattern scripts/verify_schema_contract.py already uses for this exact case.
+  v_oid := 'public.record_http_rate_limit(text, timestamptz, text)'::regprocedure;
+  SELECT EXISTS (
+    SELECT 1 FROM pg_proc p,
+      LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
+    WHERE p.oid = v_oid AND a.grantee = 0 AND a.privilege_type = 'EXECUTE'
+  ) INTO v_public_has_execute;
+  IF v_public_has_execute THEN
     RAISE EXCEPTION 'PUBLIC must not have EXECUTE on record_http_rate_limit';
   END IF;
   IF has_function_privilege('anon', 'public.record_http_rate_limit(text, timestamptz, text)', 'EXECUTE') THEN
