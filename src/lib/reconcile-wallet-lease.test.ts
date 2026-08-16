@@ -14,6 +14,7 @@ type Write = { table: string; rows: unknown };
 let leaseHeldBy: string | null = null;
 const writes: Write[] = [];
 const alerts: { level: string; kind: string }[] = [];
+const raisedAlerts: { level: string; kind: string; dedupKey: string | null }[] = [];
 const sourceEvents = [
   { asset: "asset-a", side: "BUY", shares: 10 },
   { asset: "asset-a", side: "SELL", shares: 4 },
@@ -21,13 +22,25 @@ const sourceEvents = [
 ];
 /** Deliberately stale compact cache, i.e. a real divergence to repair. */
 const compact = [{ asset: "asset-a", shares: 99 }];
+/**
+ * Controls walletHasRecentlyPersistedEvents' `first_seen_at` lookup
+ * independently of `sourceEvents` above (which has no first_seen_at field
+ * and, unset, correctly reads as "not recent"). Set per-test.
+ */
+let mostRecentFirstSeenAt: string | null = null;
 
 function rowsThenable(table: string, rows: unknown[]) {
   const chain = {
-    select: () => chain,
+    select: (columns?: string) => {
+      if (table === "source_events" && columns === "first_seen_at") {
+        return mostRecentFirstSeenAtChain();
+      }
+      return chain;
+    },
     eq: () => chain,
     order: () => chain,
     range: (from: number) => (from === 0 ? chain : emptyChain(table)),
+    limit: () => chain,
     upsert: (r: unknown) => {
       writes.push({ table, rows: r });
       return { then: (res: (v: unknown) => void) => res({ data: null, error: null }) };
@@ -39,6 +52,19 @@ function rowsThenable(table: string, rows: unknown[]) {
 }
 function emptyChain(table: string) {
   return rowsThenable(table, []);
+}
+function mostRecentFirstSeenAtChain(): unknown {
+  const chain = {
+    eq: () => chain,
+    order: () => chain,
+    limit: () => chain,
+    then: (resolve: (v: { data: unknown; error: unknown }) => void) =>
+      resolve({
+        data: mostRecentFirstSeenAt === null ? [] : [{ first_seen_at: mostRecentFirstSeenAt }],
+        error: null,
+      }),
+  };
+  return chain;
 }
 
 vi.mock("@/integrations/supabase/client.server", () => ({
@@ -67,8 +93,14 @@ vi.mock("@/integrations/supabase/client.server", () => ({
       if (table === "source_position_state") return rowsThenable(table, compact);
       if (table === "alerts") {
         const chain = {
-          upsert: () => chain,
-          insert: () => chain,
+          upsert: (row: { level: string; kind: string; dedup_key: string | null }) => {
+            raisedAlerts.push({ level: row.level, kind: row.kind, dedupKey: row.dedup_key });
+            return chain;
+          },
+          insert: (row: { level: string; kind: string; dedup_key: string | null }) => {
+            raisedAlerts.push({ level: row.level, kind: row.kind, dedupKey: row.dedup_key });
+            return chain;
+          },
           select: () => chain,
           then: (resolve: (v: { data: unknown; error: unknown }) => void) =>
             resolve({ data: [], error: null }),
@@ -138,5 +170,73 @@ describe("wallet-scoped reconciliation serialization", () => {
         w.table,
       );
     }
+  });
+});
+
+describe("reconcile() alert classification (this fixture always finds a real mismatch: compact asset-a=99 vs replayed=6)", () => {
+  it("classifies as INFO reconciliation_advanced when expectAdvance is true (routine advancement)", async () => {
+    leaseHeldBy = null;
+    writes.length = 0;
+    raisedAlerts.length = 0;
+    mostRecentFirstSeenAt = null;
+
+    await shadow.reconcile(WALLET, { expectAdvance: true });
+
+    expect(raisedAlerts).toHaveLength(1);
+    expect(raisedAlerts[0]).toMatchObject({ level: "info", kind: "reconciliation_advanced" });
+  });
+
+  it("classifies as WARN reconciliation_mismatch when expectAdvance is false and nothing was recently persisted (unexplained divergence)", async () => {
+    leaseHeldBy = null;
+    writes.length = 0;
+    raisedAlerts.length = 0;
+    mostRecentFirstSeenAt = null;
+
+    await shadow.reconcile(WALLET, { expectAdvance: false });
+
+    expect(raisedAlerts).toHaveLength(1);
+    expect(raisedAlerts[0]).toMatchObject({ level: "warn", kind: "reconciliation_mismatch" });
+  });
+});
+
+describe("routine sibling-driven advancement (recency-based, not merely fetched-event-count-based)", () => {
+  it("classifies as INFO when expectAdvance is false but a sibling persisted an event for this wallet moments ago", async () => {
+    leaseHeldBy = null;
+    writes.length = 0;
+    raisedAlerts.length = 0;
+    mostRecentFirstSeenAt = new Date(Date.now() - 2_000).toISOString();
+
+    await shadow.reconcile(WALLET, { expectAdvance: false });
+
+    expect(raisedAlerts).toHaveLength(1);
+    expect(raisedAlerts[0]).toMatchObject({ level: "info", kind: "reconciliation_advanced" });
+  });
+
+  it("does NOT classify as INFO merely because old bootstrap-replay history exists for the wallet", async () => {
+    // Regression for over-triggering on stale history: a wallet whose most
+    // recent persisted event is old (e.g. re-fetched during a bootstrap
+    // catch-up) must not mask a genuine cache corruption as routine
+    // advancement.
+    leaseHeldBy = null;
+    writes.length = 0;
+    raisedAlerts.length = 0;
+    mostRecentFirstSeenAt = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    await shadow.reconcile(WALLET, { expectAdvance: false });
+
+    expect(raisedAlerts).toHaveLength(1);
+    expect(raisedAlerts[0]).toMatchObject({ level: "warn", kind: "reconciliation_mismatch" });
+  });
+
+  it("does NOT classify as INFO when the wallet has no source_events at all", async () => {
+    leaseHeldBy = null;
+    writes.length = 0;
+    raisedAlerts.length = 0;
+    mostRecentFirstSeenAt = null;
+
+    await shadow.reconcile(WALLET, { expectAdvance: false });
+
+    expect(raisedAlerts).toHaveLength(1);
+    expect(raisedAlerts[0]).toMatchObject({ level: "warn", kind: "reconciliation_mismatch" });
   });
 });
