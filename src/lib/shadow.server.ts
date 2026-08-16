@@ -94,7 +94,15 @@ const CYCLE_BUDGET_MS = 50_000;
  */
 const EXPERIMENT_CONCURRENCY = 2;
 const EXPERIMENT_DEADLINE_MS = 40_000;
-const RESEARCH_DEADLINE_MS = 8_000;
+/**
+ * Scheduler budget for the candidate research stage. This is enforced with a
+ * REAL AbortController (not Promise.race): candidate research shares the signal
+ * with every public HTTP call it makes, so hitting this budget cancels the
+ * in-flight work and we AWAIT its unwind + terminal worker_status write before
+ * returning. Previously the race returned after 8s while the research pass kept
+ * running in an abandoned context, stranding its 300s lease at state='running'.
+ */
+export const RESEARCH_DEADLINE_MS = 8_000;
 /** Auxiliary (non-accounting) stage budgets, so one slow stage cannot eat a cycle. */
 /**
  * Unlike every other auxiliary stage below, mark_refresh previously had no
@@ -1685,13 +1693,23 @@ async function raiseCashAlerts(experiment: Experiment): Promise<void> {
   }
 }
 
-/** Recurring candidate research refresh (throttled to once every 6 hours). */
-async function refreshCandidateResearchSafely(): Promise<{ ran: boolean; detail: string | null }> {
+/**
+ * Recurring candidate research refresh (cadence owned by the research module).
+ * Cancellation, not abandonment: the abort is propagated into the research
+ * deadline and we await the terminal state write before returning.
+ */
+export async function refreshCandidateResearchSafely(
+  budgetMs: number = RESEARCH_DEADLINE_MS,
+): Promise<{ ran: boolean; detail: string | null }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("candidate research scheduler budget reached")), budgetMs);
   try {
     const { refreshCandidateResearchIfDue } = await import("./candidates/research.server");
-    return await withDeadline(refreshCandidateResearchIfDue(), RESEARCH_DEADLINE_MS, "candidate research");
+    return await refreshCandidateResearchIfDue(controller.signal);
   } catch (err) {
     return { ran: false, detail: err instanceof Error ? err.message : "research refresh skipped" };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
