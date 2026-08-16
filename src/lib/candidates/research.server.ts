@@ -9,6 +9,15 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { parseSourceSide } from "../shadow-core";
+
+import {
+  RESEARCH_BATCH_SIZE,
+  RESEARCH_BUDGET_MS,
+  budgetExhausted,
+  selectResearchBatch,
+} from "./research-batch";
+
 import {
   PROMOTED_STATUS,
   buildPromotedExperiment,
@@ -132,16 +141,19 @@ export async function fetchPublicTrades(wallet: string): Promise<CandidateTrade[
     );
     const rows = Array.isArray(json) ? (json as Json[]) : [];
     for (const r of rows) {
+      // Fail closed: an unrecognized/missing side is never treated as a BUY.
+      const side = parseSourceSide(r["side"]);
+      if (side === null) continue;
       out.push({
         asset: str(r["asset"]),
-        side: str(r["side"]).toUpperCase() === "SELL" ? "SELL" : "BUY",
         size: num(r["size"]),
         price: num(r["price"]),
         ts: num(r["timestamp"]),
         title: str(r["title"]),
         slug: str(r["slug"]),
         outcome: str(r["outcome"]),
-      });
+        side,
+      } as CandidateTrade);
     }
     if (rows.length < TRADE_PAGE_SIZE) break;
   }
@@ -292,7 +304,7 @@ async function acquireResearchLease(): Promise<boolean> {
 }
 
 async function recordRunState(summary: ResearchSummary): Promise<void> {
-  await supabaseAdmin
+  const { error } = await supabaseAdmin
     .from("worker_status")
     .update({
       state: summary.state === "skipped_locked" ? "running" : summary.state,
@@ -304,7 +316,11 @@ async function recordRunState(summary: ResearchSummary): Promise<void> {
       lease_expires_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     } as never)
-    .eq("id", RESEARCH_LOCK_ID);
+    .eq("id", RESEARCH_LOCK_ID)
+    .select("id");
+  // A silently dropped run-state write would leave the lease looking held and
+  // the pass looking like it never ran, so surface it instead of ignoring it.
+  if (error) throw new Error(`worker_status update failed: ${error.message}`);
 }
 
 export type ResearchRunState = {
@@ -380,14 +396,41 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
   const reference = await referenceFingerprint();
   const nowSeconds = Math.floor(Date.now() / 1000);
 
+  // Bounded + resumable: only the oldest-computed slice is refreshed per
+  // invocation, so one scheduled run finishes far inside the 300s lease and
+  // repeated runs progress across the whole watchlist. Deterministic cursor:
+  // candidate_metrics.computed_at (never-computed candidates first).
+  const { data: computedRows } = await supabaseAdmin
+    .from("candidate_metrics")
+    .select("candidate_id, computed_at");
+  const lastComputedAt = new Map<string, string | null>(
+    ((computedRows ?? []) as { candidate_id: string; computed_at: string | null }[]).map((r) => [
+      r.candidate_id,
+      r.computed_at,
+    ]),
+  );
+  const resolvedRows = rows.filter((r) => Boolean(r.wallet));
+  const batch = selectResearchBatch(resolvedRows, lastComputedAt, RESEARCH_BATCH_SIZE);
+  const batchIds = new Set(batch.map((r) => r.id));
+  const startedAtMs = Date.now();
+
   const unresolved: string[] = [];
   const insufficient: string[] = [];
   const failures: { handle: string; error: string }[] = [];
   let researched = 0;
+  let deferred = 0;
 
   for (const row of rows) {
     if (!row.wallet) {
       unresolved.push(row.handle);
+      continue;
+    }
+    if (!batchIds.has(row.id)) {
+      deferred += 1;
+      continue;
+    }
+    if (budgetExhausted(startedAtMs, Date.now(), RESEARCH_BUDGET_MS)) {
+      deferred += 1;
       continue;
     }
     // One candidate's public-API failure must never abort the bounded cohort.
@@ -512,7 +555,9 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
         ? failures.map((f) => `${f.handle}: ${f.error}`).join("; ").slice(0, 400)
         : unresolved.length > 0
           ? `Unresolved handles: ${unresolved.join(", ")}`
-          : null,
+          : deferred > 0
+            ? `Bounded pass: ${researched} researched, ${deferred} deferred to the next scheduled run.`
+            : null,
   };
   await recordRunState(summary);
   return summary;

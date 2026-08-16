@@ -44,7 +44,11 @@ import {
   isEligibleForV2Copy,
   isV2Name,
 } from "./v2-cohort";
-import { GENERAL_SHADOW_POLLING_ENABLED, isGeneralShadowName } from "./general-shadow";
+import {
+  GENERAL_SHADOW_CATCHUP_PAGE_BUDGET,
+  GENERAL_SHADOW_POLLING_ENABLED,
+  isGeneralShadowName,
+} from "./general-shadow";
 import {
   DATA_API_HOST,
   getHostCooldown,
@@ -620,6 +624,7 @@ export async function fetchUntilCheckpointCovered(
   checkpointTs: number,
   pageSize: number = PAGE_SIZE,
   signal?: AbortSignal,
+  maxPages?: number,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
   const raw: Json[] = [];
   let pagesFetched = 0;
@@ -646,6 +651,15 @@ export async function fetchUntilCheckpointCovered(
         if (oldestValid === null || ts < oldestValid) oldestValid = ts;
       }
       if (exhausted || coversCheckpoint) return { raw, pagesFetched };
+      // Bounded catch-up (General Shadow safe-resume guard only; undefined for
+      // V2/V3/candidate polling, which keep their unbounded semantics). Fail
+      // closed instead of returning a partial window: the caller then leaves
+      // the checkpoint untouched and a later cycle retries the same boundary.
+      if (maxPages !== undefined && pagesFetched >= maxPages) {
+        throw new CatchupPageBudgetExceededError(
+          `Bounded catch-up budget of ${maxPages} pages exhausted before covering checkpoint ${checkpointTs}`,
+        );
+      }
       offset += pageSize;
       if (offset > MAX_TRADES_OFFSET) break;
     }
@@ -666,6 +680,9 @@ export async function fetchUntilCheckpointCovered(
 /** Raised when a bootstrapped worker has no valid boundary to catch up against. */
 export class MissingCatchupBoundaryError extends Error {}
 
+/** Raised when a bounded (General Shadow) catch-up hits its per-cycle page budget. */
+export class CatchupPageBudgetExceededError extends Error {}
+
 /**
  * A first-ever bootstrap stays a bounded fixed-page fetch (never an unlimited
  * history download). Once bootstrapped, catchupBoundary (the previous
@@ -683,6 +700,7 @@ async function fetchSourceWindow(
   catchupBoundary: number | null,
   signal?: AbortSignal,
   cache?: TradesRequestCache,
+  maxCatchupPages?: number,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
   if (!bootstrapped) {
     return fetchFixedPages(
@@ -702,6 +720,7 @@ async function fetchSourceWindow(
     catchupBoundary,
     PAGE_SIZE,
     signal,
+    maxCatchupPages,
   );
 }
 
@@ -1330,9 +1349,15 @@ async function reconcileHeld(
     updated_at: stamp,
   }));
   for (const chunk of chunked(rows, 200)) {
-    await supabaseAdmin
+    const { error: repairError } = await supabaseAdmin
       .from("source_position_state")
       .upsert(chunk as never, { onConflict: "wallet,asset" });
+    // A failed repair upsert must NEVER be reported as repaired/advanced: fail
+    // visibly before any reconciliation_advanced / reconciliation_mismatch
+    // alert is raised. Paper accounting tables are untouched either way.
+    if (repairError) {
+      throw new Error(`source_position_state repair failed for ${wallet}: ${repairError.message}`);
+    }
   }
 
   if (!result.ok) {
@@ -1828,6 +1853,9 @@ export async function runExperimentCycle(
             resolveCatchupBoundary(checkpoint?.last_source_ts, experiment.follow_from_ts),
             cycleAbort.signal,
             tradesCache,
+            isGeneralShadowName(experiment.name)
+              ? GENERAL_SHADOW_CATCHUP_PAGE_BUDGET
+              : undefined,
           ),
         );
         const events = normalizeSourceEvents(window.raw, wallet);

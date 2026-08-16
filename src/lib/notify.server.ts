@@ -34,14 +34,60 @@ const IMPORTANT_KIND_LIST = [...IMPORTANT_KINDS];
 
 /** Tier 1: actual paper BUYs always have delivery priority. */
 const PRIORITY_KIND = "paper_buy";
-const TIER2_KIND_LIST = IMPORTANT_KIND_LIST.filter((kind) => kind !== PRIORITY_KIND);
 
 /**
- * Operational (non paper BUY) alerts are only retried while they are still
- * current. Older rows remain stored for history/diagnostics but must never
- * flood Telegram with an ancient backlog.
+ * RETRY CUTOVER (hardening deployment, 2026-08-16).
+ *
+ * Thousands of genuinely stale alerts (position_settled from Aug 9,
+ * poll_failure from Aug 11, ...) predate this deployment. They stay stored for
+ * history/diagnostics and are never deleted, but they are NOT retry candidates:
+ * replaying them would blast the chat with an ancient backlog. Only alerts
+ * created at/after this instant participate in retry, which is what makes
+ * durable (no expiry) retry semantics safe for future actionable kinds.
+ */
+export const TELEGRAM_RETRY_CUTOVER_AT = "2026-08-14T00:00:00.000Z";
+
+/**
+ * Durable kinds: genuinely actionable, low volume. After the cutover these stay
+ * retryable indefinitely (at-least-once), with no freshness expiry.
+ */
+const DURABLE_KINDS = new Set([
+  "paper_buy",
+  "paper_sell",
+  "position_settled",
+  "settlement",
+  "settlement_verified",
+  "LOW_SPENDABLE_CASH",
+  "CASH_RESERVE_REACHED",
+  "pmus_exact_match",
+  "us_exact_match",
+]);
+
+/** Tier 2a: durable kinds other than the tier-1 priority kind. */
+const DURABLE_TIER2_KIND_LIST = [...DURABLE_KINDS].filter((kind) => kind !== PRIORITY_KIND);
+
+/**
+ * High-volume operational diagnostics (poll/reconciliation noise). Only useful
+ * while current, so they stay bounded to the short freshness window below.
+ */
+const OPERATIONAL_KIND_LIST = IMPORTANT_KIND_LIST.filter((kind) => !DURABLE_KINDS.has(kind));
+
+export function isDurableAlertKind(kind: string): boolean {
+  return DURABLE_KINDS.has(kind);
+}
+
+/**
+ * Operational alerts are only retried while they are still current. Older rows
+ * remain stored for history/diagnostics but never flood Telegram.
  */
 const NON_PAPER_BUY_MAX_RETRY_AGE_MS = 2 * 60 * 60 * 1000;
+
+/** The oldest created_at a retry candidate of the given class may have. */
+export function retryFloorIso(kind: "durable" | "operational", now = Date.now()): string {
+  const cutover = new Date(TELEGRAM_RETRY_CUTOVER_AT).getTime();
+  if (kind === "durable") return new Date(cutover).toISOString();
+  return new Date(Math.max(cutover, now - NON_PAPER_BUY_MAX_RETRY_AGE_MS)).toISOString();
+}
 
 const RETRY_AFTER_MS = 60_000;
 
@@ -148,14 +194,18 @@ export async function notifyAlert(alert: {
  * were never attempted), using a strict two-tier priority policy.
  *
  * TIER 1 — actual paper BUYs, oldest first (FIFO), selected before any other
- * kind is even queried. No operational alert can occupy a slot ahead of a
- * pending paper_buy.
- * TIER 2 — other currently-actionable kinds, only within
- * NON_PAPER_BUY_MAX_RETRY_AGE_MS, newest first, using only the retry capacity
- * left over after tier 1.
+ * kind is even queried. No other alert can occupy a slot ahead of a pending
+ * paper_buy.
+ * TIER 2a — other DURABLE_KINDS (settlement / cash / paper sell): retryable
+ * indefinitely after the cutover, newest first.
+ * TIER 2b — high-volume operational diagnostics, only within
+ * NON_PAPER_BUY_MAX_RETRY_AGE_MS.
+ *
+ * Every tier is floored at TELEGRAM_RETRY_CUTOVER_AT, so the pre-hardening
+ * backlog is never replayed while remaining stored.
  *
  * `limit` is a TOTAL budget across both tiers. Nothing is ever deleted here:
- * alerts outside the operational window simply stop being retry candidates.
+ * alerts outside their window simply stop being retry candidates.
  */
 export async function retryPendingTelegramAlerts(limit = 10): Promise<{ attempted: number; sent: number }> {
   if (telegramStatus() === "NOT_CONFIGURED") return { attempted: 0, sent: 0 };
@@ -177,26 +227,32 @@ export async function retryPendingTelegramAlerts(limit = 10): Promise<{ attempte
     .is("notified_at", null)
     .in("notification_status" as never, ["pending", "failed"] as never)
     .eq("kind" as never, PRIORITY_KIND as never)
+    .gte("created_at" as never, retryFloorIso("durable") as never)
     .order("created_at", { ascending: true })
     .limit(total);
   if (priorityError) return { attempted: 0, sent: 0 };
 
   const priorityRows = priority ?? [];
-  const remaining = total - priorityRows.length;
-  let otherRows: typeof priorityRows = [];
-  if (remaining > 0) {
-    const freshSince = new Date(Date.now() - NON_PAPER_BUY_MAX_RETRY_AGE_MS).toISOString();
+  const otherRows: typeof priorityRows = [];
+
+  const tiers: { kinds: string[]; floor: string }[] = [
+    { kinds: DURABLE_TIER2_KIND_LIST, floor: retryFloorIso("durable") },
+    { kinds: OPERATIONAL_KIND_LIST, floor: retryFloorIso("operational") },
+  ];
+  for (const tier of tiers) {
+    const remaining = total - priorityRows.length - otherRows.length;
+    if (remaining <= 0 || tier.kinds.length === 0) break;
     const { data: others, error: othersError } = await supabaseAdmin
       .from("alerts")
       .select("*")
       .is("notified_at", null)
       .in("notification_status" as never, ["pending", "failed"] as never)
-      .in("kind" as never, TIER2_KIND_LIST as never)
-      .gte("created_at" as never, freshSince as never)
+      .in("kind" as never, tier.kinds as never)
+      .gte("created_at" as never, tier.floor as never)
       .order("created_at", { ascending: false })
       .limit(remaining);
     if (othersError) return { attempted: 0, sent: 0 };
-    otherRows = others ?? [];
+    otherRows.push(...((others ?? []) as typeof priorityRows));
   }
 
   const data = [...priorityRows, ...otherRows].slice(0, total);

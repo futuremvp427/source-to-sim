@@ -76,7 +76,7 @@ Milestones (PostgreSQL-computed, not host-clock-derived):
 - **T_7d** = 2026-08-23 12:09:43.355885 UTC
 - **T_14d** = 2026-08-30 12:09:43.355885 UTC
 
-Separately, and not affecting this determination: the durable host-level rate-limit cooldown (`http_rate_limits` / `record_http_rate_limit`) is confirmed operating in production (earliest observed write 2026-08-16 10:32:09 UTC). A follow-up migration hardening that function's privileges has been merged to the repository but is **not yet deployed** to production as of this audit — production's live function definition still matches the original, pre-hardening version. This is a distinct, security-relevant deployment gap, tracked separately, and does not affect the T_clean determination above.
+Separately, and not affecting this determination: the durable host-level rate-limit cooldown (`http_rate_limits` / `record_http_rate_limit`) is confirmed operating in production (earliest observed write 2026-08-16 10:32:09 UTC). The follow-up privilege hardening for that function is **confirmed deployed** in production: a production audit shows `record_http_rate_limit` execute = false for `anon` and `authenticated`, and true for `service_role`, with the `service_role`-only runtime guard present in the live definition. This does not affect the T_clean determination above.
 
 ## Separately diagnosed, not a T_clean blocker: reconciliation cache oscillation
 
