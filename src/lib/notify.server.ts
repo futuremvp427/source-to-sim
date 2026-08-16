@@ -36,16 +36,17 @@ const IMPORTANT_KIND_LIST = [...IMPORTANT_KINDS];
 const PRIORITY_KIND = "paper_buy";
 
 /**
- * RETRY CUTOVER (hardening deployment, 2026-08-16).
+ * RETRY CUTOVER — the actual hardening deployment boundary (commit 66bc02d,
+ * 2026-08-16T20:26:30Z).
  *
- * Thousands of genuinely stale alerts (position_settled from Aug 9,
- * poll_failure from Aug 11, ...) predate this deployment. They stay stored for
- * history/diagnostics and are never deleted, but they are NOT retry candidates:
- * replaying them would blast the chat with an ancient backlog. Only alerts
- * created at/after this instant participate in retry, which is what makes
- * durable (no expiry) retry semantics safe for future actionable kinds.
+ * Every alert created before this instant (including the never-delivered
+ * Aug 14-15 settlement alerts) stays stored for history/diagnostics and is
+ * never deleted, but is NOT a retry candidate: replaying that backlog would
+ * blast the chat with historical noise. Only alerts created at/after this
+ * instant participate in retry, which is what makes durable (no expiry) retry
+ * semantics safe for future actionable kinds.
  */
-export const TELEGRAM_RETRY_CUTOVER_AT = "2026-08-14T00:00:00.000Z";
+export const TELEGRAM_RETRY_CUTOVER_AT = "2026-08-16T20:26:30.000Z";
 
 /**
  * Durable kinds: genuinely actionable, low volume. After the cutover these stay

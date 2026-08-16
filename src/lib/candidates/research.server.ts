@@ -13,9 +13,11 @@ import { parseSourceSide } from "../shadow-core";
 
 import {
   RESEARCH_BATCH_SIZE,
-  RESEARCH_BUDGET_MS,
-  budgetExhausted,
+  ResearchBudgetExhaustedError,
+  UNRESOLVED_RESOLUTIONS_PER_RUN,
+  createResearchDeadline,
   selectResearchBatch,
+  selectUnresolvedForResolution,
 } from "./research-batch";
 
 import {
@@ -81,17 +83,39 @@ export const SEED_CANDIDATES: {
 
 type Json = Record<string, unknown>;
 
-async function getJson(url: string, attempts = 2): Promise<unknown> {
+/** Per-request timeout cap; always combined with the overall run deadline. */
+const REQUEST_TIMEOUT_MS = 15_000;
+
+function combineSignals(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
+function isAbort(err: unknown): boolean {
+  return (
+    err instanceof ResearchBudgetExhaustedError ||
+    (err instanceof Error && (err.name === "AbortError" || err.name === "ResearchBudgetExhaustedError"))
+  );
+}
+
+export async function getJson(
+  url: string,
+  opts: { attempts?: number | undefined; signal?: AbortSignal | undefined } = {},
+): Promise<unknown> {
+  const attempts = opts.attempts ?? 2;
   let lastErr: unknown;
   for (let i = 0; i < attempts; i += 1) {
+    // The overall deadline wins over any remaining retry budget.
+    if (opts.signal?.aborted) throw new ResearchBudgetExhaustedError("research deadline reached");
     try {
       const res = await fetch(url, {
         headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(15_000),
+        signal: combineSignals(opts.signal, REQUEST_TIMEOUT_MS),
       });
       if (!res.ok) throw new Error(`${url.split("?")[0]} responded ${res.status}`);
       return (await res.json()) as unknown;
     } catch (err) {
+      if (opts.signal?.aborted) throw new ResearchBudgetExhaustedError("research deadline reached");
       lastErr = err;
       if (i < attempts - 1) await new Promise((r) => setTimeout(r, 400));
     }
@@ -117,10 +141,11 @@ function numOrNull(v: unknown): number | null {
 /* ------------------------------------------------------------------ */
 
 /** Resolves a handle to a proxy wallet via the PUBLIC profile search. Exact, case-insensitive match only — never a guess. */
-export async function resolveHandle(handle: string): Promise<string | null> {
+export async function resolveHandle(handle: string, signal?: AbortSignal): Promise<string | null> {
   try {
     const json = (await getJson(
       `${GAMMA_API}/public-search?q=${encodeURIComponent(handle)}&limit_per_type=10&search_profiles=true`,
+      { signal },
     )) as { profiles?: { name?: string; proxyWallet?: string }[] };
     const profiles = json.profiles ?? [];
     const exact = profiles.filter(
@@ -128,16 +153,19 @@ export async function resolveHandle(handle: string): Promise<string | null> {
     );
     if (exact.length !== 1) return null;
     return str(exact[0]?.proxyWallet).toLowerCase();
-  } catch {
+  } catch (err) {
+    // A deadline abort must stop the run, not look like "unresolved".
+    if (isAbort(err)) throw err;
     return null;
   }
 }
 
-export async function fetchPublicTrades(wallet: string): Promise<CandidateTrade[]> {
+export async function fetchPublicTrades(wallet: string, signal?: AbortSignal): Promise<CandidateTrade[]> {
   const out: CandidateTrade[] = [];
   for (let page = 0; page < TRADE_PAGES; page += 1) {
     const json = await getJson(
       `${DATA_API}/trades?user=${wallet}&takerOnly=false&limit=${TRADE_PAGE_SIZE}&offset=${page * TRADE_PAGE_SIZE}`,
+      { signal },
     );
     const rows = Array.isArray(json) ? (json as Json[]) : [];
     for (const r of rows) {
@@ -160,8 +188,8 @@ export async function fetchPublicTrades(wallet: string): Promise<CandidateTrade[
   return out;
 }
 
-export async function fetchPublicPositions(wallet: string): Promise<CandidatePosition[]> {
-  const json = await getJson(`${DATA_API}/positions?user=${wallet}&limit=${POSITION_LIMIT}`);
+export async function fetchPublicPositions(wallet: string, signal?: AbortSignal): Promise<CandidatePosition[]> {
+  const json = await getJson(`${DATA_API}/positions?user=${wallet}&limit=${POSITION_LIMIT}`, { signal });
   const rows = Array.isArray(json) ? (json as Json[]) : [];
   return rows.map((r) => ({
     asset: str(r["asset"]),
@@ -178,7 +206,10 @@ export async function fetchPublicPositions(wallet: string): Promise<CandidatePos
 }
 
 /** Bounded public price-history sampling used to estimate follower slippage. */
-export async function fetchSlippageSamples(trades: readonly CandidateTrade[]): Promise<SlippageSample[]> {
+export async function fetchSlippageSamples(
+  trades: readonly CandidateTrade[],
+  signal?: AbortSignal,
+): Promise<SlippageSample[]> {
   const recent = [...trades]
     .filter((t) => t.side === "BUY" && t.asset && t.price > 0)
     .sort((a, b) => b.ts - a.ts)
@@ -190,11 +221,13 @@ export async function fetchSlippageSamples(trades: readonly CandidateTrade[]): P
     try {
       const json = (await getJson(
         `${CLOB_API}/prices-history?market=${trade.asset}&interval=1w&fidelity=1`,
+        { signal },
       )) as { history?: { t?: number; p?: number }[] };
       history = (json.history ?? [])
         .map((h) => ({ t: num(h.t), p: num(h.p) }))
         .filter((h) => h.t > 0 && h.p > 0);
-    } catch {
+    } catch (err) {
+      if (isAbort(err)) throw err;
       history = [];
     }
     for (const delay of DELAYS) {
@@ -228,8 +261,14 @@ export type WatchlistRow = {
   weekly_snapshot_pnl: number | null;
   promoted_experiment_id: string | null;
   added_at: string;
+  updated_at?: string | null;
 };
 
+/**
+ * Seeds watchlist METADATA ONLY — no network handle resolution. Resolution is a
+ * separate, bounded step so a scheduled run can never spend its whole budget
+ * re-resolving every unresolved handle serially.
+ */
 export async function seedWatchlist(): Promise<WatchlistRow[]> {
   const { data: existing, error: readError } = await supabaseAdmin
     .from("candidate_watchlist")
@@ -241,8 +280,7 @@ export async function seedWatchlist(): Promise<WatchlistRow[]> {
 
   for (const seed of SEED_CANDIDATES) {
     const current = byHandle.get(seed.handle);
-    let wallet = seed.wallet ?? current?.wallet ?? null;
-    if (!wallet) wallet = await resolveHandle(seed.handle);
+    const wallet = seed.wallet ?? current?.wallet ?? null;
 
     const payload = {
       handle: seed.handle,
@@ -258,6 +296,19 @@ export async function seedWatchlist(): Promise<WatchlistRow[]> {
       updated_at: new Date().toISOString(),
     };
 
+    // Skip no-op writes so updated_at stays a usable rotation cursor for the
+    // bounded unresolved-resolution queue below.
+    if (
+      current &&
+      current.wallet === wallet &&
+      current.wallet_resolved === Boolean(wallet) &&
+      current.source === SNAPSHOT_SOURCE &&
+      current.weekly_snapshot_rank === seed.rank &&
+      Number(current.weekly_snapshot_pnl) === Number(seed.pnl)
+    ) {
+      continue;
+    }
+
     // Idempotent: handle is unique, so a repeat run updates in place.
     const { error: writeError } = current
       ? await supabaseAdmin.from("candidate_watchlist").update(payload as never).eq("id", current.id)
@@ -270,6 +321,49 @@ export async function seedWatchlist(): Promise<WatchlistRow[]> {
     .select("*")
     .order("weekly_snapshot_rank", { ascending: true });
   return (data ?? []) as unknown as WatchlistRow[];
+}
+
+/**
+ * Resolves AT MOST `limit` unresolved handles per invocation, deterministically
+ * and inside the overall run deadline. Returns the rows with any newly resolved
+ * wallet applied in memory.
+ */
+export async function resolveBoundedUnresolved(
+  rows: readonly WatchlistRow[],
+  signal?: AbortSignal,
+  limit: number = UNRESOLVED_RESOLUTIONS_PER_RUN,
+): Promise<{ rows: WatchlistRow[]; attempted: string[]; resolved: string[] }> {
+  const targets = selectUnresolvedForResolution(rows, limit);
+  const out = [...rows];
+  const attempted: string[] = [];
+  const resolved: string[] = [];
+
+  for (const target of targets) {
+    attempted.push(target.handle);
+    const wallet = await resolveHandle(target.handle, signal);
+    const nowIso = new Date().toISOString();
+    const { error } = await supabaseAdmin
+      .from("candidate_watchlist")
+      .update({
+        wallet,
+        wallet_resolved: Boolean(wallet),
+        notes: wallet
+          ? null
+          : "wallet_unresolved: no single exact public profile match; address deliberately not guessed.",
+        updated_at: nowIso,
+      } as never)
+      .eq("id", target.id);
+    if (error) throw new Error(`candidate_watchlist resolution write failed: ${error.message}`);
+    if (wallet) {
+      resolved.push(target.handle);
+      const idx = out.findIndex((r) => r.id === target.id);
+      if (idx >= 0) out[idx] = { ...out[idx]!, wallet, wallet_resolved: true, updated_at: nowIso };
+    } else {
+      const idx = out.findIndex((r) => r.id === target.id);
+      if (idx >= 0) out[idx] = { ...out[idx]!, updated_at: nowIso };
+    }
+  }
+  return { rows: out, attempted, resolved };
 }
 
 /* ------------------------------------------------------------------ */
@@ -350,8 +444,8 @@ export async function loadResearchRunState(): Promise<ResearchRunState | null> {
   };
 }
 
-async function referenceFingerprint(): Promise<CandidateFingerprint> {
-  const trades = await fetchPublicTrades(REFERENCE_WALLET);
+export async function referenceFingerprint(signal?: AbortSignal): Promise<CandidateFingerprint> {
+  const trades = await fetchPublicTrades(REFERENCE_WALLET, signal);
   return computeFingerprint(trades);
 }
 
@@ -392,17 +486,34 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
     };
   }
 
-  const rows = await seedWatchlist();
-  const reference = await referenceFingerprint();
+  // The overall wall-clock budget starts HERE — immediately after the lease and
+  // before any seeding, handle resolution, reference fingerprint or public HTTP
+  // call — and every network call below shares its AbortSignal.
+  const deadline = createResearchDeadline();
+
+  const unresolved: string[] = [];
+  const insufficient: string[] = [];
+  const failures: { handle: string; error: string }[] = [];
+  let researched = 0;
+  let deferred = 0;
+  let budgetHit = false;
+
+  try {
+  const seeded = await seedWatchlist();
+  // At most UNRESOLVED_RESOLUTIONS_PER_RUN network resolutions per invocation.
+  const { rows } = await resolveBoundedUnresolved(seeded, deadline.signal);
+  deadline.assertLive();
+  const reference = await referenceFingerprint(deadline.signal);
   const nowSeconds = Math.floor(Date.now() / 1000);
 
   // Bounded + resumable: only the oldest-computed slice is refreshed per
   // invocation, so one scheduled run finishes far inside the 300s lease and
   // repeated runs progress across the whole watchlist. Deterministic cursor:
   // candidate_metrics.computed_at (never-computed candidates first).
-  const { data: computedRows } = await supabaseAdmin
+  const { data: computedRows, error: computedError } = await supabaseAdmin
     .from("candidate_metrics")
     .select("candidate_id, computed_at");
+  if (computedError) throw new Error(`candidate_metrics read failed: ${computedError.message}`);
   const lastComputedAt = new Map<string, string | null>(
     ((computedRows ?? []) as { candidate_id: string; computed_at: string | null }[]).map((r) => [
       r.candidate_id,
@@ -412,13 +523,6 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
   const resolvedRows = rows.filter((r) => Boolean(r.wallet));
   const batch = selectResearchBatch(resolvedRows, lastComputedAt, RESEARCH_BATCH_SIZE);
   const batchIds = new Set(batch.map((r) => r.id));
-  const startedAtMs = Date.now();
-
-  const unresolved: string[] = [];
-  const insufficient: string[] = [];
-  const failures: { handle: string; error: string }[] = [];
-  let researched = 0;
-  let deferred = 0;
 
   for (const row of rows) {
     if (!row.wallet) {
@@ -429,7 +533,8 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
       deferred += 1;
       continue;
     }
-    if (budgetExhausted(startedAtMs, Date.now(), RESEARCH_BUDGET_MS)) {
+    if (deadline.expired()) {
+      budgetHit = true;
       deferred += 1;
       continue;
     }
@@ -437,8 +542,8 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
     try {
     let trades: CandidateTrade[] = [];
     let positions: CandidatePosition[] = [];
-    trades = await fetchPublicTrades(row.wallet);
-    positions = await fetchPublicPositions(row.wallet);
+    trades = await fetchPublicTrades(row.wallet, deadline.signal);
+    positions = await fetchPublicPositions(row.wallet, deadline.signal);
 
     const metrics = computeMetrics({ trades, positions, nowSeconds });
     const fingerprint = computeFingerprint(trades);
@@ -480,6 +585,7 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
       } as never,
       { onConflict: "candidate_id" },
     );
+    if (candidate_metricsError) throw new Error(`candidate_metrics write failed: ${candidate_metricsError.message}`);
 
     const { error: candidate_fingerprintError } = await supabaseAdmin.from("candidate_fingerprint").upsert(
       {
@@ -529,6 +635,8 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
     if (metrics.sampleCount === 0) insufficient.push(row.handle);
     researched += 1;
     } catch (err) {
+      // A deadline abort is a run-level outcome, not a per-candidate failure.
+      if (isAbort(err) || deadline.expired()) throw new ResearchBudgetExhaustedError();
       const message = err instanceof Error ? err.message : "public request failed";
       failures.push({ handle: row.handle, error: message });
       await supabaseAdmin
@@ -555,12 +663,43 @@ export async function runCandidateResearch(): Promise<ResearchSummary> {
         ? failures.map((f) => `${f.handle}: ${f.error}`).join("; ").slice(0, 400)
         : unresolved.length > 0
           ? `Unresolved handles: ${unresolved.join(", ")}`
-          : deferred > 0
+          : budgetHit
+            ? `Bounded pass stopped at the ${deadline.budgetMs}ms budget: ${researched} researched, ${deferred} deferred.`
+            : deferred > 0
             ? `Bounded pass: ${researched} researched, ${deferred} deferred to the next scheduled run.`
             : null,
   };
   await recordRunState(summary);
   return summary;
+  } catch (err) {
+    // Deadline exhaustion or a top-level public-fetch failure must still leave a
+    // terminal state behind — never a worker_status row stuck at 'running'
+    // until the 300s lease expires.
+    const aborted = isAbort(err) || deadline.expired();
+    const message = err instanceof Error ? err.message : "research pass failed";
+    const summary: ResearchSummary = {
+      ranAt: new Date().toISOString(),
+      state: researched > 0 ? "partial" : "error",
+      researched,
+      resolvedCount: 0,
+      unresolvedCount: unresolved.length,
+      unresolved,
+      insufficient,
+      failures,
+      detail: (aborted
+        ? `Research budget exhausted after ${deadline.budgetMs}ms: ${researched} researched, ${deferred} deferred.`
+        : `Research pass failed: ${message}`
+      ).slice(0, 400),
+    };
+    try {
+      await recordRunState(summary);
+    } catch {
+      // Surfacing the original cause matters more than the bookkeeping write.
+    }
+    return summary;
+  } finally {
+    deadline.dispose();
+  }
 }
 
 /* ------------------------------------------------------------------ */
