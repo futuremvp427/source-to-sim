@@ -11,9 +11,12 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 export type TelegramStatus = "NOT_CONFIGURED" | "CONFIGURED";
 
-/** Alert kinds worth a push notification. Everything else stays in-app only. */
+/**
+ * Alert kinds worth a push notification. Everything else stays in-app only.
+ * new_source_trades is deliberately absent: those rows stay in the database for
+ * the dashboard, but source-trade volume is not actionable over Telegram.
+ */
 const IMPORTANT_KINDS = new Set([
-  "new_source_trades",
   "paper_buy",
   "paper_sell",
   "LOW_SPENDABLE_CASH",
@@ -28,6 +31,17 @@ const IMPORTANT_KINDS = new Set([
   "us_exact_match",
 ]);
 const IMPORTANT_KIND_LIST = [...IMPORTANT_KINDS];
+
+/** Tier 1: actual paper BUYs always have delivery priority. */
+const PRIORITY_KIND = "paper_buy";
+const TIER2_KIND_LIST = IMPORTANT_KIND_LIST.filter((kind) => kind !== PRIORITY_KIND);
+
+/**
+ * Operational (non paper BUY) alerts are only retried while they are still
+ * current. Older rows remain stored for history/diagnostics but must never
+ * flood Telegram with an ancient backlog.
+ */
+const NON_PAPER_BUY_MAX_RETRY_AGE_MS = 2 * 60 * 60 * 1000;
 
 const RETRY_AFTER_MS = 60_000;
 
