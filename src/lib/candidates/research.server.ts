@@ -557,18 +557,42 @@ export async function runCandidateResearch(signal?: AbortSignal): Promise<Resear
   // invocation, so one scheduled run finishes far inside the 300s lease and
   // repeated runs progress across the whole watchlist. Deterministic cursor:
   // candidate_metrics.computed_at (never-computed candidates first).
-  const { data: computedRows, error: computedError } = await supabaseAdmin
-    .from("candidate_metrics")
-    .select("candidate_id, computed_at");
+  const [
+    { data: computedRows, error: computedError },
+    { data: fingerprintRows, error: fingerprintReadError },
+    { data: scoreRows, error: scoreReadError },
+  ] = await Promise.all([
+    supabaseAdmin.from("candidate_metrics").select("candidate_id, computed_at"),
+    supabaseAdmin.from("candidate_fingerprint").select("candidate_id, computed_at"),
+    supabaseAdmin.from("candidate_scores").select("candidate_id, computed_at"),
+  ]);
   if (computedError) throw new Error(`candidate_metrics read failed: ${computedError.message}`);
-  const lastComputedAt = new Map<string, string | null>(
-    ((computedRows ?? []) as { candidate_id: string; computed_at: string | null }[]).map((r) => [
-      r.candidate_id,
-      r.computed_at,
-    ]),
-  );
+  if (fingerprintReadError)
+    throw new Error(`candidate_fingerprint read failed: ${fingerprintReadError.message}`);
+  if (scoreReadError) throw new Error(`candidate_scores read failed: ${scoreReadError.message}`);
+  type ComputedAtRow = { candidate_id: string; computed_at: string | null };
+  const toMap = (rowsIn: unknown[] | null): Map<string, string | null> =>
+    new Map(((rowsIn ?? []) as ComputedAtRow[]).map((r) => [r.candidate_id, r.computed_at]));
+  const lastComputedAt = toMap(computedRows);
+  const fingerprintAt = toMap(fingerprintRows);
+  const scoreAt = toMap(scoreRows);
   const resolvedRows = rows.filter((r) => Boolean(r.wallet));
-  const batch = selectResearchBatch(resolvedRows, lastComputedAt, RESEARCH_BATCH_SIZE);
+  // Candidates whose persisted artifacts are missing or mixed-version are
+  // repaired ahead of ordinary oldest-first rotation.
+  const { evaluateCandidatePersistence } = await import("./consistency.server");
+  const repairIds = new Set(
+    resolvedRows
+      .filter((r) => {
+        const verdict = evaluateCandidatePersistence({
+          metrics: lastComputedAt.get(r.id) ?? null,
+          fingerprint: fingerprintAt.get(r.id) ?? null,
+          score: scoreAt.get(r.id) ?? null,
+        });
+        return verdict.missing.length > 0 || verdict.stale.length > 0;
+      })
+      .map((r) => r.id),
+  );
+  const batch = selectResearchBatch(resolvedRows, lastComputedAt, RESEARCH_BATCH_SIZE, repairIds);
   const batchIds = new Set(batch.map((r) => r.id));
 
   for (const row of rows) {
