@@ -22,13 +22,25 @@ const sourceEvents = [
 ];
 /** Deliberately stale compact cache, i.e. a real divergence to repair. */
 const compact = [{ asset: "asset-a", shares: 99 }];
+/**
+ * Controls walletHasRecentlyPersistedEvents' `first_seen_at` lookup
+ * independently of `sourceEvents` above (which has no first_seen_at field
+ * and, unset, correctly reads as "not recent"). Set per-test.
+ */
+let mostRecentFirstSeenAt: string | null = null;
 
 function rowsThenable(table: string, rows: unknown[]) {
   const chain = {
-    select: () => chain,
+    select: (columns?: string) => {
+      if (table === "source_events" && columns === "first_seen_at") {
+        return mostRecentFirstSeenAtChain();
+      }
+      return chain;
+    },
     eq: () => chain,
     order: () => chain,
     range: (from: number) => (from === 0 ? chain : emptyChain(table)),
+    limit: () => chain,
     upsert: (r: unknown) => {
       writes.push({ table, rows: r });
       return { then: (res: (v: unknown) => void) => res({ data: null, error: null }) };
@@ -40,6 +52,19 @@ function rowsThenable(table: string, rows: unknown[]) {
 }
 function emptyChain(table: string) {
   return rowsThenable(table, []);
+}
+function mostRecentFirstSeenAtChain(): unknown {
+  const chain = {
+    eq: () => chain,
+    order: () => chain,
+    limit: () => chain,
+    then: (resolve: (v: { data: unknown; error: unknown }) => void) =>
+      resolve({
+        data: mostRecentFirstSeenAt === null ? [] : [{ first_seen_at: mostRecentFirstSeenAt }],
+        error: null,
+      }),
+  };
+  return chain;
 }
 
 vi.mock("@/integrations/supabase/client.server", () => ({
@@ -153,6 +178,7 @@ describe("reconcile() alert classification (this fixture always finds a real mis
     leaseHeldBy = null;
     writes.length = 0;
     raisedAlerts.length = 0;
+    mostRecentFirstSeenAt = null;
 
     await shadow.reconcile(WALLET, { expectAdvance: true });
 
@@ -160,10 +186,11 @@ describe("reconcile() alert classification (this fixture always finds a real mis
     expect(raisedAlerts[0]).toMatchObject({ level: "info", kind: "reconciliation_advanced" });
   });
 
-  it("classifies as WARN reconciliation_mismatch when expectAdvance is false (unexplained divergence)", async () => {
+  it("classifies as WARN reconciliation_mismatch when expectAdvance is false and nothing was recently persisted (unexplained divergence)", async () => {
     leaseHeldBy = null;
     writes.length = 0;
     raisedAlerts.length = 0;
+    mostRecentFirstSeenAt = null;
 
     await shadow.reconcile(WALLET, { expectAdvance: false });
 
@@ -172,21 +199,44 @@ describe("reconcile() alert classification (this fixture always finds a real mis
   });
 });
 
-describe("shouldExpectReconciliationAdvance (routine sibling advancement classification)", () => {
-  it("expects advancement when this experiment's own insert won the race", () => {
-    expect(shadow.shouldExpectReconciliationAdvance(3, 0)).toBe(true);
-    expect(shadow.shouldExpectReconciliationAdvance(3, 5)).toBe(true);
+describe("routine sibling-driven advancement (recency-based, not merely fetched-event-count-based)", () => {
+  it("classifies as INFO when expectAdvance is false but a sibling persisted an event for this wallet moments ago", async () => {
+    leaseHeldBy = null;
+    writes.length = 0;
+    raisedAlerts.length = 0;
+    mostRecentFirstSeenAt = new Date(Date.now() - 2_000).toISOString();
+
+    await shadow.reconcile(WALLET, { expectAdvance: false });
+
+    expect(raisedAlerts).toHaveLength(1);
+    expect(raisedAlerts[0]).toMatchObject({ level: "info", kind: "reconciliation_advanced" });
   });
 
-  it("still expects advancement when a sibling won the insert race but this cycle saw the same upstream activity", () => {
-    // sibling A inserted; this experiment's own persistEvents returned 0
-    // (upsert already had the rows), but its own fetch still saw 5 events.
-    expect(shadow.shouldExpectReconciliationAdvance(0, 5)).toBe(true);
+  it("does NOT classify as INFO merely because old bootstrap-replay history exists for the wallet", async () => {
+    // Regression for over-triggering on stale history: a wallet whose most
+    // recent persisted event is old (e.g. re-fetched during a bootstrap
+    // catch-up) must not mask a genuine cache corruption as routine
+    // advancement.
+    leaseHeldBy = null;
+    writes.length = 0;
+    raisedAlerts.length = 0;
+    mostRecentFirstSeenAt = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    await shadow.reconcile(WALLET, { expectAdvance: false });
+
+    expect(raisedAlerts).toHaveLength(1);
+    expect(raisedAlerts[0]).toMatchObject({ level: "warn", kind: "reconciliation_mismatch" });
   });
 
-  it("does NOT expect advancement when there was no insert and no observed upstream activity", () => {
-    // The only genuinely unexplained case: nothing new was persisted and
-    // nothing new was even seen from upstream this cycle.
-    expect(shadow.shouldExpectReconciliationAdvance(0, 0)).toBe(false);
+  it("does NOT classify as INFO when the wallet has no source_events at all", async () => {
+    leaseHeldBy = null;
+    writes.length = 0;
+    raisedAlerts.length = 0;
+    mostRecentFirstSeenAt = null;
+
+    await shadow.reconcile(WALLET, { expectAdvance: false });
+
+    expect(raisedAlerts).toHaveLength(1);
+    expect(raisedAlerts[0]).toMatchObject({ level: "warn", kind: "reconciliation_mismatch" });
   });
 });

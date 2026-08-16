@@ -1223,25 +1223,45 @@ export async function refreshMarks(experimentId: string): Promise<{ updated: num
 /* ------------------------------------------------------------------ */
 
 /**
- * Whether a wallet-level reconciliation mismatch found this cycle should be
- * classified as expected/routine advancement (reconciliation_advanced INFO)
- * rather than an unexplained divergence (reconciliation_mismatch WARN).
- *
- * `insertedCount > 0` alone under-counts: V2/V3 siblings follow the same
- * wallet and can poll within ~1s of each other, so whichever sibling's
- * persistEvents commits first wins the insert (upsert with ignoreDuplicates
- * returns 0 rows for the loser), even though the loser's own fetch this
- * cycle genuinely saw that same new activity from upstream. `fetchedEventCount
- * > 0` captures that: it is only ever consulted here while the experiment is
- * still `!bootstrapped` (the caller's own gate), i.e. during catch-up, where
- * seeing upstream activity is itself routine. A mismatch with neither a real
- * insert nor any observed upstream activity still classifies as unexplained.
+ * How recently a wallet's source_events must have been persisted (by ANY
+ * experiment -- this one or a polling sibling) for a same-cycle
+ * reconciliation mismatch to be classified as expected/routine advancement
+ * rather than an unexplained divergence. Comfortably covers cross-sibling
+ * poll timing (V2/V3 siblings can call reconcile() within ~1s of each
+ * other) plus scheduler jitter, while being far too short for old
+ * bootstrap-replay history (fetchSourceWindow's fixed-page bootstrap pulls
+ * events that may be days old) to ever satisfy it.
  */
-export function shouldExpectReconciliationAdvance(
-  insertedCount: number,
-  fetchedEventCount: number,
-): boolean {
-  return insertedCount > 0 || fetchedEventCount > 0;
+const RECONCILE_RECENT_PERSIST_WINDOW_MS = 120_000;
+
+/**
+ * True if this wallet has a source_events row persisted within the last
+ * RECONCILE_RECENT_PERSIST_WINDOW_MS, regardless of which experiment
+ * inserted it.
+ *
+ * Why this exists: `inserted > 0` alone (this experiment's own persistEvents
+ * count) under-counts real advancement. V2/V3 siblings follow the same
+ * wallet and can poll within ~1s of each other, so whichever sibling's
+ * persistEvents commits first wins the insert (upsert with
+ * ignoreDuplicates returns 0 rows for the loser) even though the wallet
+ * genuinely just advanced. Checking `first_seen_at` recency (not merely
+ * whether this cycle's fetch returned any events at all) is required: a
+ * bootstrapping experiment's fixed-page catch-up can return a nonzero
+ * `events.length` made entirely of long-persisted history, which must NOT
+ * be allowed to mask a genuine source_position_state corruption as routine
+ * advancement.
+ */
+async function walletHasRecentlyPersistedEvents(wallet: string): Promise<boolean> {
+  const { data, error } = await supabaseAdmin
+    .from("source_events")
+    .select("first_seen_at")
+    .eq("wallet", wallet)
+    .order("first_seen_at", { ascending: false })
+    .limit(1);
+  if (error || !data?.[0]) return false;
+  const firstSeenAt = (data[0] as { first_seen_at: string }).first_seen_at;
+  const ageMs = Date.now() - new Date(firstSeenAt).getTime();
+  return ageMs >= 0 && ageMs <= RECONCILE_RECENT_PERSIST_WINDOW_MS;
 }
 
 export async function reconcile(
@@ -1359,11 +1379,20 @@ async function reconcileHeld(
 
   if (!result.ok) {
     // Distinguish the two genuinely different causes instead of hiding either.
-    // expectAdvance means this cycle just ingested new source fills, so the
-    // wallet-level compact cache is EXPECTED to be one step behind the replay:
-    // that is routine advancement, not an integrity failure. Only a mismatch
-    // with no new ingestion is a real, unexplained divergence.
-    if (options.expectAdvance) {
+    // expectAdvance means THIS experiment's own persistEvents call just
+    // ingested new source fills, so the wallet-level compact cache is
+    // EXPECTED to be one step behind the replay: that is routine
+    // advancement, not an integrity failure. When this experiment's own
+    // insert was 0, a sibling may still have won the same insert race
+    // moments earlier -- checked via first_seen_at recency, NOT merely
+    // whether this cycle's own fetch returned any events (a bootstrapping
+    // experiment's fixed-page catch-up can return old history that must not
+    // mask a genuine cache corruption). Only a mismatch with neither a real
+    // insert nor any recently-persisted wallet activity is a real,
+    // unexplained divergence.
+    const expectAdvance =
+      options.expectAdvance || (await walletHasRecentlyPersistedEvents(wallet));
+    if (expectAdvance) {
       await raiseAlert(
         "info",
         "reconciliation_advanced",
@@ -1875,9 +1904,7 @@ export async function runExperimentCycle(
         const reconciliation = await timed("reconciliation", () =>
           inserted > 0 || !bootstrapped
             ? boundedStage(
-                reconcile(wallet, {
-                  expectAdvance: shouldExpectReconciliationAdvance(inserted, events.length),
-                }),
+                reconcile(wallet, { expectAdvance: inserted > 0 }),
                 RECONCILE_DEADLINE_MS,
                 "reconciliation",
                 null,
