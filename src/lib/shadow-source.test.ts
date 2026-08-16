@@ -52,7 +52,11 @@ describe("Finding K: latest-poll-inserted telemetry", () => {
   it("both the success and error lease releases record cycleEventsInserted", () => {
     // The error path's release is wrapped in its own bounded cleanup budget, so
     // it is no longer directly awaited; match the call itself either way.
-    const releases = src.match(/releaseLease\(lease, \{[^}]*\}\)/gs) ?? [];
+    // Anchored on stage_ms (present only on the two real-cycle-completion
+    // releases) so the unrelated host-cooldown-defer release -- which
+    // deliberately records nothing about a cycle that never ran -- isn't
+    // swept into this check.
+    const releases = src.match(/releaseLease\(lease, \{[^}]*stage_ms[^}]*\}\)/gs) ?? [];
     expect(releases.length).toBeGreaterThanOrEqual(2);
     for (const release of releases) {
       expect(release).toContain("last_poll_events_inserted: cycleEventsInserted");

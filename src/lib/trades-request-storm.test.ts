@@ -127,9 +127,13 @@ describe("the shared fetch has its own independent hard deadline", () => {
       vi.fn((_url: string, init?: RequestInit) => {
         return new Promise<Response>((_resolve, reject) => {
           const signal = init?.signal as AbortSignal | undefined;
-          signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
-            once: true,
-          });
+          signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            {
+              once: true,
+            },
+          );
         });
       }),
     );
@@ -160,9 +164,13 @@ describe("the shared fetch has its own independent hard deadline", () => {
       vi.fn((_url: string, init?: RequestInit) => {
         return new Promise<Response>((_resolve, reject) => {
           const signal = init?.signal as AbortSignal | undefined;
-          signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
-            once: true,
-          });
+          signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            {
+              once: true,
+            },
+          );
         });
       }),
     );
@@ -219,7 +227,7 @@ describe("the shared fetch has its own independent hard deadline", () => {
 });
 
 describe("cache lifecycle on total failure", () => {
-  it("a 429 on every attempt rejects, clears the cache entry, and a later caller performs a genuinely new fetch", async () => {
+  it("a 429 rejects on the first attempt (no in-process retry), clears the cache entry, and a later caller performs a genuinely new fetch", async () => {
     let calls = 0;
     vi.stubGlobal(
       "fetch",
@@ -233,13 +241,32 @@ describe("cache lifecycle on total failure", () => {
     const cache = new Map();
 
     await expect(getArrayForTest(url, undefined, cache)).rejects.toBeInstanceOf(RateLimitedError);
-    expect(calls).toBe(3); // all 3 attempts exhausted
+    // Phase 2: a 429 gets zero in-process retries -- one call, not three.
+    expect(calls).toBe(1);
     expect(cache.has(url)).toBe(false); // cleared, not left as a rejected entry
 
     const secondCallCountBefore = calls;
     await expect(getArrayForTest(url, undefined, cache)).rejects.toBeInstanceOf(RateLimitedError);
-    // A genuinely new 3-attempt sequence ran, not a cached rejection replayed.
-    expect(calls).toBe(secondCallCountBefore + 3);
+    // A genuinely new fetch ran, not a cached rejection replayed.
+    expect(calls).toBe(secondCallCountBefore + 1);
+  });
+
+  it("a non-429 failure still exhausts its bounded 3-attempt retry before the cache entry clears", async () => {
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls += 1;
+        return jsonResponse({}, 500);
+      }),
+    );
+
+    const url = buildTradesUrl(250, 0, "0xexhausted500");
+    const cache = new Map();
+
+    await expect(getArrayForTest(url, undefined, cache)).rejects.toThrow();
+    expect(calls).toBe(3);
+    expect(cache.has(url)).toBe(false);
   });
 });
 
@@ -279,13 +306,18 @@ describe("Retry-After / jittered backoff", () => {
     for (const s of samples) expect(s).toBeLessThanOrEqual(8_000);
   });
 
-  it("a 429 without Retry-After still retries via RateLimitedError with a null retryAfterMs", async () => {
+  it("a 429 without Retry-After rejects with a RateLimitedError carrying a null retryAfterMs, with zero retries", async () => {
+    let calls = 0;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse({}, 429)),
+      vi.fn(async () => {
+        calls += 1;
+        return jsonResponse({}, 429);
+      }),
     );
     const url = buildTradesUrl(250, 0, "0xabc");
     await expect(getArrayForTest(url)).rejects.toBeInstanceOf(RateLimitedError);
+    expect(calls).toBe(1);
   });
 
   it("sleepForTest resolves early when the given signal aborts before the delay elapses", async () => {
@@ -304,8 +336,7 @@ describe("Retry-After / jittered backoff", () => {
     expect(resolved).toBe(true);
   });
 
-  it("getJson clamps a pathological Retry-After to the remaining deadline budget instead of honoring it in full", async () => {
-    vi.useFakeTimers();
+  it("a 429's Retry-After no longer drives any in-process wait at all (pacing moved to the shared host cooldown)", async () => {
     let calls = 0;
     vi.stubGlobal(
       "fetch",
@@ -316,23 +347,40 @@ describe("Retry-After / jittered backoff", () => {
     );
 
     const url = buildTradesUrl(250, 0, "0xpathological");
-    const deadlineAt = Date.now() + 2_000;
+    // No fake timers needed at all: if Retry-After still drove an in-process
+    // wait, this call would hang for (a clamped fraction of) an hour. It
+    // must instead reject essentially immediately, with only the one
+    // attempt that observed the 429.
+    await expect(getJsonForTest(url, 3)).rejects.toBeInstanceOf(RateLimitedError);
+    expect(calls).toBe(1);
+  });
+
+  it("getJson still clamps its inter-attempt backoff delay to the remaining deadline budget for non-429 failures", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls += 1;
+        return jsonResponse({}, 500);
+      }),
+    );
+
+    const url = buildTradesUrl(250, 0, "0xclamped500");
+    // Far tighter than backoffDelayMs's own ~8s jitter ceiling, so this only
+    // passes if the deadline clamp is actually shortening the wait.
+    const deadlineAt = Date.now() + 100;
 
     let rejected: unknown;
     const done = getJsonForTest(url, 3, undefined, deadlineAt).catch((err) => {
       rejected = err;
     });
-
-    // If the raw 3600s Retry-After were honored in full, the second attempt
-    // would not fire for another hour. The deadline clamp caps the actual
-    // wait to the remaining budget, so a second attempt fires promptly and
-    // the whole call gives up once that budget is exhausted — well short of
-    // an hour.
-    await vi.advanceTimersByTimeAsync(2_500);
+    await vi.advanceTimersByTimeAsync(150);
     await done;
 
-    expect(calls).toBe(2);
-    expect(rejected).toBeInstanceOf(RateLimitedError);
+    expect(calls).toBeGreaterThanOrEqual(1);
+    expect(calls).toBeLessThanOrEqual(3);
+    expect(rejected).toBeDefined();
   });
 });
 

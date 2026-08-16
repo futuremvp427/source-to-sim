@@ -30,6 +30,7 @@ import {
   type ProfitStatus,
 } from "./general-shadow";
 import { MARK_MAX_AGE_MS, roundUsd } from "./shadow-core";
+import { parseRetryAfterMs, recordHostRateLimit } from "./http-rate-limit.server";
 
 const DATA_API = "https://data-api.polymarket.com";
 const ACTIVITY_PAGE = 250;
@@ -44,13 +45,33 @@ type Json = Record<string, unknown>;
 /* Non-trade activity ingestion (SPLIT / MERGE / REDEEM)               */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Callers of ingestGeneralActivity are already gated on the shared
+ * data-api.polymarket.com cooldown (checked once, before any network work,
+ * in runExperimentCycle -- General Shadow experiments go through that same
+ * gate), so this normally only ever fires while the host is believed
+ * healthy. If it turns out NOT to be -- this request is the one that
+ * discovers a fresh 429 -- it records the same shared cooldown so /trades
+ * callers back off too, instead of General Shadow silently absorbing 429s
+ * on its own and leaving the shared budget unaware of them. No in-process
+ * retry here either, matching shadow.server.ts's getJson: one 429 fails
+ * this page immediately rather than amplifying it.
+ */
 async function getActivityPage(wallet: string, offset: number): Promise<Json[]> {
   const url = `${DATA_API}/activity?user=${wallet}&limit=${ACTIVITY_PAGE}&offset=${offset}`;
   const res = await fetch(url, {
     headers: { accept: "application/json" },
     signal: AbortSignal.timeout(10_000),
   });
-  if (!res.ok) throw new Error(`activity feed responded ${res.status}`);
+  if (!res.ok) {
+    if (res.status === 429) {
+      await recordHostRateLimit(
+        new URL(url).host,
+        parseRetryAfterMs(res.headers.get("retry-after")),
+      );
+    }
+    throw new Error(`activity feed responded ${res.status}`);
+  }
   const json = (await res.json()) as unknown;
   if (Array.isArray(json)) return json as Json[];
   return [];

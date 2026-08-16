@@ -5,6 +5,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { DATA_API_HOST, getHostCooldown } from "./http-rate-limit.server";
 import { MARK_MAX_AGE_MS } from "./shadow-core";
 import { classifyWorker, findAbandonedWorkers, type WorkerRow } from "./worker-health";
 
@@ -36,7 +37,64 @@ const HEALTH_HTTP_TIMEOUT_MS = 8_000;
  * window.
  */
 const PUBLIC_API_PROBE_TTL_MS = 55_000;
-let cachedPublicApiProbe: { at: number; status: CheckStatus; detail: string } | null = null;
+
+type PublicApiProbeResult = { status: CheckStatus; detail: string };
+/**
+ * Caches the in-flight PROMISE, not just the resolved value: a TTL check on
+ * a resolved-value cache still lets every caller that arrives before the
+ * FIRST one finishes see an empty/expired cache and fire its own request --
+ * concurrent dashboard tabs hitting runSelfCheck within the same window
+ * would still each issue an upstream probe during the up-to-8s the fetch is
+ * in flight. Sharing the promise itself means every concurrent caller
+ * within the TTL, including ones that arrive mid-flight, awaits the exact
+ * same request instead of starting a new one.
+ */
+let cachedPublicApiProbe: { at: number; promise: Promise<PublicApiProbeResult> } | null = null;
+
+function probePublicDataApi(): Promise<PublicApiProbeResult> {
+  if (cachedPublicApiProbe && Date.now() - cachedPublicApiProbe.at < PUBLIC_API_PROBE_TTL_MS) {
+    return cachedPublicApiProbe.promise;
+  }
+  const startedAt = Date.now();
+  const promise = (async (): Promise<PublicApiProbeResult> => {
+    // A reachability probe is still a request against a host that may
+    // already be rate-limiting this app; respect the same shared cooldown
+    // ingestion uses (see shadow.server.ts) instead of continuing to poll
+    // through an active 429 condition every TTL window.
+    const cooldown = await getHostCooldown(DATA_API_HOST);
+    if (cooldown.blocked) {
+      return {
+        status: "WARN",
+        detail: `${DATA_API_HOST} rate-limit cooldown active${
+          cooldown.until ? ` until ${cooldown.until.toISOString()}` : ""
+        }; probe skipped`,
+      };
+    }
+    try {
+      const res = await fetch(PUBLIC_DATA_API, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(HEALTH_HTTP_TIMEOUT_MS),
+      });
+      return res.ok
+        ? { status: "PASS", detail: "Public trades API reachable" }
+        : { status: "WARN", detail: `Public trades API returned HTTP ${res.status}` };
+    } catch (err) {
+      return {
+        status: "FAIL",
+        detail: err instanceof Error ? err.message : "Public trades API unreachable",
+      };
+    }
+  })();
+  cachedPublicApiProbe = { at: startedAt, promise };
+  return promise;
+}
+
+/** Test-only alias so the shared-promise/cooldown-gated probe can be asserted directly. */
+export const probePublicDataApiForTest = probePublicDataApi;
+/** Test-only: clears the module-level probe cache between test cases. */
+export function resetPublicApiProbeCacheForTest(): void {
+  cachedPublicApiProbe = null;
+}
 
 function ageSeconds(iso: string | null | undefined): number | null {
   if (!iso) return null;
@@ -198,27 +256,14 @@ export async function runSelfCheck(): Promise<HealthReport> {
         : `${fresh}/${open.length} open positions marked within ${Math.round(MARK_MAX_AGE_MS / 1000)}s (${coverage}%)`,
   });
 
-  // 9. Public Polymarket data API (shared across concurrent callers — see PUBLIC_API_PROBE_TTL_MS)
-  let publicStatus: CheckStatus;
-  let publicDetail: string;
-  if (cachedPublicApiProbe && Date.now() - cachedPublicApiProbe.at < PUBLIC_API_PROBE_TTL_MS) {
-    publicStatus = cachedPublicApiProbe.status;
-    publicDetail = cachedPublicApiProbe.detail;
-  } else {
-    try {
-      const res = await fetch(PUBLIC_DATA_API, {
-        headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(HEALTH_HTTP_TIMEOUT_MS),
-      });
-      publicStatus = res.ok ? "PASS" : "WARN";
-      publicDetail = res.ok ? "Public trades API reachable" : `Public trades API returned HTTP ${res.status}`;
-    } catch (err) {
-      publicStatus = "FAIL";
-      publicDetail = err instanceof Error ? err.message : "Public trades API unreachable";
-    }
-    cachedPublicApiProbe = { at: Date.now(), status: publicStatus, detail: publicDetail };
-  }
-  checks.push({ id: "public_api", label: "Polymarket public API", status: publicStatus, detail: publicDetail });
+  // 9. Public Polymarket data API (shared across concurrent callers — see probePublicDataApi)
+  const { status: publicStatus, detail: publicDetail } = await probePublicDataApi();
+  checks.push({
+    id: "public_api",
+    label: "Polymarket public API",
+    status: publicStatus,
+    detail: publicDetail,
+  });
 
   // 7. Polymarket US authenticated capability (preview-only)
   const { data: integration, error: integrationError } = await supabaseAdmin

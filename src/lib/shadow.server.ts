@@ -45,6 +45,14 @@ import {
   isV2Name,
 } from "./v2-cohort";
 import { isGeneralShadowName } from "./general-shadow";
+import {
+  DATA_API_HOST,
+  getHostCooldown,
+  parseRetryAfterMs,
+  recordHostRateLimit,
+} from "./http-rate-limit.server";
+/** Re-exported so existing external imports of parseRetryAfterMs from this module keep working. */
+export { parseRetryAfterMs } from "./http-rate-limit.server";
 
 export const TARGET_WALLET = "0x8fbd7cf5f806f563080864694415829f7229a959";
 export const EXPERIMENT_NAME = "SHADOW";
@@ -113,6 +121,15 @@ const RECONCILE_DEADLINE_MS = 8_000;
 const CLEANUP_STATUS_DEADLINE_MS = 4_000;
 const CLEANUP_RELEASE_DEADLINE_MS = 5_000;
 const CLEANUP_ALERT_DEADLINE_MS = 4_000;
+/**
+ * The host-cooldown read happens after the lease is acquired but before the
+ * withDeadline-bounded stages pipeline starts, so without its own bound a
+ * stalled query here would recreate exactly the pre-Phase-1 checkpoint-load
+ * hang: heartbeat_at/fence advancing on retry while the lease is never
+ * released, stranding the worker at state='running' and blocking its
+ * Promise.allSettled batch. Short because this is a single-row PK lookup.
+ */
+const HOST_COOLDOWN_CHECK_DEADLINE_MS = 5_000;
 
 class DeadlineError extends Error {}
 
@@ -163,20 +180,6 @@ function chunked<T>(items: T[], size: number): T[][] {
 function requestSignal(signal?: AbortSignal): AbortSignal {
   const timeout = AbortSignal.timeout(12_000);
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
-}
-
-/**
- * Parses a Retry-After header (either delay-seconds or an HTTP-date, per
- * RFC 9110 10.2.3) into a millisecond wait. Returns null when absent or
- * unparseable so the caller falls back to its own backoff schedule.
- */
-export function parseRetryAfterMs(value: string | null, now: number = Date.now()): number | null {
-  if (!value) return null;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
-  const when = Date.parse(value);
-  if (Number.isFinite(when)) return Math.max(0, when - now);
-  return null;
 }
 
 /**
@@ -265,9 +268,18 @@ async function getJson(
     } catch (err) {
       lastErr = err;
       if (signal?.aborted) break;
+      // 429 gets zero in-process retries, regardless of attempts remaining:
+      // Phase 1 (jittered backoff) reduced collisions within one request's
+      // own retry loop, but production evidence showed bursts recurring
+      // every ~5-6 minutes across all 10 V2/V3 experiments even with that in
+      // place -- retrying inside a single request just rediscovers the same
+      // host-wide limit up to 3x per experiment per cycle, amplifying it.
+      // Pacing now happens at the shared host-cooldown level (below)
+      // instead, which survives across scheduler ticks; a non-429 transient
+      // failure (network blip, 5xx) keeps the existing bounded retry.
+      if (err instanceof RateLimitedError) break;
       if (i < attempts - 1) {
-        const retryAfterMs = err instanceof RateLimitedError ? err.retryAfterMs : null;
-        let delay = backoffDelayMs(i, retryAfterMs);
+        let delay = backoffDelayMs(i, null);
         if (deadlineAt !== undefined) {
           const remaining = deadlineAt - Date.now();
           if (remaining <= 0) break;
@@ -276,6 +288,18 @@ async function getJson(
         await sleep(delay, signal);
       }
     }
+  }
+  if (lastErr instanceof RateLimitedError) {
+    // Safely awaited: recordHostRateLimit now has its own real
+    // AbortController-based hard deadline (COOLDOWN_WRITE_DEADLINE_MS, 5s),
+    // enforced via postgrest-js's .abortSignal() rather than mere
+    // Promise.race abandonment, so a stalled Supabase RPC can no longer
+    // extend this call indefinitely -- it returns within 5s regardless, well
+    // inside SHARED_TRADES_FETCH_DEADLINE_MS (45s). Awaiting (rather than
+    // fire-and-forget) means the cooldown is reliably recorded before this
+    // request's own failure is reported, instead of racing an unrelated
+    // caller that might check it a moment later.
+    await recordHostRateLimit(new URL(url).host, lastErr.retryAfterMs);
   }
   throw lastErr instanceof Error ? lastErr : new Error("request failed");
 }
@@ -444,6 +468,9 @@ export const backoffDelayMsForTest = backoffDelayMs;
 export const getJsonForTest = getJson;
 export const sleepForTest = sleep;
 export const SHARED_TRADES_FETCH_DEADLINE_MS_FOR_TEST = SHARED_TRADES_FETCH_DEADLINE_MS;
+export const HOST_COOLDOWN_CHECK_DEADLINE_MS_FOR_TEST = HOST_COOLDOWN_CHECK_DEADLINE_MS;
+export const CLEANUP_RELEASE_DEADLINE_MS_FOR_TEST = CLEANUP_RELEASE_DEADLINE_MS;
+export const candidateResearchIfCycleAndHostAllowForTest = candidateResearchIfCycleAndHostAllow;
 
 /* ------------------------------------------------------------------ */
 /* Experiment / config                                                 */
@@ -1496,11 +1523,40 @@ export async function runIngestCycle(workerId: string): Promise<MultiCycleResult
     reference: cycles.find((c) => c.experimentName === EXPERIMENT_NAME) ?? null,
     reclaimedWorkers: reclaimed,
     deferredExperiments: deferred,
-    candidateResearch:
-      Date.now() - startedMs > CYCLE_BUDGET_MS
-        ? { ran: false, detail: "deferred: cycle time budget reached" }
-        : await refreshCandidateResearchSafely(),
+    candidateResearch: await candidateResearchIfCycleAndHostAllow(startedMs),
   };
+}
+
+/**
+ * Candidate research (candidates/research.server.ts) has its own,
+ * independent /trades fetcher against the same data-api.polymarket.com host
+ * -- it is not routed through getJson/getArray in this file, so it does not
+ * automatically respect the shared cooldown on its own. Gated here instead:
+ * skip the whole (6-hour-throttled, so low-cost to defer) pass while the
+ * host is in cooldown, rather than let it keep rediscovering or prolonging
+ * the same rate limit the cooldown exists to stop.
+ */
+async function candidateResearchIfCycleAndHostAllow(
+  startedMs: number,
+): Promise<{ ran: boolean; detail: string | null }> {
+  if (Date.now() - startedMs > CYCLE_BUDGET_MS) {
+    return { ran: false, detail: "deferred: cycle time budget reached" };
+  }
+  const cooldown = await boundedStage(
+    getHostCooldown(DATA_API_HOST),
+    HOST_COOLDOWN_CHECK_DEADLINE_MS,
+    "candidate_research_cooldown_check",
+    { blocked: true, until: null, reason: "cooldown check timed out" },
+  );
+  if (cooldown.blocked) {
+    return {
+      ran: false,
+      detail: `deferred: ${DATA_API_HOST} rate-limit cooldown active${
+        cooldown.until ? ` until ${cooldown.until.toISOString()}` : ""
+      }`,
+    };
+  }
+  return refreshCandidateResearchSafely();
 }
 
 /**
@@ -1636,6 +1692,52 @@ export async function runExperimentCycle(
     return {
       ...base,
       skipped: "Another worker holds the ingestion lease.",
+    };
+  }
+
+  // Read fresh every call (not threaded down from runIngestCycle) so a
+  // cooldown recorded by an earlier experiment IN THIS SAME cycle is seen
+  // immediately by a later one, not just on the next scheduler tick. Applies
+  // uniformly to every experiment -- including General Shadow, since it hits
+  // the same host via a different path (see general-shadow.server.ts) -- so
+  // one shared budget paces all of them together instead of each
+  // independently rediscovering the limit. Checked before any checkpoint or
+  // network work starts: a deferred cycle must never touch
+  // worker_checkpoints, so nothing here can advance a checkpoint.
+  //
+  // Bounded (not a bare await): this read runs before the withDeadline-wrapped
+  // stages pipeline below, so it has no deadline of its own otherwise -- a
+  // stalled query here would strand the lease exactly like the pre-Phase-1
+  // checkpoint-load hang. On timeout, fail closed (treat as blocked) rather
+  // than risk hammering an upstream that may already be rate-limiting this
+  // app; the lease is still released as idle either way.
+  const hostCooldown = await boundedStage(
+    getHostCooldown(DATA_API_HOST),
+    HOST_COOLDOWN_CHECK_DEADLINE_MS,
+    "host_cooldown_check",
+    { blocked: true, until: null, reason: "cooldown check timed out" },
+  );
+  if (hostCooldown.blocked) {
+    // Bounded via the same cleanup pattern used by the error path below
+    // (boundedStage + CLEANUP_RELEASE_DEADLINE_MS): releaseLease is an
+    // unbounded Supabase update, and a stalled worker_status write here
+    // would otherwise strand this function -- with the cooldown active and
+    // nothing else running, that's exactly the "worker never returns"
+    // failure mode this whole gate exists to avoid. A timeout still lets
+    // the function return promptly; fencing (fence/worker_id match) means a
+    // write that eventually lands late is still safe, and the next cycle's
+    // own lease acquisition is unaffected either way.
+    await boundedStage(
+      releaseLease(lease, { state: "idle" }),
+      CLEANUP_RELEASE_DEADLINE_MS,
+      "cooldown_release_lease",
+      undefined,
+    );
+    return {
+      ...base,
+      skipped: `${DATA_API_HOST} rate-limit cooldown active${
+        hostCooldown.until ? ` until ${hostCooldown.until.toISOString()}` : ""
+      }${hostCooldown.reason ? ` (${hostCooldown.reason})` : ""}; deferring to next cycle.`,
     };
   }
 
