@@ -42,6 +42,13 @@ const CRYPTO_NAMES = [
 /** Uppercase-only tickers, matched case-sensitively to avoid prose collisions. */
 const CRYPTO_TICKERS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "LTC", "AVAX", "ADA", "LINK"];
 
+/**
+ * Tickers safe to match case-insensitively (slugs are lowercase). "sol",
+ * "link", "ada" and "ltc" are deliberately excluded here: they collide with
+ * ordinary prose or other domains.
+ */
+const CRYPTO_TICKERS_ANY_CASE = ["btc", "eth", "xrp", "doge", "avax"];
+
 function hasWord(haystackLower: string, word: string): boolean {
   return new RegExp(`(^|[^a-z0-9])${word}([^a-z0-9]|$)`).test(haystackLower);
 }
@@ -55,6 +62,7 @@ export function isCryptoMarket(title: string, slug?: string): boolean {
   const lower = raw.toLowerCase();
   // Slug form (bitcoin-above-100k) is covered because hyphens are non-alphanumeric.
   if (CRYPTO_NAMES.some((name) => hasWord(lower, name))) return true;
+  if (CRYPTO_TICKERS_ANY_CASE.some((ticker) => hasWord(lower, ticker))) return true;
   return CRYPTO_TICKERS.some((ticker) => hasTicker(raw, ticker));
 }
 
