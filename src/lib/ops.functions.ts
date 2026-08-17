@@ -4,6 +4,7 @@ import type { ComparisonData } from "./comparison.server";
 import type { HealthReport } from "./health.server";
 import type { CapacityComparisonData } from "./capacity.server";
 import type { ObservationLogData } from "./observation/daily.server";
+import type { MasterPortfolio } from "./master-portfolio";
 
 /** Fair-comparison read model for every enabled shadow experiment. Read-only. */
 export const getComparison = createServerFn({ method: "GET" }).handler(
@@ -40,5 +41,16 @@ export const getObservationLog = createServerFn({ method: "GET" }).handler(
   async (): Promise<ObservationLogData> => {
     const { loadObservationLog } = await import("./observation/daily.server");
     return loadObservationLog();
+  },
+);
+
+/**
+ * Master Portfolio rollup (WEATHER sleeve = the five V2 experiments).
+ * Read-only and fully derived; not wired into the UI yet.
+ */
+export const getMasterPortfolio = createServerFn({ method: "GET" }).handler(
+  async (): Promise<MasterPortfolio> => {
+    const { loadMasterPortfolio } = await import("./master-portfolio.server");
+    return loadMasterPortfolio();
   },
 );
