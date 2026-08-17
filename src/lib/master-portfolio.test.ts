@@ -12,6 +12,7 @@ import {
 } from "./master-portfolio";
 import { V2_COHORT, v2ExperimentName } from "./v2-cohort";
 import { v3ExperimentName } from "./v3-cohort";
+import { V4_PILOT_NAME } from "./v4-pilot";
 
 const wallet = (overrides: Partial<Parameters<typeof walletTotals>[0]> = {}): MasterWallet =>
   walletTotals({
@@ -55,6 +56,15 @@ describe("master portfolio inclusion", () => {
   it("never double-counts the same wallet across V2 and V3", () => {
     const names = new Set(MASTER_CATEGORIES.flatMap((c) => c.experimentNames));
     expect(names.size).toBe(5);
+  });
+
+  it("excludes SHADOW V4 COMPOUND PILOT: HighTempTation — the pilot has its own dedicated card, never Master totals", () => {
+    expect(isIncludedInMaster(V4_PILOT_NAME)).toBe(false);
+    expect(masterCategoryForExperiment(V4_PILOT_NAME)).toBeNull();
+    // Master still contains exactly the five original V2 names, unchanged.
+    const weather = MASTER_CATEGORIES.find((c) => c.key === "WEATHER")!;
+    expect(weather.experimentNames).toHaveLength(5);
+    expect(weather.experimentNames).not.toContain(V4_PILOT_NAME);
   });
 });
 

@@ -15,6 +15,7 @@ import { summarizeExperiment, type ExperimentSummary, type TradeLite } from "./c
 import { summarizeLatency, type LatencyBreakdown } from "./latency-core";
 import { workerIdFor } from "./shadow.server";
 import { V2_REFERENCE_NAME, experimentCohort, experimentLabel, type Cohort } from "./v2-cohort";
+import { isV4PilotName } from "./v4-pilot";
 
 export type ComparisonRow = ExperimentSummary & {
   id: string;
@@ -187,7 +188,11 @@ export async function loadComparison(): Promise<ComparisonData> {
   if (experimentsError) throw new Error(experimentsError.message);
 
   const rows: ComparisonRow[] = [];
-  for (const experiment of experiments ?? []) {
+  // The V4 compound pilot has its own dedicated card (see the HighTempTation
+  // strategy detail view) and does not fit either the frozen-V1-audit or
+  // fair-comparison-V2 bucket this reader produces — excluded, not silently
+  // miscategorized as V1.
+  for (const experiment of (experiments ?? []).filter((e) => !isV4PilotName(e.name))) {
     const workerId = workerIdFor({ id: experiment.id, name: experiment.name });
     const [
       positionsRes,

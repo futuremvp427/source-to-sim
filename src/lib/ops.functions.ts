@@ -5,6 +5,7 @@ import type { HealthReport } from "./health.server";
 import type { CapacityComparisonData } from "./capacity.server";
 import type { ObservationLogData } from "./observation/daily.server";
 import type { MasterPortfolio } from "./master-portfolio";
+import type { V4PilotComparison } from "./v4-pilot.server";
 
 /** Fair-comparison read model for every enabled shadow experiment. Read-only. */
 export const getComparison = createServerFn({ method: "GET" }).handler(
@@ -52,5 +53,17 @@ export const getMasterPortfolio = createServerFn({ method: "GET" }).handler(
   async (): Promise<MasterPortfolio> => {
     const { loadMasterPortfolio } = await import("./master-portfolio.server");
     return loadMasterPortfolio();
+  },
+);
+
+/**
+ * SHADOW V4 COMPOUND PILOT: HighTempTation vs. the existing V2 dynamic-v1
+ * follower on the same wallet. Read-only, PAPER SIMULATION / DERIVED, and
+ * never included in Master Portfolio.
+ */
+export const getV4PilotComparison = createServerFn({ method: "GET" }).handler(
+  async (): Promise<V4PilotComparison | null> => {
+    const { loadV4PilotComparison } = await import("./v4-pilot.server");
+    return loadV4PilotComparison();
   },
 );

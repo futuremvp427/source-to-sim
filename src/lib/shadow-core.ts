@@ -263,6 +263,168 @@ export function decideDynamicBuy(input: {
   };
 }
 
+/* ------------------------------------------------------------------ */
+/* Compound book-capital sizing (PAPER ONLY) — SHADOW V4 COMPOUND PILOT */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Second sizing rule, dispatched explicitly by an experiment's sizing_rule
+ * column (see decideBuyForSizingRule). Unlike dynamic-v1, the sizing base is
+ * cumulative realized book capital rather than raw cash, so it compounds:
+ * realized gains raise future BUY targets, realized losses lower them.
+ */
+export const COMPOUND_V2_PILOT_SIZING_RULE = "compound-v2-pilot";
+export const COMPOUND_V2_PILOT_LABEL =
+  "4% of book capital, 12% per-market cap, 90% deployment cap, $1 floor, no $5 ceiling";
+export const COMPOUND_ENTRY_FRACTION = 0.04;
+export const COMPOUND_MARKET_CAP_FRACTION = 0.12;
+export const COMPOUND_PORTFOLIO_DEPLOYMENT_CAP_FRACTION = 0.9;
+
+/** book_capital = starting_cash + cumulative realized P&L. Never unrealized mark-to-market. */
+export function computeBookCapital(input: { startingCash: number; realizedPnl: number }): number {
+  return roundUsd(input.startingCash + input.realizedPnl);
+}
+
+export type CompoundBuyInput = {
+  price: number;
+  /** starting_cash + cumulative realized P&L. Never unrealized mark-to-market equity. */
+  bookCapital: number;
+  /** Actual spendable simulated cash right now. */
+  cash: number;
+  /** Sum of open cost basis already held in this fill's market (by condition_id). */
+  marketCostBasis: number;
+  /** Sum of open cost basis across the whole experiment. */
+  portfolioCostBasis: number;
+};
+
+/**
+ * target = 4% of book capital.
+ * actual = min(target, remaining per-market capacity, remaining portfolio
+ * capacity, actual spendable cash). Never negative, never leverage: every
+ * candidate is clamped to >= 0 before the min, so a cap that is already
+ * breached (e.g. book capital shrank after a loss) contributes 0 headroom —
+ * it blocks further BUYs into that market/portfolio without ever forcing a
+ * SELL of the existing, now-over-cap position.
+ */
+export function decideCompoundBuy(input: CompoundBuyInput): FollowerDecision {
+  const { price, marketCostBasis, portfolioCostBasis } = input;
+  if (!validPrice(price)) {
+    return { action: "SKIP", shares: 0, notional: 0, price, reason: "Invalid source price" };
+  }
+  const bookCapital = Math.max(0, input.bookCapital);
+  const cash = Math.max(0, input.cash);
+  const candidates: Array<{ amount: number; reason: string }> = [
+    { amount: bookCapital * COMPOUND_ENTRY_FRACTION, reason: "TARGET_BELOW_MIN" },
+    { amount: Math.max(0, bookCapital * COMPOUND_MARKET_CAP_FRACTION - marketCostBasis), reason: "PER_MARKET_CAP_REACHED" },
+    {
+      amount: Math.max(0, bookCapital * COMPOUND_PORTFOLIO_DEPLOYMENT_CAP_FRACTION - portfolioCostBasis),
+      reason: "PORTFOLIO_DEPLOYMENT_CAP_REACHED",
+    },
+    { amount: cash, reason: "INSUFFICIENT_CASH" },
+  ];
+  const binding = candidates.reduce((min, c) => (c.amount < min.amount ? c : min));
+  const amount = roundCents(Math.max(0, binding.amount));
+  if (amount + 1e-9 < SIZING_MIN_USD) {
+    return {
+      action: "SKIP",
+      shares: 0,
+      notional: 0,
+      price,
+      reason: `SKIP_${binding.reason} (capacity $${amount} < $${SIZING_MIN_USD})`,
+    };
+  }
+  return {
+    action: "BUY",
+    shares: roundShares(amount / price),
+    notional: roundUsd(amount),
+    price,
+    reason: `${COMPOUND_V2_PILOT_SIZING_RULE}: $${amount} (${COMPOUND_V2_PILOT_LABEL})`,
+  };
+}
+
+export type SizingRuleBuyInput = {
+  sizingRule: string;
+  price: number;
+  startingCash: number;
+  cash: number;
+  bookCapital: number;
+  marketCostBasis: number;
+  portfolioCostBasis: number;
+};
+
+/**
+ * Explicit dispatch by sizing_rule. Every experiment's BUY sizing must go
+ * through this function so behavior is chosen by data (sizing_rule), never by
+ * which code path happens to run. A sizing_rule this dispatcher does not
+ * recognize fails CLOSED (SKIP) rather than silently defaulting to any
+ * specific formula — a bad or future sizing_rule value must never spend
+ * simulated cash under the wrong rule.
+ */
+export function decideBuyForSizingRule(input: SizingRuleBuyInput): FollowerDecision {
+  const { sizingRule, price, startingCash, cash, bookCapital, marketCostBasis, portfolioCostBasis } = input;
+  if (sizingRule === "dynamic-v1") {
+    return decideDynamicBuy({ price, startingCash, cash });
+  }
+  if (sizingRule === COMPOUND_V2_PILOT_SIZING_RULE) {
+    return decideCompoundBuy({ price, bookCapital, cash, marketCostBasis, portfolioCostBasis });
+  }
+  return {
+    action: "SKIP",
+    shares: 0,
+    notional: 0,
+    price,
+    reason: `UNKNOWN_SIZING_RULE: ${sizingRule}`,
+  };
+}
+
+/** Deterministic fail-closed reason when a compound-rule BUY has no verified market grouping. */
+export const COMPOUND_SIZING_MISSING_CONDITION_ID_REASON =
+  "compound sizing unavailable: missing condition_id";
+
+export type OpenCostBasisRow = { asset: string; costBasis: number };
+
+/**
+ * Groups open cost basis by market (condition_id) rather than by asset, so
+ * compound sizing's 12% per-market cap applies across EVERY outcome-token
+ * asset of the same Polymarket market (Yes/No are separate assets, one
+ * market). An asset absent from assetToConditionId falls back to being its
+ * own bucket here — that is only safe because the caller (shadow.server.ts)
+ * fails the BUY closed for any CURRENT fill whose own market grouping is
+ * unverified; this function only aggregates the exposure already on the
+ * books, which must be counted somewhere regardless.
+ */
+export type MarketKeyResolution = { verified: true; marketKey: string } | { verified: false };
+
+/**
+ * Resolves the market grouping key a compound-rule BUY must use for its cap
+ * checks. Fails closed (verified: false) — never silently falls back to
+ * treating the asset as its own single-asset market — when neither this
+ * event's own condition_id nor a condition_id cached from an earlier fill of
+ * the same asset is available. A caller must SKIP the BUY when unverified;
+ * it must never spend simulated cash under an unverified market grouping.
+ */
+export function resolveCompoundMarketKey(input: {
+  conditionId: string | null;
+  cachedConditionId: string | null;
+}): MarketKeyResolution {
+  const key = input.conditionId ?? input.cachedConditionId;
+  return key === null ? { verified: false } : { verified: true, marketKey: key };
+}
+
+export function aggregateCostBasisByMarket(
+  positions: OpenCostBasisRow[],
+  assetToConditionId: ReadonlyMap<string, string>,
+): { marketCostBasisByKey: Map<string, number>; portfolioCostBasisTotal: number } {
+  const marketCostBasisByKey = new Map<string, number>();
+  let portfolioCostBasisTotal = 0;
+  for (const p of positions) {
+    const key = assetToConditionId.get(p.asset) ?? p.asset;
+    marketCostBasisByKey.set(key, roundUsd((marketCostBasisByKey.get(key) ?? 0) + p.costBasis));
+    portfolioCostBasisTotal = roundUsd(portfolioCostBasisTotal + p.costBasis);
+  }
+  return { marketCostBasisByKey, portfolioCostBasisTotal };
+}
+
 /** BUY: spend the configured simulated amount at the source fill price. */
 export function decideBuy(input: {
   price: number;

@@ -19,12 +19,16 @@ import {
   applyBuy,
   applySell,
   buildEventCommit,
-  decideDynamicBuy,
+  aggregateCostBasisByMarket,
+  COMPOUND_SIZING_MISSING_CONDITION_ID_REASON,
+  computeBookCapital,
+  decideBuyForSizingRule,
   decideProportionalSell,
   normalizeSourceEvents,
   openPnl,
   reconcileSourceState,
   replaySourcePositions,
+  resolveCompoundMarketKey,
   resolveMark,
   roundShares,
   roundUsd,
@@ -524,6 +528,8 @@ export type Experiment = {
   realized_pnl: number;
   /** Unix seconds. Fills older than this are stored as history only, never paper-copied. */
   follow_from_ts: number | null;
+  /** BUY sizing dispatch key (see decideBuyForSizingRule). Defaults to dynamic-v1 for every legacy row. */
+  sizing_rule?: string | null;
 };
 
 /**
@@ -837,6 +843,11 @@ type SourceEventRow = {
   price: number;
   source_ts: number;
   first_seen_at: string;
+  /**
+   * Market grouping key for compound sizing's per-market exposure cap. Null
+   * falls back to per-asset grouping (see marketKey in processPendingEvents).
+   */
+  condition_id: string | null;
 };
 
 type PaperPositionRow = {
@@ -974,8 +985,54 @@ async function processPendingEvents(
     return { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0, scopeExcluded: 0 };
   const followFrom = experiment.follow_from_ts ?? 0;
   const scope = parseMarketScope(experiment.market_scope);
+  const sizingRule = experiment.sizing_rule ?? "dynamic-v1";
+  const isCompoundRule = sizingRule !== "dynamic-v1";
 
   const assets = [...new Set(rows.map((r) => r.asset))];
+
+  /**
+   * Per-market and portfolio open cost basis, needed only by compound sizing's
+   * caps. dynamic-v1 experiments (every V1/V2/V3/candidate row today) never
+   * populate or read these, so they cost zero extra queries and zero extra
+   * work on the unchanged path.
+   */
+  let marketCostBasisByKey = new Map<string, number>();
+  let portfolioCostBasisTotal = 0;
+  const assetToMarketKey = new Map<string, string>();
+  if (isCompoundRule) {
+    const openCall = supabaseAdmin
+      .from("paper_positions")
+      .select("asset, cost_basis")
+      .eq("experiment_id", experiment.id)
+      .gt("shares", 0);
+    const { data: openRows, error: openError } = await (signal ? openCall.abortSignal(signal) : openCall);
+    if (openError) throw new Error(openError.message);
+    const openPositions = (openRows ?? []) as { asset: string; cost_basis: number }[];
+    const openAssets = openPositions.map((r) => r.asset);
+    // condition_id is a property of the asset/market itself (immutable source
+    // feed), not experiment-scoped, so any wallet's source_events rows for
+    // these assets carry the right value.
+    let conditionRows: { asset: string; condition_id: string | null }[] = [];
+    if (openAssets.length > 0) {
+      const conditionCall = supabaseAdmin.from("source_events").select("asset, condition_id").in("asset", openAssets);
+      const { data, error: conditionError } = await (signal ? conditionCall.abortSignal(signal) : conditionCall);
+      if (conditionError) throw new Error(conditionError.message);
+      conditionRows = (data ?? []) as { asset: string; condition_id: string | null }[];
+    }
+    for (const r of conditionRows) {
+      if (r.condition_id && !assetToMarketKey.has(r.asset)) assetToMarketKey.set(r.asset, r.condition_id);
+    }
+    // Pure, unit-tested aggregation: every outcome-token asset of the same
+    // market (same condition_id) is grouped into one cap bucket, not one per
+    // asset. See aggregateCostBasisByMarket's own tests for the exact
+    // multi-asset scenario this guarantees.
+    const aggregated = aggregateCostBasisByMarket(
+      openPositions.map((r) => ({ asset: r.asset, costBasis: Number(r.cost_basis) })),
+      assetToMarketKey,
+    );
+    marketCostBasisByKey = aggregated.marketCostBasisByKey;
+    portfolioCostBasisTotal = aggregated.portfolioCostBasisTotal;
+  }
 
   // SourceSharesBefore must also be experiment-scoped. A wallet-global compact
   // row can be ahead of another experiment and would distort proportional sells.
@@ -1110,14 +1167,48 @@ async function processPendingEvents(
     // A late source event must never reopen a paper position that already
     // reached final settlement: that row is a closed historical record.
     const isTerminal = isTerminalSettlementStatus(settlementStatusByAsset.get(row.asset));
+    // Fail closed, never fall open: a compound-rule BUY whose market grouping
+    // cannot be verified (no condition_id on this row, and none cached from an
+    // earlier fill of the same asset) must not be treated as its own
+    // independent single-asset market — that would silently allow more total
+    // exposure than the per-market cap intends. dynamic-v1 never reaches this
+    // branch (isCompoundRule is false), so its behavior is unaffected.
+    const marketKeyResolution = resolveCompoundMarketKey({
+      conditionId: row.condition_id,
+      cachedConditionId: assetToMarketKey.get(row.asset) ?? null,
+    });
+    const marketKey = marketKeyResolution.verified ? marketKeyResolution.marketKey : row.asset;
+    if (isCompoundRule && row.condition_id && !assetToMarketKey.has(row.asset)) {
+      assetToMarketKey.set(row.asset, row.condition_id);
+    }
+    function decideBuySide(): FollowerDecision {
+      if (isCompoundRule && !marketKeyResolution.verified) {
+        return {
+          action: "SKIP",
+          shares: 0,
+          notional: 0,
+          price,
+          reason: COMPOUND_SIZING_MISSING_CONDITION_ID_REASON,
+        };
+      }
+      return decideBuyForSizingRule({
+        sizingRule,
+        price,
+        startingCash: Number(experiment.starting_cash),
+        cash,
+        bookCapital: computeBookCapital({
+          startingCash: Number(experiment.starting_cash),
+          realizedPnl: realizedTotal,
+        }),
+        marketCostBasis: marketCostBasisByKey.get(marketKey) ?? 0,
+        portfolioCostBasis: portfolioCostBasisTotal,
+      });
+    }
+
     const decision: FollowerDecision = isTerminal
       ? { action: "SKIP", shares: 0, notional: 0, price, reason: SETTLED_POSITION_SKIP_REASON }
       : side === "BUY"
-        ? decideDynamicBuy({
-            price,
-            startingCash: Number(experiment.starting_cash),
-            cash,
-          })
+        ? decideBuySide()
         : decideProportionalSell({
             price,
             sourceSharesBefore: before,
@@ -1130,6 +1221,8 @@ async function processPendingEvents(
     let nextPosition = position;
     const prevCash = cash;
     const prevRealizedTotal = realizedTotal;
+    const prevMarketCostBasis = marketCostBasisByKey.get(marketKey) ?? 0;
+    const prevPortfolioCostBasisTotal = portfolioCostBasisTotal;
 
     if (decision.action === "BUY") {
       const applied = applyBuy(position, cash, decision.shares, decision.notional);
@@ -1147,6 +1240,16 @@ async function processPendingEvents(
       tradedAssets.add(row.asset);
     } else {
       result.skips += 1;
+    }
+
+    // Keep the in-memory caps current for the rest of this batch. Settlement
+    // (a separate pass) always zeroes cost basis via a direct DB write, so the
+    // NEXT batch's fresh open-positions query already reflects it — no update
+    // needed here for that path.
+    if (isCompoundRule && (decision.action === "BUY" || decision.action === "SELL")) {
+      const delta = roundUsd(nextPosition.costBasis - position.costBasis);
+      marketCostBasisByKey.set(marketKey, roundUsd((marketCostBasisByKey.get(marketKey) ?? 0) + delta));
+      portfolioCostBasisTotal = roundUsd(portfolioCostBasisTotal + delta);
     }
 
     cash = cashAfter;
@@ -1234,6 +1337,10 @@ async function processPendingEvents(
       // persisted bankroll, so nothing may be applied a second time.
       cash = prevCash;
       realizedTotal = prevRealizedTotal;
+      if (isCompoundRule) {
+        marketCostBasisByKey.set(marketKey, prevMarketCostBasis);
+        portfolioCostBasisTotal = prevPortfolioCostBasisTotal;
+      }
       if (decision.action === "BUY") result.buys -= 1;
       if (decision.action === "SELL") result.sells -= 1;
     }

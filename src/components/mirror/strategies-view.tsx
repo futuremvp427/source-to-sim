@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 
 import { formatUsd } from "@/lib/mirror-trader";
-import { getComparison } from "@/lib/ops.functions";
+import { getComparison, getV4PilotComparison } from "@/lib/ops.functions";
 import {
   categoryCards,
   categoryWallets,
@@ -198,6 +198,84 @@ function BackButton({ label, onClick }: { label: string; onClick: () => void }) 
   );
 }
 
+/**
+ * SHADOW V4 COMPOUND PILOT: HighTempTation — a parallel, paper-only forward
+ * pilot of compound-v2-pilot sizing. Never in Master Portfolio. Renders
+ * nothing once loaded if the pilot has not been seeded yet (e.g. pre-migration).
+ */
+function CompoundingPilotCard() {
+  const fetchPilot = useServerFn(getV4PilotComparison);
+  const { data, isPending } = useQuery({
+    queryKey: ["v4-pilot-comparison"],
+    queryFn: () => fetchPilot(),
+    refetchInterval: DASHBOARD_REFRESH_MS,
+  });
+
+  if (!isPending && !data) return null;
+
+  return (
+    <TerminalCard
+      title="Compounding pilot — HighTempTation"
+      subtitle="SHADOW V4 COMPOUND PILOT · 4% entry / 12% per-market cap / 90% deployment · paper only, parallel to V2"
+      action={<Chip tone="warn">Pilot</Chip>}
+    >
+      {isPending || !data ? (
+        <div className="space-y-2 py-2">
+          {Array.from({ length: 2 }).map((_, i) => (
+            <div key={i} className="h-12 animate-pulse rounded bg-muted/60" />
+          ))}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+            <Metric label="Start capital" value={formatUsd(data.activationBaseline)} />
+            <Metric label="Book capital" value={formatUsd(data.pilot.bookCapital)} />
+            <Metric label="Cash" value={formatUsd(data.pilot.cash)} />
+            <Metric
+              label="Realized P&L"
+              value={formatUsd(data.pilot.realizedPnl)}
+              tone={pnlTone(data.pilot.realizedPnl)}
+            />
+            <Metric label="Open cost basis" value={formatUsd(data.pilot.openCostBasis)} />
+            <Metric
+              label="Deployment"
+              value={data.pilot.deployedPct === null ? "Unavailable" : `${data.pilot.deployedPct.toFixed(1)}%`}
+            />
+            <Metric label="Open positions" value={String(data.pilot.openPositions)} />
+            <Metric label="Worker" value={data.pilot.workerState ?? "Unknown"} hint={data.pilot.lastError ?? undefined} />
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Sizing: {data.sizingRule} · Activated {new Date(data.activatedAt).toLocaleString()} · V2's{" "}
+            {formatUsd(data.activationBaseline)} realized book capital at activation rolled in as this pilot's
+            starting principal.
+          </p>
+          {data.v2 ? (
+            <div className="rounded-md border border-border/70 bg-background/40 p-3">
+              <p className="mb-2 text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+                Since-activation book-capital delta vs. common {formatUsd(data.activationBaseline)} baseline
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                <Metric
+                  label="Pilot (compound-v2-pilot)"
+                  value={formatUsd(data.pilot.sinceActivationDelta)}
+                  tone={pnlTone(data.pilot.sinceActivationDelta)}
+                  size="sm"
+                />
+                <Metric
+                  label="V2 (dynamic-v1)"
+                  value={formatUsd(data.v2.sinceActivationDelta)}
+                  tone={pnlTone(data.v2.sinceActivationDelta)}
+                  size="sm"
+                />
+              </div>
+            </div>
+          ) : null}
+        </div>
+      )}
+    </TerminalCard>
+  );
+}
+
 function WalletDetail({ wallet, onBack }: { wallet: MasterWallet; onBack: () => void }) {
   const [advanced, setAdvanced] = useState(false);
   const fetchComparison = useServerFn(getComparison);
@@ -213,6 +291,7 @@ function WalletDetail({ wallet, onBack }: { wallet: MasterWallet; onBack: () => 
   return (
     <div className="space-y-3">
       <BackButton label="Weather sleeve" onClick={onBack} />
+      {wallet.label === "HighTempTation" ? <CompoundingPilotCard /> : null}
       <TerminalCard
         title={`${wallet.label} — paper wallet`}
         subtitle={wallet.wallet}
