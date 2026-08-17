@@ -44,6 +44,7 @@ import {
   isEligibleForV2Copy,
   isV2Name,
 } from "./v2-cohort";
+import { isInMarketScope, parseMarketScope } from "./market-scope";
 import {
   GENERAL_SHADOW_CATCHUP_PAGE_BUDGET,
   GENERAL_SHADOW_POLLING_ENABLED,
@@ -1056,7 +1057,7 @@ async function processPendingEvents(
 
     // Post-follow but out of scope: consume the event and keep experiment-scoped
     // source state truthful, without any paper accounting or SKIP statistics.
-    if (!isInMarketScope(scope, row.market_title, row.slug ?? undefined)) {
+    if (!isInMarketScope(scope, row.market_title)) {
       const nextShares = roundShares(nextSourceForRow);
       await commitEventAtomically(
         lease,
@@ -1687,7 +1688,7 @@ function emptyCycle(ranAt: string, experiment: Experiment): CycleResult {
     skipped: null,
     newEvents: 0,
     pagesFetched: 0,
-    process: { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0 },
+    process: { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0, scopeExcluded: 0 },
     marks: { updated: 0, failed: 0 },
     reconciliation: null,
     lagSeconds: null,
