@@ -1,33 +1,17 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useServerFn } from "@tanstack/react-start";
-import { useEffect, useMemo, useState } from "react";
+import { createFileRoute } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 
 import { supabase } from "@/integrations/supabase/client";
 
-import { EmptyState, Panel, RowSkeleton, SideTag, Stat } from "@/components/mirror/panels";
-import { CandidateSection } from "@/components/mirror/candidate-panels";
-import {
-  CapacityComparisonSection,
-  ComparisonSection,
-  EvidenceSection,
-  SelfCheckSection,
-  V2StatusSection,
-} from "@/components/mirror/comparison-panels";
-import { PmusSection } from "@/components/mirror/pmus-panels";
-import { ObservationLogSection } from "@/components/mirror/observation-panel";
-import { GeneralShadowSection } from "@/components/mirror/general-shadow-panel";
-import { LiveSafetySection } from "@/components/mirror/live-safety-panel";
-import { PoligarchLivePilotPanel } from "@/components/mirror/poligarch-live-pilot-panel";
-import { formatShares, formatTime, formatUsd, isWeatherMarket } from "@/lib/mirror-trader";
+import { ActivityView } from "@/components/mirror/activity-view";
+import { OverviewView } from "@/components/mirror/overview-view";
+import { ResearchView } from "@/components/mirror/research-view";
+import { Shell, type TabKey } from "@/components/mirror/shell";
+import { StrategiesView } from "@/components/mirror/strategies-view";
+import { SystemView } from "@/components/mirror/system-view";
+import { useShadowDashboard } from "@/lib/ui/use-dashboard-queries";
 import { isWorkerHealthy } from "@/lib/worker-health";
-import {
-  acknowledgeAlerts,
-  getShadowDashboard,
-  runReconciliation,
-  triggerIngest,
-  updateShadowSettings,
-} from "@/lib/shadow.functions";
 
 export const Route = createFileRoute("/")({
   head: () => ({
