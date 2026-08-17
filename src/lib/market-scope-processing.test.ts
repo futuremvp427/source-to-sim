@@ -101,11 +101,11 @@ describe("market_scope processing semantics", () => {
     expect(commits).toHaveLength(1);
     const commit = commits[0] as Record<string, unknown>;
     expect(commit["trade"]).toBeNull();
-    expect(commit["paper_position"] ?? commit["paperPosition"]).toBeNull();
+    expect(commit["paper_position"]).toBeNull();
     expect(commit["experiment"]).toBeNull();
     expect(commit["audit"]).toBeNull();
     // Source position state still advances so proportional sells stay truthful.
-    expect(commit["source_state"] ?? commit["sourceState"]).toBeTruthy();
+    expect(commit["source_state"]).toBeTruthy();
     expect(commit["backfilled"]).toBe(false);
   });
 
