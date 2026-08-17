@@ -498,6 +498,8 @@ export type Experiment = {
   poll_interval_seconds: number;
   enabled: boolean;
   weather_only: boolean;
+  /** Post-follow paper-copy category scope. Defaults to ALL for every legacy row. */
+  market_scope?: string | null;
   realized_pnl: number;
   /** Unix seconds. Fills older than this are stored as history only, never paper-copied. */
   follow_from_ts: number | null;
