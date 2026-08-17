@@ -333,7 +333,7 @@ describe("429 gets zero in-process retries (no upstream amplification)", () => {
 describe("runExperimentCycle respects an active host cooldown", () => {
   it("defers before touching any checkpoint/accounting table, and releases the lease as idle (not error)", async () => {
     const until = new Date(Date.now() + 90_000).toISOString();
-    const { supabaseAdmin, updateCalls } = makeFakeSupabase({
+    const { supabaseAdmin, updateCalls, rpcCalls } = makeFakeSupabase({
       cooldownRow: { blocked_until: until, reason: "429 without Retry-After" },
     });
     currentFake = supabaseAdmin;
@@ -349,6 +349,9 @@ describe("runExperimentCycle respects an active host cooldown", () => {
     expect(updateCalls[0]!.table).toBe("worker_status");
     expect((updateCalls[0]!.patch as { state: string }).state).toBe("idle");
     expect((updateCalls[0]!.patch as { last_error?: unknown }).last_error).toBeUndefined();
+    // A cycle deferred at the cycle-start cooldown check must never reach
+    // getJson, so it must never consume a pacing reservation either.
+    expect(rpcCalls.some((c) => c.name === "reserve_http_request_slot")).toBe(false);
   });
 
   it("suppresses upstream calls across repeated scheduler invocations while the cooldown remains active", async () => {

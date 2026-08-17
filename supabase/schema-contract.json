@@ -921,6 +921,31 @@
         "anon",
         "authenticated"
       ]
+    },
+    {
+      "schema": "public",
+      "name": "reserve_http_request_slot",
+      "identity_args": "text, integer, integer",
+      "security_definer": true,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "auth.role() is not null and auth.role() <> 'service_role'",
+        "service_role required",
+        "insert into public.http_rate_limits",
+        "on conflict (host) do update set",
+        "least(",
+        "greatest(h.next_request_at, v_now)"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
     }
   ],
   "rls": [

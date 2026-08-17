@@ -217,6 +217,10 @@ describe("the shared fetch has its own independent hard deadline", () => {
       /* expected */
     });
 
+    // Flushes the (fail-open, zero-wait) reservation check's own pending
+    // microtask without advancing real time, so fetch has actually been
+    // invoked by the time capturedSignal is asserted below.
+    await vi.advanceTimersByTimeAsync(0);
     expect(capturedSignal?.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(SHARED_TRADES_FETCH_DEADLINE_MS_FOR_TEST + 1_000);
     // Real cancellation, proven directly on the signal handed to fetch — a

@@ -30,7 +30,7 @@ import {
   type ProfitStatus,
 } from "./general-shadow";
 import { MARK_MAX_AGE_MS, roundUsd } from "./shadow-core";
-import { parseRetryAfterMs, recordHostRateLimit } from "./http-rate-limit.server";
+import { parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "./http-rate-limit.server";
 
 const DATA_API = "https://data-api.polymarket.com";
 const ACTIVITY_PAGE = 250;
@@ -40,6 +40,10 @@ const ACTIVITY_PAGES = 2;
 const MAX_OFFSET = 10_000;
 
 type Json = Record<string, unknown>;
+
+function sleep(ms: number): Promise<void> {
+  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+}
 
 /* ------------------------------------------------------------------ */
 /* Non-trade activity ingestion (SPLIT / MERGE / REDEEM)               */
@@ -56,9 +60,17 @@ type Json = Record<string, unknown>;
  * on its own and leaving the shared budget unaware of them. No in-process
  * retry here either, matching shadow.server.ts's getJson: one 429 fails
  * this page immediately rather than amplifying it.
+ *
+ * Also claims the same atomic pacing reservation /trades uses (see
+ * reserveRequestSlot's doc comment) immediately before firing, since this
+ * hits the same host and is exactly the kind of independent caller that
+ * could otherwise race a concurrent /trades request past the cycle-start
+ * cooldown check.
  */
 async function getActivityPage(wallet: string, offset: number): Promise<Json[]> {
   const url = `${DATA_API}/activity?user=${wallet}&limit=${ACTIVITY_PAGE}&offset=${offset}`;
+  const waitMs = await reserveRequestSlot(new URL(url).host);
+  if (waitMs > 0) await sleep(waitMs);
   const res = await fetch(url, {
     headers: { accept: "application/json" },
     signal: AbortSignal.timeout(10_000),

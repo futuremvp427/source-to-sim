@@ -151,8 +151,92 @@ export async function recordHostRateLimit(
   }
 }
 
+/**
+ * Minimum spacing enforced between any two actual upstream requests to the
+ * same host, regardless of how many callers (in-process or cross-process)
+ * race to issue one. This is what closes the concurrency gap
+ * getHostCooldown/recordHostRateLimit cannot: that pair is a plain
+ * check-then-act read of blocked_until, so two callers that both read
+ * blocked=false before either has fired a request -- e.g. the two siblings
+ * in one EXPERIMENT_CONCURRENCY batch, or General Shadow's /activity path
+ * racing a /trades call, or two overlapping scheduler invocations -- can
+ * still both proceed to a real fetch at the same instant. 500ms is small
+ * next to a cycle's ~40-50s budget (a worst-case pile-up of every caller in
+ * one cycle adds low-single-digit seconds total) but enough to force
+ * Postgres's own row-level serialization of reserve_http_request_slot to
+ * turn a simultaneous burst into a strict queue.
+ */
+const MIN_REQUEST_INTERVAL_MS = 500;
+
+/**
+ * Hard ceiling on how far into the future a pile-up of concurrent
+ * reservations can push a single caller's wait, enforced inside the RPC
+ * itself (see the migration's LEAST(...) clamp). Bounds the cost of an
+ * unusually deep pile-up (many overlapping stale invocations all
+ * reserving at once) to a fixed, small wait instead of an ever-growing
+ * queue -- comfortably under every relevant cycle/experiment deadline.
+ */
+const MAX_RESERVATION_LOOKAHEAD_MS = 4_000;
+
+/**
+ * Hard ceiling on the reservation RPC itself, mirroring
+ * COOLDOWN_WRITE_DEADLINE_MS's real-cancellation pattern: a single-row
+ * upsert has no reason to run long, and every caller of reserveRequestSlot
+ * is about to make its own bounded upstream request regardless.
+ */
+const RESERVATION_RPC_DEADLINE_MS = 5_000;
+
+/**
+ * Atomically claims the next pacing slot for a host and returns how long
+ * the caller must wait (clamped to [0, MAX_RESERVATION_LOOKAHEAD_MS]) before
+ * it may actually issue its upstream request. Deliberately independent of
+ * getHostCooldown/blocked_until -- see the migration's doc comment for why
+ * the two mechanisms are kept separate. Only actual upstream requests
+ * should call this: a same-cycle cache hit (see TradesRequestCache) must
+ * never consume a reservation, so callers gate this behind their own
+ * cache-miss branch, not before it.
+ *
+ * Fails OPEN (returns 0, i.e. proceed immediately) on any RPC error or on
+ * hitting its own deadline: this is a best-effort pacing optimization
+ * layered on top of the already-fail-CLOSED blocked_until cooldown, which
+ * remains the real safety net if the reservation RPC itself is unavailable.
+ * Failing closed here would let a transient DB hiccup halt all ingestion,
+ * which is strictly worse than temporarily losing the pacing optimization.
+ */
+export async function reserveRequestSlot(host: string): Promise<number> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RESERVATION_RPC_DEADLINE_MS);
+  try {
+    // Cast: reserve_http_request_slot is defined in this session's
+    // migration; generated Supabase types are refreshed only after the
+    // migration is applied (same pattern as record_http_rate_limit above).
+    const { data, error } = await supabaseAdmin
+      .rpc(
+        "reserve_http_request_slot" as never,
+        {
+          p_host: host,
+          p_min_interval_ms: MIN_REQUEST_INTERVAL_MS,
+          p_max_lookahead_ms: MAX_RESERVATION_LOOKAHEAD_MS,
+        } as never,
+      )
+      .abortSignal(controller.signal);
+    if (error || typeof data !== "string") return 0;
+    const reservedAtMs = new Date(data).getTime();
+    if (!Number.isFinite(reservedAtMs)) return 0;
+    const waitMs = reservedAtMs - Date.now();
+    return Math.min(Math.max(0, waitMs), MAX_RESERVATION_LOOKAHEAD_MS);
+  } catch {
+    return 0;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Test-only aliases so the cooldown constants can be asserted directly. */
 export const MIN_COOLDOWN_MS_FOR_TEST = MIN_COOLDOWN_MS;
 export const DEFAULT_COOLDOWN_MS_FOR_TEST = DEFAULT_COOLDOWN_MS;
 export const MAX_COOLDOWN_MS_FOR_TEST = MAX_COOLDOWN_MS;
 export const COOLDOWN_WRITE_DEADLINE_MS_FOR_TEST = COOLDOWN_WRITE_DEADLINE_MS;
+export const MIN_REQUEST_INTERVAL_MS_FOR_TEST = MIN_REQUEST_INTERVAL_MS;
+export const MAX_RESERVATION_LOOKAHEAD_MS_FOR_TEST = MAX_RESERVATION_LOOKAHEAD_MS;
+export const RESERVATION_RPC_DEADLINE_MS_FOR_TEST = RESERVATION_RPC_DEADLINE_MS;

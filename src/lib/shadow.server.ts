@@ -55,6 +55,7 @@ import {
   getHostCooldown,
   parseRetryAfterMs,
   recordHostRateLimit,
+  reserveRequestSlot,
 } from "./http-rate-limit.server";
 /** Re-exported so existing external imports of parseRetryAfterMs from this module keep working. */
 export { parseRetryAfterMs } from "./http-rate-limit.server";
@@ -262,6 +263,21 @@ async function getJson(
   signal?: AbortSignal,
   deadlineAt?: number,
 ): Promise<unknown> {
+  // Atomic cross-process pacing, claimed once per getJson call (not per
+  // attempt): this is what actually closes the concurrency race, since two
+  // sibling getJson calls racing each other -- not two attempts within the
+  // same call, which are already sequential -- is the scenario that let
+  // simultaneous callers both pass the (already-checked, by the time
+  // control reaches here) blocked_until read and both fire at once. See
+  // reserveRequestSlot's own doc comment for why this is deliberately
+  // independent of that check.
+  if (!signal?.aborted) {
+    let waitMs = await reserveRequestSlot(new URL(url).host);
+    if (deadlineAt !== undefined) {
+      waitMs = Math.min(waitMs, Math.max(0, deadlineAt - Date.now()));
+    }
+    if (waitMs > 0) await sleep(waitMs, signal);
+  }
   let lastErr: unknown;
   for (let i = 0; i < attempts; i += 1) {
     if (signal?.aborted) break;

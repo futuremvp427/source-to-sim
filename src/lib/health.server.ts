@@ -5,7 +5,8 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
-import { DATA_API_HOST, getHostCooldown } from "./http-rate-limit.server";
+import { GENERAL_SHADOW_POLLING_ENABLED, isGeneralShadowName } from "./general-shadow";
+import { DATA_API_HOST, getHostCooldown, reserveRequestSlot } from "./http-rate-limit.server";
 import { MARK_MAX_AGE_MS } from "./shadow-core";
 import { classifyWorker, findAbandonedWorkers, type WorkerRow } from "./worker-health";
 
@@ -71,6 +72,13 @@ function probePublicDataApi(): Promise<PublicApiProbeResult> {
       };
     }
     try {
+      // Same atomic pacing reservation ingestion's real /trades calls use
+      // (see reserveRequestSlot's doc comment): this probe is cached/TTL'd
+      // and cooldown-gated above, but it still shares the same host budget
+      // and must not be able to race a concurrent ingestion request past
+      // the point where both simultaneously believe the host is healthy.
+      const waitMs = await reserveRequestSlot(DATA_API_HOST);
+      if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
       const res = await fetch(PUBLIC_DATA_API, {
         headers: { accept: "application/json" },
         signal: AbortSignal.timeout(HEALTH_HTTP_TIMEOUT_MS),
@@ -136,7 +144,19 @@ export async function runSelfCheck(): Promise<HealthReport> {
   const { data: statuses, error: statusesError } = await supabaseAdmin.from("worker_status").select("*");
   const rows = (statuses ?? []) as unknown as WorkerRow[];
   const ingestRows = rows.filter((s) => s.id.startsWith("ingest"));
-  const requiredIds = (experiments ?? []).map((e) =>
+  // General Shadow experiments stay enabled=true in the DB (the pause is a
+  // code-level identity gate, not a DB flag -- see
+  // GENERAL_SHADOW_POLLING_ENABLED's own doc comment for why). While that
+  // gate is active, runExperimentCycle returns before ever acquiring a
+  // lease or touching worker_status for them, so they can never complete a
+  // cycle -- counting them as required here would misreport an
+  // intentional, reversible pause as a genuine FAIL. Excluded ONLY while
+  // the pause is active: flipping GENERAL_SHADOW_POLLING_ENABLED back to
+  // true makes them required again, same as any other experiment.
+  const requiredExperiments = (experiments ?? []).filter(
+    (e) => GENERAL_SHADOW_POLLING_ENABLED || !isGeneralShadowName(e.name),
+  );
+  const requiredIds = requiredExperiments.map((e) =>
     e.name === "SHADOW" ? "ingest" : `ingest:${e.id}`,
   );
   const nowMs = Date.now();

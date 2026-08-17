@@ -61,6 +61,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/paper_buy_notification_cursor.sql
+      - name: Verify reserve_http_request_slot pacing and privilege hardening
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/reserve_http_request_slot.sql
       - name: Stop local Supabase
         if: always()
         run: supabase stop --no-backup
