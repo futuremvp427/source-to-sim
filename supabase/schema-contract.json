@@ -654,6 +654,13 @@
       "default_contains": [
         "now("
       ]
+    },
+    {
+      "schema": "public",
+      "table": "paper_experiments",
+      "name": "market_scope",
+      "type": "text",
+      "not_null": true
     }
   ],
   "functions": [
