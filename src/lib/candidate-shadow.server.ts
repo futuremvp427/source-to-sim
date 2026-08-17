@@ -1,5 +1,7 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { parseMarketScope, type MarketScope } from "./market-scope";
+
 export type CandidatePaperTrade = {
   id: string;
   eventKey: string;
@@ -27,6 +29,8 @@ export type CandidatePaperFollower = {
   sizingRule: string;
   enabled: boolean;
   weatherOnly: boolean;
+  /** Post-follow paper-copy category scope for this candidate. */
+  marketScope: MarketScope;
   simulated: boolean;
   followFromTs: number | null;
   worker: {
@@ -63,6 +67,7 @@ type ExperimentRow = {
   sizing_rule: string;
   enabled: boolean;
   weather_only: boolean;
+  market_scope: string | null;
   simulated: boolean;
   follow_from_ts: number | null;
 };
@@ -72,7 +77,7 @@ export async function loadCandidateShadowPanel(): Promise<CandidateShadowPanelDa
   const { data: rawExperiments, error: experimentsError } = await supabaseAdmin
     .from("paper_experiments")
     .select(
-      "id, name, wallet_address, starting_cash, cash, realized_pnl, sizing_rule, enabled, weather_only, simulated, follow_from_ts",
+      "id, name, wallet_address, starting_cash, cash, realized_pnl, sizing_rule, enabled, weather_only, market_scope, simulated, follow_from_ts",
     )
     .like("name", "CANDIDATE: %")
     .order("name", { ascending: true });
@@ -141,6 +146,7 @@ export async function loadCandidateShadowPanel(): Promise<CandidateShadowPanelDa
       sizingRule: experiment.sizing_rule,
       enabled: experiment.enabled,
       weatherOnly: experiment.weather_only,
+      marketScope: parseMarketScope(experiment.market_scope),
       simulated: experiment.simulated,
       followFromTs: experiment.follow_from_ts === null ? null : Number(experiment.follow_from_ts),
       worker: {

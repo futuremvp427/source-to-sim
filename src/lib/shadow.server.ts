@@ -44,6 +44,7 @@ import {
   isEligibleForV2Copy,
   isV2Name,
 } from "./v2-cohort";
+import { isInMarketScope, parseMarketScope } from "./market-scope";
 import {
   GENERAL_SHADOW_CATCHUP_PAGE_BUDGET,
   GENERAL_SHADOW_POLLING_ENABLED,
@@ -498,6 +499,8 @@ export type Experiment = {
   poll_interval_seconds: number;
   enabled: boolean;
   weather_only: boolean;
+  /** Post-follow paper-copy category scope. Defaults to ALL for every legacy row. */
+  market_scope?: string | null;
   realized_pnl: number;
   /** Unix seconds. Fills older than this are stored as history only, never paper-copied. */
   follow_from_ts: number | null;
@@ -837,6 +840,12 @@ export type ProcessResult = {
   skips: number;
   /** Pre-go-live fills recorded for history/reconciliation only. */
   backfilled: number;
+  /**
+   * Post-follow fills consumed WITHOUT any paper decision because the market is
+   * outside the experiment's market_scope. Never a SKIP: no paper_trades row,
+   * no cash/P&L change and no paper_positions write.
+   */
+  scopeExcluded: number;
 };
 
 /**
@@ -941,8 +950,10 @@ async function processPendingEvents(
   const { data: pending, error } = await (signal ? pendingCall.abortSignal(signal) : pendingCall);
   if (error) throw new Error(error.message);
   const rows = (pending ?? []) as unknown as SourceEventRow[];
-  if (rows.length === 0) return { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0 };
+  if (rows.length === 0)
+    return { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0, scopeExcluded: 0 };
   const followFrom = experiment.follow_from_ts ?? 0;
+  const scope = parseMarketScope(experiment.market_scope);
 
   const assets = [...new Set(rows.map((r) => r.asset))];
 
@@ -981,7 +992,14 @@ async function processPendingEvents(
 
   let cash = Number(experiment.cash);
   let realizedTotal = Number(experiment.realized_pnl);
-  const result: ProcessResult = { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0 };
+  const result: ProcessResult = {
+    processed: 0,
+    buys: 0,
+    sells: 0,
+    skips: 0,
+    backfilled: 0,
+    scopeExcluded: 0,
+  };
   const meta = new Map<string, { title: string; outcome: string | null; ts: number }>();
   /** Assets that already had a persisted paper_positions row before this batch. */
   const existingPaperAssets = new Set<string>(
@@ -1033,6 +1051,38 @@ async function processPendingEvents(
       );
       sourceShares.set(row.asset, nextShares);
       result.backfilled += 1;
+      result.processed += 1;
+      continue;
+    }
+
+    // Post-follow but out of scope: consume the event and keep experiment-scoped
+    // source state truthful, without any paper accounting or SKIP statistics.
+    if (!isInMarketScope(scope, row.market_title)) {
+      const nextShares = roundShares(nextSourceForRow);
+      await commitEventAtomically(
+        lease,
+        experiment.id,
+        buildEventCommit({
+          sourceEventId: row.id,
+          backfilled: false,
+          sourceState: {
+            wallet,
+            asset: row.asset,
+            marketTitle: row.market_title,
+            outcome: row.outcome,
+            shares: nextShares,
+            lastEventKey: row.event_key,
+            lastEventTs: Number(row.source_ts),
+          },
+          trade: null,
+          paperPosition: null,
+          experiment: null,
+          audit: null,
+        }),
+        signal,
+      );
+      sourceShares.set(row.asset, nextShares);
+      result.scopeExcluded += 1;
       result.processed += 1;
       continue;
     }
@@ -1638,7 +1688,7 @@ function emptyCycle(ranAt: string, experiment: Experiment): CycleResult {
     skipped: null,
     newEvents: 0,
     pagesFetched: 0,
-    process: { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0 },
+    process: { processed: 0, buys: 0, sells: 0, skips: 0, backfilled: 0, scopeExcluded: 0 },
     marks: { updated: 0, failed: 0 },
     reconciliation: null,
     lagSeconds: null,

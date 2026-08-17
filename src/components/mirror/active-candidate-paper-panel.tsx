@@ -53,9 +53,14 @@ export function ActiveCandidatePaperSection() {
                     <p className="font-semibold text-card-foreground">{candidate.name.replace(/^CANDIDATE:\s*/, "")}</p>
                     <p className="mt-0.5 break-all text-[10px] text-muted-foreground">{candidate.wallet}</p>
                   </div>
-                  <span className={workerHealthy ? "text-[var(--gain)]" : "text-[var(--loss)]"}>
-                    {candidate.worker.state}
-                  </span>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                      {candidate.marketScope}
+                    </span>
+                    <span className={workerHealthy ? "text-[var(--gain)]" : "text-[var(--loss)]"}>
+                      {candidate.worker.state}
+                    </span>
+                  </div>
                 </div>
 
                 <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2">
@@ -70,7 +75,9 @@ export function ActiveCandidatePaperSection() {
                 </dl>
 
                 <p className="mt-2 text-[10px] text-muted-foreground">
-                  {candidate.sizingRule} · starting cash {formatUsd(candidate.startingCash)} · category-agnostic · bootstrap {candidate.checkpoint.bootstrapComplete ? "complete" : "pending"}
+                  {candidate.sizingRule} · starting cash {formatUsd(candidate.startingCash)} ·{" "}
+                  {candidate.marketScope === "ALL" ? "category-agnostic" : `scope ${candidate.marketScope}`} · bootstrap{" "}
+                  {candidate.checkpoint.bootstrapComplete ? "complete" : "pending"}
                 </p>
                 {candidate.worker.lastError ? (
                   <p className="mt-2 text-[10px] text-[var(--loss)]">Last error: {candidate.worker.lastError}</p>

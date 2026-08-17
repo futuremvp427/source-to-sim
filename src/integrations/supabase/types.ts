@@ -961,6 +961,7 @@ export type Database = {
           enabled: boolean
           follow_from_ts: number | null
           id: string
+          market_scope: string
           name: string
           poll_interval_seconds: number
           realized_pnl: number
@@ -982,6 +983,7 @@ export type Database = {
           enabled?: boolean
           follow_from_ts?: number | null
           id?: string
+          market_scope?: string
           name: string
           poll_interval_seconds?: number
           realized_pnl?: number
@@ -1003,6 +1005,7 @@ export type Database = {
           enabled?: boolean
           follow_from_ts?: number | null
           id?: string
+          market_scope?: string
           name?: string
           poll_interval_seconds?: number
           realized_pnl?: number
