@@ -20,6 +20,13 @@ export type ExperimentSummaryInput = {
   trades: TradeLite[];
   /** Total pipeline latency in seconds per audited event. */
   latencies: number[];
+  /**
+   * Exact BUY/SELL decision counts measured database-side. Provided because the
+   * `trades` stream is deliberately narrowed to realized-P&L-bearing rows: full
+   * paper_trades history is far too large to load per refresh. Wins, losses and
+   * drawdown are unaffected by zero-P&L rows, so the narrowed stream is exact.
+   */
+  counts?: { buys: number; sells: number };
 };
 
 export type ExperimentSummary = {
@@ -77,8 +84,8 @@ export function summarizeExperiment(input: ExperimentSummaryInput): ExperimentSu
     losses,
     winRatePct: decided === 0 ? null : Math.round((wins / decided) * 1000) / 10,
     maxDrawdown: maxDrawdown(input.startingCash, input.trades),
-    buys: input.trades.filter((t) => t.action === "BUY").length,
-    sells: input.trades.filter((t) => t.action === "SELL").length,
+    buys: input.counts ? input.counts.buys : input.trades.filter((t) => t.action === "BUY").length,
+    sells: input.counts ? input.counts.sells : input.trades.filter((t) => t.action === "SELL").length,
     medianLatencySeconds: median(input.latencies),
   };
 }
