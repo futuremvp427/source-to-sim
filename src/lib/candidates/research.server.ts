@@ -80,6 +80,7 @@ export const SEED_CANDIDATES: {
   { handle: "WeatherHK2", wallet: "0xdadbf9e1df1b8d7a184a0d6ab9c83b2337b61870", rank: 37, pnl: 1_660 },
   { handle: "Weather-Guru", wallet: null, rank: 40, pnl: 1_578 },
   { handle: "predictotemp", wallet: null, rank: 55, pnl: 1_258 },
+  { handle: "BadTattoo", wallet: "0xa7011667f22c121c6cea7aab30192307c58c47cd", rank: null, pnl: null },
 ];
 
 type Json = Record<string, unknown>;
