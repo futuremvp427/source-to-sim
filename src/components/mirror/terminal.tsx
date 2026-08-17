@@ -66,7 +66,7 @@ export function Metric({
 }: {
   label: string;
   value: string;
-  hint?: string;
+  hint?: string | undefined;
   tone?: Tone | "default";
   size?: "sm" | "md" | "lg";
 }) {
