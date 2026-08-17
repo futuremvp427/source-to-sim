@@ -159,9 +159,11 @@ describe("scheduler deadline cancels candidate research", () => {
     mockHangingFetch("prices-history");
 
     const pending = refreshCandidateResearchSafely();
-    // Let the pass progress to the slippage fetch before the scheduler budget fires.
-    await vi.advanceTimersByTimeAsync(RESEARCH_DEADLINE_MS - 1);
-    await vi.advanceTimersByTimeAsync(2);
+    // Flush the pass's own async steps (lease, bounded reads, trade/position
+    // fetches) WITHOUT burning wall clock, so it is genuinely sitting on the
+    // slippage fetch when the scheduler budget fires.
+    for (let i = 0; i < 40; i += 1) await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(RESEARCH_DEADLINE_MS + 1);
     await pending;
 
     expect(fetchCalls.some((u) => u.includes("prices-history"))).toBe(true);

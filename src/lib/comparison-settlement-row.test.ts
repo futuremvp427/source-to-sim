@@ -24,11 +24,12 @@ function makeFakeDb() {
     copyability_observations: [],
   };
 
-  type Filter = { type: "eq" | "gte" | "gt"; col: string; val: unknown };
+  type Filter = { type: "eq" | "neq" | "gte" | "gt"; col: string; val: unknown };
 
   function matches(row: Row, filters: Filter[]): boolean {
     for (const f of filters) {
       if (f.type === "eq" && row[f.col] !== f.val) return false;
+      if (f.type === "neq" && row[f.col] === f.val) return false;
       if (f.type === "gte" && !((row[f.col] as number) >= (f.val as number))) return false;
       if (f.type === "gt" && !((row[f.col] as number) > (f.val as number))) return false;
     }
@@ -75,6 +76,10 @@ function makeFakeDb() {
         filters.push({ type: "eq", col, val });
         return builder;
       },
+      neq(col: string, val: unknown) {
+        filters.push({ type: "neq", col, val });
+        return builder;
+      },
       gte(col: string, val: unknown) {
         filters.push({ type: "gte", col, val });
         return builder;
@@ -106,9 +111,48 @@ function makeFakeDb() {
     return builder;
   }
 
+  /** Mirrors the paper_trade_decision_stats SQL aggregate over the fake rows. */
+  async function rpc(name: string, args: Record<string, unknown>) {
+    if (name !== "paper_trade_decision_stats") throw new Error(`unexpected rpc ${name}`);
+    const decisions = tables["paper_trades"]!.filter(
+      (r) => r["experiment_id"] === args["p_experiment_id"] && r["action"] !== "SETTLEMENT",
+    );
+    const of = (action: string) => decisions.filter((r) => r["action"] === action);
+    const avg = (action: string) => {
+      const values = of(action)
+        .map((r) => Number(r["notional"] ?? 0))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      return values.length === 0 ? null : values.reduce((s, n) => s + n, 0) / values.length;
+    };
+    const counts = new Map<string, number>();
+    for (const row of of("SKIP")) {
+      const key = String(row["reason"] ?? "Unspecified").split("(")[0]!.trim() || "Unspecified";
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const sourceTs = decisions
+      .map((r) => (r["source_ts"] === null || r["source_ts"] === undefined ? null : Number(r["source_ts"])))
+      .filter((n): n is number => n !== null);
+    return {
+      data: {
+        eligible_decisions: decisions.length,
+        buys: of("BUY").length,
+        sells: of("SELL").length,
+        skips: of("SKIP").length,
+        avg_buy_usd: avg("BUY"),
+        avg_sell_usd: avg("SELL"),
+        last_source_ts: sourceTs.length === 0 ? null : Math.max(...sourceTs),
+        skip_reasons: [...counts]
+          .map(([reason, count]) => ({ reason, count }))
+          .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason))
+          .slice(0, 3),
+      },
+      error: null,
+    };
+  }
+
   return {
     tables,
-    supabaseAdmin: { from: (table: string) => makeBuilder(table) },
+    supabaseAdmin: { from: (table: string) => makeBuilder(table), rpc },
   };
 }
 

@@ -1706,6 +1706,10 @@ export type Database = {
         }
         Returns: boolean
       }
+      paper_trade_decision_stats: {
+        Args: { p_experiment_id: string }
+        Returns: Json
+      }
       process_source_event_atomic: {
         Args: {
           p_event: Json

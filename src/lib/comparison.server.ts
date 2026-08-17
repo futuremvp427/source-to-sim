@@ -66,15 +66,74 @@ export type ComparisonData = {
   v1Rows: ComparisonRow[];
 };
 
-type ComparisonTradeRow = {
+type RealizedTradeRow = {
   id: string;
   action: string;
   realized_pnl: number | null;
   created_at: string;
-  reason: string | null;
-  notional: number | null;
-  source_ts: number | null;
 };
+
+/** Exact database-side aggregation of the full decision history. */
+export type DecisionStats = {
+  eligibleDecisions: number;
+  buys: number;
+  sells: number;
+  skips: number;
+  avgBuyUsd: number | null;
+  avgSellUsd: number | null;
+  lastSourceTs: number | null;
+  skipReasons: { reason: string; count: number }[];
+};
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+/**
+ * Parses the `paper_trade_decision_stats` RPC payload. The RPC excludes
+ * SETTLEMENT lifecycle rows, so these numbers are the eligible-decision
+ * denominators the dashboard has always shown — computed in Postgres instead of
+ * by paginating ~100k+ paper_trades rows into memory on every refresh.
+ */
+export function parseDecisionStats(payload: unknown): DecisionStats {
+  const raw = (payload ?? {}) as Record<string, unknown>;
+  const int = (key: string): number => {
+    const n = Number(raw[key] ?? 0);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const avg = (key: string): number | null => {
+    const value = raw[key];
+    if (value === null || value === undefined) return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? round2(n) : null;
+  };
+  const lastSourceTs = raw["last_source_ts"];
+  const reasons = Array.isArray(raw["skip_reasons"]) ? (raw["skip_reasons"] as unknown[]) : [];
+  return {
+    eligibleDecisions: int("eligible_decisions"),
+    buys: int("buys"),
+    sells: int("sells"),
+    skips: int("skips"),
+    avgBuyUsd: avg("avg_buy_usd"),
+    avgSellUsd: avg("avg_sell_usd"),
+    lastSourceTs:
+      lastSourceTs === null || lastSourceTs === undefined || !Number.isFinite(Number(lastSourceTs))
+        ? null
+        : Number(lastSourceTs),
+    skipReasons: reasons.map((entry) => {
+      const row = (entry ?? {}) as Record<string, unknown>;
+      return { reason: String(row["reason"] ?? "Unspecified"), count: Number(row["count"] ?? 0) };
+    }),
+  };
+}
+
+async function loadDecisionStats(experimentId: string): Promise<DecisionStats> {
+  const { data, error } = await supabaseAdmin.rpc("paper_trade_decision_stats", {
+    p_experiment_id: experimentId,
+  });
+  if (error) throw new Error(error.message);
+  return parseDecisionStats(data);
+}
 
 type SettlementRow = {
   id: string;
@@ -82,17 +141,24 @@ type SettlementRow = {
   settled_at: string;
 };
 
-async function loadAllTrades(experimentId: string): Promise<ComparisonTradeRow[]> {
-  const paged = await fetchAllRows<ComparisonTradeRow>(async (from, to) => {
+/**
+ * Only realized-P&L-bearing decision rows are loaded. Wins, losses and
+ * drawdown are driven exclusively by non-zero realized P&L, so excluding the
+ * (vastly larger) BUY/SKIP population is exact, not an approximation.
+ */
+async function loadRealizedTrades(experimentId: string): Promise<RealizedTradeRow[]> {
+  const paged = await fetchAllRows<RealizedTradeRow>(async (from, to) => {
     const { data, error } = await supabaseAdmin
       .from("paper_trades")
-      .select("id, action, realized_pnl, created_at, reason, notional, source_ts")
+      .select("id, action, realized_pnl, created_at")
       .eq("experiment_id", experimentId)
+      .neq("action", "SETTLEMENT")
+      .neq("realized_pnl", 0)
       .order("created_at", { ascending: true })
       .order("id", { ascending: true })
       .range(from, to);
     if (error) throw new Error(error.message);
-    return (data ?? []) as unknown as ComparisonTradeRow[];
+    return (data ?? []) as unknown as RealizedTradeRow[];
   });
   if (!paged.complete) throw new Error(`Comparison trade history truncated for ${experimentId}`);
   return paged.rows;
@@ -114,15 +180,6 @@ async function loadAllSettlements(experimentId: string): Promise<SettlementRow[]
   return paged.rows;
 }
 
-function meanNotional(rows: ComparisonTradeRow[], action: string): number | null {
-  const values = rows
-    .filter((t) => String(t.action) === action)
-    .map((t) => Number(t.notional ?? 0))
-    .filter((n) => Number.isFinite(n) && n > 0);
-  if (values.length === 0) return null;
-  return Math.round((values.reduce((sum, n) => sum + n, 0) / values.length) * 100) / 100;
-}
-
 export async function loadComparison(): Promise<ComparisonData> {
   const { data: experiments, error: experimentsError } = await supabaseAdmin
     .from("paper_experiments")
@@ -134,7 +191,8 @@ export async function loadComparison(): Promise<ComparisonData> {
     const workerId = workerIdFor({ id: experiment.id, name: experiment.name });
     const [
       positionsRes,
-      allTrades,
+      decisionStats,
+      realizedTrades,
       auditRes,
       settlements,
       statusRes,
@@ -147,7 +205,8 @@ export async function loadComparison(): Promise<ComparisonData> {
         .select("shares, cost_basis, mark")
         .eq("experiment_id", experiment.id)
         .gt("shares", 0),
-      loadAllTrades(experiment.id),
+      loadDecisionStats(experiment.id),
+      loadRealizedTrades(experiment.id),
       supabaseAdmin
         .from("pipeline_audit")
         .select(
@@ -192,20 +251,7 @@ export async function loadComparison(): Promise<ComparisonData> {
     // stream fed into summarizeExperiment. The real settlement P&L already
     // enters that stream exactly once via settlementPerformanceEvents below,
     // sourced from paper_settlements.
-    const decisionTrades = allTrades.filter((t) => String(t.action) !== "SETTLEMENT");
-    const skipped = decisionTrades.filter((t) => String(t.action) === "SKIP");
-    const reasonCounts = new Map<string, number>();
-    for (const t of skipped) {
-      const raw = String(t.reason ?? "Unspecified");
-      const key = raw.split("(")[0]!.trim() || "Unspecified";
-      reasonCounts.set(key, (reasonCounts.get(key) ?? 0) + 1);
-    }
-    const skipReasons = [...reasonCounts]
-      .map(([reason, count]) => ({ reason, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 3);
-
-    const tradePerformanceEvents: TradeLite[] = decisionTrades.map((t) => ({
+    const tradePerformanceEvents: TradeLite[] = realizedTrades.map((t) => ({
       action: String(t.action),
       realizedPnl: Number(t.realized_pnl ?? 0),
       createdAt: String(t.created_at),
@@ -222,6 +268,7 @@ export async function loadComparison(): Promise<ComparisonData> {
       realizedPnl: Number(experiment.realized_pnl),
       openValue,
       trades: [...tradePerformanceEvents, ...settlementPerformanceEvents],
+      counts: { buys: decisionStats.buys, sells: decisionStats.sells },
       latencies: (auditRes.data ?? [])
         .filter((a) => a.total_latency_seconds !== null)
         .map((a) => Number(a.total_latency_seconds)),
@@ -231,10 +278,7 @@ export async function loadComparison(): Promise<ComparisonData> {
       startingCash: Number(experiment.starting_cash),
       cash: Number(experiment.cash),
     });
-    const lastSourceActivityTs = decisionTrades.reduce<number | null>((acc, t) => {
-      const ts = t.source_ts === null ? null : Number(t.source_ts);
-      return ts === null ? acc : acc === null ? ts : Math.max(acc, ts);
-    }, null);
+    const lastSourceActivityTs = decisionStats.lastSourceTs;
 
     rows.push({
       ...summary,
@@ -260,8 +304,8 @@ export async function loadComparison(): Promise<ComparisonData> {
       markedPositions: marked.length,
       openCostBasis,
       unrealizedPnl: openValue === null ? null : Math.round((openValue - openCostBasis) * 100) / 100,
-      skippedCount: skipped.length,
-      skipReasons,
+      skippedCount: decisionStats.skips,
+      skipReasons: decisionStats.skipReasons,
       settledCount: settlements.length,
       lastEventTs: checkpointRes.data?.last_source_ts ?? null,
       lagSeconds: statusRes.data?.lag_seconds ?? null,
@@ -269,12 +313,14 @@ export async function loadComparison(): Promise<ComparisonData> {
       lastSuccessAt: statusRes.data?.last_success_at ?? null,
       lastError: statusRes.data?.last_error ?? null,
       postGoLiveSourceEvents: postGoLiveRes.count ?? null,
-      eligibleDecisions: decisionTrades.length,
+      eligibleDecisions: decisionStats.eligibleDecisions,
       totalPaperTrades: summary.buys + summary.sells,
       skipRatePct:
-        decisionTrades.length === 0 ? null : Math.round((skipped.length / decisionTrades.length) * 1000) / 10,
-      avgBuyUsd: meanNotional(decisionTrades, "BUY"),
-      avgSellUsd: meanNotional(decisionTrades, "SELL"),
+        decisionStats.eligibleDecisions === 0
+          ? null
+          : Math.round((decisionStats.skips / decisionStats.eligibleDecisions) * 1000) / 10,
+      avgBuyUsd: decisionStats.avgBuyUsd,
+      avgSellUsd: decisionStats.avgSellUsd,
       nextBuyUsd: runway.nextBuyUsd,
       estimatedRemainingBuys: runway.estimatedRemainingBuys,
       medianDetectionLatencySeconds: median(
