@@ -925,7 +925,7 @@
     {
       "schema": "public",
       "name": "reserve_http_request_slot",
-      "identity_args": "text, integer, integer",
+      "identity_args": "text, integer",
       "security_definer": true,
       "config_contains": [
         "search_path=public"
@@ -935,7 +935,6 @@
         "service_role required",
         "insert into public.http_rate_limits",
         "on conflict (host) do update set",
-        "least(",
         "greatest(h.next_request_at, v_now)"
       ],
       "execute_allowed": [

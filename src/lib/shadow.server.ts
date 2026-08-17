@@ -263,25 +263,27 @@ async function getJson(
   signal?: AbortSignal,
   deadlineAt?: number,
 ): Promise<unknown> {
-  // Atomic cross-process pacing, claimed once per getJson call (not per
-  // attempt): this is what actually closes the concurrency race, since two
-  // sibling getJson calls racing each other -- not two attempts within the
-  // same call, which are already sequential -- is the scenario that let
-  // simultaneous callers both pass the (already-checked, by the time
-  // control reaches here) blocked_until read and both fire at once. See
-  // reserveRequestSlot's own doc comment for why this is deliberately
-  // independent of that check.
-  if (!signal?.aborted) {
-    let waitMs = await reserveRequestSlot(new URL(url).host);
-    if (deadlineAt !== undefined) {
-      waitMs = Math.min(waitMs, Math.max(0, deadlineAt - Date.now()));
-    }
-    if (waitMs > 0) await sleep(waitMs, signal);
-  }
   let lastErr: unknown;
+  const host = new URL(url).host;
   for (let i = 0; i < attempts; i += 1) {
     if (signal?.aborted) break;
     try {
+      // Atomic cross-process pacing, claimed fresh on every attempt (not
+      // once per getJson call): this is what actually closes the
+      // concurrency race, since two sibling getJson calls racing each
+      // other is the scenario that let simultaneous callers both pass the
+      // (already-checked, by the time control reaches here) blocked_until
+      // read and both fire at once. Sharing this attempt's own try/catch
+      // means a reservation failure (fail-CLOSED -- see
+      // reserveRequestSlot's doc comment) is retried exactly like any
+      // other transient non-429 failure below, and -- critically -- can
+      // never fall through to the fetch() call that follows it.
+      let waitMs = await reserveRequestSlot(host);
+      if (deadlineAt !== undefined) {
+        waitMs = Math.min(waitMs, Math.max(0, deadlineAt - Date.now()));
+      }
+      if (waitMs > 0) await sleep(waitMs, signal);
+      if (signal?.aborted) break;
       const res = await fetch(url, {
         headers: { accept: "application/json" },
         signal: requestSignal(signal),
@@ -305,7 +307,9 @@ async function getJson(
       // host-wide limit up to 3x per experiment per cycle, amplifying it.
       // Pacing now happens at the shared host-cooldown level (below)
       // instead, which survives across scheduler ticks; a non-429 transient
-      // failure (network blip, 5xx) keeps the existing bounded retry.
+      // failure (network blip, 5xx, or a reservation failure) keeps the
+      // existing bounded retry -- a reservation RPC hiccup is exactly the
+      // kind of transient condition this retry+backoff already exists for.
       if (err instanceof RateLimitedError) break;
       if (i < attempts - 1) {
         let delay = backoffDelayMs(i, null);

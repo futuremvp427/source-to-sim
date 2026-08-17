@@ -169,14 +169,32 @@ export async function recordHostRateLimit(
 const MIN_REQUEST_INTERVAL_MS = 500;
 
 /**
- * Hard ceiling on how far into the future a pile-up of concurrent
- * reservations can push a single caller's wait, enforced inside the RPC
- * itself (see the migration's LEAST(...) clamp). Bounds the cost of an
- * unusually deep pile-up (many overlapping stale invocations all
- * reserving at once) to a fixed, small wait instead of an ever-growing
- * queue -- comfortably under every relevant cycle/experiment deadline.
+ * Bounds how long a caller will actually WAIT on a granted reservation
+ * before giving up and deferring instead of fetching -- an application-level
+ * decision, not a SQL-side clamp (see the migration's doc comment for why a
+ * SQL-side ceiling caused bunching: every caller past the clamp collapsed
+ * onto the identical ceiling timestamp, silently reintroducing simultaneous
+ * firing). Every granted reservation stays strictly MIN_REQUEST_INTERVAL_MS
+ * apart from its neighbor no matter how deep the pile-up gets; a caller
+ * whose own slot would land past this budget simply never gets used --
+ * reserveRequestSlot throws instead of returning a wait, and the caller
+ * defers to the next scheduler tick rather than fetching.
+ *
+ * Sized from the actual known concurrent data-api.polymarket.com callers:
+ *   - EXPERIMENT_CONCURRENCY (2) within one scheduler invocation's batch
+ *   - +2 for one assumed overlapping scheduler invocation (the platform
+ *     does not guarantee mutually exclusive ticks -- see acquireLease)
+ *   - +1 candidate research (its own /trades + /positions calls; fenced
+ *     against itself by acquireResearchLease, but not against ingestion)
+ *   - +1 an independent health-probe caller (a separate dashboard tab/
+ *     process; TTL-cached but not fenced against ingestion)
+ *   realistic worst case ~= 6 concurrent callers.
+ * 8000ms / 500ms = 16 slots before any caller must defer -- ~2.5x that
+ * worst case, while still only 20% of EXPERIMENT_DEADLINE_MS (40s) and 16%
+ * of CYCLE_BUDGET_MS (50s), so even a fully-queued caller's wait is a small
+ * fraction of its own cycle budget.
  */
-const MAX_RESERVATION_LOOKAHEAD_MS = 4_000;
+const MAX_RESERVATION_LOOKAHEAD_MS = 8_000;
 
 /**
  * Hard ceiling on the reservation RPC itself, mirroring
@@ -187,21 +205,38 @@ const MAX_RESERVATION_LOOKAHEAD_MS = 4_000;
 const RESERVATION_RPC_DEADLINE_MS = 5_000;
 
 /**
+ * Raised whenever reserveRequestSlot cannot guarantee a paced slot: an RPC
+ * error, a deadline abort, an unreadable response, or a granted reservation
+ * whose wait exceeds MAX_RESERVATION_LOOKAHEAD_MS. Every one of these means
+ * the same thing to a caller -- do not fetch -- so they share one type
+ * rather than forcing callers to distinguish "coordination unavailable"
+ * from "coordination available but the queue is full" when the correct
+ * response (defer, no upstream request) is identical either way.
+ */
+export class ReservationUnavailableError extends Error {}
+
+/**
  * Atomically claims the next pacing slot for a host and returns how long
- * the caller must wait (clamped to [0, MAX_RESERVATION_LOOKAHEAD_MS]) before
- * it may actually issue its upstream request. Deliberately independent of
- * getHostCooldown/blocked_until -- see the migration's doc comment for why
- * the two mechanisms are kept separate. Only actual upstream requests
- * should call this: a same-cycle cache hit (see TradesRequestCache) must
- * never consume a reservation, so callers gate this behind their own
- * cache-miss branch, not before it.
+ * the caller must wait before it may actually issue its upstream request.
+ * Deliberately independent of getHostCooldown/blocked_until -- see the
+ * migration's doc comment for why the two mechanisms are kept separate.
+ * Only actual upstream requests should call this: a same-cycle cache hit
+ * (see TradesRequestCache) must never consume a reservation, so callers
+ * gate this behind their own cache-miss branch, not before it.
  *
- * Fails OPEN (returns 0, i.e. proceed immediately) on any RPC error or on
- * hitting its own deadline: this is a best-effort pacing optimization
- * layered on top of the already-fail-CLOSED blocked_until cooldown, which
- * remains the real safety net if the reservation RPC itself is unavailable.
- * Failing closed here would let a transient DB hiccup halt all ingestion,
- * which is strictly worse than temporarily losing the pacing optimization.
+ * Fails CLOSED: throws ReservationUnavailableError on any RPC error, on
+ * hitting its own deadline, or when the granted slot exceeds
+ * MAX_RESERVATION_LOOKAHEAD_MS. A DB-coordination hiccup must never let
+ * concurrent callers bypass pacing and recreate exactly the burst this
+ * mechanism exists to prevent -- getHostCooldown already applies this same
+ * fail-closed principle for the reactive cooldown, and a temporarily
+ * deferred poll (retried on the next scheduler tick via the existing
+ * checkpoint-driven catch-up) is a far smaller cost than an uncontrolled
+ * request burst. Callers are expected to let this propagate into their
+ * existing generic error handling (runExperimentCycle's catch-all,
+ * ingestGeneralActivity's per-page catch, candidate research's per-attempt
+ * retry / per-candidate catch) rather than special-case it -- none of those
+ * paths advance a checkpoint or touch paper accounting on a thrown error.
  */
 export async function reserveRequestSlot(host: string): Promise<number> {
   const controller = new AbortController();
@@ -213,20 +248,32 @@ export async function reserveRequestSlot(host: string): Promise<number> {
     const { data, error } = await supabaseAdmin
       .rpc(
         "reserve_http_request_slot" as never,
-        {
-          p_host: host,
-          p_min_interval_ms: MIN_REQUEST_INTERVAL_MS,
-          p_max_lookahead_ms: MAX_RESERVATION_LOOKAHEAD_MS,
-        } as never,
+        { p_host: host, p_min_interval_ms: MIN_REQUEST_INTERVAL_MS } as never,
       )
       .abortSignal(controller.signal);
-    if (error || typeof data !== "string") return 0;
+    if (error) {
+      throw new ReservationUnavailableError(`${host} reservation RPC failed: ${error.message}`);
+    }
+    if (typeof data !== "string") {
+      throw new ReservationUnavailableError(`${host} reservation RPC returned an unexpected shape`);
+    }
     const reservedAtMs = new Date(data).getTime();
-    if (!Number.isFinite(reservedAtMs)) return 0;
-    const waitMs = reservedAtMs - Date.now();
-    return Math.min(Math.max(0, waitMs), MAX_RESERVATION_LOOKAHEAD_MS);
-  } catch {
-    return 0;
+    if (!Number.isFinite(reservedAtMs)) {
+      throw new ReservationUnavailableError(`${host} reservation RPC returned an invalid timestamp`);
+    }
+    const waitMs = Math.max(0, reservedAtMs - Date.now());
+    if (waitMs > MAX_RESERVATION_LOOKAHEAD_MS) {
+      throw new ReservationUnavailableError(
+        `${host} reservation queue exceeds max lookahead (${waitMs}ms > ${MAX_RESERVATION_LOOKAHEAD_MS}ms)`,
+      );
+    }
+    return waitMs;
+  } catch (err) {
+    if (err instanceof ReservationUnavailableError) throw err;
+    // Covers both a rejected/thrown RPC call and the deadline-triggered abort.
+    throw new ReservationUnavailableError(
+      `${host} reservation unavailable: ${err instanceof Error ? err.message : "unknown error"}`,
+    );
   } finally {
     clearTimeout(timer);
   }

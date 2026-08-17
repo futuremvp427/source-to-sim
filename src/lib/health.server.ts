@@ -71,13 +71,28 @@ function probePublicDataApi(): Promise<PublicApiProbeResult> {
         }; probe skipped`,
       };
     }
+    // Same atomic pacing reservation ingestion's real /trades calls use (see
+    // reserveRequestSlot's doc comment): this probe is cached/TTL'd and
+    // cooldown-gated above, but it still shares the same host budget and
+    // must not be able to race a concurrent ingestion request past the
+    // point where both simultaneously believe the host is healthy. A
+    // reservation failure is deliberately reported as WARN, not FAIL: it
+    // means OUR coordination is degraded, not that Polymarket itself is
+    // unreachable -- conflating the two would misreport an internal
+    // hiccup as an upstream outage. Fail-closed either way: no fetch is
+    // attempted when a reservation can't be established.
+    let waitMs: number;
     try {
-      // Same atomic pacing reservation ingestion's real /trades calls use
-      // (see reserveRequestSlot's doc comment): this probe is cached/TTL'd
-      // and cooldown-gated above, but it still shares the same host budget
-      // and must not be able to race a concurrent ingestion request past
-      // the point where both simultaneously believe the host is healthy.
-      const waitMs = await reserveRequestSlot(DATA_API_HOST);
+      waitMs = await reserveRequestSlot(DATA_API_HOST);
+    } catch (err) {
+      return {
+        status: "WARN",
+        detail: `${DATA_API_HOST} request pacing reservation unavailable, probe skipped: ${
+          err instanceof Error ? err.message : "unknown error"
+        }`,
+      };
+    }
+    try {
       if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
       const res = await fetch(PUBLIC_DATA_API, {
         headers: { accept: "application/json" },

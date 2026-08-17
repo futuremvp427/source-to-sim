@@ -37,8 +37,31 @@ function from(table: string) {
   return b;
 }
 
+/**
+ * Chainable so both direct-await callers (acquireResearchLease) and
+ * .abortSignal(signal)-chained callers (reserveRequestSlot) work. Grants an
+ * immediate reservation by default -- this file is about the scheduler
+ * deadline/abort boundary, not reservation pacing/failure.
+ */
+function chainableRpc(result: { data: unknown; error: unknown }) {
+  const builder: {
+    abortSignal: (signal: AbortSignal) => typeof builder;
+    then: (resolve: (v: typeof result) => void) => void;
+  } = {
+    abortSignal: () => builder,
+    then: (resolve) => resolve(result),
+  };
+  return builder;
+}
+
 vi.mock("@/integrations/supabase/client.server", () => ({
-  supabaseAdmin: { from, rpc: async () => ({ data: "worker-1", error: null }) },
+  supabaseAdmin: {
+    from,
+    rpc: (name: string) =>
+      name === "reserve_http_request_slot"
+        ? chainableRpc({ data: new Date().toISOString(), error: null })
+        : chainableRpc({ data: "worker-1", error: null }),
+  },
 }));
 
 const { refreshCandidateResearchSafely, RESEARCH_DEADLINE_MS } = await import("../shadow.server");

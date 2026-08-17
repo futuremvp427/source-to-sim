@@ -113,6 +113,10 @@ function makeFakeSupabase(opts: {
   rpcThrows?: boolean;
   onRecordRpcAbortSignal?: (signal: AbortSignal) => void;
   workerStatusUpdateHangs?: boolean;
+  /** Reservation-specific failure injection, independent of rpcHangs/rpcThrows above (those only affect record_http_rate_limit). */
+  reservationHangs?: boolean;
+  reservationThrows?: boolean;
+  onReservationAbortSignal?: (signal: AbortSignal) => void;
 }) {
   const rpcCalls: { name: string; args: unknown }[] = [];
   const fromCalls: string[] = [];
@@ -121,6 +125,21 @@ function makeFakeSupabase(opts: {
   const supabaseAdmin = {
     rpc: (name: string, args: unknown) => {
       rpcCalls.push({ name, args });
+      // Grants an immediate reservation by default so every test in this
+      // file that isn't specifically about reservation behavior can reach
+      // an actual fetch() exactly as it did before reserveRequestSlot
+      // existed -- only reservationHangs/reservationThrows opt into
+      // exercising the fail-CLOSED path.
+      if (name === "reserve_http_request_slot") {
+        if (opts.reservationHangs) return chainableRpc({ kind: "hang" }, opts.onReservationAbortSignal);
+        if (opts.reservationThrows) {
+          return chainableRpc({ kind: "reject", error: new Error("reservation network down") });
+        }
+        return chainableRpc({
+          kind: "resolve",
+          result: { data: new Date().toISOString(), error: null },
+        });
+      }
       if (opts.rpcHangs && name === "record_http_rate_limit") {
         return chainableRpc({ kind: "hang" }, opts.onRecordRpcAbortSignal);
       }
@@ -156,6 +175,22 @@ function makeFakeSupabase(opts: {
           select: () => chainable({ data: null, error: null }),
         };
       }
+      // Fresh-worker checkpoint read/write: only reachable when the
+      // cooldown check above did NOT block -- i.e. the reservation tests
+      // below, which deliberately let the cycle proceed this far (either
+      // failing inside the fetch pipeline before any paper accounting
+      // table is touched, or -- once reservations succeed -- all the way
+      // through to a real checkpoint upsert). Any OTHER table would still
+      // hit the throw below, since this fake only ever supports this one
+      // additional table beyond http_rate_limits/worker_status.
+      if (table === "worker_checkpoints") {
+        return {
+          select: () => chainable({ data: null, error: null }),
+          eq: () => chainable({ data: null, error: null }),
+          maybeSingle: async () => ({ data: null, error: null }),
+          upsert: async () => ({ data: null, error: null }),
+        };
+      }
       // Any other table means the cooldown gate failed to short-circuit
       // before touching checkpoints/accounting -- fail loudly rather than
       // silently returning empty data.
@@ -184,6 +219,7 @@ const {
   DEFAULT_COOLDOWN_MS_FOR_TEST,
   MAX_COOLDOWN_MS_FOR_TEST,
   COOLDOWN_WRITE_DEADLINE_MS_FOR_TEST,
+  RESERVATION_RPC_DEADLINE_MS_FOR_TEST,
 } = await import("./http-rate-limit.server");
 const {
   runExperimentCycle,
@@ -638,6 +674,134 @@ describe("the health probe shares one in-flight promise and respects the host co
 
     expect(result.status).toBe("WARN");
     expect(result.detail).toMatch(/cooldown active/);
+  });
+
+  it("reports WARN (not FAIL) and skips the fetch when the reservation itself is unavailable -- distinct from an actual Polymarket outage", async () => {
+    resetPublicApiProbeCacheForTest();
+    currentFake = makeFakeSupabase({ cooldownRow: null, reservationThrows: true }).supabaseAdmin;
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await probePublicDataApiForTest();
+
+    expect(result.status).toBe("WARN");
+    expect(result.detail).toMatch(/reservation unavailable/i);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("reservation fail-closed propagation into the full ingestion cycle", () => {
+  it("a reservation RPC failure: zero upstream fetches, checkpoint never written, lease released as error with poll_failures incremented (same generic error path as any other transient failure)", async () => {
+    vi.useFakeTimers();
+    const { supabaseAdmin, updateCalls, fromCalls } = makeFakeSupabase({
+      cooldownRow: null,
+      reservationThrows: true,
+    });
+    currentFake = supabaseAdmin;
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    let rejected: unknown;
+    const promise = runExperimentCycle(baseExperiment(), "test-worker").catch((err) => {
+      rejected = err;
+    });
+    // Every getJson attempt's reservation rejects immediately (no RPC
+    // deadline involved -- reservationThrows rejects synchronously), so
+    // only the retry+backoff delays between attempts need flushing.
+    await vi.advanceTimersByTimeAsync(30_000);
+    await promise;
+
+    expect(rejected).toBeInstanceOf(Error);
+    expect((rejected as Error).message).toMatch(/reservation/i);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // worker_checkpoints is only ever READ (checkpoint_load) -- the success
+    // path's checkpoint upsert, which would show up as a second access, is
+    // never reached because the reservation failure throws inside
+    // fetchSourceWindow, well before `stages` resolves.
+    expect(fromCalls.filter((t) => t === "worker_checkpoints")).toHaveLength(1);
+    const release = updateCalls.find((u) => u.table === "worker_status");
+    expect(release).toBeDefined();
+    expect((release!.patch as { state: string }).state).toBe("error");
+    expect((release!.patch as { poll_failures: number }).poll_failures).toBe(1);
+    expect((release!.patch as { last_error: string }).last_error).toMatch(/reservation/i);
+  });
+
+  it("a reservation RPC timeout: zero upstream fetches, same fail-closed error path", async () => {
+    vi.useFakeTimers();
+    const { supabaseAdmin, updateCalls } = makeFakeSupabase({
+      cooldownRow: null,
+      reservationHangs: true,
+    });
+    currentFake = supabaseAdmin;
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    let rejected: unknown;
+    const promise = runExperimentCycle(baseExperiment(), "test-worker").catch((err) => {
+      rejected = err;
+    });
+
+    // Bounded: RESERVATION_RPC_DEADLINE_MS_FOR_TEST (5s) plus the getJson
+    // retry loop's own backoff between attempts -- comfortably covered.
+    await vi.advanceTimersByTimeAsync(RESERVATION_RPC_DEADLINE_MS_FOR_TEST * 4 + 2_000);
+    await promise;
+
+    expect(rejected).toBeDefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const release = updateCalls.find((u) => u.table === "worker_status");
+    expect((release!.patch as { state: string }).state).toBe("error");
+  });
+
+  it("no paper accounting table is ever touched when the reservation fails -- the fake's own unexpected-table guard would have thrown a DIFFERENT error otherwise", async () => {
+    vi.useFakeTimers();
+    const { supabaseAdmin } = makeFakeSupabase({ cooldownRow: null, reservationThrows: true });
+    currentFake = supabaseAdmin;
+    vi.stubGlobal("fetch", vi.fn());
+
+    let rejected: unknown;
+    const promise = runExperimentCycle(baseExperiment(), "test-worker").catch((err) => {
+      rejected = err;
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    await promise;
+
+    // If paper_experiments/paper_positions/paper_trades/source_events were
+    // ever reached, the fake would throw "unexpected table access: X"
+    // instead of the reservation error -- asserting the message proves
+    // the failure is specifically the reservation, not a later stage.
+    expect(rejected).toBeInstanceOf(Error);
+    expect((rejected as Error).message).toMatch(/reservation/i);
+  });
+
+  it("a later successful reservation (coordination DB recovered) lets the next scheduler tick proceed normally, resuming catch-up from the same boundary", async () => {
+    vi.useFakeTimers();
+    const failing = makeFakeSupabase({ cooldownRow: null, reservationThrows: true });
+    currentFake = failing.supabaseAdmin;
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    let rejected: unknown;
+    const first = runExperimentCycle(baseExperiment(), "tick-1").catch((err) => {
+      rejected = err;
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    await first;
+    expect(rejected).toBeInstanceOf(Error);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // Next tick: coordination DB has recovered. A fresh runExperimentCycle
+    // call (exactly like a real subsequent scheduler invocation) with a
+    // working reservation now proceeds through the fetch pipeline --
+    // nothing about the previous failure carries over or blocks it.
+    const recovered = makeFakeSupabase({ cooldownRow: null });
+    currentFake = recovered.supabaseAdmin;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify([]), { status: 200 })),
+    );
+    const second = runExperimentCycle(baseExperiment(), "tick-2");
+    await vi.advanceTimersByTimeAsync(5_000);
+    const result = await second;
+    expect(result.skipped).toBeNull();
   });
 });

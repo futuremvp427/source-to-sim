@@ -10,6 +10,7 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 import { parseSourceSide } from "../shadow-core";
+import { DATA_API_HOST, reserveRequestSlot } from "../http-rate-limit.server";
 
 import {
   RESEARCH_BATCH_SIZE,
@@ -100,16 +101,54 @@ function isAbort(err: unknown): boolean {
   );
 }
 
+/**
+ * Sleeps for `ms`, resolving early (never rejecting) if `signal` aborts
+ * first -- mirrors shadow.server.ts's own sleep() so a reservation wait
+ * here can never outlive the research deadline abort that's supposed to
+ * cut it short.
+ */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export async function getJson(
   url: string,
   opts: { attempts?: number | undefined; signal?: AbortSignal | undefined } = {},
 ): Promise<unknown> {
   const attempts = opts.attempts ?? 2;
+  const host = new URL(url).host;
   let lastErr: unknown;
   for (let i = 0; i < attempts; i += 1) {
     // The overall deadline wins over any remaining retry budget.
     if (opts.signal?.aborted) throw new ResearchBudgetExhaustedError("research deadline reached");
     try {
+      // Only data-api.polymarket.com (used by fetchPublicTrades/
+      // fetchPublicPositions) is gated: gamma-api.polymarket.com
+      // (resolveHandle's /public-search) and clob.polymarket.com
+      // (fetchSlippageSamples' /prices-history) are separate hosts with no
+      // evidence they share Polymarket's data-api rate limit, so pacing
+      // them would only slow research down for no closed race. Fails
+      // CLOSED like every other reservation caller (see
+      // reserveRequestSlot's own doc comment): a reservation failure
+      // throws here, is caught by the SAME catch/retry/backoff below as
+      // any other transient failure, and never falls through to fetch() --
+      // zero upstream requests happen on a reservation failure, for every
+      // one of this call's `attempts`.
+      if (host === DATA_API_HOST) {
+        const waitMs = await reserveRequestSlot(host);
+        if (waitMs > 0) await sleep(waitMs, opts.signal);
+      }
       const res = await fetch(url, {
         headers: { accept: "application/json" },
         signal: combineSignals(opts.signal, REQUEST_TIMEOUT_MS),

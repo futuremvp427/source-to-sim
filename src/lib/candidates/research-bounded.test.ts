@@ -72,10 +72,33 @@ function from(table: string) {
   return b;
 }
 
+/**
+ * Chainable RPC fake supporting both direct-await callers (e.g.
+ * acquireResearchLease) and `.abortSignal(signal)`-chained callers (e.g.
+ * reserveRequestSlot -- see http-rate-limit.server.ts). Grants an
+ * immediate reservation for reserve_http_request_slot by default, since
+ * this file's tests are about research's OWN deadline/abort/error
+ * handling, not reservation pacing/failure (covered in
+ * reserve-http-request-slot.test.ts).
+ */
+function chainableRpc(result: { data: unknown; error: unknown }) {
+  const builder: {
+    abortSignal: (signal: AbortSignal) => typeof builder;
+    then: (resolve: (v: typeof result) => void) => void;
+  } = {
+    abortSignal: () => builder,
+    then: (resolve) => resolve(result),
+  };
+  return builder;
+}
+
 vi.mock("@/integrations/supabase/client.server", () => ({
   supabaseAdmin: {
     from,
-    rpc: async () => ({ data: "worker-1", error: null }),
+    rpc: (name: string) =>
+      name === "reserve_http_request_slot"
+        ? chainableRpc({ data: new Date().toISOString(), error: null })
+        : chainableRpc({ data: "worker-1", error: null }),
   },
 }));
 

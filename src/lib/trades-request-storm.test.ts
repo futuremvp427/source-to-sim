@@ -1,6 +1,26 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/integrations/supabase/client.server", () => ({ supabaseAdmin: {} }));
+// A working reserve_http_request_slot that always grants an immediate slot:
+// these tests are about the request-storm-prevention CACHE, not pacing, so
+// this exists purely to keep getJson's now-fail-CLOSED reservation gate
+// (see http-rate-limit.server.ts) from blocking every fetch in this file.
+// Reservation-specific behavior (fail-closed, spacing, capacity) is covered
+// in reserve-http-request-slot.test.ts instead.
+vi.mock("@/integrations/supabase/client.server", () => ({
+  supabaseAdmin: {
+    rpc: (name: string) => ({
+      abortSignal: () => ({
+        then: (resolve: (v: { data: unknown; error: unknown }) => void) => {
+          if (name === "reserve_http_request_slot") {
+            resolve({ data: new Date().toISOString(), error: null });
+            return;
+          }
+          resolve({ data: null, error: null });
+        },
+      }),
+    }),
+  },
+}));
 
 const {
   getArrayForTest,

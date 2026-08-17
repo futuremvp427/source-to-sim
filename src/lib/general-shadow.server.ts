@@ -65,7 +65,11 @@ function sleep(ms: number): Promise<void> {
  * reserveRequestSlot's doc comment) immediately before firing, since this
  * hits the same host and is exactly the kind of independent caller that
  * could otherwise race a concurrent /trades request past the cycle-start
- * cooldown check.
+ * cooldown check. Fails CLOSED: a reservation failure throws here (no
+ * fetch attempted) and is caught by ingestGeneralActivity's existing
+ * per-page catch below, which marks the page truncated -- the same
+ * fail-closed outcome an actual 429 already produces, requiring no new
+ * error handling.
  */
 async function getActivityPage(wallet: string, offset: number): Promise<Json[]> {
   const url = `${DATA_API}/activity?user=${wallet}&limit=${ACTIVITY_PAGE}&offset=${offset}`;
