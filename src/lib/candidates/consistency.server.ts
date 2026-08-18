@@ -33,16 +33,23 @@ type ComputedRow = {
  * Pure per-candidate persistence invariant.
  *
  * Research is BOUNDED and resumable (oldest-first rotation), so a candidate
- * being old is expected and valid. What is NOT valid is a candidate whose three
- * artifacts come from different runs ("mixed version"), or a candidate missing
- * an artifact entirely. Therefore the invariant is INTERNAL alignment of each
- * candidate's own metrics/fingerprint/score timestamps, never freshness
- * relative to the latest global worker run.
+ * being old is expected and valid. A newly-added resolved candidate with zero
+ * artifacts is also valid: it is simply NOT_SCORED and will be selected by the
+ * never-computed-first research rotation. What is NOT valid is a candidate
+ * with only some artifacts present, or one whose three artifacts come from
+ * different runs ("mixed version"). Therefore the invariant is INTERNAL
+ * completeness/alignment once research has begun, never freshness relative to
+ * the latest global worker run.
  */
 export function evaluateCandidatePersistence(
   artifacts: { metrics?: string | null; fingerprint?: string | null; score?: string | null },
   slopMs: number = ARTIFACT_ALIGNMENT_SLOP_MS,
 ): { missing: string[]; stale: string[] } {
+  const values = [artifacts.metrics, artifacts.fingerprint, artifacts.score];
+  // A candidate that has never been researched is a legitimate NOT_SCORED
+  // state. Treat all-three-missing differently from a partially persisted run.
+  if (values.every((value) => !value)) return { missing: [], stale: [] };
+
   const missing: string[] = [];
   const times = new Map<string, number>();
   for (const [label, value] of [
@@ -73,9 +80,10 @@ export function evaluateCandidatePersistence(
 
 /**
  * Verifies the persisted research invariant across all resolved candidates,
- * using the per-candidate internal alignment rule above. Intentionally separate
- * from the research engine so it can guard both manual and scheduled entry
- * points without changing scoring math.
+ * using the per-candidate internal completeness/alignment rule above.
+ * Intentionally separate from the research engine so it can guard both manual
+ * and scheduled entry points without changing scoring math. Never-researched
+ * candidates remain valid NOT_SCORED rows until their bounded turn arrives.
  */
 export async function verifyCandidateResearchPersistence(options: {
   downgradeRunState?: boolean;

@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from "vitest";
  * Bounded oldest-first research means MOST candidates are intentionally not
  * refreshed by any given run. The persistence invariant is therefore
  * per-candidate INTERNAL alignment (metrics/fingerprint/score from the same
- * run), never freshness relative to the latest global worker run.
+ * run), never freshness relative to the latest global worker run. A resolved
+ * candidate with no artifacts yet is a valid NOT_SCORED row until its bounded
+ * research turn arrives.
  */
 
 type Row = Record<string, unknown>;
@@ -42,7 +44,7 @@ function from(table: string) {
 
 vi.mock("@/integrations/supabase/client.server", () => ({ supabaseAdmin: { from } }));
 
-const { verifyCandidateResearchPersistence } = await import("./consistency.server");
+const { evaluateCandidatePersistence, verifyCandidateResearchPersistence } = await import("./consistency.server");
 const { selectResearchBatch } = await import("./research-batch");
 
 const RUN_A = "2026-08-16T18:27:43.000Z"; // older run
@@ -80,7 +82,21 @@ describe("candidate persistence consistency under bounded rotation", () => {
     expect(check.ok).toBe(true);
     expect(check.issues).toEqual([]);
     expect(check.expectedCandidates).toBe(5);
-    // A valid bounded run must not be downgraded because others were deferred.
+    expect(workerWrites).toHaveLength(0);
+  });
+
+  it("treats a resolved candidate with zero artifacts as valid NOT_SCORED", async () => {
+    reset();
+    candidate("new-wallet", null);
+
+    expect(
+      evaluateCandidatePersistence({ metrics: null, fingerprint: null, score: null }),
+    ).toEqual({ missing: [], stale: [] });
+
+    const check = await verifyCandidateResearchPersistence({ downgradeRunState: true });
+    expect(check.ok).toBe(true);
+    expect(check.issues).toEqual([]);
+    expect(check.expectedCandidates).toBe(1);
     expect(workerWrites).toHaveLength(0);
   });
 
@@ -95,9 +111,16 @@ describe("candidate persistence consistency under bounded rotation", () => {
     expect(check.ok).toBe(true);
   });
 
-  it("fails when a candidate is missing an artifact", async () => {
+  it("fails when research has begun but an artifact is missing", async () => {
     reset();
     candidate("nofp", RUN_A, { fingerprint: null });
+    const direct = evaluateCandidatePersistence({
+      metrics: RUN_A,
+      fingerprint: null,
+      score: RUN_A,
+    });
+    expect(direct.missing).toEqual(["fingerprint"]);
+
     const check = await verifyCandidateResearchPersistence();
     expect(check.ok).toBe(false);
     expect(check.issues[0]).toMatchObject({ handle: "nofp", missing: ["fingerprint"] });
@@ -141,12 +164,10 @@ describe("bounded batch prioritizes repair candidates", () => {
       ["c", "2026-08-10T00:00:00.000Z"],
       ["d", null], // never computed
     ]);
-    // c is newest but mixed-version; it must still come first.
     expect(selectResearchBatch(candidates, lastComputed, 2, new Set(["c"])).map((x) => x.id)).toEqual([
       "c",
       "d",
     ]);
-    // Without repairs, ordinary oldest-first (never-computed first) is retained.
     expect(selectResearchBatch(candidates, lastComputed, 2).map((x) => x.id)).toEqual(["d", "a"]);
   });
 });
