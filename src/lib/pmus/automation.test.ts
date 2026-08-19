@@ -32,6 +32,34 @@ describe("weather relevance filter", () => {
   it("matches on category metadata too", () => {
     expect(isRelevantWeatherMarket({ question: "Phoenix high", category: "Weather" })).toBe(true);
   });
+
+  it("recognizes the expanded term set (storm/flood/wind/drought/wildfire/hail/humidity/ice/sleet), by question, slug, and category", () => {
+    expect(isRelevantWeatherMarket({ question: "Will a named storm form in the Atlantic by Sept 1?" })).toBe(true);
+    expect(isRelevantWeatherMarket({ question: "Will the Mississippi River flood this spring?" })).toBe(true);
+    expect(isRelevantWeatherMarket({ question: "Will wind gusts exceed 60mph in Chicago tomorrow?" })).toBe(true);
+    expect(isRelevantWeatherMarket({ question: "Will California remain in drought by year end?" })).toBe(true);
+    expect(isRelevantWeatherMarket({ question: "Will a wildfire burn over 10,000 acres in Oregon?" })).toBe(true);
+    expect(isRelevantWeatherMarket({ question: "Will hail damage be reported in Dallas this week?" })).toBe(true);
+    expect(isRelevantWeatherMarket({ question: "Will humidity exceed 90% in Miami on Friday?" })).toBe(true);
+    expect(isRelevantWeatherMarket({ question: "Will there be measurable ice accumulation in Austin?" })).toBe(true);
+    expect(isRelevantWeatherMarket({ question: "Will sleet fall in Boston this weekend?" })).toBe(true);
+
+    // Slug-only matches (hyphens normalized to spaces by the haystack build).
+    expect(isRelevantWeatherMarket({ slug: "atlantic-tropical-storm-forms-by-sept-1" })).toBe(true);
+    expect(isRelevantWeatherMarket({ slug: "midwest-flood-warning-issued" })).toBe(true);
+
+    // Category/subcategory-only matches.
+    expect(isRelevantWeatherMarket({ question: "Q4 outlook", category: "Drought" })).toBe(true);
+    expect(isRelevantWeatherMarket({ question: "Q4 outlook", subcategory: "Wildfire" })).toBe(true);
+  });
+
+  it("the expanded term set does not turn genuinely unrelated markets relevant", () => {
+    // Regression guard for the specific existing "rejects unrelated markets"
+    // fixtures above -- neither contains any of the 9 newly added terms as a
+    // substring, so adding them must not flip these to true.
+    expect(isRelevantWeatherMarket({ question: "Who wins the 2026 midterms?" })).toBe(false);
+    expect(isRelevantWeatherMarket({ slug: "nba-finals-2026-lakers" })).toBe(false);
+  });
 });
 
 describe("scan cadence", () => {

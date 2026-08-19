@@ -29,6 +29,7 @@ import {
   type PeriodKey,
   type ProfitStatus,
 } from "./general-shadow";
+import { labelExecutionAdjustedPnl, labelRawIdealizedPnl, type LabeledExecutionAdjustedPnl, type LabeledIdealizedPnl } from "./execution-labels";
 import { MARK_MAX_AGE_MS, roundUsd } from "./shadow-core";
 import { parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "./http-rate-limit.server";
 
@@ -100,9 +101,17 @@ async function getActivityPage(wallet: string, offset: number): Promise<Json[]> 
  *
  * A page that fails (or an offset ceiling) never discards pages already
  * fetched: whatever was collected is persisted.
+ *
+ * `goLiveTs` only affects the descriptive `post_go_live` flag stamped on each
+ * row (never a filter on what gets captured or persisted). It defaults to the
+ * General Shadow boundary for backward compatibility with existing callers;
+ * a caller observing a different cohort (e.g. a V2/V3 experiment) should pass
+ * that experiment's own `follow_from_ts` so the flag stays accurate for that
+ * wallet's actual paper-copy boundary.
  */
 export async function ingestGeneralActivity(
   wallet: string,
+  goLiveTs: number = GS_GO_LIVE_TS,
 ): Promise<{ fetched: number; nonTrade: number; inserted: number; pages: number; truncated: boolean }> {
   const address = wallet.toLowerCase();
   const raw: Json[] = [];
@@ -125,7 +134,7 @@ export async function ingestGeneralActivity(
     }
   }
 
-  const normalized = normalizeActivity(raw, address, GS_GO_LIVE_TS);
+  const normalized = normalizeActivity(raw, address, goLiveTs);
   if (normalized.length === 0) {
     return { fetched: raw.length, nonTrade: 0, inserted: 0, pages, truncated };
   }
@@ -209,6 +218,10 @@ export type GeneralWalletView = {
     total: number | null;
     equity: number | null;
     maxDrawdown: number | null;
+    /** `realized` above, explicitly labeled: assumes every fill happened at the exact source price. */
+    rawIdealizedPnl: LabeledIdealizedPnl;
+    /** Honest, execution-adjusted counterpart. Explicitly unavailable until a General Shadow observation series exists. */
+    executionAdjustedPnl: LabeledExecutionAdjustedPnl;
   };
   settlements: number;
   daily: GeneralDailyRow[];
@@ -545,6 +558,11 @@ async function loadWallet(experiment: {
       total,
       equity,
       maxDrawdown: daily.length > 0 ? maxDrawdown : null,
+      rawIdealizedPnl: labelRawIdealizedPnl(realized),
+      executionAdjustedPnl: labelExecutionAdjustedPnl(null, {
+        source: "observation_log",
+        unavailableReason: "No observation-log series exists yet for General Shadow experiments.",
+      }),
     },
     settlements: settlements.length,
     daily: daily.slice(-30),

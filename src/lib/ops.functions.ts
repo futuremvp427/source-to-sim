@@ -29,11 +29,18 @@ export const getV2Status = createServerFn({ method: "GET" }).handler(async () =>
   return loadV2Status();
 });
 
-/** V2 vs V3 capacity cohort comparison. Read-only, fully derived. */
+/**
+ * V2 vs V3 capacity cohort comparison. Read-only, fully derived.
+ *
+ * Requests the execution-adjusted join (see capacity.server.ts) so the
+ * dashboard can show RAW IDEALIZED P&L and EXECUTION-ADJUSTED /
+ * SLIPPAGE-ADJUSTED P&L side by side. live-safety.server.ts's own call to
+ * loadCapacityComparison() deliberately omits this flag and is unaffected.
+ */
 export const getCapacityComparison = createServerFn({ method: "GET" }).handler(
   async (): Promise<CapacityComparisonData> => {
     const { loadCapacityComparison } = await import("./capacity.server");
-    return loadCapacityComparison();
+    return loadCapacityComparison({ includeExecutionAdjusted: true });
   },
 );
 

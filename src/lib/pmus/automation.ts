@@ -31,6 +31,18 @@ export const WEATHER_TERMS = Object.freeze([
   "degrees",
   "fahrenheit",
   "celsius",
+  // Phase 0A remediation: previously missed weather/climate vocabulary (e.g.
+  // a market titled just "storm" with no "tropical" qualifier, or "flood",
+  // "drought", "wildfire" reports) — see docs' discovery-coverage audit.
+  "storm",
+  "flood",
+  "wind",
+  "drought",
+  "wildfire",
+  "hail",
+  "humidity",
+  "ice",
+  "sleet",
 ]);
 
 /** True when an open US market looks like a weather/climate market. */

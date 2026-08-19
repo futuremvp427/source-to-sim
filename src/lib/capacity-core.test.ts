@@ -146,6 +146,52 @@ describe("buildCapacityRow", () => {
   });
 });
 
+describe("buildCapacityRow labels raw vs. execution-adjusted P&L (Phase 0A remediation, item 2)", () => {
+  it("always carries an explicit RAW IDEALIZED label alongside the unchanged realizedPnl field", () => {
+    const row = buildCapacityRow(baseInput({ realizedPnl: 149.84 }));
+    // realizedPnl is untouched (backward compatible; no historical/existing
+    // consumer field is renamed or silently replaced).
+    expect(row.realizedPnl).toBe(149.84);
+    expect(row.rawIdealizedPnl.value).toBe(149.84);
+    expect(row.rawIdealizedPnl.label).toBe("RAW IDEALIZED P&L");
+    expect(row.rawIdealizedPnl.isIdealized).toBe(true);
+    expect(row.rawIdealizedPnl.isExecutable).toBe(false);
+    expect(row.rawIdealizedPnl.caveat).toMatch(/source wallet/i);
+    expect(row.rawIdealizedPnl.caveat).toMatch(/NOT a realistic or executable/i);
+  });
+
+  it("defaults executionAdjustedPnl to explicitly unavailable when no adjusted figure is supplied", () => {
+    const row = buildCapacityRow(baseInput());
+    expect(row.executionAdjustedPnl.available).toBe(false);
+    expect(row.executionAdjustedPnl.value).toBeNull();
+    if (!row.executionAdjustedPnl.available) {
+      expect(row.executionAdjustedPnl.reason.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("surfaces the execution-adjusted figure distinctly from the raw one when supplied", () => {
+    const row = buildCapacityRow(
+      baseInput({ realizedPnl: -655.39, executionAdjustedCumulativePnl: -720.1 }),
+    );
+    expect(row.rawIdealizedPnl.value).toBe(-655.39);
+    expect(row.executionAdjustedPnl.available).toBe(true);
+    if (row.executionAdjustedPnl.available) {
+      expect(row.executionAdjustedPnl.value).toBe(-720.1);
+      expect(row.executionAdjustedPnl.label).toBe("EXECUTION-ADJUSTED / SLIPPAGE-ADJUSTED P&L");
+      expect(row.executionAdjustedPnl.isExecutable).toBe(false); // still an estimate, never claims to be executable
+      expect(row.executionAdjustedPnl.source).toBe("observation_log");
+    }
+    // The two figures must never collapse to the same field/value silently.
+    expect(row.executionAdjustedPnl.value).not.toBe(row.rawIdealizedPnl.value);
+  });
+
+  it("an execution-adjusted value of exactly 0 is treated as available, not confused with unavailable", () => {
+    const row = buildCapacityRow(baseInput({ executionAdjustedCumulativePnl: 0 }));
+    expect(row.executionAdjustedPnl.available).toBe(true);
+    if (row.executionAdjustedPnl.available) expect(row.executionAdjustedPnl.value).toBe(0);
+  });
+});
+
 describe("groupCapacityRows", () => {
   it("pairs V2 and V3 rows per wallet in cohort order", () => {
     const v3 = buildCapacityRow(baseInput());

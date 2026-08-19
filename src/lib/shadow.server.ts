@@ -48,10 +48,12 @@ import {
   isEligibleForV2Copy,
   isV2Name,
 } from "./v2-cohort";
+import { isV3Name } from "./v3-cohort";
 import { isInMarketScope, parseMarketScope } from "./market-scope";
 import {
   GENERAL_SHADOW_CATCHUP_PAGE_BUDGET,
   GENERAL_SHADOW_POLLING_ENABLED,
+  GS_GO_LIVE_TS,
   isGeneralShadowName,
 } from "./general-shadow";
 import {
@@ -1890,6 +1892,24 @@ export async function refreshCandidateResearchSafely(
   }
 }
 
+/**
+ * Cohorts whose followed wallet's non-trade activity (SPLIT/MERGE/REDEEM) is
+ * captured as evidence via ingestGeneralActivity. Observation only: this never
+ * gates or influences BUY/SELL paper-copying, sizing, or accounting for any
+ * cohort -- it only decides whether the separate, additive general_activity
+ * evidence stage runs alongside a cycle's ordinary paper processing.
+ *
+ * General Shadow already captured this. V2/V3 CAPACITY are added here so the
+ * 10-experiment qualification cohort also gets non-trade evidence for its
+ * followed wallets -- previously only General Shadow's two wallets did, even
+ * though the same class of wallet activity (a source flattening a position by
+ * buying the complementary outcome and merging, rather than placing a SELL)
+ * can occur for any followed wallet.
+ */
+export function isNonTradeActivityCohort(name: string): boolean {
+  return isGeneralShadowName(name) || isV2Name(name) || isV3Name(name);
+}
+
 export async function runExperimentCycle(
   experiment: Experiment,
   baseWorkerId: string,
@@ -2098,12 +2118,12 @@ export async function runExperimentCycle(
                 NO_PREVIEWS,
               ),
         );
-        if (isGeneralShadowName(experiment.name)) {
+        if (isNonTradeActivityCohort(experiment.name)) {
           await timed("general_activity", async () => {
             try {
               const { ingestGeneralActivity } = await import("./general-shadow.server");
               await withDeadline(
-                ingestGeneralActivity(wallet),
+                ingestGeneralActivity(wallet, experiment.follow_from_ts ?? GS_GO_LIVE_TS),
                 GENERAL_ACTIVITY_DEADLINE_MS,
                 "general activity",
               );

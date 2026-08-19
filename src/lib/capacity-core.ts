@@ -7,6 +7,12 @@
  * value, so it is not a mark-to-market equity drawdown.
  */
 
+import {
+  labelExecutionAdjustedPnl,
+  labelRawIdealizedPnl,
+  type LabeledExecutionAdjustedPnl,
+  type LabeledIdealizedPnl,
+} from "./execution-labels";
 import { roundUsd, SIZING_RESERVE_FRACTION } from "./shadow-core";
 
 export type CapacityCohort = "V2" | "V3";
@@ -38,15 +44,36 @@ export type CapacityRowInput = {
   insufficientCashSkips: number;
   settledMarkets: number;
   cashPoints: CashPoint[];
+  /**
+   * The system's own observed-slippage-adjusted cumulative P&L for this
+   * experiment, when available (see observation/daily.server.ts). Pass null
+   * (the default) when no adjusted figure has been computed for this
+   * experiment yet -- this never blocks or delays the raw figure.
+   */
+  executionAdjustedCumulativePnl?: number | null;
+  executionAdjustedSource?: string;
+  executionAdjustedUnavailableReason?: string | undefined;
 };
 
-export type CapacityRow = Omit<CapacityRowInput, "cashPoints"> & {
+export type CapacityRow = Omit<
+  CapacityRowInput,
+  "cashPoints" | "executionAdjustedCumulativePnl" | "executionAdjustedSource" | "executionAdjustedUnavailableReason"
+> & {
   reserve: number;
   spendable: number;
   roi: number | null;
   markCoveragePct: number | null;
   /** CASH-basis drawdown (realized cash only, no unrealized open value). */
   maxDrawdownCash: number;
+  /**
+   * `realizedPnl` above (kept for backward compatibility) IS this same
+   * number. `rawIdealizedPnl` carries the same value with an explicit,
+   * non-optional label/caveat so no consumer can display it without also
+   * carrying the disclosure that it assumes idealized fills.
+   */
+  rawIdealizedPnl: LabeledIdealizedPnl;
+  /** The honest, execution-adjusted counterpart, explicitly absent when unavailable. */
+  executionAdjustedPnl: LabeledExecutionAdjustedPnl;
 };
 
 export type CapacityWalletGroup = {
@@ -98,7 +125,13 @@ export function cashMaxDrawdown(startingBankroll: number, points: CashPoint[]): 
 }
 
 export function buildCapacityRow(input: CapacityRowInput): CapacityRow {
-  const { cashPoints, ...rest } = input;
+  const {
+    cashPoints,
+    executionAdjustedCumulativePnl,
+    executionAdjustedSource,
+    executionAdjustedUnavailableReason,
+    ...rest
+  } = input;
   const reserve = reserveFor(input.startingBankroll);
   return {
     ...rest,
@@ -108,6 +141,11 @@ export function buildCapacityRow(input: CapacityRowInput): CapacityRow {
     markCoveragePct:
       input.openPositions > 0 ? (input.markedOpenPositions / input.openPositions) * 100 : null,
     maxDrawdownCash: cashMaxDrawdown(input.startingBankroll, cashPoints),
+    rawIdealizedPnl: labelRawIdealizedPnl(input.realizedPnl),
+    executionAdjustedPnl: labelExecutionAdjustedPnl(executionAdjustedCumulativePnl ?? null, {
+      source: executionAdjustedSource ?? "observation_log",
+      unavailableReason: executionAdjustedUnavailableReason,
+    }),
   };
 }
 
