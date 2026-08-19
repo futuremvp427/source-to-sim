@@ -125,6 +125,29 @@ export function createResearchDeadline(
 export const UNRESOLVED_RESOLUTIONS_PER_RUN = 1;
 
 /**
+ * Catch-up cadence used ONLY while an urgent research backlog remains: resolved
+ * candidates that have never completed research, or whose persisted artifacts
+ * are missing/mixed-version. Ordinary scored candidates deferred by the normal
+ * oldest-first rotation never trigger it, so the steady state stays on the
+ * 6-hour cadence. Nothing about request pacing/concurrency changes.
+ */
+export const URGENT_BACKLOG_CATCHUP_MS = 15 * 60_000;
+
+/** Stable, human-readable marker persisted in the run detail string. */
+export function formatUrgentBacklogMarker(remaining: number): string {
+  return `Urgent backlog remaining: ${Math.max(0, Math.trunc(remaining))}.`;
+}
+
+/** Reads the urgent-backlog count back out of a persisted run detail string. */
+export function parseUrgentBacklogRemaining(detail: string | null | undefined): number | null {
+  if (!detail) return null;
+  const match = /Urgent backlog remaining:\s*(\d+)\./.exec(detail);
+  if (!match) return null;
+  const n = Number(match[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
  * Bounded, deterministic selection of unresolved candidates to resolve in one
  * invocation. Oldest-touched first (never-touched first), tie-break on handle,
  * so a failed attempt rotates to the back of the queue and the tail of the
