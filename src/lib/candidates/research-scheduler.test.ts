@@ -185,7 +185,7 @@ describe("scheduler deadline cancels candidate research", () => {
     // Flush the pass's own async steps (lease, bounded reads, trade/position
     // fetches) WITHOUT burning wall clock, so it is genuinely sitting on the
     // slippage fetch when the scheduler budget fires.
-    for (let i = 0; i < 40; i += 1) await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 60; i += 1) await vi.advanceTimersByTimeAsync(100);
     await vi.advanceTimersByTimeAsync(RESEARCH_DEADLINE_MS + 1);
     await pending;
 
