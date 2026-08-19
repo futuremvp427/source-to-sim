@@ -85,14 +85,9 @@ export function isAllowedLivePilotOperation(method: unknown, path: unknown): boo
  * isAllowedLivePilotOperation) validates the *system's* state, not *this
  * order's* identity/size.
  *
- * Defense-in-depth: today the only caller of submitPoligarchLiveOrder is
- * runPreviewPipeline (poligarch-preview.server.ts), which already enforces
- * isAllowedPilotSource and per-order sizing/exposure caps before ever
- * reaching submission. But this module's own safety story should not
- * depend entirely on always being invoked correctly by something else — if
- * a future caller ever wires submission without routing through preview
- * first, this check is what stops a wrong-wallet/wrong-experiment order or
- * an over-cap notional from ever reaching the signer.
+ * Defense-in-depth: this module is currently unreachable, but if a future
+ * reviewed caller wires submission, this check stops a wrong-wallet/
+ * wrong-experiment order or an over-cap notional from reaching the signer.
  */
 export function checkPilotOrderAllowlistAndNotional(
   pilotSource: { experimentName: string; wallet: string; notionalUsd: number },
@@ -118,12 +113,58 @@ export function checkPilotOrderAllowlistAndNotional(
   return { ok: true };
 }
 
+/**
+ * Current Polymarket US create-order payload shape. The source model stays
+ * deliberately simple (YES/NO + BUY/SELL); this boundary maps it to the exact
+ * PMUS enum strings so a future enablement cannot accidentally submit stale
+ * short enum values such as `YES`, `BUY`, or `IMMEDIATE_OR_CANCEL`.
+ */
+export type PmusCreateOrderRequest = {
+  marketSlug: string;
+  type: "ORDER_TYPE_LIMIT";
+  price: { value: string; currency: "USD" };
+  quantity: number;
+  outcomeSide: "OUTCOME_SIDE_YES" | "OUTCOME_SIDE_NO";
+  action: "ORDER_ACTION_BUY" | "ORDER_ACTION_SELL";
+  tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL";
+  manualOrderIndicator: "MANUAL_ORDER_INDICATOR_AUTOMATIC";
+  synchronousExecution: true;
+};
+
+/**
+ * Extracts the exchange order id according to the current PMUS response shape:
+ * create -> top-level `id`; status -> `order.id`; cancel -> successful response
+ * is empty, so the already-known requested order id is the durable identity.
+ */
+export function extractOrderIdFromLivePilotResponse(
+  method: string,
+  path: string,
+  raw: unknown,
+  requestedOrderId?: string,
+): string | null {
+  const obj = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+  if (method === "POST" && path === "/v1/orders") {
+    return typeof obj?.["id"] === "string" ? (obj["id"] as string) : null;
+  }
+  if (method === "GET" && /^\/v1\/order\/[^/]+$/.test(path)) {
+    const order = obj?.["order"];
+    if (!order || typeof order !== "object") return null;
+    const id = (order as Record<string, unknown>)["id"];
+    return typeof id === "string" ? id : null;
+  }
+  if (method === "POST" && /^\/v1\/order\/[^/]+\/cancel$/.test(path)) {
+    return requestedOrderId && requestedOrderId.length > 0 ? requestedOrderId : null;
+  }
+  return null;
+}
+
 async function attemptLivePilotOperation(
   method: string,
   path: string,
   body: unknown,
   deps: SubmissionDeps,
   pilotSource?: { experimentName: string; wallet: string; notionalUsd: number },
+  requestedOrderId?: string,
 ): Promise<SubmissionResult> {
   // 1. Hard constant gate. Runs before literally anything else — no DB read,
   //    no credential load, no signing, no fetch — even if every other input
@@ -148,8 +189,7 @@ async function attemptLivePilotOperation(
   }
 
   // 3.5. Order-scoped identity + notional guard (submit only — cancel/status
-  // act on an order that already passed this check at submit time). Defense
-  // in depth: see checkPilotOrderAllowlistAndNotional's docstring above.
+  // act on an order that already passed this check at submit time).
   if (pilotSource) {
     const guard = checkPilotOrderAllowlistAndNotional(pilotSource, state.maxOrderNotionalUsd);
     if (!guard.ok) return { ok: false, error: guard.error };
@@ -185,11 +225,20 @@ async function attemptLivePilotOperation(
     return { ok: false, error: `${path} responded ${response.status}` };
   }
 
-  const raw = (await response.json()) as { id?: string };
-  if (!raw || typeof raw.id !== "string") {
-    return { ok: false, error: `${path} returned a response without an order id` };
+  const raw = (await response.json()) as unknown;
+  const orderId = extractOrderIdFromLivePilotResponse(method, path, raw, requestedOrderId);
+  if (!orderId) {
+    return { ok: false, error: `${path} returned an unexpected successful response shape` };
   }
-  return { ok: true, orderId: raw.id, raw };
+  if (
+    requestedOrderId &&
+    method === "GET" &&
+    /^\/v1\/order\/[^/]+$/.test(path) &&
+    orderId !== requestedOrderId
+  ) {
+    return { ok: false, error: `${path} returned a different order id than requested` };
+  }
+  return { ok: true, orderId, raw };
 }
 
 export type PoligarchLiveOrderIntent = {
@@ -242,26 +291,32 @@ export function formatPriceForTick(price: number, tick: number): string {
   return price.toFixed(decimals);
 }
 
+/** Pure request builder so the exact PMUS submission schema is testable while submission remains hard-disabled. */
+export function buildPoligarchLiveOrderRequest(order: PoligarchLiveOrderIntent): PmusCreateOrderRequest {
+  const priceTick = order.priceTick ?? DEFAULT_PRICE_TICK;
+  const roundedPrice = roundToPriceTick(order.limitPrice, priceTick);
+  return {
+    marketSlug: order.usMarketSlug,
+    type: "ORDER_TYPE_LIMIT",
+    price: { value: formatPriceForTick(roundedPrice, priceTick), currency: "USD" },
+    quantity: order.shares,
+    outcomeSide: order.outcome === "YES" ? "OUTCOME_SIDE_YES" : "OUTCOME_SIDE_NO",
+    action: order.side === "BUY" ? "ORDER_ACTION_BUY" : "ORDER_ACTION_SELL",
+    tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+    manualOrderIndicator: "MANUAL_ORDER_INDICATOR_AUTOMATIC",
+    synchronousExecution: true,
+  };
+}
+
 /** POST /v1/orders. Gated per attemptLivePilotOperation's fail-closed order. */
 export function submitPoligarchLiveOrder(
   order: PoligarchLiveOrderIntent,
   deps: SubmissionDeps,
 ): Promise<SubmissionResult> {
-  const priceTick = order.priceTick ?? DEFAULT_PRICE_TICK;
-  const roundedPrice = roundToPriceTick(order.limitPrice, priceTick);
   return attemptLivePilotOperation(
     "POST",
     "/v1/orders",
-    {
-      marketSlug: order.usMarketSlug,
-      type: "ORDER_TYPE_LIMIT",
-      price: { value: formatPriceForTick(roundedPrice, priceTick), currency: "USD" },
-      quantity: order.shares,
-      outcomeSide: order.outcome,
-      action: order.side,
-      tif: "IMMEDIATE_OR_CANCEL",
-      synchronousExecution: true,
-    },
+    buildPoligarchLiveOrderRequest(order),
     deps,
     {
       experimentName: order.experimentName,
@@ -276,7 +331,7 @@ export function cancelPoligarchLiveOrder(
   orderId: string,
   deps: SubmissionDeps,
 ): Promise<SubmissionResult> {
-  return attemptLivePilotOperation("POST", `/v1/order/${orderId}/cancel`, undefined, deps);
+  return attemptLivePilotOperation("POST", `/v1/order/${orderId}/cancel`, {}, deps, undefined, orderId);
 }
 
 /** GET /v1/order/{orderId}. Gated per attemptLivePilotOperation's fail-closed order. */
@@ -284,5 +339,5 @@ export function getPoligarchLiveOrderStatus(
   orderId: string,
   deps: SubmissionDeps,
 ): Promise<SubmissionResult> {
-  return attemptLivePilotOperation("GET", `/v1/order/${orderId}`, undefined, deps);
+  return attemptLivePilotOperation("GET", `/v1/order/${orderId}`, undefined, deps, undefined, orderId);
 }

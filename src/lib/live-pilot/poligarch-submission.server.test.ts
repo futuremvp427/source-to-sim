@@ -5,6 +5,8 @@ import {
   cancelPoligarchLiveOrder,
   getPoligarchLiveOrderStatus,
   checkPilotOrderAllowlistAndNotional,
+  buildPoligarchLiveOrderRequest,
+  extractOrderIdFromLivePilotResponse,
   roundToPriceTick,
   formatPriceForTick,
   type PoligarchLiveOrderIntent,
@@ -52,10 +54,11 @@ describe("poligarch-submission.server", () => {
   it("submitPoligarchLiveOrder always short-circuits when the hard constant is false, even with a fully-armed DB state", async () => {
     const getPilotSafetyState = vi.fn(async () => fullyArmedState);
     const fetchImpl = vi.fn();
-    const result = await submitPoligarchLiveOrder(
-      baseOrder,
-      { getPilotSafetyState, fetchImpl, now: () => 1_700_000_000 },
-    );
+    const result = await submitPoligarchLiveOrder(baseOrder, {
+      getPilotSafetyState,
+      fetchImpl,
+      now: () => 1_700_000_000,
+    });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toMatch(/SUBMISSION_NOT_ENABLED/);
     expect(fetchImpl).not.toHaveBeenCalled();
@@ -65,10 +68,11 @@ describe("poligarch-submission.server", () => {
 
   it("still fails closed on a locked safety state, independent of the hard constant", async () => {
     const fetchImpl = vi.fn();
-    const result = await submitPoligarchLiveOrder(
-      baseOrder,
-      { getPilotSafetyState: async () => lockedState, fetchImpl, now: () => 1_700_000_000 },
-    );
+    const result = await submitPoligarchLiveOrder(baseOrder, {
+      getPilotSafetyState: async () => lockedState,
+      fetchImpl,
+      now: () => 1_700_000_000,
+    });
     expect(result.ok).toBe(false);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
@@ -91,20 +95,16 @@ describe("poligarch-submission.server", () => {
   });
 
   it("detects missing credentials without throwing", async () => {
-    // Exercised once POLYMARKET_KEY_ID/POLYMARKET_SECRET_KEY are unset in the test env —
-    // confirm isPmusConfigured()-equivalent MISSING_CREDENTIALS handling is reused, not reinvented.
     const fetchImpl = vi.fn();
-    const result = await submitPoligarchLiveOrder(
-      baseOrder,
-      { getPilotSafetyState: async () => fullyArmedState, fetchImpl, now: () => 1_700_000_000 },
-    );
+    const result = await submitPoligarchLiveOrder(baseOrder, {
+      getPilotSafetyState: async () => fullyArmedState,
+      fetchImpl,
+      now: () => 1_700_000_000,
+    });
     expect(result.ok).toBe(false);
   });
 
   it("rejects operations outside the isolated allowlist even if somehow reached", async () => {
-    // Reaches into module internals is not possible from the public API, so this
-    // documents the intended behaviour of submit/cancel/status paths themselves:
-    // they only ever construct allowlisted method+path combinations.
     const fetchImpl = vi.fn();
     const cancelResult = await cancelPoligarchLiveOrder("../../etc/passwd", {
       getPilotSafetyState: async () => fullyArmedState,
@@ -123,6 +123,55 @@ describe("poligarch-submission.server", () => {
     );
     expect(result.ok).toBe(false);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("current PMUS order payload contract (pure; submission still disabled)", () => {
+  it("maps YES BUY to the exact current Polymarket US enum strings", () => {
+    expect(buildPoligarchLiveOrderRequest(baseOrder)).toEqual({
+      marketSlug: "chicago-snow",
+      type: "ORDER_TYPE_LIMIT",
+      price: { value: "0.52", currency: "USD" },
+      quantity: 3.8,
+      outcomeSide: "OUTCOME_SIDE_YES",
+      action: "ORDER_ACTION_BUY",
+      tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+      manualOrderIndicator: "MANUAL_ORDER_INDICATOR_AUTOMATIC",
+      synchronousExecution: true,
+    });
+  });
+
+  it("maps NO SELL and preserves price-tick precision", () => {
+    expect(
+      buildPoligarchLiveOrderRequest({
+        ...baseOrder,
+        side: "SELL",
+        outcome: "NO",
+        limitPrice: 0.517,
+        priceTick: 0.005,
+      }),
+    ).toMatchObject({
+      price: { value: "0.515", currency: "USD" },
+      outcomeSide: "OUTCOME_SIDE_NO",
+      action: "ORDER_ACTION_SELL",
+      tif: "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+      manualOrderIndicator: "MANUAL_ORDER_INDICATOR_AUTOMATIC",
+    });
+  });
+
+  it("parses the current create/status/cancel success response shapes", () => {
+    expect(extractOrderIdFromLivePilotResponse("POST", "/v1/orders", { id: "order-1" })).toBe("order-1");
+    expect(
+      extractOrderIdFromLivePilotResponse("GET", "/v1/order/order-1", { order: { id: "order-1" } }, "order-1"),
+    ).toBe("order-1");
+    expect(
+      extractOrderIdFromLivePilotResponse("POST", "/v1/order/order-1/cancel", {}, "order-1"),
+    ).toBe("order-1");
+  });
+
+  it("fails closed on unknown successful response shapes", () => {
+    expect(extractOrderIdFromLivePilotResponse("POST", "/v1/orders", {})).toBeNull();
+    expect(extractOrderIdFromLivePilotResponse("GET", "/v1/order/order-1", {}, "order-1")).toBeNull();
   });
 });
 
