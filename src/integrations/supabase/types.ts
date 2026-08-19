@@ -561,18 +561,21 @@ export type Database = {
         Row: {
           blocked_until: string | null
           host: string
+          next_request_at: string | null
           reason: string | null
           updated_at: string
         }
         Insert: {
           blocked_until?: string | null
           host: string
+          next_request_at?: string | null
           reason?: string | null
           updated_at?: string
         }
         Update: {
           blocked_until?: string | null
           host?: string
+          next_request_at?: string | null
           reason?: string | null
           updated_at?: string
         }
@@ -1674,6 +1677,7 @@ export type Database = {
         Args: { p_experiment_id: string; p_limit?: number }
         Returns: {
           asset: string
+          condition_id: string
           event_key: string
           first_seen_at: string
           id: string
@@ -1730,6 +1734,10 @@ export type Database = {
       release_reconcile_lease: {
         Args: { p_holder: string; p_wallet: string }
         Returns: undefined
+      }
+      reserve_http_request_slot: {
+        Args: { p_host: string; p_min_interval_ms: number }
+        Returns: string
       }
       try_acquire_reconcile_lease: {
         Args: { p_holder: string; p_seconds: number; p_wallet: string }
