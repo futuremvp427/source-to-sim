@@ -534,9 +534,22 @@ export const RESEARCH_REFRESH_HOURS = 6;
  */
 export const RESEARCH_ZERO_PROGRESS_RETRY_MS = 15 * 60_000;
 
-/** Cadence for the next pass, given the previous terminal run state. */
-export function researchCadenceMs(state: Pick<ResearchRunState, "state" | "researchedCount"> | null): number {
+/**
+ * Cadence for the next pass, given the previous terminal run state.
+ *
+ * Only two things shorten the 6-hour steady-state cadence: a zero-progress
+ * error run, and an explicit `Urgent backlog remaining: N.` marker with N > 0.
+ * `partial` alone and generic deferred counts deliberately do NOT, because the
+ * ordinary oldest-first rotation always defers already-scored candidates.
+ */
+export function researchCadenceMs(
+  state:
+    | (Pick<ResearchRunState, "state" | "researchedCount"> & { detail?: string | null })
+    | null,
+): number {
   if (state && state.state === "error" && state.researchedCount === 0) return RESEARCH_ZERO_PROGRESS_RETRY_MS;
+  const urgent = parseUrgentBacklogRemaining(state?.detail ?? null);
+  if (urgent !== null && urgent > 0) return URGENT_BACKLOG_CATCHUP_MS;
   return RESEARCH_REFRESH_HOURS * 3600_000;
 }
 
