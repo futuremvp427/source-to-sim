@@ -11,6 +11,7 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 import { parseSourceSide } from "../shadow-core";
 import { DATA_API_HOST, reserveRequestSlot } from "../http-rate-limit.server";
+import { evaluateCandidatePersistence } from "./consistency.server";
 
 import {
   RESEARCH_BATCH_SIZE,
@@ -645,7 +646,6 @@ export async function runCandidateResearch(signal?: AbortSignal): Promise<Resear
   const resolvedRows = rows.filter((r) => Boolean(r.wallet));
   // Candidates whose persisted artifacts are missing or mixed-version are
   // repaired ahead of ordinary oldest-first rotation.
-  const { evaluateCandidatePersistence } = await import("./consistency.server");
   const repairIds = new Set(
     resolvedRows
       .filter((r) => {
