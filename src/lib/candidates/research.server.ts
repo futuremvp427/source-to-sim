@@ -600,6 +600,16 @@ export async function runCandidateResearch(signal?: AbortSignal): Promise<Resear
   let researched = 0;
   let deferred = 0;
   let budgetHit = false;
+  /**
+   * URGENT backlog: resolved candidates that never completed research, or whose
+   * persisted artifacts are missing/mixed-version. Tracked so the terminal
+   * detail can carry an accurate remaining count for the catch-up cadence.
+   */
+  let urgentIds: Set<string> = new Set();
+  let urgentKnown = false;
+  const urgentCompleted = new Set<string>();
+  const urgentMarkerSuffix = (): string =>
+    urgentKnown ? ` ${formatUrgentBacklogMarker(urgentIds.size - urgentCompleted.size)}` : "";
 
   try {
   const seeded = await seedWatchlist();
@@ -648,6 +658,12 @@ export async function runCandidateResearch(signal?: AbortSignal): Promise<Resear
       })
       .map((r) => r.id),
   );
+  urgentIds = new Set(
+    resolvedRows
+      .filter((r) => repairIds.has(r.id) || !lastComputedAt.get(r.id))
+      .map((r) => r.id),
+  );
+  urgentKnown = true;
   const batch = selectResearchBatch(resolvedRows, lastComputedAt, RESEARCH_BATCH_SIZE, repairIds);
   const batchIds = new Set(batch.map((r) => r.id));
 
@@ -760,6 +776,9 @@ export async function runCandidateResearch(signal?: AbortSignal): Promise<Resear
     if (candidate_scoresError) throw new Error(`candidate_scores write failed: ${candidate_scoresError.message}`);
 
     if (metrics.sampleCount === 0) insufficient.push(row.handle);
+    // Only a candidate whose three artifact writes all succeeded leaves the
+    // urgent backlog; a failure or interruption keeps it urgent.
+    if (urgentIds.has(row.id)) urgentCompleted.add(row.id);
     researched += 1;
     } catch (err) {
       // A deadline abort is a run-level outcome, not a per-candidate failure.
@@ -780,6 +799,16 @@ export async function runCandidateResearch(signal?: AbortSignal): Promise<Resear
   const resolvedCount = rows.filter((r) => Boolean(r.wallet)).length;
   const state: ResearchSummary["state"] =
     researched === 0 ? "error" : failures.length > 0 || unresolved.length > 0 ? "partial" : "success";
+  const baseDetail =
+    failures.length > 0
+      ? failures.map((f) => `${f.handle}: ${f.error}`).join("; ").slice(0, 300)
+      : unresolved.length > 0
+        ? `Unresolved handles: ${unresolved.join(", ")}`.slice(0, 300)
+        : budgetHit
+          ? `Bounded pass stopped at the ${deadline.budgetMs}ms budget: ${researched} researched, ${deferred} deferred.`
+          : deferred > 0
+            ? `Bounded pass: ${researched} researched, ${deferred} deferred to the next scheduled run.`
+            : "";
   const summary: ResearchSummary = {
     ranAt: new Date().toISOString(),
     state,
@@ -789,16 +818,7 @@ export async function runCandidateResearch(signal?: AbortSignal): Promise<Resear
     unresolved,
     insufficient,
     failures,
-    detail:
-      failures.length > 0
-        ? failures.map((f) => `${f.handle}: ${f.error}`).join("; ").slice(0, 400)
-        : unresolved.length > 0
-          ? `Unresolved handles: ${unresolved.join(", ")}`
-          : budgetHit
-            ? `Bounded pass stopped at the ${deadline.budgetMs}ms budget: ${researched} researched, ${deferred} deferred.`
-            : deferred > 0
-            ? `Bounded pass: ${researched} researched, ${deferred} deferred to the next scheduled run.`
-            : null,
+    detail: `${baseDetail}${urgentMarkerSuffix()}`.trim() || null,
   };
   await recordRunState(summary);
   return summary;
@@ -808,6 +828,14 @@ export async function runCandidateResearch(signal?: AbortSignal): Promise<Resear
     // until the 300s lease expires.
     const aborted = isAbort(err) || deadline.expired();
     const message = err instanceof Error ? err.message : "research pass failed";
+    // The parent scheduler budget (~8s) is far shorter than this pass's own cap,
+    // so claiming the full cap elapsed would be false. Report which budget ended
+    // the run accurately.
+    const parentAborted =
+      signal?.aborted === true && Date.now() - deadline.startedAtMs < deadline.budgetMs;
+    const abortDetail = parentAborted
+      ? `Research scheduler budget exhausted before the ${deadline.budgetMs}ms pass cap: ${researched} researched, ${deferred} deferred.`
+      : `Research budget exhausted after ${deadline.budgetMs}ms: ${researched} researched, ${deferred} deferred.`;
     const summary: ResearchSummary = {
       ranAt: new Date().toISOString(),
       state: researched > 0 ? "partial" : "error",
@@ -817,10 +845,7 @@ export async function runCandidateResearch(signal?: AbortSignal): Promise<Resear
       unresolved,
       insufficient,
       failures,
-      detail: (aborted
-        ? `Research budget exhausted after ${deadline.budgetMs}ms: ${researched} researched, ${deferred} deferred.`
-        : `Research pass failed: ${message}`
-      ).slice(0, 400),
+      detail: `${(aborted ? abortDetail : `Research pass failed: ${message}`).slice(0, 300)}${urgentMarkerSuffix()}`,
     };
     try {
       await recordRunState(summary);
