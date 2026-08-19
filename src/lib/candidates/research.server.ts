@@ -17,7 +17,10 @@ import {
   RESEARCH_BUDGET_MS,
   ResearchBudgetExhaustedError,
   UNRESOLVED_RESOLUTIONS_PER_RUN,
+  URGENT_BACKLOG_CATCHUP_MS,
   createResearchDeadline,
+  formatUrgentBacklogMarker,
+  parseUrgentBacklogRemaining,
   selectResearchBatch,
   selectUnresolvedForResolution,
 } from "./research-batch";
