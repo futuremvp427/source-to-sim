@@ -193,6 +193,22 @@ describe("scheduler deadline cancels candidate research", () => {
     expect(aborts).toBeGreaterThan(0);
     expect(workerWrites().at(-1)!.payload["state"]).not.toBe("running");
   });
+
+  it("reports the parent scheduler budget accurately and keeps the interrupted urgent candidate counted", async () => {
+    mockHangingFetch("prices-history");
+
+    const pending = refreshCandidateResearchSafely();
+    for (let i = 0; i < 40; i += 1) await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(RESEARCH_DEADLINE_MS + 1);
+    await pending;
+
+    const detail = String(workerWrites().at(-1)!.payload["last_error"]);
+    // The 8s scheduler budget ended the run, so the 120s pass cap did NOT elapse.
+    expect(detail).toMatch(/Research scheduler budget exhausted before the 120000ms pass cap/);
+    expect(detail).not.toMatch(/exhausted after 120000ms/);
+    // The candidate never completed its three artifact writes, so it stays urgent.
+    expect(detail).toContain("Urgent backlog remaining: 1.");
+  });
 });
 
 describe("cadence after a bounded pass", () => {
