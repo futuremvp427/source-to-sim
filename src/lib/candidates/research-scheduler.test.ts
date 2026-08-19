@@ -188,6 +188,7 @@ describe("scheduler deadline cancels candidate research", () => {
     for (let i = 0; i < 40; i += 1) await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(RESEARCH_DEADLINE_MS + 1);
     await pending;
+    console.log("CALLS", fetchCalls);
 
     expect(fetchCalls.some((u) => u.includes("prices-history"))).toBe(true);
     expect(aborts).toBeGreaterThan(0);
