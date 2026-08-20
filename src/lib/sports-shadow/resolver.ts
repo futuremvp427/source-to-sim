@@ -91,6 +91,8 @@ export type VenueMatchResult = {
   sourceMarketSlug: string | null;
   targetEventId: string | null;
   targetMarketId: string | null;
+  /** The exact string a caller must pass to fetchPmusBook/fetchKalshiBook to fetch this market's live book — PM-US's marketSlug (NOT the numeric marketId, which fetchPmusBook cannot use) or Kalshi's marketTicker (same value as targetMarketId for Kalshi, kept separate for a uniform cross-venue field). Task 8 depends on this. */
+  targetFetchKey: string | null;
   /** Cross-series/doubleheader-safe game identifier: PM-US gameId, Kalshi gameCode. */
   targetGameIdentifier: string | null;
   targetAwayTeam: string | null;
@@ -265,6 +267,7 @@ function baseResult(venue: "PMUS" | "KALSHI", source: SourceSignal): Omit<VenueM
     sourceMarketSlug: source.marketSlug,
     targetEventId: null,
     targetMarketId: null,
+    targetFetchKey: null,
     targetGameIdentifier: null,
     targetAwayTeam: null,
     targetHomeTeam: null,
@@ -384,6 +387,7 @@ export function resolvePmusMatch(source: SourceSignal, candidates: PmusCandidate
       simpleResult("PMUS", source, "EXACT", "EXACT_MATCH", e.reason, {
         targetEventId: e.candidate.eventId,
         targetMarketId: e.candidate.marketId,
+        targetFetchKey: e.candidate.marketSlug,
         targetGameIdentifier: e.candidate.gameId,
         targetAwayTeam: e.candidate.awayTeam,
         targetHomeTeam: e.candidate.homeTeam,
@@ -530,6 +534,7 @@ export function resolveKalshiMatch(source: SourceSignal, candidates: KalshiCandi
       simpleResult("KALSHI", source, "EXACT", "EXACT_MATCH", e.reason, {
         targetEventId: e.candidate.eventTicker,
         targetMarketId: e.candidate.marketTicker,
+        targetFetchKey: e.candidate.marketTicker,
         targetGameIdentifier: e.candidate.gameCode,
         targetAwayTeam: e.candidate.awayTeam,
         targetHomeTeam: e.candidate.homeTeam,
