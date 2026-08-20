@@ -12,6 +12,22 @@ describe("normalizeTeamName", () => {
     expect(normalizeTeamName("Los Angeles D")).toBe("LAD");
     expect(normalizeTeamName("Athletics")).toBe("ATH");
     expect(normalizeTeamName("A's")).toBe("ATH");
+    // Kalshi event.title uses bare city names (confirmed live, e.g. "Minnesota vs San Diego"),
+    // not full franchise names -- only safe to add for cities with exactly one MLB team.
+    expect(normalizeTeamName("Minnesota")).toBe("MIN");
+    expect(normalizeTeamName("San Diego")).toBe("SD");
+    expect(normalizeTeamName("San Francisco")).toBe("SF");
+    expect(normalizeTeamName("Cleveland")).toBe("CLE");
+    expect(normalizeTeamName("St. Louis")).toBe("STL");
+    expect(normalizeTeamName("Cincinnati")).toBe("CIN");
+    expect(normalizeTeamName("Washington")).toBe("WSH");
+    expect(normalizeTeamName("Texas")).toBe("TEX");
+  });
+
+  it("does NOT map ambiguous shared-city bare names (Chicago/Los Angeles/New York host two teams each) -- fails closed rather than guessing", () => {
+    expect(normalizeTeamName("Chicago")).toBeNull();
+    expect(normalizeTeamName("Los Angeles")).toBeNull();
+    expect(normalizeTeamName("New York")).toBeNull();
   });
 
   it("returns null for an unrecognized team string instead of guessing", () => {
