@@ -56,6 +56,10 @@ export type KalshiRawMarket = {
   no_bid_dollars?: string | null;
   no_ask_dollars?: string | null;
   result?: string | null;
+  /** Descriptive only per Kalshi's own docs — NEVER the authoritative precision bound; use price_ranges[].step for that. Confirmed live value: "linear_cent" (even alongside a "0.0010" price_ranges step on other markets). */
+  price_level_structure?: string | null;
+  /** The authoritative valid-price-grid source, confirmed live (e.g. [{start:"0.0000",end:"1.0000",step:"0.0100"}], and separately step:"0.0010" on other open markets — sub-cent grids are real and current). Preserved as raw fixed-point strings, never parsed/snapped — Task 6/7 do not implement order-price snapping or trading. */
+  price_ranges?: { start?: string | null; end?: string | null; step?: string | null }[] | null;
 };
 
 /** Confirmed present on GET /events list responses (no per-event detail call needed). */
@@ -113,7 +117,13 @@ export type KalshiCandidate = {
   summaryYesAskDollars: number | null;
   summaryNoBidDollars: number | null;
   summaryNoAskDollars: number | null;
+  /** Descriptive only — see PriceRange note on KalshiRawMarket.price_level_structure. */
+  priceLevelStructure: string | null;
+  /** Authoritative valid-price-grid, raw fixed-point strings preserved verbatim. Measurement metadata only — no order-price snapping implemented. */
+  priceRanges: KalshiPriceRange[] | null;
 };
+
+export type KalshiPriceRange = { start: string | null; end: string | null; step: string | null };
 
 const SERIES_TO_BET_TYPE: Record<string, BetType> = {
   KXMLBGAME: "MONEYLINE",
@@ -163,6 +173,10 @@ function baseFields(market: KalshiRawMarket, seriesTicker: string | null) {
     summaryYesAskDollars: parseDollarField(market.yes_ask_dollars),
     summaryNoBidDollars: parseDollarField(market.no_bid_dollars),
     summaryNoAskDollars: parseDollarField(market.no_ask_dollars),
+    priceLevelStructure: market.price_level_structure ?? null,
+    priceRanges: market.price_ranges
+      ? market.price_ranges.map((r) => ({ start: r.start ?? null, end: r.end ?? null, step: r.step ?? null }))
+      : null,
   };
 }
 
@@ -270,7 +284,15 @@ export function classifyKalshiMarket(market: KalshiRawMarket, event: KalshiRawEv
 
 /* ---------------------------- Book normalization ---------------------------- */
 
-export type KalshiBookSide = { bestBid: number | null; bestAsk: number | null; bidLevels: DepthLevel[]; askLevels: DepthLevel[] };
+export type KalshiBookSide = {
+  bestBid: number | null;
+  bestAsk: number | null;
+  /** Exact integer 1e-4-dollar units (see PRICE_SCALE) for the best prices above — retained alongside the float for auditability, since this is the form all arithmetic actually happened in. */
+  bestBidUnits: number | null;
+  bestAskUnits: number | null;
+  bidLevels: DepthLevel[];
+  askLevels: DepthLevel[];
+};
 
 /**
  * Both binary complement views of one Kalshi market's book. Neither `yes` nor `no` is
@@ -290,30 +312,76 @@ export type KalshiBookSnapshot = {
 };
 
 const TOP_LEVELS = 5;
-/** Kalshi's own documented tick size (`price_level_structure: "linear_cent"`, `step: "0.0100"`) — prices are integer-cent multiples. Complement arithmetic (1 - p) is done in integer cents, never float dollars, to avoid drift like 0.7 -> 0.30000000000000004; conversion back to a decimal dollar value happens only once, at the final output boundary. */
-const CENTS_PER_DOLLAR = 100;
 
-type CentsLevel = { priceCents: number; qty: number };
+/**
+ * Kalshi's *_dollars price strings carry up to 4 decimal places (confirmed live: a broad scan
+ * of open markets found `price_ranges[].step: "0.0010"` — finer than whole cents — alongside
+ * the single-cent `"0.0100"` step seen on other markets; `price_level_structure` is
+ * DESCRIPTIVE per Kalshi's own docs, never the authoritative precision bound). All price
+ * arithmetic (parsing, complement, sort, crossed-book comparison) happens in exact integer
+ * 1e-4-dollar units — never `Math.round(price * 100)`, never float subtraction — so 0.1234's
+ * complement is exactly 0.8766 and 0.5001 stays distinguishable from 0.5002. Conversion to a
+ * plain `number` happens exactly once, at the final output boundary, by dividing by
+ * PRICE_SCALE — a single division of a small exact integer introduces no visible drift at 4
+ * decimal digits (unlike the classic `1 - 0.7` float-subtraction problem this design avoids
+ * entirely by never subtracting two already-lossy floats).
+ */
+const PRICE_SCALE = 10_000;
+/** Kalshi contract quantities carry up to 2 decimal places (confirmed live, e.g. "301.17", "511.03"). Same exact-integer-then-single-division approach as price. */
+const QTY_SCALE = 100;
 
-function parseRawLevel(tuple: unknown): CentsLevel | null {
+/**
+ * Strict parser for a Kalshi fixed-point dollar string into exact integer 1e-4-dollar units.
+ * Accepts 0-4 decimal digits ("0", "0.1", "0.12", "0.123", "0.1234", "1", "1.0000"). Rejects
+ * (returns null, never rounds or truncates): more than 4 decimals, malformed decimals,
+ * exponent notation, negative numbers, values over 1, trailing junk, and empty strings —
+ * enforced by full anchoring (`^...$`), not by post-hoc range clamping.
+ */
+export function parseKalshiPriceUnits(raw: string): number | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  const m = /^(\d+)(?:\.(\d{1,4}))?$/.exec(raw);
+  if (!m) return null;
+  const intPart = Number(m[1]);
+  const fracDigits = (m[2] ?? "").padEnd(4, "0");
+  const units = intPart * PRICE_SCALE + Number(fracDigits);
+  if (!Number.isFinite(units) || units <= 0 || units > PRICE_SCALE) return null;
+  return units;
+}
+
+/**
+ * Strict parser for a Kalshi fixed-point quantity string into exact integer 1e-2-contract
+ * units. Accepts 0-2 decimal digits ("1.55", "0.01", "100.00"). Rejects malformed strings,
+ * negative values, zero (a zero-quantity level carries no live depth), NaN, and Infinity.
+ */
+export function parseKalshiQuantityUnits(raw: string): number | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  const m = /^(\d+)(?:\.(\d{1,2}))?$/.exec(raw);
+  if (!m) return null;
+  const intPart = Number(m[1]);
+  const fracDigits = (m[2] ?? "").padEnd(2, "0");
+  const units = intPart * QTY_SCALE + Number(fracDigits);
+  if (!Number.isFinite(units) || units <= 0) return null;
+  return units;
+}
+
+type UnitsLevel = { priceUnits: number; qtyUnits: number };
+
+function parseRawLevel(tuple: unknown): UnitsLevel | null {
   if (!Array.isArray(tuple) || tuple.length !== 2) return null;
   const [priceStr, qtyStr] = tuple as unknown[];
   if (typeof priceStr !== "string" || typeof qtyStr !== "string") return null;
-  const priceNum = Number(priceStr);
-  if (!Number.isFinite(priceNum)) return null;
-  const priceCents = Math.round(priceNum * CENTS_PER_DOLLAR);
-  if (priceCents <= 0 || priceCents > CENTS_PER_DOLLAR) return null;
-  const qty = Number(qtyStr);
-  if (!Number.isFinite(qty) || qty <= 0) return null;
-  return { priceCents, qty };
+  const priceUnits = parseKalshiPriceUnits(priceStr);
+  const qtyUnits = parseKalshiQuantityUnits(qtyStr);
+  if (priceUnits === null || qtyUnits === null) return null;
+  return { priceUnits, qtyUnits };
 }
 
-function toDepthLevel(level: CentsLevel): DepthLevel {
-  return { price: level.priceCents / CENTS_PER_DOLLAR, size: level.qty };
+function toDepthLevel(level: UnitsLevel): DepthLevel {
+  return { price: level.priceUnits / PRICE_SCALE, size: level.qtyUnits / QTY_SCALE };
 }
 
 function emptyKalshiBook(ticker: string, observedAt: number, staleReason: string): KalshiBookSnapshot {
-  const emptySide: KalshiBookSide = { bestBid: null, bestAsk: null, bidLevels: [], askLevels: [] };
+  const emptySide: KalshiBookSide = { bestBid: null, bestAsk: null, bestBidUnits: null, bestAskUnits: null, bidLevels: [], askLevels: [] };
   return { venue: "KALSHI", marketId: ticker, observedAt, yes: emptySide, no: { ...emptySide }, rawYesBids: [], rawNoBids: [], staleReason };
 }
 
@@ -322,10 +390,12 @@ function emptyKalshiBook(ticker: string, observedAt: number, staleReason: string
  * (`orderbook_fp.yes_dollars`/`orderbook_fp.no_dollars`, each an array of
  * `[priceString, quantityString]` BID tuples — confirmed live, no separate ask arrays).
  * Derives YES asks from NO bids and NO asks from YES bids via the binary complement
- * (1 - price), both in integer cents. Per the mission: bid > ask is crossed and fails closed
- * (nulled best price, non-null staleReason, raw levels still preserved); bid == ask is a
- * legitimate locked-market state, left as-is. An empty side is a valid observation with no
- * executable depth on that side, not an error.
+ * (PRICE_SCALE - priceUnits), entirely in exact integer units. Per the mission: bid > ask is
+ * crossed and fails closed (nulled best price, non-null staleReason, raw levels still
+ * preserved); bid == ask is a legitimate locked-market state, left as-is — both comparisons
+ * are done on the exact integer units, so sub-cent distinctions (e.g. 0.5001 vs 0.5002) are
+ * never lost. An empty side is a valid observation with no executable depth on that side, not
+ * an error.
  */
 export function normalizeKalshiBook(raw: unknown, ticker: string, observedAt: number): KalshiBookSnapshot {
   if (typeof raw !== "object" || raw === null) return emptyKalshiBook(ticker, observedAt, "malformed orderbook payload: not an object");
@@ -339,39 +409,39 @@ export function normalizeKalshiBook(raw: unknown, ticker: string, observedAt: nu
 
   const yesBids = yesRaw
     .map(parseRawLevel)
-    .filter((l): l is CentsLevel => l !== null)
-    .sort((a, b) => b.priceCents - a.priceCents)
+    .filter((l): l is UnitsLevel => l !== null)
+    .sort((a, b) => b.priceUnits - a.priceUnits)
     .slice(0, TOP_LEVELS);
   const noBids = noRaw
     .map(parseRawLevel)
-    .filter((l): l is CentsLevel => l !== null)
-    .sort((a, b) => b.priceCents - a.priceCents)
+    .filter((l): l is UnitsLevel => l !== null)
+    .sort((a, b) => b.priceUnits - a.priceUnits)
     .slice(0, TOP_LEVELS);
 
   const yesAsks = noBids
-    .map((l): CentsLevel => ({ priceCents: CENTS_PER_DOLLAR - l.priceCents, qty: l.qty }))
-    .sort((a, b) => a.priceCents - b.priceCents)
+    .map((l): UnitsLevel => ({ priceUnits: PRICE_SCALE - l.priceUnits, qtyUnits: l.qtyUnits }))
+    .sort((a, b) => a.priceUnits - b.priceUnits)
     .slice(0, TOP_LEVELS);
   const noAsks = yesBids
-    .map((l): CentsLevel => ({ priceCents: CENTS_PER_DOLLAR - l.priceCents, qty: l.qty }))
-    .sort((a, b) => a.priceCents - b.priceCents)
+    .map((l): UnitsLevel => ({ priceUnits: PRICE_SCALE - l.priceUnits, qtyUnits: l.qtyUnits }))
+    .sort((a, b) => a.priceUnits - b.priceUnits)
     .slice(0, TOP_LEVELS);
 
-  let yesBestBid = yesBids[0]?.priceCents ?? null;
-  let yesBestAsk = yesAsks[0]?.priceCents ?? null;
-  let noBestBid = noBids[0]?.priceCents ?? null;
-  let noBestAsk = noAsks[0]?.priceCents ?? null;
+  let yesBestBidUnits = yesBids[0]?.priceUnits ?? null;
+  let yesBestAskUnits = yesAsks[0]?.priceUnits ?? null;
+  let noBestBidUnits = noBids[0]?.priceUnits ?? null;
+  let noBestAskUnits = noAsks[0]?.priceUnits ?? null;
 
   const reasons: string[] = [];
-  if (yesBestBid !== null && yesBestAsk !== null && yesBestBid > yesBestAsk) {
-    reasons.push(`crossed YES book: bid ${yesBestBid} > ask ${yesBestAsk} (cents)`);
-    yesBestBid = null;
-    yesBestAsk = null;
+  if (yesBestBidUnits !== null && yesBestAskUnits !== null && yesBestBidUnits > yesBestAskUnits) {
+    reasons.push(`crossed YES book: bid ${yesBestBidUnits} > ask ${yesBestAskUnits} (1e-4 units)`);
+    yesBestBidUnits = null;
+    yesBestAskUnits = null;
   }
-  if (noBestBid !== null && noBestAsk !== null && noBestBid > noBestAsk) {
-    reasons.push(`crossed NO book: bid ${noBestBid} > ask ${noBestAsk} (cents)`);
-    noBestBid = null;
-    noBestAsk = null;
+  if (noBestBidUnits !== null && noBestAskUnits !== null && noBestBidUnits > noBestAskUnits) {
+    reasons.push(`crossed NO book: bid ${noBestBidUnits} > ask ${noBestAskUnits} (1e-4 units)`);
+    noBestBidUnits = null;
+    noBestAskUnits = null;
   }
 
   return {
@@ -379,14 +449,18 @@ export function normalizeKalshiBook(raw: unknown, ticker: string, observedAt: nu
     marketId: ticker,
     observedAt,
     yes: {
-      bestBid: yesBestBid !== null ? yesBestBid / CENTS_PER_DOLLAR : null,
-      bestAsk: yesBestAsk !== null ? yesBestAsk / CENTS_PER_DOLLAR : null,
+      bestBid: yesBestBidUnits !== null ? yesBestBidUnits / PRICE_SCALE : null,
+      bestAsk: yesBestAskUnits !== null ? yesBestAskUnits / PRICE_SCALE : null,
+      bestBidUnits: yesBestBidUnits,
+      bestAskUnits: yesBestAskUnits,
       bidLevels: yesBids.map(toDepthLevel),
       askLevels: yesAsks.map(toDepthLevel),
     },
     no: {
-      bestBid: noBestBid !== null ? noBestBid / CENTS_PER_DOLLAR : null,
-      bestAsk: noBestAsk !== null ? noBestAsk / CENTS_PER_DOLLAR : null,
+      bestBid: noBestBidUnits !== null ? noBestBidUnits / PRICE_SCALE : null,
+      bestAsk: noBestAskUnits !== null ? noBestAskUnits / PRICE_SCALE : null,
+      bestBidUnits: noBestBidUnits,
+      bestAskUnits: noBestAskUnits,
       bidLevels: noBids.map(toDepthLevel),
       askLevels: noAsks.map(toDepthLevel),
     },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyKalshiMarket, deriveGameCode, normalizeKalshiBook, type KalshiRawEvent, type KalshiRawMarket } from "./kalshi";
+import { classifyKalshiMarket, deriveGameCode, normalizeKalshiBook, parseKalshiPriceUnits, parseKalshiQuantityUnits, type KalshiRawEvent, type KalshiRawMarket } from "./kalshi";
 
 const GAME_EVENT: KalshiRawEvent = {
   event_ticker: "KXMLBGAME-26AUG222040MINSD",
@@ -323,5 +323,160 @@ describe("normalizeKalshiBook — real confirmed shape (orderbook_fp.{yes,no}_do
     expect(normalizeKalshiBook(null, "t", observedAt).staleReason).toMatch(/malformed/i);
     expect(normalizeKalshiBook({}, "t", observedAt).staleReason).toMatch(/malformed/i);
     expect(normalizeKalshiBook({ orderbook_fp: { yes_dollars: "nope", no_dollars: [] } }, "t", observedAt).staleReason).toMatch(/malformed/i);
+  });
+});
+
+describe("parseKalshiPriceUnits — exact fixed-point (1e-4) price parsing, no cent rounding", () => {
+  it("1. 0.1234 parses exactly to 1234 units", () => {
+    expect(parseKalshiPriceUnits("0.1234")).toBe(1234);
+  });
+
+  it("5/6/7/8. sub-cent precision preserved: 0.001, 0.005, 0.002, 0.0001", () => {
+    expect(parseKalshiPriceUnits("0.001")).toBe(10);
+    expect(parseKalshiPriceUnits("0.005")).toBe(50);
+    expect(parseKalshiPriceUnits("0.002")).toBe(20);
+    expect(parseKalshiPriceUnits("0.0001")).toBe(1);
+  });
+
+  it("9. no cent rounding: 0.1234 and 0.1235 remain distinct integer units, not both 12", () => {
+    expect(parseKalshiPriceUnits("0.1234")).toBe(1234);
+    expect(parseKalshiPriceUnits("0.1235")).toBe(1235);
+  });
+
+  it("10. more than 4 decimals is rejected", () => {
+    expect(parseKalshiPriceUnits("0.12345")).toBeNull();
+  });
+
+  it("11. a malformed decimal is rejected", () => {
+    expect(parseKalshiPriceUnits("0.1.2")).toBeNull();
+    expect(parseKalshiPriceUnits(".5")).toBeNull();
+    expect(parseKalshiPriceUnits("0.")).toBeNull();
+  });
+
+  it("12. exponent notation is rejected", () => {
+    expect(parseKalshiPriceUnits("1e-4")).toBeNull();
+    expect(parseKalshiPriceUnits("5E-1")).toBeNull();
+  });
+
+  it("rejects NaN/Infinity-shaped strings, negative values, values over 1, trailing junk, and empty string", () => {
+    expect(parseKalshiPriceUnits("NaN")).toBeNull();
+    expect(parseKalshiPriceUnits("Infinity")).toBeNull();
+    expect(parseKalshiPriceUnits("-0.5")).toBeNull();
+    expect(parseKalshiPriceUnits("1.0001")).toBeNull();
+    expect(parseKalshiPriceUnits("0.5abc")).toBeNull();
+    expect(parseKalshiPriceUnits("")).toBeNull();
+  });
+
+  it("19. existing whole-cent examples are unchanged", () => {
+    expect(parseKalshiPriceUnits("0.01")).toBe(100);
+    expect(parseKalshiPriceUnits("0.5800")).toBe(5800);
+    expect(parseKalshiPriceUnits("1")).toBe(10000);
+    expect(parseKalshiPriceUnits("1.0000")).toBe(10000);
+  });
+});
+
+describe("parseKalshiQuantityUnits — exact fixed-point (1e-2) quantity parsing", () => {
+  it("15. quantity 1.55 preserved exactly", () => {
+    expect(parseKalshiQuantityUnits("1.55")).toBe(155);
+  });
+
+  it("16. quantity 0.01 preserved exactly", () => {
+    expect(parseKalshiQuantityUnits("0.01")).toBe(1);
+  });
+
+  it("preserves whole-unit quantities like 100.00", () => {
+    expect(parseKalshiQuantityUnits("100.00")).toBe(10000);
+  });
+
+  it("rejects malformed, negative, zero, NaN, and Infinity quantities", () => {
+    expect(parseKalshiQuantityUnits("abc")).toBeNull();
+    expect(parseKalshiQuantityUnits("-1.55")).toBeNull();
+    expect(parseKalshiQuantityUnits("0")).toBeNull();
+    expect(parseKalshiQuantityUnits("0.00")).toBeNull();
+    expect(parseKalshiQuantityUnits("NaN")).toBeNull();
+    expect(parseKalshiQuantityUnits("Infinity")).toBeNull();
+  });
+});
+
+describe("normalizeKalshiBook — sub-cent (1e-4) precision throughout the derived book", () => {
+  const observedAt = 1_700_000_000_000;
+
+  it("2. complement of 0.1234 is exactly 0.8766", () => {
+    const raw = { orderbook_fp: { yes_dollars: [], no_dollars: [["0.1234", "1"]] } };
+    const snap = normalizeKalshiBook(raw, "t", observedAt);
+    expect(snap.yes.bestAsk).toBe(0.8766);
+    expect(snap.yes.bestAskUnits).toBe(8766);
+  });
+
+  it("3. complement of 0.0001 is exactly 0.9999", () => {
+    const raw = { orderbook_fp: { yes_dollars: [], no_dollars: [["0.0001", "1"]] } };
+    expect(normalizeKalshiBook(raw, "t", observedAt).yes.bestAsk).toBe(0.9999);
+  });
+
+  it("4. complement of 0.9999 is exactly 0.0001", () => {
+    const raw = { orderbook_fp: { yes_dollars: [], no_dollars: [["0.9999", "1"]] } };
+    expect(normalizeKalshiBook(raw, "t", observedAt).yes.bestAsk).toBe(0.0001);
+  });
+
+  it("0.5001 and 0.5002 remain distinguishable through the full parse+sort+complement pipeline", () => {
+    const raw = { orderbook_fp: { yes_dollars: [["0.5001", "1"], ["0.5002", "1"]], no_dollars: [] } };
+    const snap = normalizeKalshiBook(raw, "t", observedAt);
+    expect(snap.rawYesBids.map((l) => l.price)).toEqual([0.5002, 0.5001]);
+    expect(snap.yes.bestBid).toBe(0.5002);
+  });
+
+  it("13. best bid 0.5001 / best ask 0.5002 is valid/non-crossed", () => {
+    const raw = { orderbook_fp: { yes_dollars: [["0.5001", "1"]], no_dollars: [["0.4998", "1"]] } }; // NO bid 0.4998 -> YES ask = 1-0.4998 = 0.5002
+    const snap = normalizeKalshiBook(raw, "t", observedAt);
+    expect(snap.yes.bestBid).toBe(0.5001);
+    expect(snap.yes.bestAsk).toBe(0.5002);
+    expect(snap.staleReason).toBeNull();
+  });
+
+  it("14. best bid 0.5002 / best ask 0.5001 is crossed/invalid", () => {
+    const raw = { orderbook_fp: { yes_dollars: [["0.5002", "1"]], no_dollars: [["0.4999", "1"]] } }; // NO bid 0.4999 -> YES ask = 0.5001
+    const snap = normalizeKalshiBook(raw, "t", observedAt);
+    expect(snap.yes.bestBid).toBeNull();
+    expect(snap.yes.bestAsk).toBeNull();
+    expect(snap.staleReason).toMatch(/crossed/i);
+  });
+
+  it("a locked book at sub-cent precision (0.5001 bid == 0.5001 ask) remains valid, per the existing Task 6 decision", () => {
+    const raw = { orderbook_fp: { yes_dollars: [["0.5001", "1"]], no_dollars: [["0.4999", "1"]] } }; // YES ask = 1-0.4999 = 0.5001, equal to bid
+    const snap = normalizeKalshiBook(raw, "t", observedAt);
+    expect(snap.yes.bestBid).toBe(0.5001);
+    expect(snap.yes.bestAsk).toBe(0.5001);
+    expect(snap.staleReason).toBeNull();
+  });
+
+  it("20. YES/NO complement behavior is unchanged semantically for whole-cent inputs", () => {
+    const raw = { orderbook_fp: { yes_dollars: [["0.58", "1"]], no_dollars: [["0.40", "1"]] } };
+    const snap = normalizeKalshiBook(raw, "t", observedAt);
+    expect(snap.yes.bestBid).toBe(0.58);
+    expect(snap.yes.bestAsk).toBe(0.6);
+    expect(snap.no.bestBid).toBe(0.4);
+    expect(snap.no.bestAsk).toBeCloseTo(0.42, 9);
+  });
+});
+
+describe("price grid metadata preservation", () => {
+  it("17. price_ranges is preserved verbatim, including sub-cent steps", () => {
+    const c = classifyKalshiMarket(
+      gameMarket({ price_ranges: [{ start: "0.0000", end: "1.0000", step: "0.0010" }] }),
+      GAME_EVENT,
+    );
+    expect(c.priceRanges).toEqual([{ start: "0.0000", end: "1.0000", step: "0.0010" }]);
+  });
+
+  it("18. price_level_structure is preserved but never treated as authoritative over price_ranges", () => {
+    const c = classifyKalshiMarket(gameMarket({ price_level_structure: "linear_cent", price_ranges: [{ start: "0", end: "1", step: "0.0010" }] }), GAME_EVENT);
+    expect(c.priceLevelStructure).toBe("linear_cent");
+    expect(c.priceRanges?.[0]?.step).toBe("0.0010");
+  });
+
+  it("preserves null price grid metadata when absent, without fabricating it", () => {
+    const c = classifyKalshiMarket(gameMarket(), GAME_EVENT);
+    expect(c.priceRanges).toBeNull();
+    expect(c.priceLevelStructure).toBeNull();
   });
 });
