@@ -3,12 +3,19 @@ export type Venue = "PMUS" | "KALSHI";
 export type MatchStatus = "EXACT" | "NEAR" | "NONE" | "UNVERIFIED";
 export type SettlementCompatibility = "COMPATIBLE" | "INCOMPATIBLE" | "UNVERIFIED";
 
+/** Three-way source-eligibility classification (Task 3). Never collapse UNVERIFIED into INELIGIBLE. */
+export type ClassificationStatus = "ELIGIBLE" | "INELIGIBLE" | "UNVERIFIED";
+
 /** Structured source-market metadata resolved from gamma-api by conditionId (Task 3). */
 export type SourceMarketMetadata = {
   conditionId: string;
   league: string | null;
   sportsMarketType: string | null;
   betType: BetType | null;
+  /** ELIGIBLE / INELIGIBLE / UNVERIFIED — see src/lib/sports-shadow/eligibility.ts for the full reason-code vocabulary. */
+  status: ClassificationStatus;
+  /** One of the ReasonCode values from eligibility.ts, kept as `string` here to avoid a circular import. */
+  reasonCode: string;
   ineligibleReason: string | null;
   line: number | null;
   awayTeam: string | null;
