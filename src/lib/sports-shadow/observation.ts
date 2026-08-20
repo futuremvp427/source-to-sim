@@ -9,8 +9,8 @@
  */
 
 import type { KalshiBookSnapshot } from "./kalshi";
-import type { MatchStatus, ResolverReasonCode, SettlementCompatibility as ResolverSettlementCompatibility, SettlementProfile, TargetSide, VenueMatchResult } from "./resolver";
-import type { BookSnapshot, DepthLevel, Venue } from "./types";
+import type { MatchStatus, ResolverReasonCode, SettlementProfile, TargetSide, VenueMatchResult } from "./resolver";
+import type { BookSnapshot, DepthLevel, SettlementCompatibility as ResolverSettlementCompatibility, Venue } from "./types";
 
 /** The five and only legal requested delays (matches the Task 1 DB CHECK constraint exactly). Defined once here — no module duplicates a slightly different array. */
 export const SPORTS_SHADOW_DELAYS_MS = [0, 5_000, 10_000, 30_000, 60_000] as const;

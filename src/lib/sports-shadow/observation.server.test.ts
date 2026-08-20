@@ -239,7 +239,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
     await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, { repo });
     const zeroDelayRow = [...observations.values()].find((o) => o.requestedDelayMs === 0)!;
     zeroDelayRow.observedAt = "2026-01-01T00:00:00Z";
-    zeroDelayRow.patch = undefined;
+    delete zeroDelayRow.patch;
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
     await takeDueSportsShadowObservations(baseDeps(repo, { fetchPmusBook }));
     expect(fetchPmusBook).toHaveBeenCalledTimes(4); // the 4 still-pending ones, not the already-observed +0

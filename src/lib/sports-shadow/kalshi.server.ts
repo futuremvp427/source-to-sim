@@ -86,11 +86,13 @@ async function pacedGetJson<T>(path: string, deps: KalshiNetworkDeps): Promise<T
   }
 }
 
+type PaginatedKalshiResponse = { cursor?: string; markets?: unknown; events?: unknown };
+
 async function paginate<T>(pathBuilder: (cursor: string | null) => string, itemsKey: "markets" | "events", deps: KalshiNetworkDeps): Promise<T[]> {
   const out: T[] = [];
   let cursor: string | null = null;
   for (let page = 0; page < MAX_PAGES_PER_SERIES; page += 1) {
-    const json = await pacedGetJson<{ cursor?: string; markets?: unknown; events?: unknown }>(pathBuilder(cursor), deps);
+    const json: PaginatedKalshiResponse = await pacedGetJson<PaginatedKalshiResponse>(pathBuilder(cursor), deps);
     const items = json[itemsKey];
     if (Array.isArray(items)) out.push(...(items as T[]));
     cursor = json.cursor && json.cursor.length > 0 ? json.cursor : null;
@@ -162,7 +164,7 @@ export async function fetchKalshiBook(ticker: string, deps: Partial<KalshiNetwor
     const json = await pacedGetJson<unknown>(`/markets/${encodeURIComponent(ticker)}/orderbook`, d);
     return normalizeKalshiBook(json, ticker, observedAt);
   } catch (err) {
-    const emptySide = { bestBid: null, bestAsk: null, bidLevels: [], askLevels: [] };
+    const emptySide = { bestBid: null, bestAsk: null, bestBidUnits: null, bestAskUnits: null, bidLevels: [], askLevels: [] };
     return {
       venue: "KALSHI",
       marketId: ticker,

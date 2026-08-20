@@ -176,11 +176,12 @@ describe("fetchPmusBook", () => {
 describe("auth/safety", () => {
   it("40. the public fetch never adds authentication headers", async () => {
     clearPmusDiscoveryCache();
-    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ events: [] }), { status: 200 }));
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ events: [] }), { status: 200 }));
     await discoverPmusMlbMarkets(okDeps({ fetchImpl }));
     const call = fetchImpl.mock.calls[0];
     if (!call) throw new Error("expected fetchImpl to have been called");
-    const init = call[1] as RequestInit;
+    const init = call[1];
+    if (!init) throw new Error("expected fetchImpl to have been called with a RequestInit");
     const headers = init.headers as Record<string, string>;
     expect(Object.keys(headers).some((h) => /auth|signature|access-key|api-key/i.test(h))).toBe(false);
     expect(headers["Accept"]).toBe("application/json");

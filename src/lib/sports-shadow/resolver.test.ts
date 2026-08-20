@@ -81,6 +81,8 @@ function kalshiCandidate(overrides: Partial<KalshiCandidate> = {}): KalshiCandid
     summaryYesAskDollars: null,
     summaryNoBidDollars: null,
     summaryNoAskDollars: null,
+    priceLevelStructure: "linear_cent",
+    priceRanges: [{ start: "0.0000", end: "1.0000", step: "0.0010" }],
     ...overrides,
   };
 }
