@@ -37,6 +37,8 @@ export type PmusRawMarket = {
   id?: string | number | null;
   slug?: string | null;
   question?: string | null;
+  /** Confirmed-live free-text settlement rules (e.g. "...Extra innings are included if played. If the game is delayed, postponed, or suspended and not rescheduled within two weeks..."). Preserved raw for Task 7's settlement-compatibility evaluation — never parsed as the sole source of eligibility. */
+  description?: string | null;
   marketType?: string | null;
   /** Granular, sport-prefixed type. THE authoritative field for eligibility (see module doc). */
   sportsMarketType?: string | null;
@@ -117,6 +119,8 @@ export type PmusCandidate = {
   closed: boolean | null;
   marketStatus: string | null;
   question: string | null;
+  /** Raw market-level settlement rules text (market.description) — see PmusRawMarket.description. Task 7 diagnostic input only. */
+  rulesDescription: string | null;
   sides: PmusCandidateSide[];
 };
 
@@ -155,6 +159,7 @@ function baseCandidate(event: PmusRawEvent, market: PmusRawMarket): Omit<PmusCan
     closed: market.closed ?? null,
     marketStatus: market.status ?? null,
     question: market.question ?? null,
+    rulesDescription: market.description ?? null,
     sides: (market.marketSides ?? []).map((s) => ({
       description: s.description ?? null,
       teamAbbreviation: s.team?.abbreviation ?? null,
