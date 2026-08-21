@@ -256,11 +256,15 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'sports_shadow_source_fills.downstream_status CHECK constraint missing or unexpected';
   END IF;
+  -- Loose on exact paren/cast rendering (Postgres renders a single-predicate partial
+  -- index WHERE clause as e.g. "WHERE (downstream_status = 'PENDING'::text)", not the
+  -- "((...))" double-paren shape used elsewhere in this file for a compound predicate)
+  -- -- still strict enough to prove the index targets the right column and value.
   IF NOT EXISTS (
     SELECT 1 FROM pg_indexes
     WHERE schemaname = 'public' AND tablename = 'sports_shadow_source_fills'
       AND indexname = 'sports_shadow_source_fills_pending_idx'
-      AND indexdef LIKE '%WHERE ((downstream_status = ''PENDING''%'
+      AND indexdef LIKE '%WHERE%downstream_status%PENDING%'
   ) THEN
     RAISE EXCEPTION 'sports_shadow_source_fills_pending_idx partial index is missing';
   END IF;
