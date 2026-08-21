@@ -250,6 +250,61 @@ describe("takeDueSportsShadowObservations — due queue", () => {
     expect(DUE_BATCH_LIMIT).toBeLessThanOrEqual(50);
   });
 
+  it("24b. an explicit maxRows overrides DUE_BATCH_LIMIT without changing any other behavior", async () => {
+    const { repo, observations } = makeFakeRepo();
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, { repo }); // 5 due rows
+    const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
+    const out = await takeDueSportsShadowObservations(baseDeps(repo, { fetchPmusBook }), 2);
+    expect(fetchPmusBook).toHaveBeenCalledTimes(2);
+    expect(out.captured).toBe(2);
+    const stillPending = [...observations.values()].filter((o) => o.observedAt === null);
+    expect(stillPending).toHaveLength(3);
+  });
+
+  it("24c. omitting maxRows preserves the exact prior DUE_BATCH_LIMIT default behavior", async () => {
+    const { repo } = makeFakeRepo();
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, { repo });
+    const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
+    const out = await takeDueSportsShadowObservations(baseDeps(repo, { fetchPmusBook })); // no maxRows arg
+    expect(fetchPmusBook).toHaveBeenCalledTimes(5); // all 5 due rows, same as before this change
+    expect(out.captured).toBe(5);
+  });
+
+  it("24d. omitting deadlineAtMs (null default) preserves exact prior behavior -- no row is ever skipped for time", async () => {
+    const { repo } = makeFakeRepo();
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, { repo });
+    const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
+    const out = await takeDueSportsShadowObservations(baseDeps(repo, { fetchPmusBook }), DUE_BATCH_LIMIT); // maxRows explicit, deadlineAtMs omitted
+    expect(fetchPmusBook).toHaveBeenCalledTimes(5);
+    expect(out.captured).toBe(5);
+  });
+
+  it("24e. once the deadline is reached, remaining rows are left completely untouched (observed_at stays null), never marked a terminal failure", async () => {
+    const { repo, observations } = makeFakeRepo();
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, { repo }); // 5 due rows
+    let call = 0;
+    // Simulate wall-clock advancing: the deadline check reads d.now() before each row;
+    // return a time past the deadline starting on the 3rd row.
+    const clockSequence = [DETECTED_AT_MS, DETECTED_AT_MS, DETECTED_AT_MS + 10_000, DETECTED_AT_MS + 10_000, DETECTED_AT_MS + 10_000, DETECTED_AT_MS + 10_000];
+    const now = () => clockSequence[Math.min(call++, clockSequence.length - 1)]!;
+    const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
+    const out = await takeDueSportsShadowObservations({ repo, fetchPmusBook, now }, 5, DETECTED_AT_MS + 5_000);
+    expect(fetchPmusBook.mock.calls.length).toBeLessThan(5); // stopped early
+    expect(out.captured + out.failed + out.skipped).toBeLessThan(5);
+    const untouched = [...observations.values()].filter((o) => o.observedAt === null && o.patch === undefined);
+    expect(untouched.length).toBeGreaterThan(0); // never claimed, never terminal-failed -- safe to retry
+  });
+
+  it("24f. a deadline already in the past when the pass starts processes zero rows, all left untouched", async () => {
+    const { repo, observations } = makeFakeRepo();
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, { repo });
+    const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
+    const out = await takeDueSportsShadowObservations({ repo, fetchPmusBook, now: () => DETECTED_AT_MS }, 5, DETECTED_AT_MS - 1);
+    expect(fetchPmusBook).not.toHaveBeenCalled();
+    expect(out).toEqual({ captured: 0, failed: 0, skipped: 0 });
+    expect([...observations.values()].every((o) => o.observedAt === null)).toBe(true);
+  });
+
   it("25. oldest fire_at is handled first", async () => {
     const { repo } = makeFakeRepo();
     await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, { repo });

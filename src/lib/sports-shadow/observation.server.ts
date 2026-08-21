@@ -243,23 +243,48 @@ export type DueCollectionResult = { captured: number; failed: number; skipped: n
 
 /**
  * Collects every currently-due observation (observed_at IS NULL AND fire_at <= now),
- * bounded to DUE_BATCH_LIMIT, oldest fire_at first. For each row: fetches the genuine
- * live book (never cached), builds the persistence patch (capture or explicit
- * failure), and attempts the CAS terminal write. A row whose CAS is lost to a
- * concurrent worker (observed_at was no longer null by the time this call's UPDATE
- * ran) is counted as `skipped`, never `captured`/`failed` — the network fetch that
- * "wasted" is an accepted cost (see the mission's network-race note), not corruption.
+ * bounded to `maxRows` (defaults to DUE_BATCH_LIMIT, preserving prior behavior exactly
+ * when omitted), oldest fire_at first. For each row: fetches the genuine live book
+ * (never cached), builds the persistence patch (capture or explicit failure), and
+ * attempts the CAS terminal write. A row whose CAS is lost to a concurrent worker
+ * (observed_at was no longer null by the time this call's UPDATE ran) is counted as
+ * `skipped`, never `captured`/`failed` — the network fetch that "wasted" is an accepted
+ * cost (see the mission's network-race note), not corruption.
+ *
+ * `maxRows` exists for callers with a tighter wall-clock budget than the default 20-row
+ * batch (each due row issues one real, sequential, up-to-~12s-timeout network fetch) —
+ * e.g. Task 11's sub-minute sports-shadow observation lane, which needs a small enough
+ * cap that its worst-case wall time stays comfortably inside its own lease TTL. Passing
+ * a smaller maxRows never changes anything else about this function's behavior.
+ *
+ * `deadlineAtMs` (epoch ms, default null = no deadline, identical to prior behavior) is
+ * checked ONLY between rows, never mid-fetch: fetchPmusBook/fetchKalshiBook each own a
+ * fixed internal ~12s AbortController this function cannot reach in from outside, so a
+ * single already-started row can still legitimately run up to its own ~12s ceiling
+ * regardless of the deadline. What the deadline bounds is the NUMBER of further rows
+ * this pass starts once elapsed wall time is exhausted — any row not yet reached when
+ * the deadline is crossed is left completely untouched (`observed_at` stays null,
+ * exactly the same safe-to-retry state the existing CAS-loss `skipped` path already
+ * relies on), never marked a terminal failure. This is what lets a caller with a strict
+ * lane-hold budget (Task 11) bound worst-case wall time to roughly
+ * `deadlineAtMs budget + one row's own worst-case fetch time`, instead of
+ * `maxRows * one row's own worst-case fetch time`.
  */
-export async function takeDueSportsShadowObservations(deps: Partial<ObservationDeps> = {}): Promise<DueCollectionResult> {
+export async function takeDueSportsShadowObservations(
+  deps: Partial<ObservationDeps> = {},
+  maxRows: number = DUE_BATCH_LIMIT,
+  deadlineAtMs: number | null = null,
+): Promise<DueCollectionResult> {
   const d: ObservationDeps = { ...defaultDeps, ...deps };
   const nowIso = new Date(d.now()).toISOString();
-  const due = await d.repo.findDueObservations(nowIso, DUE_BATCH_LIMIT);
+  const due = await d.repo.findDueObservations(nowIso, maxRows);
 
   let captured = 0;
   let failed = 0;
   let skipped = 0;
 
   for (const row of due) {
+    if (deadlineAtMs !== null && d.now() >= deadlineAtMs) break;
     if (!row.targetFetchKey) {
       const patch = buildTerminalFailurePatch(d.now(), "MISSING_TARGET_IDENTIFIER", "due observation's linked match has no usable fetch key", row.fireAt, row.requestedDelayMs);
       if (await d.repo.claimObservationTerminal(row.id, patch)) failed += 1;
