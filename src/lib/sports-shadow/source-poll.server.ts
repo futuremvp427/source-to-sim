@@ -3,11 +3,77 @@
  *
  * One bounded, one-shot call per wallet: paginate data-api.polymarket.com/trades for
  * ONE approved wallet, normalize via shadow-core.ts's already-proven
- * `normalizeSourceEvents`, persist every genuinely-new fill as durable evidence, resolve
- * source-market eligibility (Task 3), and feed ELIGIBLE fills through Task 4's pure
- * `decideFill` reducer against durably-reconstructed episode state. Task 11 is expected
- * to invoke `pollSportsShadowWallet` repeatedly (once per wallet per cycle) — this
- * module has no internal loop, no timer, and no daemon of its own.
+ * `normalizeSourceEvents`, persist every genuinely-new fill as durable evidence, then
+ * retry EVERY currently-pending fill for this wallet (freshly inserted this poll, or
+ * orphaned by an earlier failure/crash — see the Task 12D / P1-A design below) through
+ * Task 3 eligibility and Task 4's pure `decideFill` reducer against durably-reconstructed
+ * episode state. Task 11 is expected to invoke `pollSportsShadowWallet` repeatedly (once
+ * per wallet per cycle) — this module has no internal loop, no timer, and no daemon of
+ * its own.
+ *
+ * ============================== TASK 12D / P1-A: DURABLE DOWNSTREAM RETRY ==============================
+ * ROOT CAUSE (Codex P1 finding): a fill's raw row could be inserted successfully, then
+ * fail LATER — metadata lookup, UNVERIFIED metadata, findLatestEpisode, the episode
+ * mutation itself — and the ONLY thing a later poll checked was insertRawFill's
+ * `inserted: false` (i.e. "the raw row already exists"). That collapsed two genuinely
+ * different states into one: "raw evidence persisted" and "downstream processing safely
+ * applied" are NOT the same thing, and treating them as one meant a transient failure
+ * permanently lost that fill from ever contributing to an episode/signal.
+ *
+ * FIX: `sports_shadow_source_fills.downstream_status` (see
+ * supabase/migrations/20260821040000_sports_shadow_fill_retry_and_fairness.sql) makes
+ * the two states independently durable. Every poll now has two phases: (1) insert every
+ * genuinely-new fill as before (default downstream_status = PENDING, dedup semantics on
+ * the raw insert itself are UNCHANGED); (2) query EVERY currently-PENDING fill for this
+ * wallet — bounded, oldest source_ts first — and run it through classification +
+ * decideFill, exactly like the pre-Task-12D inline loop did, except the DB write that
+ * "commits" a fill's outcome now happens ONLY through insertEpisodeAtomic /
+ * updateEpisodeAtomic (see below), which the migration proves atomically pairs the
+ * episode mutation with marking that exact fill COMPLETE in one transaction.
+ *
+ * HARD DESIGN GATE — why a fill can never be applied twice, even across a crash:
+ *   a. raw fill exists (downstream_status = PENDING)
+ *   b. episode aggregation is COMPUTED (decideFill runs, produces nextState)
+ *   c. the atomic RPC call that would commit nextState + mark this fill COMPLETE either
+ *      fully commits or the process crashes before/during it
+ *   d. if it crashed: NEITHER the episode mutation NOR the completion marker landed —
+ *      Postgres rolled back the whole (single-function-call) transaction
+ *   e. the next worker's retry re-reads episode state fresh via findLatestEpisode, sees
+ *      the SAME prior state as before (because nothing from the crashed attempt
+ *      persisted), recomputes the IDENTICAL decideFill result, and this time either
+ *      commits cleanly (episode mutated + fill COMPLETE together) or crashes again with
+ *      the same all-or-nothing guarantee
+ * There is no reachable intermediate state where the episode was mutated but the fill is
+ * still PENDING — by construction, not by convention. This relies on wallet polling
+ * being serialized by Task 11's SOURCE_LOCK_ID lease (only one worker ever calls
+ * pollSportsShadowWallet for a given wallet at a time); true concurrent double-processing
+ * of the same wallet was already out of scope for the rest of Task 10/11.
+ *
+ * Terminal classification (a fill's OWN immutable data will never produce a different
+ * outcome on retry, so it is safe to stop retrying it):
+ *   - missing conditionId, or metadata.status === "INELIGIBLE"  -> TERMINAL_INELIGIBLE
+ *   - decideFill returns INVALID_FILL (shares/price/side already violate its own
+ *     invariants; those values never change once persisted)                -> TERMINAL_INVALID
+ *   - metadata.status === "UNVERIFIED" (or a metadata fetch throws)  -> STAYS PENDING.
+ *     Per the mission's explicit instruction, temporary uncertainty is never silently
+ *     treated as permanently processed — Task 3's UNVERIFIED reason-code vocabulary
+ *     mixes genuinely transient causes (fetch failure, malformed/empty response) with
+ *     causes that happen to also be permanent in practice (ambiguous period, unknown
+ *     team) without a cheap, already-proven way to tell them apart here; retrying a
+ *     permanently-ambiguous market is bounded wasted work, not a correctness bug,
+ *     whereas terminally dropping a transient one would be.
+ *   - pre-go-live suppression (isEligibleForEpisodeTrigger === false)  -> COMPLETE. This
+ *     is the historically-correct, final answer for that exact fill: goLiveAtMs is fixed
+ *     and durable (Task 10), so re-evaluating it on a LATER "resumption" poll (once the
+ *     wallet has any history and isBootstrap flips to false) would wrongly retroactively
+ *     trigger a fill that was legitimately excluded because collection was not live yet
+ *     — retrying it would be a new bug, not a fix.
+ *   - DUPLICATE_FILL, or SELL_RECORDED with no matching open episode  -> COMPLETE
+ *     (single fill-only write, safe alone: either the aggregation is already reflected
+ *     elsewhere, or there is genuinely nothing durable left to do for a SELL against no
+ *     tracked position).
+ *   - a network/DB failure at any step (metadata fetch, findLatestEpisode, the atomic
+ *     RPC itself)  -> STAYS PENDING, retried next poll.
  *
  * Never imports pmus.ts/kalshi.ts/resolver.ts/observation.ts/depth-walk.ts — target-venue
  * matching and quote capture are explicitly out of scope here; Task 11 wires this
@@ -28,9 +94,9 @@ import {
 } from "../http-rate-limit.server";
 import { buildTradesUrl, MAX_TRADES_OFFSET, PAGE_SIZE } from "../shadow.server";
 import { normalizeSourceEvents, type NormalizedEvent, type RawTrade } from "../shadow-core";
-import { decideFill, type OpenEpisodeState } from "./episode";
+import { decideFill, type EligibleFill, type OpenEpisodeState } from "./episode";
 import { fetchSourceMarketMetadata } from "./source-metadata.server";
-import { isEligibleForEpisodeTrigger, toEligibleFill } from "./source-poll";
+import { isEligibleForEpisodeTrigger } from "./source-poll";
 import type { BetType, SourceMarketMetadata } from "./types";
 
 /**
@@ -41,6 +107,9 @@ import type { BetType, SourceMarketMetadata } from "./types";
  * `backlogTruncated` reports that explicitly rather than silently dropping older history.
  */
 export const MAX_PAGES_PER_WALLET = Math.floor(MAX_TRADES_OFFSET / PAGE_SIZE) + 1;
+
+/** Bounded per-poll cap on how many currently-PENDING fills are retried in phase 2 — generous relative to expected per-wallet volume, but never unbounded. Excess pending work simply stays durable for a later poll, exactly like Task 11B's pending-signal batch. */
+export const MAX_PENDING_FILLS_PER_POLL = 500;
 
 const REQUEST_TIMEOUT_MS = 12_000;
 
@@ -139,7 +208,6 @@ export type NewSignalRow = {
   walletHandle: string | null;
   conditionId: string;
   asset: string;
-  firstFillId: string;
   firstFillAtIso: string;
   lastFillAtIso: string;
   vwap: number;
@@ -159,6 +227,22 @@ export type NewSignalRow = {
   sourceOutcome: string | null;
 };
 
+/** A durably-persisted fill whose downstream (classification + episode) processing has not yet safely completed. Reconstructed entirely from already-stored columns — never re-fetched from the source API. */
+export type PendingDownstreamFillRow = {
+  id: string;
+  eventKey: string;
+  walletHandle: string | null;
+  conditionId: string | null;
+  asset: string;
+  outcome: string | null;
+  eventSlug: string | null;
+  marketSlug: string | null;
+  side: "BUY" | "SELL";
+  shares: number;
+  price: number;
+  sourceTs: number;
+};
+
 export type PollRepository = {
   hasAnyFillsForWallet(wallet: string): Promise<boolean>;
   findExistingEventKeys(wallet: string, eventKeys: string[]): Promise<Set<string>>;
@@ -174,8 +258,31 @@ export type PollRepository = {
   countDurableOrdinalFills(wallet: string, tuplePrefixes: string[]): Promise<Map<string, number>>;
   /** Most recent episode (by source_last_fill_at) for this exact position, if any. */
   findLatestEpisode(wallet: string, conditionId: string, asset: string): Promise<EpisodeCacheEntry | null>;
-  insertNewEpisode(row: NewSignalRow): Promise<{ id: string }>;
-  updateEpisode(id: string, state: OpenEpisodeState): Promise<void>;
+  /** Bounded, oldest-source_ts-first: every fill for this wallet whose downstream processing has not yet safely completed. Includes fills inserted THIS poll and any orphaned by an earlier failure/crash — see this module's Task 12D/P1-A doc comment. */
+  findPendingDownstreamFills(wallet: string, limit: number): Promise<PendingDownstreamFillRow[]>;
+  /** Atomically inserts the new episode row AND marks fillId's downstream_status COMPLETE in one transaction. */
+  insertEpisodeAtomic(fillId: string, row: NewSignalRow): Promise<{ id: string }>;
+  /** Atomically updates the existing episode's aggregate fields AND marks fillId's downstream_status COMPLETE in one transaction. */
+  updateEpisodeAtomic(fillId: string, signalId: string, state: OpenEpisodeState): Promise<void>;
+  /** Marks a fill COMPLETE with no paired episode mutation — safe as a lone single-table write (see this module's terminal-classification doc comment). */
+  markFillComplete(fillId: string): Promise<void>;
+  /** Marks a fill permanently terminal — its own immutable data will never produce a different outcome on retry. */
+  markFillTerminal(fillId: string, status: "TERMINAL_INELIGIBLE" | "TERMINAL_INVALID"): Promise<void>;
+};
+
+type RawPendingFillRow = {
+  id: string;
+  event_key: string;
+  wallet_handle: string | null;
+  condition_id: string | null;
+  asset: string;
+  outcome: string | null;
+  event_slug: string | null;
+  market_slug: string | null;
+  side: "BUY" | "SELL";
+  shares: number;
+  price: number;
+  source_ts: number;
 };
 
 /**
@@ -316,54 +423,89 @@ export const supabasePollRepository: PollRepository = {
     };
   },
 
-  async insertNewEpisode(row) {
+  async findPendingDownstreamFills(wallet, limit) {
     const { data, error } = await supabaseAdmin
-      .from("sports_shadow_signals" as never)
-      .insert({
-        episode_key: row.episodeKey,
-        source_wallet: row.wallet,
-        source_handle: row.walletHandle,
-        source_condition_id: row.conditionId,
-        source_asset: row.asset,
-        source_outcome: row.sourceOutcome,
-        source_event_slug: row.sourceEventSlug,
-        source_market_slug: row.sourceMarketSlug,
-        first_fill_id: row.firstFillId,
-        source_first_fill_at: row.firstFillAtIso,
-        source_last_fill_at: row.lastFillAtIso,
-        source_vwap: row.vwap,
-        source_shares: row.shares,
-        source_notional: row.notional,
-        source_fill_count: row.fillCount,
-        source_sell_seen: row.sellSeen,
-        league: row.league,
-        scheduled_start_at: row.scheduledStartAt,
-        away_team: row.awayTeam,
-        home_team: row.homeTeam,
-        bet_type: row.betType,
-        selected_side: row.selectedSide,
-        line: row.line,
-      } as never)
-      .select("id")
-      .single();
+      .from("sports_shadow_source_fills" as never)
+      .select("id, event_key, wallet_handle, condition_id, asset, outcome, event_slug, market_slug, side, shares, price, source_ts")
+      .eq("wallet", wallet)
+      .eq("downstream_status", "PENDING")
+      .order("source_ts", { ascending: true })
+      .limit(limit);
     if (error) throw new Error(error.message);
-    return { id: (data as unknown as { id: string }).id };
+    return ((data ?? []) as unknown as RawPendingFillRow[]).map((r) => ({
+      id: r.id,
+      eventKey: r.event_key,
+      walletHandle: r.wallet_handle,
+      conditionId: r.condition_id,
+      asset: r.asset,
+      outcome: r.outcome,
+      eventSlug: r.event_slug,
+      marketSlug: r.market_slug,
+      side: r.side,
+      shares: r.shares,
+      price: r.price,
+      sourceTs: r.source_ts,
+    }));
   },
 
-  async updateEpisode(id, state) {
+  async insertEpisodeAtomic(fillId, row) {
+    const { data, error } = await supabaseAdmin.rpc("insert_sports_shadow_episode" as never, {
+      p_fill_id: fillId,
+      p_episode_key: row.episodeKey,
+      p_source_wallet: row.wallet,
+      p_source_handle: row.walletHandle,
+      p_source_condition_id: row.conditionId,
+      p_source_asset: row.asset,
+      p_source_outcome: row.sourceOutcome,
+      p_source_event_slug: row.sourceEventSlug,
+      p_source_market_slug: row.sourceMarketSlug,
+      p_source_first_fill_at: row.firstFillAtIso,
+      p_source_last_fill_at: row.lastFillAtIso,
+      p_source_vwap: row.vwap,
+      p_source_shares: row.shares,
+      p_source_notional: row.notional,
+      p_source_fill_count: row.fillCount,
+      p_source_sell_seen: row.sellSeen,
+      p_league: row.league,
+      p_scheduled_start_at: row.scheduledStartAt,
+      p_away_team: row.awayTeam,
+      p_home_team: row.homeTeam,
+      p_bet_type: row.betType,
+      p_selected_side: row.selectedSide,
+      p_line: row.line,
+    } as never);
+    if (error) throw new Error(error.message);
+    return { id: data as unknown as string };
+  },
+
+  async updateEpisodeAtomic(fillId, signalId, state) {
+    const { error } = await supabaseAdmin.rpc("update_sports_shadow_episode" as never, {
+      p_fill_id: fillId,
+      p_signal_id: signalId,
+      p_source_first_fill_at: new Date(state.firstBuyAt * 1000).toISOString(),
+      p_source_last_fill_at: new Date(state.lastFillAt * 1000).toISOString(),
+      p_source_vwap: state.vwap,
+      p_source_shares: state.totalShares,
+      p_source_notional: state.totalNotional,
+      p_source_fill_count: state.buyFillCount,
+      p_source_sell_seen: state.sellSeen,
+    } as never);
+    if (error) throw new Error(error.message);
+  },
+
+  async markFillComplete(fillId) {
     const { error } = await supabaseAdmin
-      .from("sports_shadow_signals" as never)
-      .update({
-        source_first_fill_at: new Date(state.firstBuyAt * 1000).toISOString(),
-        source_last_fill_at: new Date(state.lastFillAt * 1000).toISOString(),
-        source_vwap: state.vwap,
-        source_shares: state.totalShares,
-        source_notional: state.totalNotional,
-        source_fill_count: state.buyFillCount,
-        source_sell_seen: state.sellSeen,
-        updated_at: new Date().toISOString(),
-      } as never)
-      .eq("id", id);
+      .from("sports_shadow_source_fills" as never)
+      .update({ downstream_status: "COMPLETE" } as never)
+      .eq("id", fillId);
+    if (error) throw new Error(error.message);
+  },
+
+  async markFillTerminal(fillId, status) {
+    const { error } = await supabaseAdmin
+      .from("sports_shadow_source_fills" as never)
+      .update({ downstream_status: status } as never)
+      .eq("id", fillId);
     if (error) throw new Error(error.message);
   },
 };
@@ -424,15 +566,11 @@ export type WalletPollResult = {
   lateReconciliationCount: number;
   /** True only when this was a RESUMPTION poll (wallet had prior history) and no durable overlap was found within MAX_PAGES_PER_WALLET — a genuine first-ever bootstrap hitting the page cap is NOT truncation (there is no "backlog" to complete). */
   backlogTruncated: boolean;
+  /** How many fills processed this poll (phase 2) were NOT part of this poll's freshly-inserted batch — i.e. genuinely recovered from an earlier failed/crashed poll. Direct evidence of the Task 12D/P1-A durable-retry mechanism actually doing something, not just existing. */
+  orphanedFillsRecovered: number;
   /** First error encountered, if any. Partial progress made before the error is still reflected in the other fields above — one bad page/row does not discard already-persisted evidence. */
   error: string | null;
 };
-
-function rawStr(raw: unknown, key: string): string | null {
-  if (typeof raw !== "object" || raw === null) return null;
-  const v = (raw as Record<string, unknown>)[key];
-  return typeof v === "string" && v.length > 0 ? v : null;
-}
 
 function emptyResult(wallet: string): WalletPollResult {
   return {
@@ -452,6 +590,7 @@ function emptyResult(wallet: string): WalletPollResult {
     sellRecordedCount: 0,
     lateReconciliationCount: 0,
     backlogTruncated: false,
+    orphanedFillsRecovered: 0,
     error: null,
   };
 }
@@ -658,11 +797,9 @@ export async function pollSportsShadowWallet(
 
   const genuinelyNew = [...newReliable, ...newDegraded].sort((a, b) => a.sourceTs - b.sourceTs || a.eventKey.localeCompare(b.eventKey));
 
-  const positionCache = new Map<string, EpisodeCacheEntry | null>();
-  const metadataCache = new Map<string, SourceMarketMetadata>();
-
+  /* -------------------- Phase 1: persist every genuinely-new fill as durable evidence -------------------- */
+  const insertedThisPoll = new Set<string>();
   for (const event of genuinelyNew) {
-    let fillId: string;
     try {
       const insertResult = await d.repo.insertRawFill({
         eventKey: event.eventKey,
@@ -682,65 +819,108 @@ export async function pollSportsShadowWallet(
         identityDegraded: event.identityDegraded,
         raw: event.raw,
       });
-      if (!insertResult.inserted) {
+      if (insertResult.inserted) {
+        result.newRows += 1;
+        insertedThisPoll.add(insertResult.id);
+      } else {
         result.duplicateRows += 1;
-        continue;
       }
-      fillId = insertResult.id;
-      result.newRows += 1;
     } catch (err) {
       result.error = result.error ?? `insertRawFill failed: ${err instanceof Error ? err.message : "unknown error"}`;
       result.invalidRows += 1;
-      continue;
     }
+  }
 
-    if (!event.conditionId) {
+  /*
+   * -------------------- Phase 2: retry EVERY currently-pending fill for this wallet --------------------
+   * Bounded, oldest source_ts first. Naturally includes fills just inserted above AND any
+   * orphaned by an earlier failed/crashed poll — see this module's Task 12D/P1-A doc
+   * comment for why re-running this against the same fill is always safe.
+   */
+  let pendingFills: PendingDownstreamFillRow[];
+  try {
+    pendingFills = await d.repo.findPendingDownstreamFills(normalizedWallet, MAX_PENDING_FILLS_PER_POLL);
+  } catch (err) {
+    result.error = result.error ?? `findPendingDownstreamFills failed: ${err instanceof Error ? err.message : "unknown error"}`;
+    pendingFills = [];
+  }
+  result.orphanedFillsRecovered = pendingFills.filter((f) => !insertedThisPoll.has(f.id)).length;
+
+  const positionCache = new Map<string, EpisodeCacheEntry | null>();
+  const metadataCache = new Map<string, SourceMarketMetadata>();
+
+  for (const fill of pendingFills) {
+    if (!fill.conditionId) {
       result.unverifiedRows += 1;
+      try {
+        await d.repo.markFillTerminal(fill.id, "TERMINAL_INELIGIBLE");
+      } catch {
+        // Best-effort: a failed terminal-marker write just leaves this fill PENDING,
+        // re-evaluated (and re-attempted) identically next poll.
+      }
       continue;
     }
 
-    let metadata = metadataCache.get(event.conditionId);
+    let metadata = metadataCache.get(fill.conditionId);
     if (!metadata) {
       try {
-        metadata = await d.fetchSourceMarketMetadata(event.conditionId);
+        metadata = await d.fetchSourceMarketMetadata(fill.conditionId);
       } catch (err) {
         result.error = result.error ?? `fetchSourceMarketMetadata failed: ${err instanceof Error ? err.message : "unknown error"}`;
         result.metadataFetchFailures += 1;
-        continue;
+        continue; // stays PENDING
       }
-      metadataCache.set(event.conditionId, metadata);
+      metadataCache.set(fill.conditionId, metadata);
     }
 
     if (metadata.status === "INELIGIBLE") {
       result.ineligibleRows += 1;
+      try {
+        await d.repo.markFillTerminal(fill.id, "TERMINAL_INELIGIBLE");
+      } catch {
+        // Best-effort; stays PENDING and is re-evaluated identically next poll.
+      }
       continue;
     }
     if (metadata.status === "UNVERIFIED" || !metadata.betType) {
       result.unverifiedRows += 1;
-      continue;
+      continue; // stays PENDING -- temporary uncertainty is never silently treated as permanent
     }
 
-    const eligibleFill = toEligibleFill(event, detectedAtMs);
-    if (!eligibleFill) {
-      result.invalidRows += 1;
-      continue;
-    }
+    const eligibleFill: EligibleFill = {
+      eventKey: fill.eventKey,
+      wallet: normalizedWallet,
+      conditionId: fill.conditionId,
+      asset: fill.asset,
+      side: fill.side,
+      shares: fill.shares,
+      price: fill.price,
+      sourceTs: fill.sourceTs,
+      detectedAt: detectedAtMs,
+    };
 
-    if (!isEligibleForEpisodeTrigger(event.sourceTs, result.isBootstrap, goLiveAtMs)) {
+    if (!isEligibleForEpisodeTrigger(fill.sourceTs, result.isBootstrap, goLiveAtMs)) {
       result.suppressedPreGoLive += 1;
+      try {
+        await d.repo.markFillComplete(fill.id);
+      } catch {
+        // Best-effort; stays PENDING and is re-evaluated identically next poll (isBootstrap
+        // is recomputed fresh each poll from hasAnyFillsForWallet, so this stays safe even
+        // if retried under a different isBootstrap value later -- see the doc comment above).
+      }
       continue;
     }
 
-    const positionKey = `${normalizedWallet}:${event.conditionId}:${event.asset}`;
+    const positionKey = `${normalizedWallet}:${fill.conditionId}:${fill.asset}`;
     let cacheEntry: EpisodeCacheEntry | null;
     if (positionCache.has(positionKey)) {
       cacheEntry = positionCache.get(positionKey)!;
     } else {
       try {
-        cacheEntry = await d.repo.findLatestEpisode(normalizedWallet, event.conditionId, event.asset);
+        cacheEntry = await d.repo.findLatestEpisode(normalizedWallet, fill.conditionId, fill.asset);
       } catch (err) {
         result.error = result.error ?? `findLatestEpisode failed: ${err instanceof Error ? err.message : "unknown error"}`;
-        continue;
+        continue; // stays PENDING
       }
       positionCache.set(positionKey, cacheEntry);
     }
@@ -749,20 +929,37 @@ export async function pollSportsShadowWallet(
 
     if (decision.kind === "INVALID_FILL") {
       result.invalidRows += 1;
+      try {
+        await d.repo.markFillTerminal(fill.id, "TERMINAL_INVALID");
+      } catch {
+        // Best-effort; stays PENDING and is re-evaluated identically next poll.
+      }
       continue;
     }
     if (decision.kind === "DUPLICATE_FILL") {
       result.duplicateRows += 1;
+      try {
+        await d.repo.markFillComplete(fill.id);
+      } catch {
+        // Best-effort; stays PENDING and is re-evaluated identically next poll.
+      }
       continue;
     }
     if (decision.kind === "SELL_RECORDED") {
       result.sellRecordedCount += 1;
       if (decision.nextState && cacheEntry) {
         try {
-          await d.repo.updateEpisode(cacheEntry.id, decision.nextState);
+          await d.repo.updateEpisodeAtomic(fill.id, cacheEntry.id, decision.nextState);
           positionCache.set(positionKey, { id: cacheEntry.id, state: decision.nextState });
         } catch (err) {
-          result.error = result.error ?? `updateEpisode (SELL_RECORDED) failed: ${err instanceof Error ? err.message : "unknown error"}`;
+          result.error = result.error ?? `updateEpisodeAtomic (SELL_RECORDED) failed: ${err instanceof Error ? err.message : "unknown error"}`;
+          // stays PENDING
+        }
+      } else {
+        try {
+          await d.repo.markFillComplete(fill.id);
+        } catch {
+          // Best-effort; stays PENDING and is re-evaluated identically next poll.
         }
       }
       continue;
@@ -772,24 +969,24 @@ export async function pollSportsShadowWallet(
       else result.lateReconciliationCount += 1;
       if (cacheEntry) {
         try {
-          await d.repo.updateEpisode(cacheEntry.id, decision.nextState);
+          await d.repo.updateEpisodeAtomic(fill.id, cacheEntry.id, decision.nextState);
           positionCache.set(positionKey, { id: cacheEntry.id, state: decision.nextState });
         } catch (err) {
-          result.error = result.error ?? `updateEpisode failed: ${err instanceof Error ? err.message : "unknown error"}`;
+          result.error = result.error ?? `updateEpisodeAtomic failed: ${err instanceof Error ? err.message : "unknown error"}`;
+          // stays PENDING
         }
       }
       continue;
     }
 
     // NEW_EPISODE | NEW_EPISODE_AFTER_30M
-    const firstFillAtIso = new Date(event.sourceTs * 1000).toISOString();
+    const firstFillAtIso = new Date(fill.sourceTs * 1000).toISOString();
     const newRow: NewSignalRow = {
       episodeKey: decision.episodeKey,
       wallet: normalizedWallet,
-      walletHandle: rawStr(event.raw, "name"),
-      conditionId: event.conditionId,
-      asset: event.asset,
-      firstFillId: fillId,
+      walletHandle: fill.walletHandle,
+      conditionId: fill.conditionId,
+      asset: fill.asset,
       firstFillAtIso,
       lastFillAtIso: firstFillAtIso,
       vwap: decision.nextState.vwap,
@@ -802,21 +999,21 @@ export async function pollSportsShadowWallet(
       awayTeam: metadata.awayTeam,
       homeTeam: metadata.homeTeam,
       betType: metadata.betType,
-      selectedSide: event.outcome ?? "UNKNOWN",
+      selectedSide: fill.outcome ?? "UNKNOWN",
       line: metadata.line,
       sourceEventSlug: metadata.eventSlug,
       sourceMarketSlug: metadata.marketSlug,
-      sourceOutcome: event.outcome,
+      sourceOutcome: fill.outcome,
     };
     try {
-      const inserted = await d.repo.insertNewEpisode(newRow);
+      const inserted = await d.repo.insertEpisodeAtomic(fill.id, newRow);
       positionCache.set(positionKey, { id: inserted.id, state: decision.nextState });
       result.newSignals.push({
         id: inserted.id,
         episodeKey: decision.episodeKey,
         wallet: normalizedWallet,
-        conditionId: event.conditionId,
-        asset: event.asset,
+        conditionId: fill.conditionId,
+        asset: fill.asset,
         betType: metadata.betType,
         selectedSide: newRow.selectedSide,
         line: metadata.line,
@@ -831,9 +1028,16 @@ export async function pollSportsShadowWallet(
         firstFillAtIso,
       });
     } catch (err) {
-      result.error = result.error ?? `insertNewEpisode failed: ${err instanceof Error ? err.message : "unknown error"}`;
+      result.error = result.error ?? `insertEpisodeAtomic failed: ${err instanceof Error ? err.message : "unknown error"}`;
+      // stays PENDING
     }
   }
 
   return result;
+}
+
+function rawStr(raw: unknown, key: string): string | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const v = (raw as Record<string, unknown>)[key];
+  return typeof v === "string" && v.length > 0 ? v : null;
 }

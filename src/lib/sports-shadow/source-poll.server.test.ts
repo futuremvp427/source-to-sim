@@ -6,6 +6,7 @@ import {
   pollSportsShadowWallet,
   type EpisodeCacheEntry,
   type NewSignalRow,
+  type PendingDownstreamFillRow,
   type PollRepository,
   type RawFillRow,
   type SourcePollNetworkDeps,
@@ -16,23 +17,33 @@ import type { SourceMarketMetadata } from "./types";
 const WALLET = "0xa71093cafc0c099b4ccab24c3cb8018d817923c4";
 const PAGE_SIZE = 250;
 
+type DownstreamStatus = "PENDING" | "COMPLETE" | "TERMINAL_INELIGIBLE" | "TERMINAL_INVALID";
+
 /* ------------------------------------------------------------------ */
-/* In-memory fake repository — mirrors the real Supabase semantics     */
-/* (UNIQUE event_key, wallet-scoped lookups, most-recent-episode-wins). */
+/* In-memory fake repository — mirrors the real Supabase semantics,     */
+/* including Task 12D/P1-A's atomic episode-mutation + fill-completion  */
+/* pairing: insertEpisodeAtomic/updateEpisodeAtomic either apply BOTH   */
+/* their episode-side and fill-side effects, or (when configured to     */
+/* throw) apply NEITHER -- the throw check runs before any mutation,    */
+/* exactly mirroring a real Postgres transaction rollback.              */
 /* ------------------------------------------------------------------ */
 
 class FakeRepo implements PollRepository {
-  fillsByEventKey = new Map<string, { id: string; row: RawFillRow }>();
+  fillsByEventKey = new Map<string, { id: string; row: RawFillRow; downstreamStatus: DownstreamStatus }>();
+  fillsById = new Map<string, { id: string; row: RawFillRow; downstreamStatus: DownstreamStatus }>();
   episodesById = new Map<string, { row: NewSignalRow; state: OpenEpisodeState }>();
   nextId = 1;
   findLatestEpisodeCalls = 0;
-  updateEpisodeCalls: Array<{ id: string; state: OpenEpisodeState }> = [];
+  updateEpisodeAtomicCalls: Array<{ fillId: string; signalId: string; state: OpenEpisodeState }> = [];
+  markFillCompleteCalls: string[] = [];
+  markFillTerminalCalls: Array<{ fillId: string; status: string }> = [];
   throwOnHasAny: Error | null = null;
   throwOnFindExisting: Error | null = null;
   throwOnInsertRawFillFor: string | null = null;
-  throwOnInsertNewEpisode: Error | null = null;
-  throwOnUpdateEpisode: Error | null = null;
+  throwOnInsertEpisodeAtomic: Error | null = null;
+  throwOnUpdateEpisodeAtomic: Error | null = null;
   throwOnCountDurableOrdinal: Error | null = null;
+  throwOnFindPendingDownstreamFills: Error | null = null;
 
   async hasAnyFillsForWallet(wallet: string): Promise<boolean> {
     if (this.throwOnHasAny) throw this.throwOnHasAny;
@@ -57,7 +68,9 @@ class FakeRepo implements PollRepository {
     const existing = this.fillsByEventKey.get(row.eventKey);
     if (existing) return { id: existing.id, inserted: false };
     const id = `fill-${this.nextId++}`;
-    this.fillsByEventKey.set(row.eventKey, { id, row });
+    const entry = { id, row, downstreamStatus: "PENDING" as DownstreamStatus };
+    this.fillsByEventKey.set(row.eventKey, entry);
+    this.fillsById.set(id, entry);
     return { id, inserted: true };
   }
 
@@ -84,12 +97,36 @@ class FakeRepo implements PollRepository {
     return best;
   }
 
-  async insertNewEpisode(row: NewSignalRow) {
-    if (this.throwOnInsertNewEpisode) throw this.throwOnInsertNewEpisode;
+  async findPendingDownstreamFills(wallet: string, limit: number): Promise<PendingDownstreamFillRow[]> {
+    if (this.throwOnFindPendingDownstreamFills) throw this.throwOnFindPendingDownstreamFills;
+    const pending = [...this.fillsByEventKey.values()]
+      .filter((f) => f.row.wallet === wallet && f.downstreamStatus === "PENDING")
+      .sort((a, b) => a.row.sourceTs - b.row.sourceTs || a.row.eventKey.localeCompare(b.row.eventKey))
+      .slice(0, limit);
+    return pending.map((f) => ({
+      id: f.id,
+      eventKey: f.row.eventKey,
+      walletHandle: f.row.walletHandle,
+      conditionId: f.row.conditionId,
+      asset: f.row.asset,
+      outcome: f.row.outcome,
+      eventSlug: f.row.eventSlug,
+      marketSlug: f.row.marketSlug,
+      side: f.row.side,
+      shares: f.row.shares,
+      price: f.row.price,
+      sourceTs: f.row.sourceTs,
+    }));
+  }
+
+  /** Atomic: throws BEFORE any mutation (matching a real rolled-back transaction), so a configured failure leaves the fill PENDING and no episode row created. */
+  async insertEpisodeAtomic(fillId: string, row: NewSignalRow): Promise<{ id: string }> {
+    if (this.throwOnInsertEpisodeAtomic) throw this.throwOnInsertEpisodeAtomic;
+    const anchorFill = this.fillsById.get(fillId);
     const id = `signal-${this.nextId++}`;
     const state: OpenEpisodeState = {
       episodeKey: row.episodeKey,
-      anchorEventKey: this.fillsByEventKey.get(row.firstFillId)?.row.eventKey ?? row.firstFillId,
+      anchorEventKey: anchorFill?.row.eventKey ?? fillId,
       wallet: row.wallet,
       conditionId: row.conditionId,
       asset: row.asset,
@@ -107,14 +144,30 @@ class FakeRepo implements PollRepository {
       processedEventKeys: new Set([row.episodeKey]),
     };
     this.episodesById.set(id, { row, state });
+    if (anchorFill) anchorFill.downstreamStatus = "COMPLETE";
     return { id };
   }
 
-  async updateEpisode(id: string, state: OpenEpisodeState): Promise<void> {
-    if (this.throwOnUpdateEpisode) throw this.throwOnUpdateEpisode;
-    this.updateEpisodeCalls.push({ id, state });
-    const existing = this.episodesById.get(id);
+  /** Atomic: throws BEFORE any mutation, so a configured failure leaves BOTH the episode state AND the fill's downstream_status unchanged (still PENDING) -- see the Hard Design Gate tests below. */
+  async updateEpisodeAtomic(fillId: string, signalId: string, state: OpenEpisodeState): Promise<void> {
+    if (this.throwOnUpdateEpisodeAtomic) throw this.throwOnUpdateEpisodeAtomic;
+    this.updateEpisodeAtomicCalls.push({ fillId, signalId, state });
+    const existing = this.episodesById.get(signalId);
     if (existing) existing.state = state;
+    const fill = this.fillsById.get(fillId);
+    if (fill) fill.downstreamStatus = "COMPLETE";
+  }
+
+  async markFillComplete(fillId: string): Promise<void> {
+    this.markFillCompleteCalls.push(fillId);
+    const fill = this.fillsById.get(fillId);
+    if (fill) fill.downstreamStatus = "COMPLETE";
+  }
+
+  async markFillTerminal(fillId: string, status: "TERMINAL_INELIGIBLE" | "TERMINAL_INVALID"): Promise<void> {
+    this.markFillTerminalCalls.push({ fillId, status });
+    const fill = this.fillsById.get(fillId);
+    if (fill) fill.downstreamStatus = status;
   }
 }
 
@@ -200,7 +253,7 @@ describe("pollSportsShadowWallet — bootstrap vs resumption detection", () => {
 
   it("reports isBootstrap=false when the wallet already has durable history", async () => {
     const repo = new FakeRepo();
-    repo.fillsByEventKey.set("sid:existing", { id: "fill-existing", row: { eventKey: "sid:existing", wallet: WALLET.toLowerCase() } as RawFillRow });
+    repo.fillsByEventKey.set("sid:existing", { id: "fill-existing", row: { eventKey: "sid:existing", wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
     const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [] }) });
     const result = await pollSportsShadowWallet(WALLET, null, deps);
     expect(result.isBootstrap).toBe(false);
@@ -234,7 +287,7 @@ describe("pollSportsShadowWallet — pagination", () => {
     const repo = new FakeRepo();
     const overlapTrade = trade({ transactionHash: "0xoverlap", id: "sid-overlap" });
     // Pre-seed as if already durably known.
-    repo.fillsByEventKey.set("sid:sid-overlap", { id: "fill-x", row: { eventKey: "sid:sid-overlap", wallet: WALLET.toLowerCase() } as RawFillRow });
+    repo.fillsByEventKey.set("sid:sid-overlap", { id: "fill-x", row: { eventKey: "sid:sid-overlap", wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
 
     const fullPage = Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `native-page0-${i}`, transactionHash: `0xtx-page0-${i}` }));
     const { deps } = makeDeps({
@@ -256,7 +309,7 @@ describe("pollSportsShadowWallet — pagination", () => {
 
   it("marks backlogTruncated=true when a RESUMPTION poll exhausts MAX_PAGES_PER_WALLET without finding overlap", async () => {
     const repo = new FakeRepo();
-    repo.fillsByEventKey.set("sid:preexisting", { id: "fill-pre", row: { eventKey: "sid:preexisting", wallet: WALLET.toLowerCase() } as RawFillRow });
+    repo.fillsByEventKey.set("sid:preexisting", { id: "fill-pre", row: { eventKey: "sid:preexisting", wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
     const { deps } = makeDeps({ repo, network: makeNetworkDeps(() => SHARED_FULL_PAGE) });
     const result = await pollSportsShadowWallet(WALLET, 0, deps);
     expect(result.pagesFetched).toBe(MAX_PAGES_PER_WALLET);
@@ -294,7 +347,7 @@ describe("pollSportsShadowWallet — normalization edge cases", () => {
     expect(result.duplicateRows).toBe(0);
   });
 
-  it("persists a fill lacking conditionId as evidence-only, marks unverified, never calls metadata", async () => {
+  it("persists a fill lacking conditionId as durable evidence, marks unverified, marks the fill TERMINAL_INELIGIBLE (can never resolve), never calls metadata", async () => {
     const fetchSourceMarketMetadata = vi.fn(async () => ELIGIBLE_METADATA);
     const { repo, deps } = makeDeps({
       network: makeNetworkDeps({ 0: [trade({ conditionId: undefined })] }),
@@ -305,11 +358,12 @@ describe("pollSportsShadowWallet — normalization edge cases", () => {
     expect(result.unverifiedRows).toBe(1);
     expect(fetchSourceMarketMetadata).not.toHaveBeenCalled();
     expect(repo.fillsByEventKey.size).toBe(1);
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("TERMINAL_INELIGIBLE");
   });
 });
 
 describe("pollSportsShadowWallet — eligibility routing", () => {
-  it("routes INELIGIBLE metadata to ineligibleRows and never touches the episode engine", async () => {
+  it("routes INELIGIBLE metadata to ineligibleRows, marks the fill TERMINAL_INELIGIBLE, and never touches the episode engine", async () => {
     const repo = new FakeRepo();
     const ineligible: SourceMarketMetadata = { ...ELIGIBLE_METADATA, status: "INELIGIBLE", betType: null, reasonCode: "REJECT_PROP" };
     const { deps } = makeDeps({
@@ -321,16 +375,20 @@ describe("pollSportsShadowWallet — eligibility routing", () => {
     expect(result.ineligibleRows).toBe(1);
     expect(result.newSignals).toHaveLength(0);
     expect(repo.findLatestEpisodeCalls).toBe(0);
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("TERMINAL_INELIGIBLE");
   });
 
-  it("routes UNVERIFIED metadata to unverifiedRows", async () => {
+  it("routes UNVERIFIED metadata to unverifiedRows and leaves the fill PENDING (retried next poll, never treated as permanently processed)", async () => {
+    const repo = new FakeRepo();
     const unverified: SourceMarketMetadata = { ...ELIGIBLE_METADATA, status: "UNVERIFIED", betType: null, reasonCode: "UNVERIFIED_METADATA_MISSING" };
     const { deps } = makeDeps({
+      repo,
       network: makeNetworkDeps({ 0: [trade()] }),
       fetchSourceMarketMetadata: vi.fn(async () => unverified) as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
     });
     const result = await pollSportsShadowWallet(WALLET, 0, deps);
     expect(result.unverifiedRows).toBe(1);
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("PENDING");
   });
 
   it("fails closed to unverifiedRows when status is ELIGIBLE but betType is unexpectedly null", async () => {
@@ -344,8 +402,10 @@ describe("pollSportsShadowWallet — eligibility routing", () => {
     expect(result.newSignals).toHaveLength(0);
   });
 
-  it("counts a thrown metadata fetch as metadataFetchFailures, not ineligible/unverified", async () => {
+  it("counts a thrown metadata fetch as metadataFetchFailures, not ineligible/unverified, and leaves the fill PENDING", async () => {
+    const repo = new FakeRepo();
     const { deps } = makeDeps({
+      repo,
       network: makeNetworkDeps({ 0: [trade()] }),
       fetchSourceMarketMetadata: vi.fn(async () => {
         throw new Error("gamma-api unreachable");
@@ -354,6 +414,7 @@ describe("pollSportsShadowWallet — eligibility routing", () => {
     const result = await pollSportsShadowWallet(WALLET, 0, deps);
     expect(result.metadataFetchFailures).toBe(1);
     expect(result.error).toContain("gamma-api unreachable");
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("PENDING");
   });
 
   it("caches metadata by conditionId — two fills sharing a conditionId only fetch metadata once", async () => {
@@ -373,7 +434,7 @@ describe("pollSportsShadowWallet — eligibility routing", () => {
 });
 
 describe("pollSportsShadowWallet — bootstrap go-live gating", () => {
-  it("suppresses episode triggering for a pre-go-live fill during bootstrap, but still persists the raw fill", async () => {
+  it("suppresses episode triggering for a pre-go-live fill during bootstrap, still persists the raw fill, marks it COMPLETE (correct final answer, never re-triggered on a later resumption poll)", async () => {
     const repo = new FakeRepo();
     const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ timestamp: 1_700_000_000 })] }) });
     const goLiveAtMs = 1_700_000_000_000 + 3_600_000; // one hour after this fill
@@ -382,6 +443,7 @@ describe("pollSportsShadowWallet — bootstrap go-live gating", () => {
     expect(result.newSignals).toHaveLength(0);
     expect(repo.findLatestEpisodeCalls).toBe(0);
     expect(repo.fillsByEventKey.size).toBe(1); // evidence still persisted
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("COMPLETE");
   });
 
   it("allows episode triggering for a post-go-live fill during bootstrap", async () => {
@@ -394,7 +456,7 @@ describe("pollSportsShadowWallet — bootstrap go-live gating", () => {
 
   it("ignores goLiveAtMs entirely during a RESUMPTION poll (always processes)", async () => {
     const repo = new FakeRepo();
-    repo.fillsByEventKey.set("sid:seed", { id: "fill-seed", row: { eventKey: "sid:seed", wallet: WALLET.toLowerCase() } as RawFillRow });
+    repo.fillsByEventKey.set("sid:seed", { id: "fill-seed", row: { eventKey: "sid:seed", wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
     const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ timestamp: 1_700_000_000 })] }) });
     const result = await pollSportsShadowWallet(WALLET, null, deps); // null goLiveAtMs, would fail-closed under bootstrap
     expect(result.isBootstrap).toBe(false);
@@ -422,6 +484,21 @@ describe("pollSportsShadowWallet — episode engine integration", () => {
     const { deps } = makeDeps({ network: makeNetworkDeps({ 0: [trade({ outcome: undefined })] }) });
     const result = await pollSportsShadowWallet(WALLET, 0, deps);
     expect(result.newSignals[0]?.selectedSide).toBe("UNKNOWN");
+  });
+
+  it("the anchor fill and every aggregated fill are marked COMPLETE after successful downstream processing", async () => {
+    const repo = new FakeRepo();
+    const { deps } = makeDeps({
+      repo,
+      network: makeNetworkDeps({
+        0: [
+          trade({ transactionHash: "0xtx-a", timestamp: 1_700_000_000, size: 10, price: 0.5 }),
+          trade({ transactionHash: "0xtx-b", timestamp: 1_700_000_500, size: 10, price: 0.6 }),
+        ],
+      }),
+    });
+    await pollSportsShadowWallet(WALLET, 0, deps);
+    expect([...repo.fillsByEventKey.values()].every((f) => f.downstreamStatus === "COMPLETE")).toBe(true);
   });
 
   it("aggregates a second same-position BUY within the 30-minute window (AGGREGATED_BUY)", async () => {
@@ -496,7 +573,7 @@ describe("pollSportsShadowWallet — episode engine integration", () => {
     expect(episode.state.totalShares).toBe(20);
   });
 
-  it("records SELL_RECORDED against a matching open position and marks source_sell_seen", async () => {
+  it("records SELL_RECORDED against a matching open position, marks source_sell_seen, and marks the SELL fill COMPLETE", async () => {
     const repo = new FakeRepo();
     const { deps } = makeDeps({
       repo,
@@ -511,33 +588,34 @@ describe("pollSportsShadowWallet — episode engine integration", () => {
     expect(result.sellRecordedCount).toBe(1);
     const episode = [...repo.episodesById.values()][0]!;
     expect(episode.state.sellSeen).toBe(true);
-    expect(repo.updateEpisodeCalls.some((c) => c.state.sellSeen)).toBe(true);
+    expect(repo.updateEpisodeAtomicCalls.some((c) => c.state.sellSeen)).toBe(true);
+    expect([...repo.fillsByEventKey.values()].every((f) => f.downstreamStatus === "COMPLETE")).toBe(true);
   });
 
-  it("records SELL_RECORDED with no DB write when there is no matching open position", async () => {
+  it("records SELL_RECORDED with no episode DB write when there is no matching open position, and marks the fill COMPLETE (nothing durable left to do)", async () => {
     const repo = new FakeRepo();
     const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ side: "SELL" })] }) });
     const result = await pollSportsShadowWallet(WALLET, 0, deps);
     expect(result.sellRecordedCount).toBe(1);
-    expect(repo.updateEpisodeCalls).toHaveLength(0);
+    expect(repo.updateEpisodeAtomicCalls).toHaveLength(0);
     expect(repo.episodesById.size).toBe(0);
+    expect(repo.markFillCompleteCalls).toHaveLength(1);
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("COMPLETE");
   });
 
-  it("counts an INVALID_FILL from decideFill (e.g. zero shares) without crashing the poll", async () => {
-    const { deps } = makeDeps({ network: makeNetworkDeps({ 0: [trade({ size: 0 })] }) });
+  it("counts an INVALID_FILL from decideFill (e.g. zero shares) without crashing the poll, and marks the fill TERMINAL_INVALID (its own immutable data will never validate)", async () => {
+    const repo = new FakeRepo();
+    const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ size: 0 })] }) });
     const result = await pollSportsShadowWallet(WALLET, 0, deps);
     expect(result.invalidRows).toBe(1);
     expect(result.newRows).toBe(1); // the raw fill is still persisted as evidence
     expect(result.newSignals).toHaveLength(0);
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("TERMINAL_INVALID");
   });
 
-  it("defense-in-depth: a fill whose eventKey is already in the reconstructed episode's processedEventKeys is treated as DUPLICATE_FILL, never double-aggregated", async () => {
+  it("defense-in-depth: a fill whose eventKey is already known durably is treated as duplicateRows and never reprocessed, whether or not decideFill's own processedEventKeys would also have caught it", async () => {
     const repo = new FakeRepo();
     const seedTrade = trade({ transactionHash: "0xtx-seed", timestamp: 1_700_000_000 });
-    // Pre-seed an episode whose anchor event_key matches this exact fill's would-be key,
-    // simulating a pre-filter miss (the fill is durably known but findExistingEventKeys did not report it).
-    const eventKey = "native-key-placeholder"; // overwritten below once we know the real derived key
-    void eventKey;
     const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [seedTrade] }) });
     const first = await pollSportsShadowWallet(WALLET, 0, deps);
     expect(first.newSignals).toHaveLength(1);
@@ -545,12 +623,137 @@ describe("pollSportsShadowWallet — episode engine integration", () => {
 
     // Second poll: same fill reappears (simulating an overlap-detection miss), and the fake's
     // findExistingEventKeys legitimately reports it as known this time, so it is filtered
-    // before decideFill ever runs — proving the primary DB pre-filter, not decideFill, is what
-    // prevents reprocessing in the normal path.
+    // before ever reaching decideFill or phase 2 at all — proving the primary DB pre-filter,
+    // not decideFill, is what prevents reprocessing in the normal path. It is also already
+    // COMPLETE from the first poll, so even findPendingDownstreamFills would not surface it
+    // again either -- two independent, redundant safety nets.
     const second = await pollSportsShadowWallet(WALLET, 0, deps);
     expect(second.duplicateRows).toBeGreaterThan(0);
     expect(second.newSignals).toHaveLength(0);
     expect(anchorKey).toBeTruthy();
+  });
+});
+
+describe("pollSportsShadowWallet — Task 12D/P1-A: durable downstream retry", () => {
+  it("orphanedFillsRecovered reports 0 when every processed fill was inserted this same poll", async () => {
+    const { deps } = makeDeps({ network: makeNetworkDeps({ 0: [trade()] }) });
+    const result = await pollSportsShadowWallet(WALLET, 0, deps);
+    expect(result.orphanedFillsRecovered).toBe(0);
+  });
+
+  it("a fill left PENDING by metadata failure on poll 1 is picked up and completed on poll 2, reported as orphanedFillsRecovered, without re-fetching it from the network", async () => {
+    const repo = new FakeRepo();
+    const failingMetadata = vi.fn(async () => {
+      throw new Error("gamma-api unreachable");
+    });
+    const { deps: deps1 } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ transactionHash: "0xtx-orphan" })] }), fetchSourceMarketMetadata: failingMetadata as unknown as WalletPollDeps["fetchSourceMarketMetadata"] });
+    const first = await pollSportsShadowWallet(WALLET, 0, deps1);
+    expect(first.newRows).toBe(1);
+    expect(first.metadataFetchFailures).toBe(1);
+    expect(first.newSignals).toHaveLength(0);
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("PENDING");
+
+    // Poll 2: network returns NOTHING new (the fill is already durable), but metadata now succeeds.
+    const { deps: deps2 } = makeDeps({ repo, network: makeNetworkDeps({ 0: [] }) });
+    const second = await pollSportsShadowWallet(WALLET, 0, deps2);
+    expect(second.newRows).toBe(0); // nothing new fetched from the network
+    expect(second.orphanedFillsRecovered).toBe(1); // but the orphaned PENDING fill WAS recovered
+    expect(second.newSignals).toHaveLength(1); // and it now successfully produced a signal
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("COMPLETE");
+  });
+
+  it("fault injection: findLatestEpisode failure leaves the fill PENDING, retried and completed on the next poll", async () => {
+    const repo = new FakeRepo();
+    const originalFind = repo.findLatestEpisode.bind(repo);
+    let calls = 0;
+    repo.findLatestEpisode = async (wallet, conditionId, asset) => {
+      calls += 1;
+      if (calls === 1) throw new Error("findLatestEpisode transient failure");
+      return originalFind(wallet, conditionId, asset);
+    };
+    const { deps: deps1 } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ transactionHash: "0xtx-a" })] }) });
+    const first = await pollSportsShadowWallet(WALLET, 0, deps1);
+    expect(first.error).toContain("findLatestEpisode transient failure");
+    expect(first.newSignals).toHaveLength(0);
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("PENDING");
+
+    const { deps: deps2 } = makeDeps({ repo, network: makeNetworkDeps({ 0: [] }) });
+    const second = await pollSportsShadowWallet(WALLET, 0, deps2);
+    expect(second.newSignals).toHaveLength(1);
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("COMPLETE");
+  });
+
+  it("fault injection: insertEpisodeAtomic (signal-insert) failure leaves the fill PENDING, no episode created, retried and completed on the next poll", async () => {
+    const repo = new FakeRepo();
+    repo.throwOnInsertEpisodeAtomic = new Error("unique_violation");
+    const { deps: deps1 } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ transactionHash: "0xtx-a" })] }) });
+    const first = await pollSportsShadowWallet(WALLET, 0, deps1);
+    expect(first.error).toContain("unique_violation");
+    expect(first.newSignals).toHaveLength(0);
+    expect(repo.episodesById.size).toBe(0);
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("PENDING");
+
+    repo.throwOnInsertEpisodeAtomic = null;
+    const { deps: deps2 } = makeDeps({ repo, network: makeNetworkDeps({ 0: [] }) });
+    const second = await pollSportsShadowWallet(WALLET, 0, deps2);
+    expect(second.newSignals).toHaveLength(1);
+    expect(repo.episodesById.size).toBe(1);
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("COMPLETE");
+  });
+
+  it("fault injection: updateEpisodeAtomic (episode-update) failure on an AGGREGATED_BUY leaves the SECOND fill PENDING and does NOT mutate the episode, retried and completed on the next poll", async () => {
+    const repo = new FakeRepo();
+    const { deps: seedDeps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ transactionHash: "0xtx-a", timestamp: 1_700_000_000, size: 10, price: 0.5 })] }) });
+    const seed = await pollSportsShadowWallet(WALLET, 0, seedDeps);
+    expect(seed.newSignals).toHaveLength(1);
+    const episodeStateBefore = { ...[...repo.episodesById.values()][0]!.state };
+
+    repo.throwOnUpdateEpisodeAtomic = new Error("update failed");
+    const { deps: deps2 } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ transactionHash: "0xtx-b", timestamp: 1_700_000_100, size: 10, price: 0.6 })] }) });
+    const second = await pollSportsShadowWallet(WALLET, 0, deps2);
+    expect(second.error).toContain("update failed");
+    expect(second.aggregatedCount).toBe(1); // decision was still computed and counted even though the write failed
+    // The episode state is UNCHANGED -- the throw happened before any mutation, matching a real rolled-back transaction.
+    expect([...repo.episodesById.values()][0]!.state).toEqual(episodeStateBefore);
+    const pendingCount = [...repo.fillsByEventKey.values()].filter((f) => f.downstreamStatus === "PENDING").length;
+    expect(pendingCount).toBe(1); // exactly the second fill remains PENDING
+
+    // Retry: the failure is cleared, the SAME fill is recovered and applied EXACTLY ONCE.
+    repo.throwOnUpdateEpisodeAtomic = null;
+    const { deps: deps3 } = makeDeps({ repo, network: makeNetworkDeps({ 0: [] }) });
+    const third = await pollSportsShadowWallet(WALLET, 0, deps3);
+    expect(third.orphanedFillsRecovered).toBe(1);
+    expect(third.aggregatedCount).toBe(1);
+    const finalEpisode = [...repo.episodesById.values()][0]!.state;
+    // HARD DESIGN GATE PROOF: totalShares reflects the second fill's 10 shares applied
+    // EXACTLY ONCE (10 + 10 = 20), never twice (which would be 30) despite the failed
+    // first attempt having already computed (but never committed) the same aggregation.
+    expect(finalEpisode.totalShares).toBe(20);
+    expect(finalEpisode.vwap).toBeCloseTo((10 * 0.5 + 10 * 0.6) / 20);
+    expect([...repo.fillsByEventKey.values()].every((f) => f.downstreamStatus === "COMPLETE")).toBe(true);
+  });
+
+  it("HARD DESIGN GATE: a fill whose atomic write throws mid-transaction is never double-applied even across three retries", async () => {
+    const repo = new FakeRepo();
+    const { deps: seedDeps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ transactionHash: "0xtx-a", timestamp: 1_700_000_000, size: 10, price: 0.5 })] }) });
+    await pollSportsShadowWallet(WALLET, 0, seedDeps);
+
+    repo.throwOnUpdateEpisodeAtomic = new Error("simulated crash 1");
+    const { deps: deps2 } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ transactionHash: "0xtx-b", timestamp: 1_700_000_100, size: 10, price: 0.6 })] }) });
+    await pollSportsShadowWallet(WALLET, 0, deps2); // crashes, fill stays PENDING
+
+    repo.throwOnUpdateEpisodeAtomic = new Error("simulated crash 2");
+    const { deps: deps3 } = makeDeps({ repo, network: makeNetworkDeps({ 0: [] }) });
+    await pollSportsShadowWallet(WALLET, 0, deps3); // retried, crashes AGAIN, still PENDING
+
+    repo.throwOnUpdateEpisodeAtomic = null;
+    const { deps: deps4 } = makeDeps({ repo, network: makeNetworkDeps({ 0: [] }) });
+    const finalPoll = await pollSportsShadowWallet(WALLET, 0, deps4); // third retry finally succeeds
+
+    expect(finalPoll.aggregatedCount).toBe(1);
+    const finalEpisode = [...repo.episodesById.values()][0]!.state;
+    expect(finalEpisode.totalShares).toBe(20); // still exactly once, not 3x, despite 2 prior crashes
+    expect(finalEpisode.buyFillCount).toBe(2);
   });
 });
 
@@ -583,7 +786,6 @@ describe("pollSportsShadowWallet — error handling", () => {
   it("continues processing subsequent fills after one insertRawFill failure", async () => {
     const repo = new FakeRepo();
     const badTx = "0xtx-bad";
-    repo.throwOnInsertRawFillFor = null; // set after we know the derived key; simplified: throw on first insert call.
     let calls = 0;
     const originalInsert = repo.insertRawFill.bind(repo);
     repo.insertRawFill = async (row: RawFillRow) => {
@@ -603,32 +805,15 @@ describe("pollSportsShadowWallet — error handling", () => {
     expect(result.error).toContain("insert failed");
   });
 
-  it("does not populate newSignals or positionCache when insertNewEpisode throws", async () => {
+  it("a findPendingDownstreamFills failure is reported and phase 2 processes zero fills this poll (safe -- everything stays PENDING/durable, retried next poll)", async () => {
     const repo = new FakeRepo();
-    repo.throwOnInsertNewEpisode = new Error("unique_violation");
+    repo.throwOnFindPendingDownstreamFills = new Error("db unreachable");
     const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade()] }) });
     const result = await pollSportsShadowWallet(WALLET, 0, deps);
-    expect(result.error).toContain("unique_violation");
-    expect(result.newSignals).toHaveLength(0);
-    expect(repo.episodesById.size).toBe(0);
-  });
-
-  it("records but survives an updateEpisode failure on an AGGREGATED_BUY", async () => {
-    const repo = new FakeRepo();
-    const { deps } = makeDeps({
-      repo,
-      network: makeNetworkDeps({
-        0: [trade({ transactionHash: "0xtx-a", timestamp: 1_700_000_000 }), trade({ transactionHash: "0xtx-b", timestamp: 1_700_000_100 })],
-      }),
-    });
-    const first = await pollSportsShadowWallet(WALLET, 0, deps);
-    expect(first.newSignals).toHaveLength(1);
-
-    repo.throwOnUpdateEpisode = new Error("update failed");
-    const { deps: deps2 } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ transactionHash: "0xtx-c", timestamp: 1_700_000_200 })] }) });
-    const second = await pollSportsShadowWallet(WALLET, 0, deps2);
-    expect(second.error).toContain("update failed");
-    expect(second.aggregatedCount).toBe(1); // decision was still made and counted even though the write failed
+    expect(result.error).toContain("db unreachable");
+    expect(result.newRows).toBe(1); // phase 1 (raw insert) still succeeded
+    expect(result.newSignals).toHaveLength(0); // phase 2 never ran
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("PENDING");
   });
 
   it("never throws out of pollSportsShadowWallet itself for any of the above failures", async () => {
@@ -729,9 +914,9 @@ describe("pollSportsShadowWallet — STABLE EVENT-KEY window-shift audit (degrad
 
   it("D. pagination overlap-stop ignores a degraded-only key match and only trusts a reliable identity match", async () => {
     const repo = new FakeRepo();
-    repo.fillsByEventKey.set("sid:seed-reliable", { id: "fill-seed-1", row: { eventKey: "sid:seed-reliable", wallet: WALLET.toLowerCase() } as RawFillRow });
+    repo.fillsByEventKey.set("sid:seed-reliable", { id: "fill-seed-1", row: { eventKey: "sid:seed-reliable", wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
     const seedDegradedKey = `${COLLIDE_TUPLE_PREFIX}0`;
-    repo.fillsByEventKey.set(seedDegradedKey, { id: "fill-seed-2", row: { eventKey: seedDegradedKey, wallet: WALLET.toLowerCase() } as RawFillRow });
+    repo.fillsByEventKey.set(seedDegradedKey, { id: "fill-seed-2", row: { eventKey: seedDegradedKey, wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
 
     const filler = (n: number, prefix: string) =>
       Array.from({ length: n }, (_, i) =>
