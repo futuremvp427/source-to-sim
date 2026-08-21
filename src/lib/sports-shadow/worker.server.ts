@@ -128,10 +128,9 @@ export const FINAL_OBSERVATION_STAGE_DEADLINE_MS_FOR_TEST = FINAL_OBSERVATION_ST
  * one metadata fetch ~10s) ~= 12s (the page-fetch timeout dominates), and since all wallets
  * in one lane share ONE deadline, only the wallet in flight when it fires can overrun --
  * earlier/later wallets' own top-of-poll checks stop them at/before the shared deadline.
- * DEFENSIBLE WORST CASE for the source lane alone: SOURCE_LANE_BUDGET_MS + ~12s ~= 42s.
- * NORMAL EXPECTED runtime (steady-state, short per-wallet gaps): low single-digit seconds
- * for all 3 wallets combined. See worker.server.test.ts's Task 13F timing-bound tests and
- * the Task 13G final report for the full-route (source + both observation stages) figure.
+ * DEFENSIBLE WORST CASE for the WALLET-POLLING PORTION of the source lane:
+ * SOURCE_LANE_BUDGET_MS + ~12s ~= 42s. NORMAL EXPECTED runtime (steady-state, short
+ * per-wallet gaps): low single-digit seconds for all 3 wallets combined.
  *
  * Task 13G / P1-Q (Codex re-review): bootstrap (a wallet's first-ever poll) is no longer a
  * fixed one-page operation -- it now shares the exact same MAX_PAGES_PER_WALLET ceiling as
@@ -141,6 +140,22 @@ export const FINAL_OBSERVATION_STAGE_DEADLINE_MS_FOR_TEST = FINAL_OBSERVATION_ST
  * bootstrap and steady-state alike, so the same "at most one operation in flight when the
  * shared deadline fires" reasoning applies unchanged regardless of which of the two a
  * given wallet's poll happens to be.
+ *
+ * CONFIRMED, CREDIBLE, NOT YET FIXED (Codex re-review round 7) -- OUT OF TASK 13G's SCOPE:
+ * `runSourceLane` does not end when the wallet-polling loop above does -- it goes on to
+ * call `resolveVenuePending` for BOTH PMUS and KALSHI (see below), and NEITHER of those
+ * calls receives `laneDeadlineAtMs` at all. `resolveVenuePending`'s own PM-US/Kalshi
+ * discovery passes (pmus.server.ts/kalshi.server.ts, established in Task 12F/P1-G/P1-I)
+ * can each walk multiple pages at up to ~12s per page, bounded only by LEASE ownership,
+ * never by wall-clock deadline. This means the ~42s figure above is NOT the true worst
+ * case for the full `runSourceLane` invocation -- venue matching afterward is a real,
+ * currently-unbounded-by-deadline contributor that can add substantially more wall time.
+ * Task 13G's own mission scope is specifically the SOURCE lane's completeness/timing
+ * (source-poll.server.ts's P1-Q/P1-R) -- threading a deadline through `resolveVenuePending`
+ * and the PM-US/Kalshi discovery functions in their own separate, already-tested files is a
+ * distinct, differently-scoped change (analogous to Task 13F's original problem, but in a
+ * different subsystem) deliberately left for a dedicated follow-up task rather than
+ * expanded into here without the same care this task gave the source lane itself.
  */
 export const SOURCE_LANE_BUDGET_MS = 30_000;
 export const SOURCE_LEASE_TTL_SECONDS = 60;
@@ -528,6 +543,12 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
       leaseLost = true;
       break;
     }
+    // Task 13G (Codex re-review round 7, P1): checkpoint() can itself perform a real
+    // lease-renewal RPC -- re-checked immediately after it succeeds, before starting the
+    // next wallet's poll (whose own first operation, hasAnyFillsForWallet, is a DB call
+    // with no deadline check of its own before it), mirroring the identical renewal-
+    // latency fix already applied throughout source-poll.server.ts.
+    if (budgetExceeded(d.now() - laneStartMs, SOURCE_LANE_BUDGET_MS)) break;
     try {
       const result: WalletPollResult = await d.pollSportsShadowWallet(wallet, config.goLiveAtMs, { ...d.sourcePollDeps, checkpointLease: checkpoint }, laneDeadlineAtMs);
       newSignalsCreated += result.newSignals.length;

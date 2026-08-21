@@ -108,7 +108,6 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
-import { PAGE_ROWS } from "../db-pagination";
 import {
   DATA_API_HOST,
   getHostCooldown,
@@ -137,6 +136,18 @@ export const MAX_PAGES_PER_WALLET = Math.floor(MAX_TRADES_OFFSET / PAGE_SIZE) + 
 
 /** Bounded per-poll cap on how many currently-PENDING fills are retried in phase 2 — generous relative to expected per-wallet volume, but never unbounded. Excess pending work simply stays durable for a later poll, exactly like Task 11B's pending-signal batch. */
 export const MAX_PENDING_FILLS_PER_POLL = 500;
+
+/**
+ * Task 13G (Codex re-review round 7, P1): bounds how many distinct degraded-tuple
+ * prefixes `countDurableOrdinalFills` reconciles CONCURRENTLY in one call -- keeps the
+ * number of simultaneous Supabase subrequests small and predictable (relevant on a
+ * subrequest-limited runtime like Cloudflare Workers) regardless of how many distinct
+ * prefixes a large catch-up scan's batch happens to contain. Any excess is deferred
+ * (conservatively treated as already-durable this poll, never inserted) rather than
+ * processed unbounded -- re-evaluated fresh, with no memory of this decision, on the
+ * wallet's next poll.
+ */
+export const RECONCILE_PREFIX_CAP = 25;
 
 
 const REQUEST_TIMEOUT_MS = 12_000;
@@ -453,101 +464,59 @@ export const supabasePollRepository: PollRepository = {
     const out = new Map<string, number>();
     if (tuplePrefixes.length === 0) return out;
     for (const prefix of tuplePrefixes) out.set(prefix, 0);
-    // Task 13G / P1-R (Codex re-review, P1): a single bounded query, not one sequential
-    // round trip per prefix -- for a large distinct-tuple-collision batch (worst case,
-    // every row in a page is a distinct colliding tuple), a naive per-prefix loop could
-    // issue up to PAGE_SIZE (250) sequential requests with no deadline check.
+    // Task 13G (Codex re-review rounds 3-7, P1): four prior designs for this method each
+    // failed differently -- (a) one sequential LIKE-count query per prefix: correct and
+    // unambiguous, but unbounded WALL TIME for many distinct prefixes; (b) one unpaged
+    // read of the wallet's whole degraded history: silently truncated by PostgREST's
+    // per-request row cap; (c) that read paginated via fetchAllRowsAfterId: correct
+    // completeness but genuinely unbounded time for a wallet with a large degraded
+    // history, AND unable to distinguish "exactly at the page cap" from "more remain" once
+    // crossed -- permanently misclassifying every future fill for that wallet, since the
+    // table only grows; (d) exact `prefix#N` candidate keys via `.in()`: bounded response
+    // size, but since this file's own docs note EVERY currently-observed /trades row lacks
+    // a native id/log index (degraded is the NORMAL case, not rare), `tuplePrefixes.length`
+    // can reach the low thousands for a large scan, producing a `.in()` filter with
+    // hundreds of thousands of values -- a request URI PostgREST/its proxy rejects
+    // outright; (e) reading the wallet's degraded history bounded by MAX_TRADES_OFFSET:
+    // WRONG -- that constant only bounds how deep one LIVE /trades snapshot can be
+    // paginated, not this DURABLE table's cumulative row count, which keeps every row it
+    // has ever seen across every poll and is therefore genuinely unbounded over a wallet's
+    // lifetime.
     //
-    // Task 13G (Codex re-review rounds 3-5, P1): reading the wallet's ENTIRE degraded
-    // (tx_hash_ordinal) history to answer a question about a handful of SPECIFIC prefixes
-    // is the wrong shape of query -- it is silently truncated by PostgREST's per-request
-    // row cap if unpaged; if paged (via fetchAllRowsAfterId), it is unbounded in real wall
-    // time for a wallet with a large degraded history, AND it can never distinguish
-    // "exactly at the page cap, genuinely complete" from "hit the cap, more remain" for a
-    // wallet whose degraded history exceeds that cap -- permanently misclassifying every
-    // future degraded fill as already-durable once crossed, since the table only grows.
-    //
-    // Task 13G (Codex re-review round 6, P1): the round-5 "exact candidate keys via .in()"
-    // fix traded one bug for a worse one -- `degradedEvents` comes from the ENTIRE
-    // confirmed scan (up to MAX_PAGES_PER_WALLET pages), and per this file's own
-    // documented production reality, EVERY currently-observed /trades row lacks a native
-    // id/log index and therefore uses the degraded (tx_hash_ordinal) tier -- degraded
-    // events are the NORMAL case, not a rare edge case, so `tuplePrefixes.length` can
-    // genuinely reach the low thousands for a large catch-up scan. At
-    // MAX_ORDINAL_COLLISIONS_PER_TUPLE=50 candidates each, that produced a `.in()` filter
-    // with hundreds of thousands of values -- a request URI PostgREST/its proxy would
-    // reject outright, failing the WHOLE reconciliation (and, per the abort-on-error fix
-    // above, the whole scan's persistence) every time it recurred for that wallet.
-    //
-    // FIX: go back to reading the wallet's degraded history directly, but bounded by a
-    // PROVEN structural ceiling rather than an arbitrary page cap or a per-prefix
-    // candidate guess: MAX_TRADES_OFFSET (shadow.server.ts) is the hard limit the source
-    // /trades API itself enforces on how far ANY wallet can ever be paginated (HTTP 400
-    // beyond it) -- so no wallet's cumulative row count in this table can structurally
-    // exceed roughly that many, REGARDLESS of how many distinct prefixes any one poll asks
-    // about. Reading up to `ceil(MAX_TRADES_OFFSET / PAGE_ROWS) + 1` pages is therefore
-    // PROVABLY sufficient with margin to read a wallet's entire degraded history in the
-    // common case (a short/empty final page), independent of tuplePrefixes.length -- unlike
-    // the per-prefix-candidate-key approach, this does not grow with how many distinct
-    // tuples this poll happens to ask about.
-    const maxPages = Math.ceil(MAX_TRADES_OFFSET / PAGE_ROWS) + 1;
-    const rows: { event_key: string }[] = [];
-    let afterId: string | null = null;
-    let pages = 0;
-    let truncated = false;
-    while (pages < maxPages) {
-      // Task 13G (Codex re-review round 5, P1): deadline-checked BETWEEN pages.
-      if (deadline && deadline.now() >= deadline.deadlineAtMs) {
-        truncated = true;
-        break;
-      }
-      let query = supabaseAdmin
-        .from("sports_shadow_source_fills" as never)
-        .select("event_key")
-        .eq("wallet", wallet)
-        .eq("identity_basis", "tx_hash_ordinal")
-        .order("event_key", { ascending: true })
-        .limit(PAGE_ROWS);
-      if (afterId) query = query.gt("event_key", afterId);
-      const { data, error } = await query;
-      if (error) throw new Error(error.message);
-      const page = (data as unknown as { event_key: string }[] | null) ?? [];
-      pages += 1;
-      rows.push(...page);
-      if (page.length < PAGE_ROWS) break; // genuinely complete: a short/empty final page
-      afterId = page[page.length - 1]!.event_key;
-    }
-    if (!truncated && pages >= maxPages) {
-      // Hit the page cap without ever seeing a short final page -- ambiguous (this
-      // wallet's degraded history is at or beyond the structural ceiling above, an
-      // extreme case for any of the currently-approved wallets). Resolve with a single
-      // independent `count: "exact", head: true` aggregate (no rows returned, so never
-      // subject to the per-request row cap) -- only paid in this rare branch, not on
-      // every call.
-      const { count: totalCount, error: countError } = await supabaseAdmin
-        .from("sports_shadow_source_fills" as never)
-        .select("id", { count: "exact", head: true })
-        .eq("wallet", wallet)
-        .eq("identity_basis", "tx_hash_ordinal");
-      if (countError) throw new Error(countError.message);
-      if (rows.length !== (totalCount ?? 0)) truncated = true;
-    }
-    if (truncated) {
-      // Fail closed, matching reconcileDegradedEvents's own error-path convention: an
-      // unverifiable count must never be treated as "fewer durable rows than reality,"
-      // which would risk a duplicate insert. This poll's degraded rows are simply
-      // deferred to a later retry instead.
-      for (const prefix of tuplePrefixes) out.set(prefix, Number.POSITIVE_INFINITY);
+    // FIX: go back to (a)'s query shape -- per-prefix `count: "exact", head: true"` (no
+    // rows returned, so NEVER subject to the row cap, and an EXACT number regardless of
+    // how large the wallet's cumulative history has grown -- no pagination, no ambiguity)
+    // -- but issue them CONCURRENTLY, bounded to RECONCILE_PREFIX_CAP prefixes per call.
+    // Concurrency keeps real wall time close to one round trip regardless of prefix count;
+    // the cap keeps the number of simultaneous subrequests small and predictable (relevant
+    // on a subrequest-limited runtime like Cloudflare Workers). Any prefix beyond the cap
+    // is conservatively treated as already-durable THIS poll (skip, never insert) rather
+    // than guessed at -- a temporary deferral, not a permanent one: it is re-evaluated
+    // fresh, with no memory of this decision, on the wallet's very next poll, whenever this
+    // poll's batch of distinct prefixes is smaller (the overwhelmingly common case, since a
+    // batch this large only arises from an extreme trading burst or an extended outage).
+    const toReconcile = tuplePrefixes.slice(0, RECONCILE_PREFIX_CAP);
+    const deferred = tuplePrefixes.slice(RECONCILE_PREFIX_CAP);
+    for (const prefix of deferred) out.set(prefix, Number.POSITIVE_INFINITY);
+
+    // Task 13G (Codex re-review round 7, P1): checked before issuing the concurrent batch
+    // -- if already past deadline, none of these requests start at all this poll.
+    if (deadline && deadline.now() >= deadline.deadlineAtMs) {
+      for (const prefix of toReconcile) out.set(prefix, Number.POSITIVE_INFINITY);
       return out;
     }
-    for (const row of rows) {
-      for (const prefix of tuplePrefixes) {
-        if (row.event_key.startsWith(prefix)) {
-          out.set(prefix, (out.get(prefix) ?? 0) + 1);
-          break; // a key has exactly one ordinal prefix by construction
-        }
-      }
-    }
+    const results = await Promise.all(
+      toReconcile.map(async (prefix) => {
+        const { count, error } = await supabaseAdmin
+          .from("sports_shadow_source_fills" as never)
+          .select("id", { count: "exact", head: true })
+          .eq("wallet", wallet)
+          .like("event_key", `${prefix}%`);
+        if (error) throw new Error(error.message);
+        return { prefix, count: count ?? 0 };
+      }),
+    );
+    for (const { prefix, count } of results) out.set(prefix, count);
     return out;
   },
 
