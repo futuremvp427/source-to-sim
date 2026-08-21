@@ -134,20 +134,6 @@ import type { BetType, SourceMarketMetadata } from "./types";
  */
 export const MAX_PAGES_PER_WALLET = Math.floor(MAX_TRADES_OFFSET / PAGE_SIZE) + 1;
 
-/**
- * Task 13G / P1-Q, Section 1-2: a wallet's FIRST-EVER poll (bootstrap, `!hasHistory`)
- * fetches exactly ONE page — the newest <=PAGE_SIZE trades — instead of walking backward
- * through up to MAX_PAGES_PER_WALLET (41) pages of history. See the module doc comment
- * above `pollSportsShadowWallet` ("TASK 13G: FORWARD-ONLY BOOTSTRAP") for the full proof
- * that one page is sufficient: `sports_shadow_signals` (the only durable source of
- * `OpenEpisodeState`, via `findLatestEpisode`) is a brand-new, experiment-specific table
- * that starts completely empty, so there is no pre-existing DCA/episode state to
- * reconstruct from history at all; and `isEligibleForEpisodeTrigger` compares only a
- * fill's own immutable `sourceTs` against the fixed, durable `goLiveAtMs` — never wallet
- * history — so eligibility can never depend on how much backlog has been walked.
- */
-export const BOOTSTRAP_MAX_PAGES = 1;
-
 /** Bounded per-poll cap on how many currently-PENDING fills are retried in phase 2 — generous relative to expected per-wallet volume, but never unbounded. Excess pending work simply stays durable for a later poll, exactly like Task 11B's pending-signal batch. */
 export const MAX_PENDING_FILLS_PER_POLL = 500;
 
@@ -441,41 +427,50 @@ export const supabasePollRepository: PollRepository = {
       )
       .select("id, event_key");
     if (error) throw new Error(error.message);
+    // Task 13G / P1-R (Codex re-review, P1): unlike insertRawFill's single-row conflict
+    // fallback, NO second lookup is issued for rows that already existed. The caller
+    // (pollSportsShadowWallet's Phase 1 persist loop) never reads `.id` for an
+    // `inserted: false` result — it is only used to add a freshly-inserted row's id to
+    // `insertedThisPoll` — so the extra round trip was pure overhead with no consumer, and
+    // (per Codex's finding) a real unbounded-by-deadline DB operation the timing contract
+    // never accounted for. Removing it is a strict improvement, not a deadline workaround.
     const insertedByKey = new Map(
       ((data as unknown as { id: string; event_key: string }[] | null) ?? []).map((r) => [r.event_key, r.id]),
     );
-    const missingKeys = rows.map((r) => r.eventKey).filter((k) => !insertedByKey.has(k));
-    let existingByKey = new Map<string, string>();
-    if (missingKeys.length > 0) {
-      // Conflict path: these rows already existed (a concurrent poller, or a duplicate
-      // within this same batch — see reconcileDegradedEvents, whose output never contains
-      // same-batch duplicates, so this is the "already durable" case in practice).
-      const { data: existing, error: selectError } = await supabaseAdmin
-        .from("sports_shadow_source_fills" as never)
-        .select("id, event_key")
-        .in("event_key", missingKeys);
-      if (selectError) throw new Error(selectError.message);
-      existingByKey = new Map(
-        ((existing as unknown as { id: string; event_key: string }[] | null) ?? []).map((r) => [r.event_key, r.id]),
-      );
-    }
     return rows.map((row) => {
       const insertedId = insertedByKey.get(row.eventKey);
       if (insertedId) return { eventKey: row.eventKey, id: insertedId, inserted: true };
-      return { eventKey: row.eventKey, id: existingByKey.get(row.eventKey) ?? "", inserted: false };
+      return { eventKey: row.eventKey, id: "", inserted: false };
     });
   },
 
   async countDurableOrdinalFills(wallet, tuplePrefixes) {
     const out = new Map<string, number>();
-    for (const prefix of tuplePrefixes) {
-      const { count, error } = await supabaseAdmin
-        .from("sports_shadow_source_fills" as never)
-        .select("id", { count: "exact", head: true })
-        .eq("wallet", wallet)
-        .like("event_key", `${prefix}%`);
-      if (error) throw new Error(error.message);
-      out.set(prefix, count ?? 0);
+    if (tuplePrefixes.length === 0) return out;
+    // Task 13G / P1-R (Codex re-review, P1): a single bounded query, not one sequential
+    // round trip per prefix -- for a large distinct-tuple-collision batch (worst case,
+    // every row in a page is a distinct colliding tuple), the prior per-prefix loop could
+    // issue up to PAGE_SIZE (250) sequential requests with no deadline check, an
+    // unaccounted-for contributor to the route's real wall time. Every degraded
+    // (tx_hash_ordinal) row for this wallet is fetched in ONE query and counted
+    // client-side per prefix -- correct because `identity_basis` is set exactly once at
+    // insert time and never changes, so this is a complete, precise substitute for the
+    // per-prefix LIKE-count queries it replaces.
+    const { data, error } = await supabaseAdmin
+      .from("sports_shadow_source_fills" as never)
+      .select("event_key")
+      .eq("wallet", wallet)
+      .eq("identity_basis", "tx_hash_ordinal");
+    if (error) throw new Error(error.message);
+    const keys = ((data as unknown as { event_key: string }[] | null) ?? []).map((r) => r.event_key);
+    for (const prefix of tuplePrefixes) out.set(prefix, 0);
+    for (const key of keys) {
+      for (const prefix of tuplePrefixes) {
+        if (key.startsWith(prefix)) {
+          out.set(prefix, (out.get(prefix) ?? 0) + 1);
+          break; // a key has exactly one ordinal prefix by construction
+        }
+      }
     }
     return out;
   },
@@ -899,23 +894,41 @@ async function reconcileDegradedEvents(
  * or how many pages have ever been walked. Neither of the two things bootstrap could
  * plausibly be FOR (DCA continuity, go-live eligibility) requires historical replay.
  *
- * FIX: a wallet's first-ever poll (`!hasHistory`) fetches EXACTLY ONE page (the newest
- * <=PAGE_SIZE trades, see BOOTSTRAP_MAX_PAGES) and stops -- by design, not by deadline.
- * This durably seeds `hasAnyFillsForWallet` (so every later poll is steady-state
- * resumption) and gives steady-state polling its first overlap anchor. Forward
- * requirements B1-B8 (mission Section 2) all hold: B1/B7 -- a single page fetch either
- * genuinely completes (isBootstrap done, backlogTruncated=false) or is retried identically
- * next poll (nothing "silently" completes via a deadline race, since BOOTSTRAP_MAX_PAGES=1
- * IS the completion condition, not a truncation of one). B2 -- unaffected, already
- * guaranteed by isEligibleForEpisodeTrigger regardless of how bootstrap is implemented.
- * B3/B4 -- once bootstrap seeds an anchor, ordinary steady-state polling (short gaps
- * between frequent invocations) reliably closes any remaining gap up to and past
- * GO_LIVE_AT, the SAME mechanism already relied on for all later forward catch-up. B5 --
- * the boundary is the durable content of `sports_shadow_source_fills` itself, not
- * in-memory state, so a restart before/after bootstrap changes nothing. B6 -- wallets
- * remain fully independent (unchanged). B8 -- proved above: one page suffices because
- * there is no pre-existing DCA state to reconstruct and eligibility never depends on
- * history depth.
+ * FIX (revised after a second Codex review round, see the identically-tagged P1 finding
+ * this paragraph replaces): a wallet's first-ever poll (`!hasHistory`) is NOT capped at a
+ * fixed one page -- an unconditional single-page bootstrap is unsound whenever more than
+ * PAGE_SIZE post-go-live trades already exist by the time a wallet's first poll runs (a
+ * real, not merely theoretical, case for a fast-trading approved wallet): page 0 alone
+ * would not reach back to `goLiveAtMs`, yet would still become the wallet's PERMANENT
+ * first overlap anchor, silently stranding every eligible fill on page 1 and beyond
+ * forever (a direct B4 violation). Instead, bootstrap keeps paging -- sharing the exact
+ * same MAX_PAGES_PER_WALLET ceiling steady-state resumption already uses -- until a
+ * fetched page contains a fill strictly BEFORE `goLiveAtMs`, proving this scan has walked
+ * CONTINUOUSLY from "now" back across the go-live boundary, so every fill at or after it,
+ * on every page seen so far, has been captured. If `goLiveAtMs` is not yet configured, no
+ * fill can ever be eligible regardless of history depth (Task 12E/P1-F), so a single page
+ * remains sufficient in that (degenerate, pre-configuration) case. In the common case --
+ * fewer than PAGE_SIZE trades since go-live by the time bootstrap runs -- this still
+ * completes in exactly one page, unchanged from the original (unsound) design's happy
+ * path; it now also correctly handles the high-volume case by walking further instead of
+ * silently truncating. This durably seeds `hasAnyFillsForWallet` (so every later poll is
+ * steady-state resumption) and gives steady-state polling its first overlap anchor.
+ * Forward requirements B1-B8 (mission Section 2) all hold: B1/B7 -- bootstrap either
+ * genuinely completes (crossed the go-live boundary, a natural end, or the accepted
+ * MAX_PAGES_PER_WALLET ceiling -- see `scanConfirmedComplete` below) or is retried
+ * identically next poll, never silently "done" via a deadline race. B2 -- unaffected,
+ * already guaranteed by isEligibleForEpisodeTrigger regardless of how bootstrap is
+ * implemented. B3/B4 -- bootstrap itself now proves every post-go-live fill on the source
+ * as of "now" is captured (not merely delegated to steady-state's short-gap assumption),
+ * and ordinary steady-state polling closes any remaining gap from there forward. B5 -- the
+ * boundary is the durable content of `sports_shadow_source_fills` itself, not in-memory
+ * state, so a restart before/after bootstrap changes nothing (an interrupted multi-page
+ * bootstrap attempt is discarded in full, same as any other unconfirmed scan -- see
+ * `scanConfirmedComplete`). B6 -- wallets remain fully independent (unchanged). B8 --
+ * proved above: no DCA state ever needs reconstructing from history (still true
+ * regardless of how many pages bootstrap ends up walking); the number of pages needed is
+ * instead exactly however many are required to prove the go-live boundary has been
+ * crossed, which this design computes directly rather than assuming.
  *
  * ============================== TASK 13G / P1-Q + P1-R: NO-STRANDING PERSISTENCE ==============================
  * The bootstrap redesign above eliminates the GUARANTEED, every-cycle trigger for P1-Q
@@ -982,7 +995,13 @@ export async function pollSportsShadowWallet(
   }
   result.isBootstrap = !hasHistory;
 
-  const maxPagesThisScan = hasHistory ? MAX_PAGES_PER_WALLET : BOOTSTRAP_MAX_PAGES;
+  // Task 13G / P1-Q (Codex re-review): bootstrap and steady-state share the SAME page
+  // ceiling. Bootstrap typically stops after just one page in the common case (see the
+  // go-live-boundary-crossing check below), but must be allowed to walk as far as
+  // steady-state resumption can when a wallet already has substantial post-go-live volume
+  // by its first-ever poll -- a fixed, smaller cap would silently strand real eligible
+  // fills beyond it (B4).
+  const maxPagesThisScan = MAX_PAGES_PER_WALLET;
   const rawPages: RawTrade[][] = [];
   let overlapFound = false;
   let naturalEnd = false;
@@ -1023,13 +1042,34 @@ export async function pollSportsShadowWallet(
       result.rowsFetched += rows.length;
 
       if (!hasHistory) {
-        // Task 13G / P1-Q, Section 1-2: forward-only bootstrap is exactly one page by
-        // design -- see this file's "TASK 13G / P1-Q: FORWARD-ONLY BOOTSTRAP" doc comment
-        // above pollSportsShadowWallet for the full proof. There is no pre-existing
-        // durable state to overlap against (hasHistory is false), so this is a genuine,
-        // intentional completion, not a truncation.
-        naturalEnd = true;
-        break;
+        // Task 13G / P1-Q (Codex re-review, P1): a FIXED one-page bootstrap is unsound in
+        // general -- if more than PAGE_SIZE post-go-live trades already exist by the time
+        // a wallet's first-ever poll runs, page 0 alone would not reach back to
+        // goLiveAtMs, yet it would still become the wallet's permanent first overlap
+        // anchor, silently stranding every eligible fill on page 1 and beyond forever
+        // (violates B4). Bootstrap therefore keeps paging, exactly like steady-state's
+        // MAX_PAGES_PER_WALLET budget, until a fetched page contains a fill strictly
+        // BEFORE goLiveAtMs -- proof this scan has walked continuously from "now" back
+        // across the go-live boundary, so every fill at or after it on every page seen so
+        // far has been captured (B1-B4, B8: `sports_shadow_signals` starting empty and
+        // isEligibleForEpisodeTrigger's pure sourceTs/goLiveAtMs comparison, see the module
+        // doc comment, mean nothing PRE-go-live ever needs to be reached at all). If
+        // goLiveAtMs is not yet configured, no fill can ever be eligible regardless of
+        // history depth (Task 12E/P1-F), so a single page remains sufficient.
+        if (goLiveAtMs === null) {
+          naturalEnd = true;
+          break;
+        }
+        const crossedGoLive = normalizeSourceEvents(rows, normalizedWallet).some((e) => e.sourceTs * 1000 < goLiveAtMs);
+        if (crossedGoLive) {
+          naturalEnd = true;
+          break;
+        }
+        if (rows.length < PAGE_SIZE) {
+          naturalEnd = true;
+          break;
+        }
+        continue; // keep paging further back -- go-live boundary not yet reached
       }
 
       // Overlap-to-stop must be proven with a RELIABLE key only (source_id or
@@ -1062,11 +1102,12 @@ export async function pollSportsShadowWallet(
   // exhaustion -- there may well be more history the wallet's own overlap key would have
   // found had the lease survived. Only a real MAX_PAGES_PER_WALLET exhaustion (loop ran
   // out of iterations without overlap, a natural end, a deadline stop, or an error) counts
-  // as backlogTruncated in this (accepted historical-depth boundary) sense. Never reachable
-  // for a bootstrap poll: BOOTSTRAP_MAX_PAGES=1 always exits via the explicit `naturalEnd`
-  // break above once page 0 is fetched, never by exhausting its (single) iteration budget.
+  // as backlogTruncated in this (accepted historical-depth boundary) sense. Task 13G / P1-Q
+  // (Codex re-review): bootstrap can now ALSO exhaust MAX_PAGES_PER_WALLET without ever
+  // crossing the go-live boundary (an extreme case -- 10,000+ post-go-live trades for one
+  // wallet since bootstrap) -- this is genuine, unconditional-of-hasHistory truncation too.
   const ranOutOfPages = !overlapFound && !naturalEnd && !deadlineExceeded && !result.leaseLost && result.error === null;
-  if (hasHistory && ranOutOfPages) {
+  if (ranOutOfPages) {
     result.backlogTruncated = true;
   }
   // Task 13F: a deadline-triggered stop is NEVER an intentional completion boundary --
@@ -1089,9 +1130,33 @@ export async function pollSportsShadowWallet(
 
   const insertedThisPoll = new Set<string>();
   if (scanConfirmedComplete) {
-    const normalizedEvents: NormalizedEvent[] = normalizeSourceEvents(rawPages.flat(), normalizedWallet);
-    const reliableEvents = normalizedEvents.filter((e) => !e.identityDegraded);
-    const degradedEvents = normalizedEvents.filter((e) => e.identityDegraded);
+    // Task 13G / P1-Q (Codex re-review, P1): persist in the SAME oldest-fetched-page-first
+    // order pagination actually walked, never re-sorted by sourceTs/eventKey. Sorting the
+    // merged set by sourceTs/eventKey (the prior approach) does not track the provider's
+    // actual page boundaries for same-second collisions, so a partial commit under that
+    // ordering could land rows from a NEWER page in an earlier batch than rows from an
+    // OLDER page -- exactly the kind of out-of-page-order commit that lets a later poll's
+    // overlap check recognize newer content as covered while an older, still-unpersisted
+    // page is not.
+    //
+    // normalizeSourceEvents MUST still be called ONCE on the full, newest-page-first
+    // flattened array (not per-page): a degraded (tx_hash_ordinal) event's "#N" ordinal
+    // label is assigned fresh per call by counting occurrences of its raw tuple WITHIN
+    // that call's input -- calling it separately per page would independently label two
+    // genuinely distinct physical fills (split across two pages) as the SAME "#0",
+    // collapsing them into one durable row. `raw` is passed through by reference
+    // (shadow-core.ts's own `raw: r`), so page origin is instead recovered via a
+    // reference-keyed Map built BEFORE normalizing, without touching the durably-stored
+    // raw evidence blob at all.
+    const pageIndexByRawRow = new Map<RawTrade, number>();
+    rawPages.forEach((page, pageIndex) => {
+      for (const row of page) pageIndexByRawRow.set(row, pageIndex);
+    });
+    const allEventsBySourceOrder: NormalizedEvent[] = normalizeSourceEvents(rawPages.flat(), normalizedWallet);
+    // rawPages[0] is the NEWEST page (offset 0) -- descending pageIndex is oldest-first.
+    const allEvents = [...allEventsBySourceOrder].sort((a, b) => (pageIndexByRawRow.get(b.raw) ?? 0) - (pageIndexByRawRow.get(a.raw) ?? 0));
+    const reliableEvents = allEvents.filter((e) => !e.identityDegraded);
+    const degradedEvents = allEvents.filter((e) => e.identityDegraded);
 
     let existingReliableKeys: Set<string>;
     try {
@@ -1100,14 +1165,18 @@ export async function pollSportsShadowWallet(
       result.error = result.error ?? `findExistingEventKeys failed: ${err instanceof Error ? err.message : "unknown error"}`;
       existingReliableKeys = new Set();
     }
-    const newReliable = reliableEvents.filter((e) => !existingReliableKeys.has(e.eventKey));
-    result.duplicateRows += reliableEvents.length - newReliable.length;
+    const newReliableKeys = new Set(reliableEvents.filter((e) => !existingReliableKeys.has(e.eventKey)).map((e) => e.eventKey));
+    result.duplicateRows += reliableEvents.length - newReliableKeys.size;
 
     const { newDegraded, duplicateCount: degradedDuplicates, error: reconcileError } = await reconcileDegradedEvents(degradedEvents, normalizedWallet, d.repo);
     result.error = result.error ?? reconcileError;
     result.duplicateRows += degradedDuplicates;
+    const newDegradedKeys = new Set(newDegraded.map((e) => e.eventKey));
 
-    const genuinelyNew = [...newReliable, ...newDegraded].sort((a, b) => a.sourceTs - b.sourceTs || a.eventKey.localeCompare(b.eventKey));
+    // Preserve `allEvents`' own oldest-page-first order (NOT `newDegraded`'s
+    // count-reconciliation order) by filtering the original sequence rather than
+    // concatenating the two "new" sub-lists.
+    const genuinelyNew = allEvents.filter((e) => newReliableKeys.has(e.eventKey) || newDegradedKeys.has(e.eventKey));
 
     /* -------------------- Phase 1 persist: batched, deadline-checked BETWEEN (never mid-) batch -------------------- */
     for (let i = 0; i < genuinelyNew.length; i += PERSIST_BATCH_SIZE) {
@@ -1133,7 +1202,18 @@ export async function pollSportsShadowWallet(
         }
       } catch (err) {
         result.error = result.error ?? `insertRawFillsBatch failed: ${err instanceof Error ? err.message : "unknown error"}`;
-        result.invalidRows += batch.length;
+        result.invalidRows += genuinelyNew.length - i; // this batch AND every later (newer) batch never attempted
+        result.backlogTruncated = true;
+        // Task 13G / P1-Q (Codex re-review, P1): a failed batch must stop ALL further
+        // persistence this poll, not just skip to the next batch. genuinelyNew is ordered
+        // oldest-page-first -- continuing past a failure would risk persisting NEWER pages
+        // while this (older) batch's rows stay un-persisted, which a later poll's overlap
+        // check could then mistake for full coverage, stranding the older, failed batch
+        // forever. Stopping here guarantees only a CONTIGUOUS prefix, starting from the
+        // pre-existing durable boundary forward, is ever committed -- the un-persisted
+        // suffix (this batch onward) is simply re-discovered as still-genuinely-new and
+        // retried, oldest-first again, on the wallet's next poll.
+        break;
       }
     }
   }

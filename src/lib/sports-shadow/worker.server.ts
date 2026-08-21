@@ -132,6 +132,15 @@ export const FINAL_OBSERVATION_STAGE_DEADLINE_MS_FOR_TEST = FINAL_OBSERVATION_ST
  * NORMAL EXPECTED runtime (steady-state, short per-wallet gaps): low single-digit seconds
  * for all 3 wallets combined. See worker.server.test.ts's Task 13F timing-bound tests and
  * the Task 13G final report for the full-route (source + both observation stages) figure.
+ *
+ * Task 13G / P1-Q (Codex re-review): bootstrap (a wallet's first-ever poll) is no longer a
+ * fixed one-page operation -- it now shares the exact same MAX_PAGES_PER_WALLET ceiling as
+ * steady-state resumption, walking as many pages as needed to prove the go-live boundary
+ * has been crossed (see source-poll.server.ts's "FORWARD-ONLY BOOTSTRAP" doc comment).
+ * This does NOT change the formula above: this deadline is checked before every page for
+ * bootstrap and steady-state alike, so the same "at most one operation in flight when the
+ * shared deadline fires" reasoning applies unchanged regardless of which of the two a
+ * given wallet's poll happens to be.
  */
 export const SOURCE_LANE_BUDGET_MS = 30_000;
 export const SOURCE_LEASE_TTL_SECONDS = 60;
