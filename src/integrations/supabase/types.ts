@@ -1443,6 +1443,349 @@ export type Database = {
         }
         Relationships: []
       }
+      sports_market_matches: {
+        Row: {
+          first_match_status: string
+          id: string
+          line: number | null
+          match_status: string
+          metadata: Json | null
+          next_recheck_at: string | null
+          normalized_game_id: string | null
+          reason: string | null
+          recheck_count: number
+          resolved_at: string
+          selected_side: string | null
+          settlement_compatibility: string
+          signal_id: string
+          target_event_id: string | null
+          target_identifier: string | null
+          target_market_id: string | null
+          venue: string
+        }
+        Insert: {
+          first_match_status: string
+          id?: string
+          line?: number | null
+          match_status: string
+          metadata?: Json | null
+          next_recheck_at?: string | null
+          normalized_game_id?: string | null
+          reason?: string | null
+          recheck_count?: number
+          resolved_at?: string
+          selected_side?: string | null
+          settlement_compatibility?: string
+          signal_id: string
+          target_event_id?: string | null
+          target_identifier?: string | null
+          target_market_id?: string | null
+          venue: string
+        }
+        Update: {
+          first_match_status?: string
+          id?: string
+          line?: number | null
+          match_status?: string
+          metadata?: Json | null
+          next_recheck_at?: string | null
+          normalized_game_id?: string | null
+          reason?: string | null
+          recheck_count?: number
+          resolved_at?: string
+          selected_side?: string | null
+          settlement_compatibility?: string
+          signal_id?: string
+          target_event_id?: string | null
+          target_identifier?: string | null
+          target_market_id?: string | null
+          venue?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sports_market_matches_signal_id_fkey"
+            columns: ["signal_id"]
+            isOneToOne: false
+            referencedRelation: "sports_shadow_signals"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sports_quote_observations: {
+        Row: {
+          ask_depth: Json | null
+          best_ask: number | null
+          best_bid: number | null
+          bid_depth: Json | null
+          created_at: string
+          detection_latency_ms: number | null
+          error_code: string | null
+          fetch_ended_at: string | null
+          fetch_started_at: string | null
+          fire_at: string
+          id: string
+          market_status: string | null
+          match_id: string | null
+          observed_at: string | null
+          raw_metadata: Json | null
+          reason: string | null
+          requested_delay_ms: number
+          signal_id: string
+          source_timestamp: string
+          spread: number | null
+          stale: boolean
+          venue: string
+        }
+        Insert: {
+          ask_depth?: Json | null
+          best_ask?: number | null
+          best_bid?: number | null
+          bid_depth?: Json | null
+          created_at?: string
+          detection_latency_ms?: number | null
+          error_code?: string | null
+          fetch_ended_at?: string | null
+          fetch_started_at?: string | null
+          fire_at: string
+          id?: string
+          market_status?: string | null
+          match_id?: string | null
+          observed_at?: string | null
+          raw_metadata?: Json | null
+          reason?: string | null
+          requested_delay_ms: number
+          signal_id: string
+          source_timestamp: string
+          spread?: number | null
+          stale?: boolean
+          venue: string
+        }
+        Update: {
+          ask_depth?: Json | null
+          best_ask?: number | null
+          best_bid?: number | null
+          bid_depth?: Json | null
+          created_at?: string
+          detection_latency_ms?: number | null
+          error_code?: string | null
+          fetch_ended_at?: string | null
+          fetch_started_at?: string | null
+          fire_at?: string
+          id?: string
+          market_status?: string | null
+          match_id?: string | null
+          observed_at?: string | null
+          raw_metadata?: Json | null
+          reason?: string | null
+          requested_delay_ms?: number
+          signal_id?: string
+          source_timestamp?: string
+          spread?: number | null
+          stale?: boolean
+          venue?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sports_quote_observations_match_id_fkey"
+            columns: ["match_id"]
+            isOneToOne: false
+            referencedRelation: "sports_market_matches"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sports_quote_observations_signal_id_fkey"
+            columns: ["signal_id"]
+            isOneToOne: false
+            referencedRelation: "sports_shadow_signals"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sports_shadow_signals: {
+        Row: {
+          away_team: string | null
+          bet_type: string
+          created_at: string
+          episode_key: string
+          first_fill_id: string
+          home_team: string | null
+          id: string
+          league: string
+          line: number | null
+          scheduled_start_at: string | null
+          selected_side: string
+          source_asset: string
+          source_condition_id: string | null
+          source_event_slug: string | null
+          source_fill_count: number
+          source_first_fill_at: string
+          source_handle: string | null
+          source_last_fill_at: string
+          source_market_slug: string | null
+          source_notional: number
+          source_outcome: string | null
+          source_sell_seen: boolean
+          source_shares: number
+          source_vwap: number
+          source_wallet: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          away_team?: string | null
+          bet_type: string
+          created_at?: string
+          episode_key: string
+          first_fill_id: string
+          home_team?: string | null
+          id?: string
+          league?: string
+          line?: number | null
+          scheduled_start_at?: string | null
+          selected_side: string
+          source_asset: string
+          source_condition_id?: string | null
+          source_event_slug?: string | null
+          source_fill_count?: number
+          source_first_fill_at: string
+          source_handle?: string | null
+          source_last_fill_at: string
+          source_market_slug?: string | null
+          source_notional?: number
+          source_outcome?: string | null
+          source_sell_seen?: boolean
+          source_shares?: number
+          source_vwap?: number
+          source_wallet: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          away_team?: string | null
+          bet_type?: string
+          created_at?: string
+          episode_key?: string
+          first_fill_id?: string
+          home_team?: string | null
+          id?: string
+          league?: string
+          line?: number | null
+          scheduled_start_at?: string | null
+          selected_side?: string
+          source_asset?: string
+          source_condition_id?: string | null
+          source_event_slug?: string | null
+          source_fill_count?: number
+          source_first_fill_at?: string
+          source_handle?: string | null
+          source_last_fill_at?: string
+          source_market_slug?: string | null
+          source_notional?: number
+          source_outcome?: string | null
+          source_sell_seen?: boolean
+          source_shares?: number
+          source_vwap?: number
+          source_wallet?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sports_shadow_signals_first_fill_id_fkey"
+            columns: ["first_fill_id"]
+            isOneToOne: false
+            referencedRelation: "sports_shadow_source_fills"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sports_shadow_source_fills: {
+        Row: {
+          asset: string
+          condition_id: string | null
+          downstream_status: string
+          downstream_unverified_reason: string | null
+          event_key: string
+          event_slug: string | null
+          first_seen_at: string
+          id: string
+          identity_basis: string
+          identity_degraded: boolean
+          market_slug: string | null
+          market_title: string
+          outcome: string | null
+          price: number
+          raw: Json | null
+          shares: number
+          side: string
+          source_ts: number
+          wallet: string
+          wallet_handle: string | null
+        }
+        Insert: {
+          asset: string
+          condition_id?: string | null
+          downstream_status?: string
+          downstream_unverified_reason?: string | null
+          event_key: string
+          event_slug?: string | null
+          first_seen_at?: string
+          id?: string
+          identity_basis: string
+          identity_degraded?: boolean
+          market_slug?: string | null
+          market_title?: string
+          outcome?: string | null
+          price?: number
+          raw?: Json | null
+          shares?: number
+          side: string
+          source_ts?: number
+          wallet: string
+          wallet_handle?: string | null
+        }
+        Update: {
+          asset?: string
+          condition_id?: string | null
+          downstream_status?: string
+          downstream_unverified_reason?: string | null
+          event_key?: string
+          event_slug?: string | null
+          first_seen_at?: string
+          id?: string
+          identity_basis?: string
+          identity_degraded?: boolean
+          market_slug?: string | null
+          market_title?: string
+          outcome?: string | null
+          price?: number
+          raw?: Json | null
+          shares?: number
+          side?: string
+          source_ts?: number
+          wallet?: string
+          wallet_handle?: string | null
+        }
+        Relationships: []
+      }
+      sports_shadow_wallet_cursor: {
+        Row: {
+          id: string
+          next_wallet_index: number
+          updated_at: string
+        }
+        Insert: {
+          id: string
+          next_wallet_index?: number
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          next_wallet_index?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
       tracked_wallets: {
         Row: {
           active: boolean
@@ -1666,6 +2009,27 @@ export type Database = {
         }
         Returns: Json
       }
+      find_pending_sports_shadow_signals: {
+        Args: { p_limit: number; p_venue: string }
+        Returns: {
+          away_team: string
+          bet_type: string
+          created_at: string
+          home_team: string
+          id: string
+          line: number
+          missing_kalshi: boolean
+          missing_pmus: boolean
+          scheduled_start_at: string
+          selected_side: string
+          source_asset: string
+          source_condition_id: string
+          source_event_slug: string
+          source_first_fill_at: string
+          source_market_slug: string
+          source_wallet: string
+        }[]
+      }
       get_experiment_source_positions: {
         Args: { p_assets: string[]; p_experiment_id: string }
         Returns: {
@@ -1713,6 +2077,34 @@ export type Database = {
         }
         Returns: boolean
       }
+      insert_sports_shadow_episode: {
+        Args: {
+          p_away_team: string
+          p_bet_type: string
+          p_episode_key: string
+          p_fill_id: string
+          p_home_team: string
+          p_league: string
+          p_line: number
+          p_scheduled_start_at: string
+          p_selected_side: string
+          p_source_asset: string
+          p_source_condition_id: string
+          p_source_event_slug: string
+          p_source_fill_count: number
+          p_source_first_fill_at: string
+          p_source_handle: string
+          p_source_last_fill_at: string
+          p_source_market_slug: string
+          p_source_notional: number
+          p_source_outcome: string
+          p_source_sell_seen: boolean
+          p_source_shares: number
+          p_source_vwap: number
+          p_source_wallet: string
+        }
+        Returns: string
+      }
       paper_trade_decision_stats: {
         Args: { p_experiment_id: string }
         Returns: Json
@@ -1735,6 +2127,15 @@ export type Database = {
         Args: { p_holder: string; p_wallet: string }
         Returns: undefined
       }
+      renew_sports_shadow_lease: {
+        Args: {
+          p_fence: number
+          p_id: string
+          p_lease_seconds: number
+          p_worker_id: string
+        }
+        Returns: boolean
+      }
       reserve_http_request_slot: {
         Args: { p_host: string; p_min_interval_ms: number }
         Returns: string
@@ -1746,6 +2147,20 @@ export type Database = {
       update_live_pilot_intent_status_atomic: {
         Args: { p_fields: Json; p_intent_id: string; p_new_status: string }
         Returns: Json
+      }
+      update_sports_shadow_episode: {
+        Args: {
+          p_fill_id: string
+          p_signal_id: string
+          p_source_fill_count: number
+          p_source_first_fill_at: string
+          p_source_last_fill_at: string
+          p_source_notional: number
+          p_source_sell_seen: boolean
+          p_source_shares: number
+          p_source_vwap: number
+        }
+        Returns: undefined
       }
     }
     Enums: {
