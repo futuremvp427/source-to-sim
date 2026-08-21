@@ -867,14 +867,25 @@ async function reconcileDegradedEvents(
   let duplicateCount = 0;
   for (const [prefix, group] of groups) {
     const durableCount = durableCounts.get(prefix) ?? 0;
-    const batchCount = group.length;
-    if (batchCount <= durableCount) {
-      duplicateCount += batchCount;
-      continue;
+    // Task 13G (Codex re-review round 9, P1): filter by each event's OWN ordinal number
+    // against the durable count, never by POSITION within `group`. Positional slicing
+    // (`sorted.slice(durableCount)`) silently assumed `group` always contains the FULL,
+    // contiguous 0..N-1 ordinal range for this tuple -- true when reconciliation ran once
+    // for the whole scan, but false once reconciliation runs PER PAGE (see the "one page
+    // at a time" persist loop above): a later page's `group` for this tuple can contain
+    // ONLY ordinal #1 (say), with ordinal #0 already committed by an earlier page THIS
+    // SAME POLL, making `sorted.slice(durableCount=1)` on a 1-element group incorrectly
+    // slice off the position, not the ordinal -- wrongly treating a genuinely-new higher
+    // ordinal as a duplicate merely because it happens to be the only entry in its own
+    // page's local group. Checking each entry's actual ordinal suffix is correct
+    // regardless of whether `group` represents a whole scan or one page's local subset.
+    for (const event of group) {
+      if (ordinalSuffix(event.eventKey) < durableCount) {
+        duplicateCount += 1;
+      } else {
+        newDegraded.push(event);
+      }
     }
-    const sorted = [...group].sort((a, b) => ordinalSuffix(a.eventKey) - ordinalSuffix(b.eventKey));
-    duplicateCount += durableCount;
-    newDegraded.push(...sorted.slice(durableCount));
   }
 
   return { newDegraded, duplicateCount, error };
@@ -1236,131 +1247,131 @@ export async function pollSportsShadowWallet(
     // order still needs restoring to actual page order for persistence and batch-grouping
     // below, via the same reference-keyed page-index map.
     const allEvents = [...allEventsBySourceOrder].sort((a, b) => (pageIndexByRawRow.get(b.raw) ?? 0) - (pageIndexByRawRow.get(a.raw) ?? 0));
-    const reliableEvents = allEvents.filter((e) => !e.identityDegraded);
-    const degradedEvents = allEvents.filter((e) => e.identityDegraded);
+
+    // Task 13G (Codex re-review round 9, P1): reconciliation and persistence are now ONE
+    // PAGE at a time, oldest page first, rather than a single scan-wide "reconcile
+    // everything, then persist everything" gate. The prior all-or-nothing design meant a
+    // scan whose degraded-tuple reconciliation could not fully complete within budget
+    // (rare per-scan, but possible for a large catch-up with many distinct prefixes)
+    // committed NOTHING -- and since nothing changes between identical retries of the same
+    // scan, that could repeat every poll, making zero durable progress indefinitely under a
+    // routinely tight deadline. Processing one page's reconciliation+persist as a single
+    // atomic unit means an EARLIER page that fully completes is durably committed even if a
+    // LATER page's reconciliation or persist doesn't fit in the remaining budget -- genuine,
+    // monotonic incremental progress every poll, not "all or nothing" per scan. This does
+    // not weaken the no-stranding invariant: exactly like the previous per-batch design, a
+    // page is only ever committed once its own findExistingEventKeys AND degraded
+    // reconciliation AND insertRawFillsBatch have all genuinely completed, and stopping
+    // after any earlier page still leaves every later (unprocessed) page's content
+    // discoverable as genuinely-new on the wallet's next poll.
+    const eventsByPageIndex = new Map<number, NormalizedEvent[]>();
+    for (const event of allEvents) {
+      const pageIdx = pageIndexByRawRow.get(event.raw) ?? 0;
+      const list = eventsByPageIndex.get(pageIdx);
+      if (list) list.push(event);
+      else eventsByPageIndex.set(pageIdx, [event]);
+    }
+    // pageIndexByRawRow uses the ORIGINAL rawPages indices (0 = newest) -- descending
+    // gives oldest-page-first, matching every other ordering decision in this function.
+    const pageIndicesOldestFirst = [...eventsByPageIndex.keys()].sort((a, b) => b - a);
 
     // Task 13G (Codex re-review round 3, P1): a confirmed-complete scan can still have
     // exhausted (or nearly exhausted) the deadline during its OWN last fetch/lease-check
-    // iteration -- checked again here, immediately before starting the first of what may
-    // be several further sequential DB calls (findExistingEventKeys, degraded-event
-    // reconciliation, the first persist batch). If already past deadline, none of that
-    // work starts at all this poll: exactly as safe as any other unconfirmed-scan
-    // discard (see scanConfirmedComplete above) -- nothing here has been persisted yet,
-    // so nothing is stranded, only deferred to the wallet's next poll.
-    const readyToPersist = d.now() < deadlineAtMs;
-    if (!readyToPersist) {
-      result.backlogTruncated = true;
-    }
-
-    if (readyToPersist) {
-    let existingReliableKeys: Set<string>;
-    try {
-      existingReliableKeys = await d.repo.findExistingEventKeys(normalizedWallet, reliableEvents.map((e) => e.eventKey));
-    } catch (err) {
-      result.error = result.error ?? `findExistingEventKeys failed: ${err instanceof Error ? err.message : "unknown error"}`;
-      existingReliableKeys = new Set();
-    }
-    const newReliableKeys = new Set(reliableEvents.filter((e) => !existingReliableKeys.has(e.eventKey)).map((e) => e.eventKey));
-    result.duplicateRows += reliableEvents.length - newReliableKeys.size;
-
-    // Task 13G (Codex re-review round 4, P1): re-checked here, immediately before
-    // degraded-event reconciliation -- findExistingEventKeys's own await can run past the
-    // deadline, and reconcileDegradedEvents can itself issue a further, page-cap-bounded
-    // chain of sequential requests (see countDurableOrdinalFills). If already past
-    // deadline, abort ALL persistence this poll -- not just the degraded half -- rather
-    // than persisting reliable events from a page while skipping that SAME page's degraded
-    // ones: durable reliable keys would let a later poll's overlap check stop at that page,
-    // permanently stranding the un-reconciled degraded rows it also contained.
+    // iteration -- checked again here, immediately before starting the first page's own
+    // work. If already past deadline, none of it starts at all this poll: exactly as safe
+    // as any other unconfirmed-scan discard (see scanConfirmedComplete above) -- nothing
+    // here has been persisted yet, so nothing is stranded, only deferred to the wallet's
+    // next poll.
     if (d.now() >= deadlineAtMs) {
       result.backlogTruncated = true;
     } else {
-    const { newDegraded, duplicateCount: degradedDuplicates, error: reconcileError } = await reconcileDegradedEvents(
-      degradedEvents,
-      normalizedWallet,
-      d.repo,
-      { now: d.now, deadlineAtMs },
-    );
-    result.error = result.error ?? reconcileError;
-
-    // Task 13G (Codex re-review round 5, P1): a reconciliation FAILURE (not just a
-    // deadline hit) must abort ALL persistence this poll too, not merely skip the
-    // degraded half -- persisting this scan's reliable events while skipping its
-    // degraded ones has the exact same partial-page stranding risk as the deadline-abort
-    // case immediately above: a later poll's overlap check would recognize the newly
-    // durable reliable keys and stop there, permanently skipping the un-reconciled
-    // degraded rows the same pages also contained.
-    if (reconcileError !== null) {
-      result.backlogTruncated = true;
-    } else {
-    result.duplicateRows += degradedDuplicates;
-    const newDegradedKeys = new Set(newDegraded.map((e) => e.eventKey));
-
-    // Preserve `allEvents`' own oldest-page-first order (NOT `newDegraded`'s
-    // count-reconciliation order) by filtering the original sequence rather than
-    // concatenating the two "new" sub-lists.
-    const genuinelyNew = allEvents.filter((e) => newReliableKeys.has(e.eventKey) || newDegradedKeys.has(e.eventKey));
-
-    // Task 13G (Codex re-review round 3, P1): batches are grouped by ACTUAL originating
-    // page, never a fixed-size slice that can straddle two pages. A fixed PERSIST_BATCH_SIZE
-    // window could combine the tail of an older page with the head of a newer one; if that
-    // combined batch commits but a later batch fails/is deferred, the newer page ends up
-    // PARTIALLY durable -- which breaks the invariant a later poll's per-page overlap check
-    // relies on (a page's reliable keys are either all durable or all absent). Grouping by
-    // page keeps every batch naturally <= PAGE_SIZE (a page can never hold more rows than
-    // one fetch), so this is a pure reorganization, not a larger unit of work.
-    const pageGroups: NormalizedEvent[][] = [];
-    for (const event of genuinelyNew) {
-      const pageIdx = pageIndexByRawRow.get(event.raw);
-      const last = pageGroups[pageGroups.length - 1];
-      if (last && last.length > 0 && pageIndexByRawRow.get(last[0]!.raw) === pageIdx) {
-        last.push(event);
-      } else {
-        pageGroups.push([event]);
-      }
-    }
-
-    /* -------------------- Phase 1 persist: one batch per page, deadline-checked BETWEEN (never mid-) batch -------------------- */
-    for (let i = 0; i < pageGroups.length; i += 1) {
-      // Task 13G / P1-R: checked before EVERY batch, including the first -- see the
-      // `readyToPersist` check above for why the first batch is not exempt. Safe to stop
-      // here -- see the module doc comment's P1-R paragraph: any row not yet inserted this
-      // poll is still genuinely-new (never durably written) and is simply re-discovered
-      // and retried on the wallet's next poll, fully idempotently.
-      if (d.now() >= deadlineAtMs) {
-        result.backlogTruncated = true;
-        break;
-      }
-      const pageGroup = pageGroups[i]!;
-      const batch = pageGroup.map((event) => toRawFillRow(event));
-      try {
-        const batchResults = await d.repo.insertRawFillsBatch(batch);
-        for (const r of batchResults) {
-          if (r.inserted) {
-            result.newRows += 1;
-            insertedThisPoll.add(r.id);
-          } else {
-            result.duplicateRows += 1;
-          }
+      for (const pageIdx of pageIndicesOldestFirst) {
+        // Task 13G (Codex re-review round 9, P1): checked before EVERY page's
+        // reconcile+persist unit, including the first.
+        if (d.now() >= deadlineAtMs) {
+          result.backlogTruncated = true;
+          break;
         }
-      } catch (err) {
-        result.error = result.error ?? `insertRawFillsBatch failed: ${err instanceof Error ? err.message : "unknown error"}`;
-        result.invalidRows += pageGroups.slice(i).reduce((sum, g) => sum + g.length, 0); // this batch AND every later (newer) batch never attempted
-        result.backlogTruncated = true;
-        // Task 13G / P1-Q (Codex re-review, P1): a failed batch must stop ALL further
-        // persistence this poll, not just skip to the next batch. Batches are ordered
-        // oldest-page-first -- continuing past a failure would risk persisting NEWER pages
-        // while this (older) batch's rows stay un-persisted, which a later poll's overlap
-        // check could then mistake for full coverage, stranding the older, failed batch
-        // forever. Stopping here guarantees only a CONTIGUOUS prefix, starting from the
-        // pre-existing durable boundary forward, is ever committed -- the un-persisted
-        // suffix (this batch onward) is simply re-discovered as still-genuinely-new and
-        // retried, oldest-first again, on the wallet's next poll.
-        break;
+        const pageEvents = eventsByPageIndex.get(pageIdx)!;
+        const pageReliable = pageEvents.filter((e) => !e.identityDegraded);
+        const pageDegraded = pageEvents.filter((e) => e.identityDegraded);
+
+        let pageExistingReliableKeys: Set<string>;
+        try {
+          pageExistingReliableKeys = await d.repo.findExistingEventKeys(normalizedWallet, pageReliable.map((e) => e.eventKey));
+        } catch (err) {
+          // Fail OPEN, not closed: unlike degraded-count reconciliation (where a wrong
+          // guess can misidentify a specific ordinal), treating every reliable event as
+          // "not yet durable" here is always SAFE -- insertRawFillsBatch's own
+          // onConflict/ignoreDuplicates upsert idempotently no-ops any that already exist,
+          // never creating a duplicate or corrupting state. Stopping the whole page here
+          // instead would sacrifice real progress for no additional safety.
+          result.error = result.error ?? `findExistingEventKeys failed: ${err instanceof Error ? err.message : "unknown error"}`;
+          pageExistingReliableKeys = new Set();
+        }
+        const pageNewReliableKeys = new Set(pageReliable.filter((e) => !pageExistingReliableKeys.has(e.eventKey)).map((e) => e.eventKey));
+        const pageReliableDuplicates = pageReliable.length - pageNewReliableKeys.size;
+
+        // Task 13G (Codex re-review round 4, P1): re-checked here, immediately before
+        // this page's own degraded-event reconciliation -- findExistingEventKeys's own
+        // await can run past the deadline.
+        if (d.now() >= deadlineAtMs) {
+          result.backlogTruncated = true;
+          break;
+        }
+        const { newDegraded: pageNewDegraded, duplicateCount: pageDegradedDuplicates, error: reconcileError } = await reconcileDegradedEvents(
+          pageDegraded,
+          normalizedWallet,
+          d.repo,
+          { now: d.now, deadlineAtMs },
+        );
+        if (reconcileError !== null) {
+          // Task 13G (Codex re-review round 5, P1): a reconciliation FAILURE (not just a
+          // deadline hit) must stop here too, not merely skip this page's degraded half --
+          // persisting this page's reliable events while skipping its degraded ones has
+          // the exact same partial-page stranding risk as any other partial-page commit.
+          result.error = result.error ?? reconcileError;
+          result.backlogTruncated = true;
+          break;
+        }
+        result.duplicateRows += pageReliableDuplicates + pageDegradedDuplicates;
+        const pageNewDegradedKeys = new Set(pageNewDegraded.map((e) => e.eventKey));
+        const pageGenuinelyNew = pageEvents.filter((e) => pageNewReliableKeys.has(e.eventKey) || pageNewDegradedKeys.has(e.eventKey));
+
+        if (pageGenuinelyNew.length === 0) continue; // nothing new on this page -- move on
+
+        // Task 13G / P1-R: checked immediately before this page's persist batch too --
+        // reconciliation itself can consume real time.
+        if (d.now() >= deadlineAtMs) {
+          result.backlogTruncated = true;
+          break;
+        }
+        const batch = pageGenuinelyNew.map((event) => toRawFillRow(event));
+        try {
+          const batchResults = await d.repo.insertRawFillsBatch(batch);
+          for (const r of batchResults) {
+            if (r.inserted) {
+              result.newRows += 1;
+              insertedThisPoll.add(r.id);
+            } else {
+              result.duplicateRows += 1;
+            }
+          }
+        } catch (err) {
+          // Task 13G / P1-Q (Codex re-review, P1): a failed batch must stop ALL further
+          // pages this poll, not just skip to the next one -- pages are processed
+          // oldest-first, so continuing past a failure would risk committing a NEWER
+          // page while this (older) one's rows stay un-persisted, which a later poll's
+          // overlap check could then mistake for full coverage, stranding this page
+          // forever. Stopping here guarantees only a CONTIGUOUS prefix of pages, starting
+          // from the pre-existing durable boundary forward, is ever committed.
+          result.error = result.error ?? `insertRawFillsBatch failed: ${err instanceof Error ? err.message : "unknown error"}`;
+          result.invalidRows += pageGenuinelyNew.length;
+          result.backlogTruncated = true;
+          break;
+        }
       }
     }
-    } // end reconcileError check
-    } // end deadline-check-before-degraded-reconciliation
-    } // end readyToPersist
   }
 
   /*

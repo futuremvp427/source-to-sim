@@ -1622,6 +1622,38 @@ describe("Task 13G / P1-Q: formal proof -- an incomplete scan can never create a
     expect(result.backlogTruncated).toBe(true);
   });
 
+  it("Task 13G (Codex re-review round 9, P1): an EARLIER page's reconcile+persist commits durably even when a LATER page's degraded-reconciliation fails -- genuine incremental progress, not all-or-nothing per scan", async () => {
+    const repo = new FakeRepo();
+    repo.fillsByEventKey.set("sid:seed", { id: "fill-seed", row: { eventKey: "sid:seed", wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
+    // page1 (older, offset=250): one degraded row that reconciles fine.
+    // page0 (newer, offset=0): a FULL page (so pagination continues to page1) whose one
+    // degraded row's reconciliation FAILS; the rest are reliable filler.
+    const page1 = [trade({ id: undefined, transactionHash: "0xpage1-degraded" })];
+    const page0 = [
+      trade({ id: undefined, transactionHash: "0xpage0-degraded" }),
+      ...Array.from({ length: PAGE_SIZE - 1 }, (_, i) => trade({ id: `page0-filler-${i}`, transactionHash: `0xpage0-filler-${i}` })),
+    ];
+    const network = makeNetworkDeps({ 0: page0, [PAGE_SIZE]: page1, [PAGE_SIZE * 2]: [] });
+    // Pages are processed oldest-first (page1, then page0) -- fail only the SECOND call.
+    let countCalls = 0;
+    const originalCount = repo.countDurableOrdinalFills.bind(repo);
+    repo.countDurableOrdinalFills = async (wallet: string, prefixes: string[]) => {
+      countCalls += 1;
+      if (countCalls === 2) throw new Error("simulated reconciliation failure on the newer page");
+      return originalCount(wallet, prefixes);
+    };
+    const { deps } = makeDeps({ repo, network });
+    const result = await pollSportsShadowWallet(WALLET, 0, deps);
+    expect(result.error).toContain("simulated reconciliation failure");
+    expect(result.backlogTruncated).toBe(true);
+    // page1 (older, processed first) durably committed despite page0's later failure.
+    expect(result.newRows).toBe(1);
+    expect(repo.fillsByEventKey.size).toBe(2); // the pre-seeded row + page1's row
+    const durableKeys = [...repo.fillsByEventKey.keys()];
+    expect(durableKeys.some((k) => k.includes("0xpage1-degraded"))).toBe(true);
+    expect(durableKeys.some((k) => k.includes("0xpage0-degraded"))).toBe(false);
+  });
+
   it("CORE PROOF: deadline interruption + a 1-page shift of already-fetched content between polls never strands MIDDLE_BATCH", async () => {
     const repo = new FakeRepo();
     repo.fillsByEventKey.set("OLD_ANCHOR", { id: "fill-anchor", row: { eventKey: "OLD_ANCHOR", wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
