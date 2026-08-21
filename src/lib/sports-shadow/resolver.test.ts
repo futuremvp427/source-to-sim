@@ -602,8 +602,8 @@ describe("Task 12G / P1-J: PM-US LONG/SHORT orientation preservation", () => {
     const { buildMatchRow } = await import("./observation");
     const longResult = resolvePmusMatch(source(), [pmusCandidate()]);
     const shortResult = resolvePmusMatch(source({ selectedOutcomeRaw: "Baltimore Orioles" }), [pmusCandidate()]);
-    const longRow = buildMatchRow("sig-1", longResult);
-    const shortRow = buildMatchRow("sig-2", shortResult);
+    const longRow = buildMatchRow("sig-1", longResult, { firstMatchStatus: "EXACT", recheckCount: 0, nextRecheckAt: null });
+    const shortRow = buildMatchRow("sig-2", shortResult, { firstMatchStatus: "EXACT", recheckCount: 0, nextRecheckAt: null });
     expect(longRow.selectedSide).toBe("TEAM:NYY:LONG");
     expect(shortRow.selectedSide).toBe("TEAM:BAL:SHORT");
     // Round-trip is unambiguous: parsing the suffix back off recovers the exact orientation.

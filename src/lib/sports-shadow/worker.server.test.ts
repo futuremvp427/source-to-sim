@@ -13,7 +13,8 @@ import type { Venue } from "./types";
 import {
   FINAL_OBSERVATION_STAGE_DEADLINE_MS_FOR_TEST,
   OBSERVATION_LEASE_TTL_SECONDS,
-  OBSERVATION_LOCK_ID,
+  OBSERVATION_LOCK_ID_KALSHI,
+  OBSERVATION_LOCK_ID_PMUS,
   OBSERVATION_STAGE_DEADLINE_MS,
   SOURCE_LOCK_ID,
   runSportsShadowCycle,
@@ -205,25 +206,78 @@ describe("runSportsShadowCycle — lane ordering and independence", () => {
     expect(order).toContain("source");
   });
 
-  it("8. source lease already held by another invocation does NOT prevent the observation lane from running", async () => {
+  it("8. source lease already held by another invocation does NOT prevent the observation lanes from running", async () => {
     const { repo: leaseRepo } = makeFakeLeaseRepo();
     // Pre-hold the SOURCE lock only.
     await leaseRepo.acquire(SOURCE_LOCK_ID, "other-invocation", 60);
     const takeDueSportsShadowObservations = vi.fn(async () => emptyObservationCollectionResult());
     const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ leaseRepo, takeDueSportsShadowObservations: takeDueSportsShadowObservations as never }));
-    expect(summary.observationLane.acquired).toBe(true);
+    expect(summary.observationLane.pmus.acquired).toBe(true);
+    expect(summary.observationLane.kalshi.acquired).toBe(true);
     expect(summary.sourceLane?.acquired).toBe(false);
     expect(takeDueSportsShadowObservations).toHaveBeenCalled();
   });
 
   it("9. observation lease already held does not corrupt or block independent source lease acquisition", async () => {
     const { repo: leaseRepo } = makeFakeLeaseRepo();
-    await leaseRepo.acquire(OBSERVATION_LOCK_ID, "other-invocation", 90);
+    await leaseRepo.acquire(OBSERVATION_LOCK_ID_PMUS, "other-invocation", 90);
+    await leaseRepo.acquire(OBSERVATION_LOCK_ID_KALSHI, "other-invocation", 90);
     const pollSportsShadowWallet = vi.fn(async (wallet: string) => emptyWalletResult(wallet));
     const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ leaseRepo, pollSportsShadowWallet: pollSportsShadowWallet as never }));
-    expect(summary.observationLane.acquired).toBe(false);
+    expect(summary.observationLane.pmus.acquired).toBe(false);
+    expect(summary.observationLane.kalshi.acquired).toBe(false);
     expect(summary.sourceLane?.acquired).toBe(true);
     expect(pollSportsShadowWallet).toHaveBeenCalled();
+  });
+
+  it("Task 12H / P1-N, N7: PM-US's observation lease being held does NOT block Kalshi's independent lease from being acquired", async () => {
+    const { repo: leaseRepo } = makeFakeLeaseRepo();
+    await leaseRepo.acquire(OBSERVATION_LOCK_ID_PMUS, "other-invocation", 90);
+    const takeDueSportsShadowObservations = vi.fn(async () => emptyObservationCollectionResult());
+    const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ leaseRepo, takeDueSportsShadowObservations: takeDueSportsShadowObservations as never }));
+    expect(summary.observationLane.pmus.acquired).toBe(false);
+    expect(summary.observationLane.kalshi.acquired).toBe(true);
+  });
+
+  it("Task 12H / P1-N, N2: a slow PM-US observation fetch does NOT delay Kalshi's lane from STARTING -- both lanes begin concurrently, proven by real call-order timing, not just eventual independent completion", async () => {
+    const order: string[] = [];
+    let resolvePmus!: () => void;
+    const pmusStarted = new Promise<void>((resolve) => {
+      resolvePmus = resolve;
+    });
+    const takeDueSportsShadowObservations = vi.fn(async (venue: Venue) => {
+      order.push(`${venue}-start`);
+      if (venue === "PMUS") {
+        // Simulate a slow PM-US fetch (e.g. close to its 12s fetch timeout) that has not
+        // resolved yet by the time we assert Kalshi already started.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      } else {
+        resolvePmus(); // signal that Kalshi has started while PMUS is still pending
+      }
+      order.push(`${venue}-end`);
+      return emptyObservationCollectionResult();
+    });
+    const cyclePromise = runSportsShadowCycle(enabledConfig(), baseDeps({ takeDueSportsShadowObservations: takeDueSportsShadowObservations as never }));
+    await pmusStarted; // Kalshi's own call started BEFORE PMUS's slow call finished
+    expect(order).toContain("KALSHI-start");
+    expect(order).not.toContain("PMUS-end"); // PMUS's slow work is still in flight at this point
+    await cyclePromise;
+    expect(order.filter((e) => e.endsWith("-start")).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("Task 12H / P1-N, N2b/N9: each venue's observation lane receives its OWN full maxRows/deadline budget -- a PMUS backlog cannot shrink Kalshi's allotment (no shared/pooled counter)", async () => {
+    const seenArgs: Array<{ venue: Venue; maxRows: number; deadlineAtMs: number }> = [];
+    const takeDueSportsShadowObservations = vi.fn(async (venue: Venue, _deps: unknown, maxRows: number, deadlineAtMs: number) => {
+      seenArgs.push({ venue, maxRows, deadlineAtMs });
+      return emptyObservationCollectionResult();
+    });
+    await runSportsShadowCycle(enabledConfig(), baseDeps({ takeDueSportsShadowObservations: takeDueSportsShadowObservations as never }));
+    const mainPassCalls = seenArgs.slice(0, 2);
+    const pmusCall = mainPassCalls.find((c) => c.venue === "PMUS")!;
+    const kalshiCall = mainPassCalls.find((c) => c.venue === "KALSHI")!;
+    expect(pmusCall.maxRows).toBe(kalshiCall.maxRows); // identical, independent budgets -- neither is reduced by the other
+    expect(pmusCall.deadlineAtMs).toBeGreaterThan(0);
+    expect(kalshiCall.deadlineAtMs).toBeGreaterThan(0);
   });
 
   it("10. of two overlapping cycle invocations sharing one lease repo, only one acquires the source lock at a time", async () => {
@@ -433,7 +487,7 @@ describe("runSportsShadowCycle — durable pending-signal recovery (crash-recove
     expect(summary.sourceLane?.kalshi.pendingFound).toBe(1);
     expect(summary.sourceLane?.pmus.pendingProcessed).toBe(1);
     expect(summary.sourceLane?.kalshi.pendingProcessed).toBe(1);
-    expect(persistVenueMatch).toHaveBeenCalledWith("orphaned-signal", expect.anything(), expect.anything(), expect.anything(), expect.anything());
+    expect(persistVenueMatch).toHaveBeenCalledWith("orphaned-signal", expect.anything(), expect.anything(), expect.anything(), expect.anything(), expect.anything());
   });
 
   it("14. a signal with PMUS already persisted retries only Kalshi", async () => {
@@ -738,7 +792,7 @@ describe("runSportsShadowCycle — Task 12F/P1-G: lease loss stops the source la
     expect(summary.sourceLane?.kalshi.pendingFound).toBe(0);
   });
 
-  it("G9: the observation lane runs and completes independently even when the source lane reports lease loss", async () => {
+  it("G9: the observation lanes run and complete independently even when the source lane reports lease loss", async () => {
     const pollSportsShadowWallet = vi.fn(async (wallet: string) => emptyWalletResult(wallet, { leaseLost: true }));
     const takeDueSportsShadowObservations = vi.fn(async () => ({ captured: 1, failed: 0, skipped: 0 }));
     const summary = await runSportsShadowCycle(
@@ -746,8 +800,10 @@ describe("runSportsShadowCycle — Task 12F/P1-G: lease loss stops the source la
       baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never, takeDueSportsShadowObservations: takeDueSportsShadowObservations as never }),
     );
     expect(summary.sourceLane?.leaseLost).toBe(true);
-    expect(summary.observationLane.acquired).toBe(true);
-    expect(summary.observationLane.captured).toBe(1);
+    expect(summary.observationLane.pmus.acquired).toBe(true);
+    expect(summary.observationLane.pmus.captured).toBe(1);
+    expect(summary.observationLane.kalshi.acquired).toBe(true);
+    expect(summary.observationLane.kalshi.captured).toBe(1);
   });
 
   it("a source lane that never loses the lease reports leaseLost=false", async () => {
@@ -758,27 +814,33 @@ describe("runSportsShadowCycle — Task 12F/P1-G: lease loss stops the source la
 
 describe("runSportsShadowCycle — final +0 observation pass", () => {
   it("23. a final observation pass runs after the source lane and can capture a newly-due +0 row", async () => {
-    let call = 0;
-    const takeDueSportsShadowObservations = vi.fn(async () => {
-      call += 1;
-      return call === 1 ? { captured: 0, failed: 0, skipped: 0 } : { captured: 1, failed: 0, skipped: 0 };
+    // Task 12H/P1-N: per-venue call counters -- each venue's OWN 1st call is always its
+    // main pass and 2nd call is always its final pass, regardless of PMUS/KALSHI
+    // cross-venue interleaving (the main pass's Promise.all is fully awaited before the
+    // final pass ever starts).
+    const callCounts: Record<string, number> = {};
+    const takeDueSportsShadowObservations = vi.fn(async (venue: Venue) => {
+      callCounts[venue] = (callCounts[venue] ?? 0) + 1;
+      return callCounts[venue] === 1 ? { captured: 0, failed: 0, skipped: 0 } : { captured: 1, failed: 0, skipped: 0 };
     });
     const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ takeDueSportsShadowObservations: takeDueSportsShadowObservations as never }));
-    expect(takeDueSportsShadowObservations).toHaveBeenCalledTimes(2);
-    expect(summary.finalObservationPass.captured).toBe(1);
+    expect(takeDueSportsShadowObservations).toHaveBeenCalledTimes(4); // 2 venues x (main + final)
+    expect(summary.finalObservationPass.pmus.captured).toBe(1);
+    expect(summary.finalObservationPass.kalshi.captured).toBe(1);
   });
 
-  it("24. a held observation lease causes the final +0 pass to skip without waiting", async () => {
+  it("24. a held observation lease causes that venue's final +0 pass to skip without waiting, independently of the other venue", async () => {
     const { repo: leaseRepo } = makeFakeLeaseRepo();
     const takeDueSportsShadowObservations = vi.fn(async () => emptyObservationCollectionResult());
-    // Simulate: after lane A releases, something else grabs the observation lock before the final pass.
+    // Simulate: after lane A releases, something else grabs the PM-US observation lock
+    // specifically before the final pass.
     const originalRelease = leaseRepo.release.bind(leaseRepo);
-    let observationAcquireCount = 0;
+    let pmusAcquireCount = 0;
     const wrappedRepo: SportsLeaseRepository = {
       acquire: async (lockId, workerId, leaseSeconds) => {
-        if (lockId === OBSERVATION_LOCK_ID) {
-          observationAcquireCount += 1;
-          if (observationAcquireCount === 2) return null; // second (final-pass) attempt finds it held
+        if (lockId === OBSERVATION_LOCK_ID_PMUS) {
+          pmusAcquireCount += 1;
+          if (pmusAcquireCount === 2) return null; // second (final-pass) attempt finds it held
         }
         return leaseRepo.acquire(lockId, workerId, leaseSeconds);
       },
@@ -786,8 +848,9 @@ describe("runSportsShadowCycle — final +0 observation pass", () => {
       renew: leaseRepo.renew.bind(leaseRepo),
     };
     const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ leaseRepo: wrappedRepo, takeDueSportsShadowObservations: takeDueSportsShadowObservations as never }));
-    expect(summary.finalObservationPass.acquired).toBe(false);
-    expect(takeDueSportsShadowObservations).toHaveBeenCalledTimes(1); // only lane A's pass ran
+    expect(summary.finalObservationPass.pmus.acquired).toBe(false);
+    expect(summary.finalObservationPass.kalshi.acquired).toBe(true); // independent -- unaffected by PM-US's held lock
+    expect(takeDueSportsShadowObservations).toHaveBeenCalledTimes(3); // PMUS main + KALSHI main + KALSHI final (PMUS final never ran)
   });
 });
 
@@ -829,18 +892,26 @@ describe("runSportsShadowCycle — observation-lane latency (TIMING_GATE remedia
 
   it("passes a computed deadlineAtMs (now + OBSERVATION_STAGE_DEADLINE_MS) into takeDueSportsShadowObservations for the main pass -- a slow observation cannot silently drain the full maxRows batch unbounded", async () => {
     const FIXED_NOW_MS = 1_700_000_000_000;
-    const takeDueSportsShadowObservations = vi.fn(async (_deps: unknown, _maxRows: number, _deadlineAtMs: number | null) => ({ captured: 0, failed: 0, skipped: 0 }));
+    const takeDueSportsShadowObservations = vi.fn(async (_venue: Venue, _deps: unknown, _maxRows: number, _deadlineAtMs: number | null) => ({ captured: 0, failed: 0, skipped: 0 }));
     await runSportsShadowCycle(enabledConfig(), baseDeps({ takeDueSportsShadowObservations: takeDueSportsShadowObservations as never, now: () => FIXED_NOW_MS }));
-    const mainPassCall = takeDueSportsShadowObservations.mock.calls[0]!;
-    expect(mainPassCall[2]).toBe(FIXED_NOW_MS + OBSERVATION_STAGE_DEADLINE_MS);
+    // Task 12H/P1-N: the first TWO calls are the main pass (one per venue, bounded
+    // two-call concurrency) -- both must share the identical computed deadline,
+    // regardless of which venue's call happens to land first.
+    const mainPassCalls = takeDueSportsShadowObservations.mock.calls.slice(0, 2);
+    expect(mainPassCalls).toHaveLength(2);
+    for (const call of mainPassCalls) expect(call[3]).toBe(FIXED_NOW_MS + OBSERVATION_STAGE_DEADLINE_MS);
   });
 
   it("passes a shorter deadline into the final +0 catch pass so it cannot itself become a second long hold", async () => {
     const FIXED_NOW_MS = 1_700_000_000_000;
-    const takeDueSportsShadowObservations = vi.fn(async (_deps: unknown, _maxRows: number, _deadlineAtMs: number | null) => ({ captured: 0, failed: 0, skipped: 0 }));
+    const takeDueSportsShadowObservations = vi.fn(async (_venue: Venue, _deps: unknown, _maxRows: number, _deadlineAtMs: number | null) => ({ captured: 0, failed: 0, skipped: 0 }));
     await runSportsShadowCycle(enabledConfig(), baseDeps({ takeDueSportsShadowObservations: takeDueSportsShadowObservations as never, now: () => FIXED_NOW_MS }));
-    const finalPassCall = takeDueSportsShadowObservations.mock.calls[1]!;
-    expect(finalPassCall[2]).toBe(FIXED_NOW_MS + FINAL_OBSERVATION_STAGE_DEADLINE_MS_FOR_TEST);
+    // The LAST two calls are the final +0 catch pass (one per venue) -- the main pass's
+    // Promise.all is fully awaited before the final pass ever starts, so this ordering
+    // is guaranteed regardless of intra-pass PMUS/KALSHI race.
+    const finalPassCalls = takeDueSportsShadowObservations.mock.calls.slice(2, 4);
+    expect(finalPassCalls).toHaveLength(2);
+    for (const call of finalPassCalls) expect(call[3]).toBe(FIXED_NOW_MS + FINAL_OBSERVATION_STAGE_DEADLINE_MS_FOR_TEST);
     expect(FINAL_OBSERVATION_STAGE_DEADLINE_MS_FOR_TEST).toBeLessThan(OBSERVATION_STAGE_DEADLINE_MS);
   });
 
@@ -850,14 +921,17 @@ describe("runSportsShadowCycle — observation-lane latency (TIMING_GATE remedia
     // module never sees per-row detail, only the aggregate result Task 8 returns).
     const takeDueSportsShadowObservationsFirst = vi.fn(async () => ({ captured: 2, failed: 0, skipped: 0 }));
     const first = await runSportsShadowCycle(enabledConfig(), baseDeps({ leaseRepo, takeDueSportsShadowObservations: takeDueSportsShadowObservationsFirst as never }));
-    expect(first.observationLane.acquired).toBe(true);
+    expect(first.observationLane.pmus.acquired).toBe(true);
+    expect(first.observationLane.kalshi.acquired).toBe(true);
 
     // A later invocation, sharing the SAME lease repo, can immediately acquire the
-    // observation lane again -- the first cycle's clean release did not leave it locked.
+    // observation lanes again -- the first cycle's clean release did not leave them locked.
     const takeDueSportsShadowObservationsSecond = vi.fn(async () => ({ captured: 3, failed: 0, skipped: 0 }));
     const second = await runSportsShadowCycle(enabledConfig(), baseDeps({ leaseRepo, takeDueSportsShadowObservations: takeDueSportsShadowObservationsSecond as never }));
-    expect(second.observationLane.acquired).toBe(true);
-    expect(second.observationLane.captured).toBe(3);
+    expect(second.observationLane.pmus.acquired).toBe(true);
+    expect(second.observationLane.pmus.captured).toBe(3);
+    expect(second.observationLane.kalshi.acquired).toBe(true);
+    expect(second.observationLane.kalshi.captured).toBe(3);
   });
 
   it("source lane remains fully independent of the observation-lane timing fix (still acquires/runs normally)", async () => {

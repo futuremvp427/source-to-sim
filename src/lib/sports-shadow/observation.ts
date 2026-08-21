@@ -56,10 +56,59 @@ export type MatchRow = {
   reason: string | null;
   reasonCode: ResolverReasonCode;
   metadata: Record<string, unknown>;
+  /** Task 12H / P1-M: the FIRST-EVER match_status this (signal, venue) pair ever received — set once, never updated again. Durable audit evidence distinguishing "what we first observed" from "current" for experiment match-rate accounting. */
+  firstMatchStatus: MatchStatus;
+  /** Task 12H / P1-M: durable per-row recheck bookkeeping — see computeRecheckDecision. */
+  recheckCount: number;
+  nextRecheckAt: string | null;
 };
 
-/** Builds the durable row for one venue's resolver result. Persisted for EVERY status (EXACT/NEAR/NONE/UNVERIFIED) — the mission's first-100 experiment needs true match-rate accounting, not only successful matches. */
-export function buildMatchRow(signalId: string, result: VenueMatchResult): MatchRow {
+/**
+ * ============================== TASK 12H / P1-M: DURABLE RECHECK SCHEDULING ==============================
+ * ROOT CAUSE (Codex P1 finding): once ANY sports_market_matches row existed for a
+ * (signal, venue) pair, find_pending_sports_shadow_signals's anti-join treated it as
+ * permanently done — regardless of whether the persisted status was EXACT or a
+ * NONE/NEAR/UNVERIFIED that only reflected a temporarily-incomplete discovery catalog.
+ * A market listed moments after the first (failed) discovery pass could never be found.
+ *
+ * FIX: EXACT is the only truly terminal-success state (and is separately protected by
+ * persistVenueMatch's existing never-downgrade ratchet). Every other status gets a
+ * durable `next_recheck_at`: null once a well-justified cutoff is reached (this
+ * experiment is about PRE-GAME price discovery — once the game has started, discovering
+ * the target market later no longer serves the measurement, so scheduledStartAt is the
+ * preferred cutoff; a fallback bounded window from detection covers the rare case where
+ * scheduledStartAt itself is unknown), otherwise `now + RECHECK_INTERVAL_MS`.
+ *
+ * RECHECK_INTERVAL_MS = 5 minutes: this is not an arbitrary cadence — it exactly matches
+ * PM-US's and Kalshi's own discovery-catalog cache TTL (DISCOVERY_CACHE_TTL_MS in
+ * pmus.server.ts/kalshi.server.ts). Rechecking faster than the underlying discovery data
+ * can possibly change would just re-observe the identical cached catalog; rechecking
+ * slower would needlessly delay catching a newly-listed market.
+ * ================================================================================
+ */
+export const RECHECK_INTERVAL_MS = 5 * 60 * 1000;
+/** Fallback cutoff (from detection, not from "now") used ONLY when a signal's scheduledStartAt is unknown — conservative and rarely hit in practice, since Task 3/7 already require a structured game start time for eligibility in the overwhelming majority of cases. */
+export const RECHECK_FALLBACK_CUTOFF_MS = 4 * 60 * 60 * 1000;
+
+export type RecheckDecision = { nextRecheckAt: string | null };
+
+/**
+ * `status` is the just-computed resolver result for THIS call (not the previous stored
+ * status) — EXACT always yields nextRecheckAt=null (terminal success, ratcheted by
+ * persistVenueMatch before this is even reached for a downgrade attempt). For any other
+ * status: null once `nowMs` has reached the cutoff (scheduledStartAt when known, else
+ * detectedAtMs + RECHECK_FALLBACK_CUTOFF_MS), otherwise nowMs + RECHECK_INTERVAL_MS.
+ */
+export function computeRecheckDecision(status: MatchStatus, nowMs: number, detectedAtMs: number, scheduledStartAtIso: string | null): RecheckDecision {
+  if (status === "EXACT") return { nextRecheckAt: null };
+  const scheduledStartMs = scheduledStartAtIso !== null ? Date.parse(scheduledStartAtIso) : Number.NaN;
+  const cutoffMs = Number.isFinite(scheduledStartMs) ? scheduledStartMs : detectedAtMs + RECHECK_FALLBACK_CUTOFF_MS;
+  if (nowMs >= cutoffMs) return { nextRecheckAt: null };
+  return { nextRecheckAt: new Date(nowMs + RECHECK_INTERVAL_MS).toISOString() };
+}
+
+/** Builds the durable row for one venue's resolver result. Persisted for EVERY status (EXACT/NEAR/NONE/UNVERIFIED) — the mission's first-100 experiment needs true match-rate accounting, not only successful matches. `recheck` carries the Task 12H/P1-M audit/scheduling fields, computed by the caller (persistVenueMatch) since they depend on durable prior state (existing.firstMatchStatus/recheckCount) this pure function does not have access to. */
+export function buildMatchRow(signalId: string, result: VenueMatchResult, recheck: { firstMatchStatus: MatchStatus; recheckCount: number; nextRecheckAt: string | null }): MatchRow {
   return {
     signalId,
     venue: result.venue,
@@ -86,6 +135,9 @@ export function buildMatchRow(signalId: string, result: VenueMatchResult): Match
       targetBetType: result.targetBetType,
       targetMarketIdRaw: result.targetMarketId,
     },
+    firstMatchStatus: recheck.firstMatchStatus,
+    recheckCount: recheck.recheckCount,
+    nextRecheckAt: recheck.nextRecheckAt,
   };
 }
 

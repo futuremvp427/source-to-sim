@@ -128,8 +128,8 @@ BEGIN
   VALUES ('contract-test-fill-1', '0xtest', '0xasset', 'BUY', 1, 'source_id');
   INSERT INTO public.sports_shadow_signals (episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at, bet_type, selected_side)
   VALUES ('contract-test-episode-1', '0xtest', '0xasset', (SELECT id FROM public.sports_shadow_source_fills WHERE event_key = 'contract-test-fill-1'), now(), now(), 'MONEYLINE', 'TEAM');
-  INSERT INTO public.sports_market_matches (signal_id, venue, match_status)
-  VALUES ((SELECT id FROM public.sports_shadow_signals WHERE episode_key = 'contract-test-episode-1'), 'PMUS', 'EXACT');
+  INSERT INTO public.sports_market_matches (signal_id, venue, match_status, first_match_status)
+  VALUES ((SELECT id FROM public.sports_shadow_signals WHERE episode_key = 'contract-test-episode-1'), 'PMUS', 'EXACT', 'EXACT');
 
   -- Functional proof, not just catalog inspection, that an out-of-set delay is
   -- rejected. Isolated in its own exception-catching sub-block (an implicit savepoint)

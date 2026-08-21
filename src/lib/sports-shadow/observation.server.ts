@@ -23,6 +23,7 @@ import {
   buildObservationRows,
   buildPmusObservationPatch,
   buildTerminalFailurePatch,
+  computeRecheckDecision,
   isSchedulable,
   type MatchRow,
   type ObservationCapturePatch,
@@ -34,7 +35,8 @@ import type { Venue } from "./types";
 /** Bounded due-observation batch per collector call — each due row issues one real book fetch, sequentially (never Promise.all), so this directly bounds wall-clock time and outbound request volume per cycle. Task 11 calls the collector repeatedly rather than this module looping unboundedly. */
 export const DUE_BATCH_LIMIT = 20;
 
-export type ExistingMatch = { id: string; status: MatchStatus };
+/** Task 12H / P1-M: firstMatchStatus/recheckCount are read back so persistVenueMatch can preserve the immutable audit field and increment the durable counter without a second round trip. */
+export type ExistingMatch = { id: string; status: MatchStatus; firstMatchStatus: MatchStatus; recheckCount: number };
 
 export type DueObservationRow = {
   id: string;
@@ -55,7 +57,8 @@ export type ObservationRepository = {
   upsertMatch(row: MatchRow): Promise<{ id: string }>;
   /** Idempotent insert (ON CONFLICT (signal_id, venue, requested_delay_ms) DO NOTHING). Returns the count actually inserted (0 on a pure retry). */
   scheduleObservations(rows: ObservationScheduleRow[]): Promise<number>;
-  findDueObservations(nowIso: string, limit: number): Promise<DueObservationRow[]>;
+  /** Task 12H / P1-N: scoped to ONE venue — see worker.server.ts's per-venue observation lane doc comment for why a shared cross-venue query is unsafe. */
+  findDueObservations(venue: Venue, nowIso: string, limit: number): Promise<DueObservationRow[]>;
   /** CAS: only a row still `observed_at IS NULL` may transition. Returns whether THIS call won. */
   claimObservationTerminal(id: string, patch: ObservationCapturePatch): Promise<boolean>;
 };
@@ -90,13 +93,13 @@ export const supabaseObservationRepository: ObservationRepository = {
   async getExistingMatch(signalId, venue) {
     const { data, error } = await supabaseAdmin
       .from("sports_market_matches" as never)
-      .select("id, match_status")
+      .select("id, match_status, first_match_status, recheck_count")
       .eq("signal_id", signalId)
       .eq("venue", venue)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    const row = data as { id: string; match_status: MatchStatus } | null;
-    return row ? { id: row.id, status: row.match_status } : null;
+    const row = data as { id: string; match_status: MatchStatus; first_match_status: MatchStatus; recheck_count: number } | null;
+    return row ? { id: row.id, status: row.match_status, firstMatchStatus: row.first_match_status, recheckCount: row.recheck_count } : null;
   },
 
   async upsertMatch(row) {
@@ -116,6 +119,9 @@ export const supabaseObservationRepository: ObservationRepository = {
           settlement_compatibility: row.settlementCompatibility,
           reason: row.reason,
           metadata: row.metadata,
+          first_match_status: row.firstMatchStatus,
+          recheck_count: row.recheckCount,
+          next_recheck_at: row.nextRecheckAt,
         } as never,
         { onConflict: "signal_id,venue" },
       )
@@ -145,10 +151,11 @@ export const supabaseObservationRepository: ObservationRepository = {
     return (data as unknown[] | null)?.length ?? 0;
   },
 
-  async findDueObservations(nowIso, limit) {
+  async findDueObservations(venue, nowIso, limit) {
     const { data, error } = await supabaseAdmin
       .from("sports_quote_observations" as never)
       .select("id, signal_id, match_id, venue, requested_delay_ms, fire_at, sports_market_matches(target_market_id, selected_side)")
+      .eq("venue", venue)
       .is("observed_at", null)
       .lte("fire_at", nowIso)
       .order("fire_at", { ascending: true })
@@ -211,13 +218,23 @@ export type PersistMatchResult = { matchId: string; scheduled: number; downgrade
  * identical signal+venue is a harmless no-op beyond the upsert itself (the DB's
  * UNIQUE(signal_id,venue,requested_delay_ms) plus ignoreDuplicates makes repeated
  * scheduling calls insert 0 new rows). `detectedAtMs` is REQUIRED and used as the sole
- * fire_at anchor — never `result`'s source-side timestamps.
+ * fire_at anchor — never `result`'s source-side timestamps, and NEVER the re-check time
+ * either (Task 12H/P1-M, M8): a signal that only becomes EXACT on a later recheck still
+ * schedules its +0/+5/+10/+30/+60 burst against the ORIGINAL detection time, so an
+ * already-past checkpoint stays visibly late rather than being rewritten to look timely.
+ *
+ * Task 12H / P1-M: `scheduledStartAtIso` (the signal's own game start time, or null)
+ * drives computeRecheckDecision's cutoff — see observation.ts's doc comment. The
+ * existing EXACT-never-downgraded ratchet below is unchanged and is exactly what makes
+ * an EXACT row's next_recheck_at permanently null in practice (a downgrade attempt
+ * returns before ever reaching buildMatchRow).
  */
 export async function persistVenueMatch(
   signalId: string,
   result: VenueMatchResult,
   detectedAtMs: number,
   sourceTimestampIso: string,
+  scheduledStartAtIso: string | null,
   deps: Partial<ObservationDeps> = {},
 ): Promise<PersistMatchResult> {
   const d: ObservationDeps = { ...defaultDeps, ...deps };
@@ -227,7 +244,12 @@ export async function persistVenueMatch(
     return { matchId: existing.id, scheduled: 0, downgradeSkipped: true };
   }
 
-  const row = buildMatchRow(signalId, result);
+  const { nextRecheckAt } = computeRecheckDecision(result.status, d.now(), detectedAtMs, scheduledStartAtIso);
+  const row = buildMatchRow(signalId, result, {
+    firstMatchStatus: existing?.firstMatchStatus ?? result.status,
+    recheckCount: existing ? existing.recheckCount + 1 : 0,
+    nextRecheckAt,
+  });
   const { id: matchId } = await d.repo.upsertMatch(row);
 
   if (!isSchedulable(result)) return { matchId, scheduled: 0, downgradeSkipped: false };
@@ -269,15 +291,23 @@ export type DueCollectionResult = { captured: number; failed: number; skipped: n
  * lane-hold budget (Task 11) bound worst-case wall time to roughly
  * `deadlineAtMs budget + one row's own worst-case fetch time`, instead of
  * `maxRows * one row's own worst-case fetch time`.
+ *
+ * Task 12H / P1-N: `venue` scopes the due-row query itself, so a PM-US backlog can never
+ * consume Kalshi's batch slots (or vice versa) — see worker.server.ts's per-venue
+ * observation lane doc comment for the full root cause and design. The per-row
+ * `row.venue === "PMUS"` branch below is kept as a second, defense-in-depth guarantee
+ * that a row is never handed to the wrong venue's book fetcher, even though the query
+ * itself already guarantees every returned row belongs to `venue`.
  */
 export async function takeDueSportsShadowObservations(
+  venue: Venue,
   deps: Partial<ObservationDeps> = {},
   maxRows: number = DUE_BATCH_LIMIT,
   deadlineAtMs: number | null = null,
 ): Promise<DueCollectionResult> {
   const d: ObservationDeps = { ...defaultDeps, ...deps };
   const nowIso = new Date(d.now()).toISOString();
-  const due = await d.repo.findDueObservations(nowIso, maxRows);
+  const due = await d.repo.findDueObservations(venue, nowIso, maxRows);
 
   let captured = 0;
   let failed = 0;

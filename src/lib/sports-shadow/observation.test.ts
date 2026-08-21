@@ -7,8 +7,11 @@ import {
   buildTerminalFailurePatch,
   classifyKalshiFailure,
   classifyPmusFailure,
+  computeRecheckDecision,
   isSchedulable,
   isValidDetectedAt,
+  RECHECK_FALLBACK_CUTOFF_MS,
+  RECHECK_INTERVAL_MS,
   serializeTargetSide,
   SPORTS_SHADOW_DELAYS_MS,
   toDbSettlementCompatibility,
@@ -87,7 +90,7 @@ describe("serializeTargetSide", () => {
 
 describe("buildMatchRow — match persistence for every status", () => {
   it("1. an EXACT PM-US match row is built with a usable fetch key and resolved side", () => {
-    const row = buildMatchRow("sig-1", exactResult());
+    const row = buildMatchRow("sig-1", exactResult(), { firstMatchStatus: "EXACT", recheckCount: 0, nextRecheckAt: null });
     expect(row.matchStatus).toBe("EXACT");
     expect(row.targetMarketId).toBe("aec-mlb-nyy-bal-2026-08-19"); // the FETCH KEY, not the raw numeric id
     expect(row.targetIdentifier).toBe("444031");
@@ -99,6 +102,7 @@ describe("buildMatchRow — match persistence for every status", () => {
     const row = buildMatchRow(
       "sig-1",
       exactResult({ venue: "KALSHI", targetMarketId: "KXMLBGAME-1-NYY", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" }, targetPmusOrientation: null }),
+      { firstMatchStatus: "EXACT", recheckCount: 0, nextRecheckAt: null },
     );
     expect(row.venue).toBe("KALSHI");
     expect(row.targetMarketId).toBe("KXMLBGAME-1-NYY");
@@ -108,10 +112,69 @@ describe("buildMatchRow — match persistence for every status", () => {
   it("3/4/5. NEAR/NONE/UNVERIFIED match rows are built too, just not schedulable", () => {
     for (const status of ["NEAR", "NONE", "UNVERIFIED"] as const) {
       const result = exactResult({ status, targetFetchKey: status === "NEAR" ? "some-slug" : null, targetSide: null });
-      const row = buildMatchRow("sig-1", result);
+      const row = buildMatchRow("sig-1", result, { firstMatchStatus: status, recheckCount: 0, nextRecheckAt: null });
       expect(row.matchStatus).toBe(status);
       expect(isSchedulable(result)).toBe(false);
     }
+  });
+});
+
+describe("computeRecheckDecision — Task 12H / P1-M durable retry scheduling", () => {
+  const NOW = Date.parse("2026-08-19T12:00:00Z");
+  const DETECTED_AT = Date.parse("2026-08-19T11:00:00Z");
+
+  it("M1. EXACT always yields nextRecheckAt=null, regardless of cutoff/schedule state", () => {
+    const decision = computeRecheckDecision("EXACT", NOW, DETECTED_AT, "2026-08-19T20:00:00Z");
+    expect(decision.nextRecheckAt).toBeNull();
+  });
+
+  it("M2. NONE before the scheduledStartAt cutoff schedules nextRecheckAt = now + RECHECK_INTERVAL_MS", () => {
+    const scheduledStartAtIso = "2026-08-19T20:00:00Z"; // well after NOW
+    const decision = computeRecheckDecision("NONE", NOW, DETECTED_AT, scheduledStartAtIso);
+    expect(decision.nextRecheckAt).toBe(new Date(NOW + RECHECK_INTERVAL_MS).toISOString());
+  });
+
+  it("M3. NEAR before the cutoff also schedules a recheck (not just NONE)", () => {
+    const decision = computeRecheckDecision("NEAR", NOW, DETECTED_AT, "2026-08-19T20:00:00Z");
+    expect(decision.nextRecheckAt).toBe(new Date(NOW + RECHECK_INTERVAL_MS).toISOString());
+  });
+
+  it("M3b. UNVERIFIED before the cutoff also schedules a recheck", () => {
+    const decision = computeRecheckDecision("UNVERIFIED", NOW, DETECTED_AT, "2026-08-19T20:00:00Z");
+    expect(decision.nextRecheckAt).toBe(new Date(NOW + RECHECK_INTERVAL_MS).toISOString());
+  });
+
+  it("M4. the deterministic cutoff (scheduledStartAt) is reached: nextRecheckAt becomes null, stopping retries", () => {
+    const scheduledStartAtIso = "2026-08-19T11:30:00Z"; // already in the past relative to NOW
+    const decision = computeRecheckDecision("NONE", NOW, DETECTED_AT, scheduledStartAtIso);
+    expect(decision.nextRecheckAt).toBeNull();
+  });
+
+  it("M4b. exactly at the cutoff instant (>=), rechecks stop -- boundary is inclusive", () => {
+    const decision = computeRecheckDecision("NONE", NOW, DETECTED_AT, new Date(NOW).toISOString());
+    expect(decision.nextRecheckAt).toBeNull();
+  });
+
+  it("M5. when scheduledStartAt is unknown (null), the fallback cutoff is detectedAtMs + RECHECK_FALLBACK_CUTOFF_MS -- before it, still retryable", () => {
+    const justBeforeFallbackCutoff = DETECTED_AT + RECHECK_FALLBACK_CUTOFF_MS - 1;
+    const decision = computeRecheckDecision("NONE", justBeforeFallbackCutoff, DETECTED_AT, null);
+    expect(decision.nextRecheckAt).toBe(new Date(justBeforeFallbackCutoff + RECHECK_INTERVAL_MS).toISOString());
+  });
+
+  it("M5b. past the fallback cutoff (scheduledStartAt unknown), rechecks stop -- this is a real, deterministic, tested cutoff, not unbounded retry", () => {
+    const afterFallbackCutoff = DETECTED_AT + RECHECK_FALLBACK_CUTOFF_MS + 1;
+    const decision = computeRecheckDecision("NONE", afterFallbackCutoff, DETECTED_AT, null);
+    expect(decision.nextRecheckAt).toBeNull();
+  });
+
+  it("M5c. an unparseable scheduledStartAtIso also falls back to the detection-based cutoff, not to permanent retry or permanent stop", () => {
+    const justBefore = DETECTED_AT + RECHECK_FALLBACK_CUTOFF_MS - 1;
+    const decision = computeRecheckDecision("NONE", justBefore, DETECTED_AT, "not-a-date");
+    expect(decision.nextRecheckAt).not.toBeNull();
+  });
+
+  it("M2b. the recheck interval is exactly 5 minutes, matching the venues' own DISCOVERY_CACHE_TTL_MS -- rechecking faster is provably pointless", () => {
+    expect(RECHECK_INTERVAL_MS).toBe(5 * 60 * 1000);
   });
 });
 

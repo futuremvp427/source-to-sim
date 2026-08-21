@@ -6,12 +6,15 @@
  * src/routes/api/public/hooks/sports-shadow.ts). No loop, no timer, no daemon lives here
  * — every call does a fixed, bounded amount of work and returns.
  *
- * Two independent lanes, each behind its own lease (see sports-lease.server.ts), so a
+ * Three independent lanes, each behind its own lease (see sports-lease.server.ts), so a
  * slow source/discovery pass can never block a later invocation's time-critical
- * observation capture:
- *   - OBSERVATION lane (`OBSERVATION_LOCK_ID`): drains Task 8's existing durable due
- *     queue, bounded to a small row count so its worst-case wall time stays comfortably
- *     inside its own lease TTL.
+ * observation capture, and (Task 12H/P1-N) so a slow/backlogged venue's observation work
+ * can never block the other venue's:
+ *   - OBSERVATION lanes, one PER VENUE (`OBSERVATION_LOCK_ID_PMUS` /
+ *     `OBSERVATION_LOCK_ID_KALSHI`): each drains Task 8's existing durable due queue
+ *     scoped to its own venue, bounded to a small row count so worst-case wall time
+ *     stays comfortably inside its own lease TTL; run with bounded (exactly two calls)
+ *     concurrency.
  *   - SOURCE/MATCHING lane (`SOURCE_LOCK_ID`): polls each configured wallet (fairly
  *     rotated — see Task 12D/P1-B below) through the EXISTING Task 10 poller, then
  *     recovers and resolves any signal (from this cycle OR any earlier, possibly
@@ -44,7 +47,9 @@ import { pollSportsShadowWallet, supabasePollRepository, type WalletPollDeps, ty
 import type { BetType, Venue } from "./types";
 import { PENDING_BATCH_SIZE, budgetExceeded, detectedAtMsFromSignal, nextRotationIndex, rotateWallets, toSourceSignal, type PendingSignal } from "./worker";
 
-export const OBSERVATION_LOCK_ID = "sports_shadow_observations";
+/** Task 12H / P1-N: split into per-venue lease ids — see runObservationLane's doc comment. */
+export const OBSERVATION_LOCK_ID_PMUS = "sports_shadow_observations_pmus";
+export const OBSERVATION_LOCK_ID_KALSHI = "sports_shadow_observations_kalshi";
 export const SOURCE_LOCK_ID = "sports_shadow_source";
 
 /**
@@ -54,7 +59,7 @@ export const SOURCE_LOCK_ID = "sports_shadow_source";
  * fetchKalshiBook call owns a fixed internal ~12s AbortController this module cannot
  * reach in from outside. Row COUNT alone (maxRows) therefore cannot bound worst-case
  * lane-hold time: 5 rows x up to ~12s each is genuinely up to ~60-65s, which would let
- * one slow pass monopolize `OBSERVATION_LOCK_ID` for roughly a minute against a
+ * one slow pass monopolize its venue's observation lease for roughly a minute against a
  * scheduler intended to call this route every ~5s — unacceptable (this was the
  * mission's own TIMING_GATE finding; the original 90s-TTL/5-row design FAILED it).
  *
@@ -231,6 +236,9 @@ export type ObservationLaneResult = {
   skipped: number;
 };
 
+/** Task 12H / P1-N: per-venue observation lane results — see runObservationLane's doc comment for why PM-US and Kalshi each get their own independent lane. */
+export type PerVenueObservationResult = { pmus: ObservationLaneResult; kalshi: ObservationLaneResult };
+
 export type WalletSummary = {
   wallet: string;
   isBootstrap: boolean;
@@ -275,14 +283,18 @@ export type SportsShadowCycleSummary = {
   durationMs: number;
   configEnabled: boolean;
   walletCount: number;
-  observationLane: ObservationLaneResult;
+  observationLane: PerVenueObservationResult;
   sourceLane: SourceLaneResult | null;
-  finalObservationPass: ObservationLaneResult;
+  finalObservationPass: PerVenueObservationResult;
   errors: string[];
 };
 
 function emptyObservationResult(): ObservationLaneResult {
   return { acquired: false, attempted: 0, captured: 0, failed: 0, skipped: 0 };
+}
+
+function emptyPerVenueObservationResult(): PerVenueObservationResult {
+  return { pmus: emptyObservationResult(), kalshi: emptyObservationResult() };
 }
 
 function emptyVenueSummary(): VenueResolutionSummary {
@@ -317,8 +329,25 @@ function randomWorkerId(prefix: string): string {
 /* Observation lane                                                     */
 /* ------------------------------------------------------------------ */
 
-async function runObservationLane(d: SportsShadowWorkerDeps, maxRows: number, deadlineBudgetMs: number, errors: string[]): Promise<ObservationLaneResult> {
-  const lease = await acquireSportsLease(OBSERVATION_LOCK_ID, randomWorkerId("sports-obs"), OBSERVATION_LEASE_TTL_SECONDS, d.leaseRepo);
+/**
+ * ============================== TASK 12H / P1-N: PER-VENUE OBSERVATION ISOLATION ==============================
+ * ROOT CAUSE (Codex P1 finding): a single shared OBSERVATION_LOCK_ID/due-query pooled
+ * PM-US and Kalshi rows into one globally-bounded batch. A backlog of old PM-US rows
+ * (each up to a 12s fetch timeout) could fill the whole batch and/or exhaust the whole
+ * per-pass deadline before a healthy, due Kalshi row was ever reached -- inflating
+ * Kalshi's recorded lateness for a reason having nothing to do with Kalshi itself.
+ *
+ * FIX: PM-US and Kalshi each get their OWN fenced lease (OBSERVATION_LOCK_ID_PMUS /
+ * OBSERVATION_LOCK_ID_KALSHI) and their OWN bounded due-observation query (see
+ * observation.server.ts's findDueObservations(venue, ...)), invoked here as exactly two
+ * fixed, known calls via Promise.all -- bounded by construction, never an unbounded fan-out
+ * -- so a slow/backlogged PM-US lane can never delay Kalshi's lane from even starting.
+ * WITHIN each venue's own lane, rows are still processed strictly sequentially (Task 8's
+ * own explicit design, unchanged) -- only the cross-venue relationship changed.
+ * ================================================================================
+ */
+async function runObservationLane(venue: Venue, lockId: string, d: SportsShadowWorkerDeps, maxRows: number, deadlineBudgetMs: number, errors: string[]): Promise<ObservationLaneResult> {
+  const lease = await acquireSportsLease(lockId, randomWorkerId(`sports-obs-${venue.toLowerCase()}`), OBSERVATION_LEASE_TTL_SECONDS, d.leaseRepo);
   if (lease === null) {
     // Lock held by another still-live invocation. Never wait, never bypass -- just skip
     // this pass; a subsequent scheduler tick handles it, with real lateness reflected in
@@ -327,15 +356,24 @@ async function runObservationLane(d: SportsShadowWorkerDeps, maxRows: number, de
   }
   try {
     const deadlineAtMs = d.now() + deadlineBudgetMs;
-    const result = await d.takeDueSportsShadowObservations(d.observationDeps, maxRows, deadlineAtMs);
+    const result = await d.takeDueSportsShadowObservations(venue, d.observationDeps, maxRows, deadlineAtMs);
     await releaseSportsLease(lease, { state: "idle", lastError: null }, d.leaseRepo);
     return { acquired: true, attempted: result.captured + result.failed + result.skipped, captured: result.captured, failed: result.failed, skipped: result.skipped };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
-    errors.push(`observation lane failed: ${message}`);
+    errors.push(`${venue} observation lane failed: ${message}`);
     await releaseSportsLease(lease, { state: "error", lastError: message }, d.leaseRepo);
     return { acquired: true, attempted: 0, captured: 0, failed: 0, skipped: 0 };
   }
+}
+
+/** Runs BOTH venues' observation lanes with bounded (exactly-two-call) concurrency, so a slow PM-US lane can never delay Kalshi's lane from starting -- see runObservationLane's own doc comment. */
+async function runObservationLanesForBothVenues(d: SportsShadowWorkerDeps, maxRows: number, deadlineBudgetMs: number, errors: string[]): Promise<PerVenueObservationResult> {
+  const [pmus, kalshi] = await Promise.all([
+    runObservationLane("PMUS", OBSERVATION_LOCK_ID_PMUS, d, maxRows, deadlineBudgetMs, errors),
+    runObservationLane("KALSHI", OBSERVATION_LOCK_ID_KALSHI, d, maxRows, deadlineBudgetMs, errors),
+  ]);
+  return { pmus, kalshi };
 }
 
 /* ------------------------------------------------------------------ */
@@ -412,7 +450,7 @@ async function resolveVenuePending(venue: Venue, d: SportsShadowWorkerDeps, erro
     summary.attempted += 1;
     try {
       const result: VenueMatchResult = venue === "PMUS" ? resolvePmusMatch(source, pmusCandidates) : resolveKalshiMatch(source, kalshiCandidates);
-      await d.persistVenueMatch(signal.id, result, detectedAtMs, signal.sourceFirstFillAtIso, d.observationDeps);
+      await d.persistVenueMatch(signal.id, result, detectedAtMs, signal.sourceFirstFillAtIso, signal.scheduledStartAt, d.observationDeps);
       tallyVenue(summary, result.status);
       summary.pendingProcessed += 1;
     } catch (err) {
@@ -528,15 +566,16 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
       durationMs: completedAtMs - startedAtMs,
       configEnabled: false,
       walletCount: 0,
-      observationLane: emptyObservationResult(),
+      observationLane: emptyPerVenueObservationResult(),
       sourceLane: null,
-      finalObservationPass: emptyObservationResult(),
+      finalObservationPass: emptyPerVenueObservationResult(),
       errors,
     };
   }
 
-  // LANE A: observation, highest priority, always attempted first.
-  const observationLane = await runObservationLane(d, OBSERVATION_STAGE_MAX_ROWS, OBSERVATION_STAGE_DEADLINE_MS, errors);
+  // LANE A: observation, highest priority, always attempted first. Task 12H/P1-N: both
+  // venues run with bounded (exactly-two-call) concurrency so neither can delay the other.
+  const observationLane = await runObservationLanesForBothVenues(d, OBSERVATION_STAGE_MAX_ROWS, OBSERVATION_STAGE_DEADLINE_MS, errors);
 
   // LANE B: source/matching, behind its own independent lease.
   let sourceLane: SourceLaneResult;
@@ -560,9 +599,9 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
     }
   }
 
-  // Final +0 catch pass: an EXACT match may have just scheduled its +0 row. If the
-  // observation lease is held elsewhere, this simply returns without waiting/bypassing.
-  const finalObservationPass = await runObservationLane(d, FINAL_OBSERVATION_STAGE_MAX_ROWS, FINAL_OBSERVATION_STAGE_DEADLINE_MS, errors);
+  // Final +0 catch pass: an EXACT match may have just scheduled its +0 row. If a venue's
+  // observation lease is held elsewhere, that venue simply returns without waiting/bypassing.
+  const finalObservationPass = await runObservationLanesForBothVenues(d, FINAL_OBSERVATION_STAGE_MAX_ROWS, FINAL_OBSERVATION_STAGE_DEADLINE_MS, errors);
 
   const completedAtMs = d.now();
   return {

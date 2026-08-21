@@ -29,7 +29,18 @@ $$ LANGUAGE plpgsql;
 
 CREATE FUNCTION pg_temp.seed_match(p_signal_id uuid, p_venue text) RETURNS void AS $$
 BEGIN
-  INSERT INTO public.sports_market_matches (signal_id, venue, match_status) VALUES (p_signal_id, p_venue, 'EXACT');
+  INSERT INTO public.sports_market_matches (signal_id, venue, match_status, first_match_status)
+  VALUES (p_signal_id, p_venue, 'EXACT', 'EXACT');
+END;
+$$ LANGUAGE plpgsql;
+
+-- Task 12H/P1-M: seeds a non-EXACT match row with an explicit next_recheck_at (NULL means
+-- the recheck cutoff has already been reached / exhausted, matching computeRecheckDecision's
+-- output when it returns { nextRecheckAt: null }).
+CREATE FUNCTION pg_temp.seed_non_exact_match(p_signal_id uuid, p_venue text, p_status text, p_next_recheck_at timestamptz) RETURNS void AS $$
+BEGIN
+  INSERT INTO public.sports_market_matches (signal_id, venue, match_status, first_match_status, next_recheck_at)
+  VALUES (p_signal_id, p_venue, p_status, p_status, p_next_recheck_at);
 END;
 $$ LANGUAGE plpgsql;
 
@@ -240,7 +251,80 @@ BEGIN
     RAISE EXCEPTION 'scenario 12 HEAD-OF-LINE-BLOCKING REGRESSION: the newer KALSHI-only-missing signal must still be returned by the independent KALSHI query despite the saturated PMUS backlog';
   END IF;
 
-  RAISE NOTICE 'find_pending_sports_shadow_signals semantic scenarios 1-12 passed';
+  ------------------------------------------------------------------
+  -- Scenario 13 (Task 12H/P1-M): a non-EXACT (NONE) match row with a due
+  -- next_recheck_at (in the past) IS returned by the venue-scoped pending
+  -- query -- non-EXACT results are retryable, not permanently terminal.
+  ------------------------------------------------------------------
+  DELETE FROM public.sports_shadow_signals; DELETE FROM public.sports_shadow_source_fills;
+  v_signal_id := pg_temp.seed_pending_signal('s13', v_base);
+  PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'PMUS', 'NONE', now() - interval '1 minute');
+  IF NOT EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 13 P1-M REGRESSION: a NONE match with a due next_recheck_at must be returned as pending';
+  END IF;
+
+  ------------------------------------------------------------------
+  -- Scenario 14 (Task 12H/P1-M): a non-EXACT (NEAR) match row with a
+  -- next_recheck_at still in the future is NOT yet due -- excluded.
+  ------------------------------------------------------------------
+  DELETE FROM public.sports_shadow_signals; DELETE FROM public.sports_shadow_source_fills;
+  v_signal_id := pg_temp.seed_pending_signal('s14', v_base);
+  PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'PMUS', 'NEAR', now() + interval '1 hour');
+  IF EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 14 P1-M REGRESSION: a NEAR match whose next_recheck_at is still in the future must not be returned yet';
+  END IF;
+
+  ------------------------------------------------------------------
+  -- Scenario 15 (Task 12H/P1-M): a non-EXACT (UNVERIFIED) match row with
+  -- next_recheck_at IS NULL (cutoff reached / exhausted) is excluded --
+  -- the deterministic cutoff must actually stop retries, not retry forever.
+  ------------------------------------------------------------------
+  DELETE FROM public.sports_shadow_signals; DELETE FROM public.sports_shadow_source_fills;
+  v_signal_id := pg_temp.seed_pending_signal('s15', v_base);
+  PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'PMUS', 'UNVERIFIED', NULL);
+  IF EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 15 P1-M REGRESSION: an UNVERIFIED match with next_recheck_at NULL (cutoff reached) must never be returned again';
+  END IF;
+
+  ------------------------------------------------------------------
+  -- Scenario 16 (Task 12H/P1-M): EXACT is never re-offered as pending, even
+  -- if next_recheck_at were somehow non-NULL -- the ratchet (EXACT never
+  -- downgraded/rechecked) is enforced by the query itself, not just by the
+  -- TypeScript caller that normally always writes next_recheck_at=NULL for EXACT.
+  ------------------------------------------------------------------
+  DELETE FROM public.sports_shadow_signals; DELETE FROM public.sports_shadow_source_fills;
+  v_signal_id := pg_temp.seed_pending_signal('s16', v_base);
+  PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'PMUS', 'EXACT', now() - interval '1 minute');
+  IF EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 16 P1-M REGRESSION: an EXACT match must never be returned as pending regardless of next_recheck_at';
+  END IF;
+
+  ------------------------------------------------------------------
+  -- Scenario 17 (Task 12H/P1-M + P1-C independence): a saturated PMUS
+  -- due-for-recheck backlog does not affect the independent KALSHI-scoped
+  -- pending query, and vice versa.
+  ------------------------------------------------------------------
+  DELETE FROM public.sports_shadow_signals; DELETE FROM public.sports_shadow_source_fills;
+  FOR i IN 1..5 LOOP
+    v_signal_id := pg_temp.seed_pending_signal('s17-pmus-' || i, v_base + (i || ' seconds')::interval);
+    PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'PMUS', 'NONE', now() - interval '1 minute');
+  END LOOP;
+  v_signal_id := pg_temp.seed_pending_signal('s17-kalshi', v_base + interval '1000 seconds');
+  PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'KALSHI', 'NONE', now() - interval '1 minute');
+
+  SELECT count(*) INTO v_count FROM public.find_pending_sports_shadow_signals('PMUS', 20);
+  IF v_count <> 5 THEN
+    RAISE EXCEPTION 'scenario 17: expected exactly 5 PMUS-due-for-recheck rows, got %', v_count;
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 17 P1-C REGRESSION: the KALSHI-only recheck-due signal must not leak into the PMUS-scoped query';
+  END IF;
+  SELECT count(*) INTO v_count FROM public.find_pending_sports_shadow_signals('KALSHI', 20);
+  IF v_count <> 1 THEN
+    RAISE EXCEPTION 'scenario 17 P1-C REGRESSION: expected exactly 1 KALSHI-due-for-recheck row, unaffected by the saturated PMUS backlog, got %', v_count;
+  END IF;
+
+  RAISE NOTICE 'find_pending_sports_shadow_signals semantic scenarios 1-17 passed';
 END $$;
 
 ------------------------------------------------------------------

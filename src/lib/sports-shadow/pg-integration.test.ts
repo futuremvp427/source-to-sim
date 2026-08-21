@@ -84,11 +84,11 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
         evidence: [],
       };
 
-      const first = await persistVenueMatch(realSignalId, exactResult, detectedAtMs, new Date().toISOString());
+      const first = await persistVenueMatch(realSignalId, exactResult, detectedAtMs, new Date().toISOString(), null);
       expect(first.scheduled).toBe(5);
 
       // Retry: idempotent, zero new rows.
-      const second = await persistVenueMatch(realSignalId, exactResult, detectedAtMs, new Date().toISOString());
+      const second = await persistVenueMatch(realSignalId, exactResult, detectedAtMs, new Date().toISOString(), null);
       expect(second.scheduled).toBe(0);
 
       // Force every scheduled row's fire_at into the past so all five are due right now.
@@ -106,7 +106,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
 
       // Exercise the real embedded PostgREST relationship query directly through the
       // real repository method (not a hand-rolled duplicate query).
-      const due = await supabaseObservationRepository.findDueObservations(new Date().toISOString(), 20);
+      const due = await supabaseObservationRepository.findDueObservations("PMUS", new Date().toISOString(), 20);
       const dueForThisSignal = due.filter((d) => d.signalId === realSignalId);
       expect(dueForThisSignal).toHaveLength(5);
       for (const row of dueForThisSignal) {
@@ -119,7 +119,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
 
       // Run the real collector with a fake (non-network) book fetcher.
       const fetchPmusBook = async () => ({ venue: "PMUS" as const, marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: Date.now(), staleReason: null });
-      const result = await takeDueSportsShadowObservations({ fetchPmusBook }, 20);
+      const result = await takeDueSportsShadowObservations("PMUS", { fetchPmusBook }, 20);
       expect(result.captured).toBeGreaterThanOrEqual(5);
 
       // Verify CAS: every one of these five rows is now terminal (observed_at set),
@@ -131,7 +131,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       if (afterErr) throw new Error(afterErr.message);
       expect(((after ?? []) as unknown as { observed_at: string | null }[]).every((r) => r.observed_at !== null)).toBe(true);
 
-      const secondPass = await takeDueSportsShadowObservations({ fetchPmusBook }, 20);
+      const secondPass = await takeDueSportsShadowObservations("PMUS", { fetchPmusBook }, 20);
       // The second pass may capture OTHER due rows from other concurrent test runs, but
       // must not double-count this signal's already-terminal rows -- verified by the
       // observed_at values being unchanged (single write per row).
@@ -168,7 +168,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       const realSignalId = (signal as unknown as { id: string }).id;
       const { data: match } = await supabaseAdmin
         .from("sports_market_matches" as never)
-        .insert({ signal_id: realSignalId, venue: "PMUS", match_status: "EXACT" } as never)
+        .insert({ signal_id: realSignalId, venue: "PMUS", match_status: "EXACT", first_match_status: "EXACT" } as never)
         .select("id")
         .single();
       const matchId = (match as unknown as { id: string }).id;
@@ -428,7 +428,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
         .select("id")
         .single();
       const realSignalId = (signal as unknown as { id: string }).id;
-      await supabaseAdmin.from("sports_market_matches" as never).insert({ signal_id: realSignalId, venue: "KALSHI", match_status: "EXACT" } as never);
+      await supabaseAdmin.from("sports_market_matches" as never).insert({ signal_id: realSignalId, venue: "KALSHI", match_status: "EXACT", first_match_status: "EXACT" } as never);
 
       const pmusPending = await supabaseWorkerRepository.findPendingSignalsForVenue("PMUS", 1000);
       const ours = pmusPending.find((p) => p.id === realSignalId);
@@ -471,7 +471,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
           .select("id").single();
         const sid = (signal as unknown as { id: string }).id;
         signalIds.push(sid);
-        await supabaseAdmin.from("sports_market_matches" as never).insert({ signal_id: sid, venue: "KALSHI", match_status: "EXACT" } as never);
+        await supabaseAdmin.from("sports_market_matches" as never).insert({ signal_id: sid, venue: "KALSHI", match_status: "EXACT", first_match_status: "EXACT" } as never);
       }
 
       // 1 NEWER signal missing ONLY KALSHI.
@@ -487,7 +487,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
         .select("id").single();
       const newerSignalId = (newerSignal as unknown as { id: string }).id;
       signalIds.push(newerSignalId);
-      await supabaseAdmin.from("sports_market_matches" as never).insert({ signal_id: newerSignalId, venue: "PMUS", match_status: "EXACT" } as never);
+      await supabaseAdmin.from("sports_market_matches" as never).insert({ signal_id: newerSignalId, venue: "PMUS", match_status: "EXACT", first_match_status: "EXACT" } as never);
 
       const pmusPending = await supabaseWorkerRepository.findPendingSignalsForVenue("PMUS", 1000);
       expect(pmusPending.map((p) => p.id)).toEqual(expect.arrayContaining(signalIds.slice(0, 3)));
