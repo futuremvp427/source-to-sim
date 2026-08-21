@@ -36,3 +36,6 @@ dist-ssr
 .env.local
 .env.*.local
 .dev.vars.local
+
+# Subagent-driven-development scratch workspace (ledgers, briefs, reports)
+.superpowers/
