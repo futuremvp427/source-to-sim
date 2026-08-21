@@ -279,7 +279,7 @@ BEGIN
   -- query -- non-EXACT results are retryable, not permanently terminal.
   ------------------------------------------------------------------
   DELETE FROM public.sports_shadow_signals; DELETE FROM public.sports_shadow_source_fills;
-  v_signal_id := pg_temp.seed_pending_signal('s13', v_base);
+  v_signal_id := pg_temp.seed_pending_signal_scheduled('s13', v_base, now() + interval '2 hours'); -- future scheduled_start_at: this scenario tests next_recheck_at due-ness, not the P1-O cutoff
   PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'PMUS', 'NONE', now() - interval '1 minute');
   IF NOT EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id) THEN
     RAISE EXCEPTION 'scenario 13 P1-M REGRESSION: a NONE match with a due next_recheck_at must be returned as pending';
@@ -290,7 +290,7 @@ BEGIN
   -- next_recheck_at still in the future is NOT yet due -- excluded.
   ------------------------------------------------------------------
   DELETE FROM public.sports_shadow_signals; DELETE FROM public.sports_shadow_source_fills;
-  v_signal_id := pg_temp.seed_pending_signal('s14', v_base);
+  v_signal_id := pg_temp.seed_pending_signal_scheduled('s14', v_base, now() + interval '2 hours'); -- future scheduled_start_at: this scenario tests next_recheck_at not-yet-due, not the P1-O cutoff
   PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'PMUS', 'NEAR', now() + interval '1 hour');
   IF EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id) THEN
     RAISE EXCEPTION 'scenario 14 P1-M REGRESSION: a NEAR match whose next_recheck_at is still in the future must not be returned yet';
@@ -328,11 +328,11 @@ BEGIN
   ------------------------------------------------------------------
   DELETE FROM public.sports_shadow_signals; DELETE FROM public.sports_shadow_source_fills;
   FOR i IN 1..5 LOOP
-    v_signal_id := pg_temp.seed_pending_signal('s17-pmus-' || i, v_base + (i || ' seconds')::interval);
+    v_signal_id := pg_temp.seed_pending_signal_scheduled('s17-pmus-' || i, v_base + (i || ' seconds')::interval, now() + interval '2 hours'); -- future scheduled_start_at: this scenario tests per-venue independence, not the P1-O cutoff
     PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'PMUS', 'NONE', now() - interval '1 minute');
     PERFORM pg_temp.seed_match(v_signal_id, 'KALSHI'); -- resolved EXACT for KALSHI, so each is genuinely KALSHI-done (not merely "missing"), isolating the KALSHI-scoped assertion below to recheck-due semantics only
   END LOOP;
-  v_signal_id := pg_temp.seed_pending_signal('s17-kalshi', v_base + interval '1000 seconds');
+  v_signal_id := pg_temp.seed_pending_signal_scheduled('s17-kalshi', v_base + interval '1000 seconds', now() + interval '2 hours'); -- future scheduled_start_at: this scenario tests per-venue independence, not the P1-O cutoff
   PERFORM pg_temp.seed_match(v_signal_id, 'PMUS'); -- resolved EXACT for PMUS, so this signal is genuinely PMUS-done (not merely "missing"), isolating the assertion below to recheck-due semantics only
   PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'KALSHI', 'NONE', now() - interval '1 minute');
 
