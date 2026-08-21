@@ -30,6 +30,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
       - uses: supabase/setup-cli@v1
         with:
           version: latest
@@ -69,6 +74,27 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/reserve_http_request_slot.sql
+      - name: Verify Sports Forward Shadow Phase 1 schema contract (Task 12A)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_phase1.sql
+      - name: Verify find_pending_sports_shadow_signals RPC semantics and privileges (Task 12B)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_pending_signals_rpc.sql
+      - name: Export local Supabase connection env for the PostgREST integration harness
+        run: |
+          eval "$(supabase status -o env)"
+          if [ -z "${API_URL:-}" ] || [ -z "${SERVICE_ROLE_KEY:-}" ]; then
+            echo "::error::supabase status -o env did not produce API_URL/SERVICE_ROLE_KEY -- cannot run the Sports Shadow PostgREST integration harness."
+            exit 1
+          fi
+          echo "SUPABASE_URL=$API_URL" >> "$GITHUB_ENV"
+          echo "SUPABASE_SERVICE_ROLE_KEY=$SERVICE_ROLE_KEY" >> "$GITHUB_ENV"
+      - name: Verify Sports Forward Shadow real PostgREST/Supabase-JS integration (Task 12C)
+        env:
+          SPORTS_SHADOW_PG_INTEGRATION: "1"
+        run: bun run test src/lib/sports-shadow/pg-integration.test.ts
       - name: Stop local Supabase
         if: always()
         run: supabase stop --no-backup
