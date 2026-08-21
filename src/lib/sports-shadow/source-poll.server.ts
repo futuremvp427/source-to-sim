@@ -462,6 +462,25 @@ export const supabasePollRepository: PollRepository = {
     // different table) -- a wallet with more degraded rows than that cap would be
     // UNDERCOUNTED, not merely slow. `fetchAllRowsAfterId` (keyset pagination, already
     // proven elsewhere in this codebase) reads the complete set regardless of size.
+    //
+    // Task 13G (Codex re-review round 4, P1): `fetchAllRowsAfterId` cannot distinguish
+    // "exactly PAGE_ROWS*MAX_PAGES rows, genuinely complete" from "hit the page cap, more
+    // remain" -- every page it reads would be exactly full in BOTH cases, so it always
+    // reports `complete: false` at that boundary even when nothing was actually missed.
+    // Since this table only grows, a wallet that ever reaches that count would trip the
+    // fail-closed branch below FOREVER, permanently treating every future degraded fill as
+    // already durable (never inserting a genuinely new one again) -- silent, unrecoverable
+    // data loss, strictly worse than the truncation bug this pagination was meant to fix.
+    // An independent exact total (`count: "exact", head: true` -- a single aggregate,
+    // never subject to the per-request ROW cap, since no rows are returned) resolves the
+    // ambiguity: if the paginated read's row count matches the independently-queried
+    // total, every row was genuinely seen regardless of whether the last page was short.
+    const { count: totalCount, error: countError } = await supabaseAdmin
+      .from("sports_shadow_source_fills" as never)
+      .select("id", { count: "exact", head: true })
+      .eq("wallet", wallet)
+      .eq("identity_basis", "tx_hash_ordinal");
+    if (countError) throw new Error(countError.message);
     const paged = await fetchAllRowsAfterId<{ id: string; event_key: string }>(async (afterId, limit) => {
       let query = supabaseAdmin
         .from("sports_shadow_source_fills" as never)
@@ -476,11 +495,13 @@ export const supabasePollRepository: PollRepository = {
       return (data as unknown as { id: string; event_key: string }[] | null) ?? [];
     });
     for (const prefix of tuplePrefixes) out.set(prefix, 0);
-    if (!paged.complete) {
+    if (paged.rows.length !== (totalCount ?? 0)) {
       // Fail closed, matching reconcileDegradedEvents's own error-path convention: an
       // unverifiable count must never be treated as "fewer durable rows than reality,"
       // which would risk a duplicate insert. Treating every requested prefix as fully
-      // durable defers this poll's degraded rows to a later retry instead.
+      // durable defers this poll's degraded rows to a later retry instead -- a genuinely
+      // temporary state (the wallet's degraded backlog isn't growing every poll), unlike
+      // the permanent version of this branch `paged.complete` alone would have produced.
       for (const prefix of tuplePrefixes) out.set(prefix, Number.POSITIVE_INFINITY);
       return out;
     }
@@ -1057,6 +1078,14 @@ export async function pollSportsShadowWallet(
         result.leaseLost = true;
         break;
       }
+      // Task 13G (Codex re-review round 4, P1): checkpointLease can itself perform a
+      // real renewal RPC -- re-check the deadline immediately after it returns, before
+      // starting the next (up to 12s) network request, so that await's own latency can
+      // never let the deadline check above become stale by the time the fetch begins.
+      if (d.now() >= deadlineAtMs) {
+        deadlineExceeded = true;
+        break;
+      }
       const rows = await pacedFetchTradesPage(normalizedWallet, offset, d.network);
       result.pagesFetched += 1;
       if (rows.length === 0) {
@@ -1224,6 +1253,17 @@ export async function pollSportsShadowWallet(
     const newReliableKeys = new Set(reliableEvents.filter((e) => !existingReliableKeys.has(e.eventKey)).map((e) => e.eventKey));
     result.duplicateRows += reliableEvents.length - newReliableKeys.size;
 
+    // Task 13G (Codex re-review round 4, P1): re-checked here, immediately before
+    // degraded-event reconciliation -- findExistingEventKeys's own await can run past the
+    // deadline, and reconcileDegradedEvents can itself issue a further, page-cap-bounded
+    // chain of sequential requests (see countDurableOrdinalFills). If already past
+    // deadline, abort ALL persistence this poll -- not just the degraded half -- rather
+    // than persisting reliable events from a page while skipping that SAME page's degraded
+    // ones: durable reliable keys would let a later poll's overlap check stop at that page,
+    // permanently stranding the un-reconciled degraded rows it also contained.
+    if (d.now() >= deadlineAtMs) {
+      result.backlogTruncated = true;
+    } else {
     const { newDegraded, duplicateCount: degradedDuplicates, error: reconcileError } = await reconcileDegradedEvents(degradedEvents, normalizedWallet, d.repo);
     result.error = result.error ?? reconcileError;
     result.duplicateRows += degradedDuplicates;
@@ -1292,6 +1332,7 @@ export async function pollSportsShadowWallet(
         break;
       }
     }
+    } // end deadline-check-before-degraded-reconciliation
     } // end readyToPersist
   }
 
@@ -1341,6 +1382,11 @@ export async function pollSportsShadowWallet(
       result.leaseLost = true;
       break;
     }
+    // Task 13G (Codex re-review round 4, P1): checkpointLease can itself perform a real
+    // renewal RPC -- re-check the deadline immediately after it returns, before starting
+    // this fill's own (up to 10s) metadata fetch or terminal-marker write, so that await's
+    // latency can never let the deadline check above become stale.
+    if (d.now() >= deadlineAtMs) break;
     if (!fill.conditionId) {
       result.unverifiedRows += 1;
       try {

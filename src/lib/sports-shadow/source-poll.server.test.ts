@@ -1420,10 +1420,11 @@ describe("Task 13F: a per-wallet deadline bounds Phase 1 (pagination) and Phase 
     const network = makeNetworkDeps({ 0: page0, [PAGE_SIZE]: page1 });
     const base = 1_700_000_500_000;
 
-    // Calls: 1) detectedAtMs, 2) page=0's deadline check (still within budget, page0
-    // fetched), 3) page=1's deadline check (now exceeded) -- interrupted after exactly one
+    // Calls: 1) detectedAtMs, 2) page=0's top-of-loop deadline check (within budget), 3)
+    // the post-checkpointLease deadline recheck (still within budget, page0 fetched), 4)
+    // page=1's top-of-loop deadline check (now exceeded) -- interrupted after exactly one
     // full page, before ever reaching page 1's short-page natural end.
-    const firstNow = sequentialClock([base, base, base + 999_999]);
+    const firstNow = sequentialClock([base, base, base, base + 999_999]);
     const first = await pollSportsShadowWallet(
       WALLET,
       0,
@@ -1539,15 +1540,62 @@ describe("Task 13G / P1-Q: formal proof -- an incomplete scan can never create a
     // A short (naturally-completing) page, so the FETCH loop finishes via natural end --
     // scanConfirmedComplete=true -- but `now()` reports the deadline as already exceeded
     // by the time persistence itself is about to start. Calls: 1) detectedAtMs, 2) page 0's
-    // own deadline check (still within budget, so the fetch proceeds and naturally
-    // completes via the short page), 3) the readyToPersist check (now exceeded).
+    // top-of-loop deadline check (within budget), 3) the post-checkpointLease recheck
+    // (also within budget, so the fetch proceeds and naturally completes via the short
+    // page), 4) the readyToPersist check (now exceeded).
     const network = makeNetworkDeps({ 0: [trade({ id: "native-late" })] });
     const base = 1_700_000_500_000;
-    const { deps } = makeDeps({ repo, network, now: sequentialClock([base, base, base + 999_999]) });
+    const { deps } = makeDeps({ repo, network, now: sequentialClock([base, base, base, base + 999_999]) });
     const result = await pollSportsShadowWallet(WALLET, 0, deps, base + 500);
     expect(result.newRows).toBe(0);
     expect(repo.fillsByEventKey.size).toBe(1); // only the pre-seeded row
     expect(repo.insertRawFillsBatchCalls).toHaveLength(0); // persistence never started at all
+    expect(result.backlogTruncated).toBe(true);
+  });
+
+  it("Task 13G (Codex re-review round 4, P1): the deadline is re-checked immediately after checkpointLease succeeds, before starting the next page fetch", async () => {
+    const repo = new FakeRepo();
+    repo.fillsByEventKey.set("sid:seed", { id: "fill-seed", row: { eventKey: "sid:seed", wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
+    let fetchCalls = 0;
+    const network: SourcePollNetworkDeps = {
+      fetchImpl: (async () => {
+        fetchCalls += 1;
+        return new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch,
+      reserveRequestSlot: async () => 0,
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      recordHostRateLimit: async () => {},
+    };
+    const base = 1_700_000_500_000;
+    // Calls: 1) detectedAtMs, 2) page 0's top-of-loop deadline check (within budget --
+    // checkpointLease then succeeds), 3) the post-checkpointLease recheck (now exceeded,
+    // simulating real time having passed during a lease-renewal RPC).
+    const now = sequentialClock([base, base, base + 999_999]);
+    const { deps } = makeDeps({ repo, network, now });
+    const result = await pollSportsShadowWallet(WALLET, 0, deps, base + 500);
+    expect(fetchCalls).toBe(0); // the page fetch was never even attempted
+    expect(result.pagesFetched).toBe(0);
+    expect(result.backlogTruncated).toBe(true);
+  });
+
+  it("Task 13G (Codex re-review round 4, P1): the deadline is re-checked before degraded-event reconciliation starts, not just before findExistingEventKeys", async () => {
+    const repo = new FakeRepo();
+    // A degraded (tx_hash_ordinal) row: no native id, so it falls through to the ordinal
+    // fallback identity scheme (see shadow-core.ts). A short page (1 row) so the fetch
+    // loop finishes via natural end -- scanConfirmedComplete=true -- before the deadline
+    // is exceeded specifically between findExistingEventKeys and degraded reconciliation.
+    const degradedRow = trade({ id: undefined });
+    const network = makeNetworkDeps({ 0: [degradedRow] });
+    const base = 1_700_000_500_000;
+    // Calls: 1) detectedAtMs, 2) page 0's top-of-loop check (ok), 3) post-checkpointLease
+    // recheck (ok, page 0 fetched, natural end via short page), 4) readyToPersist check
+    // (ok, findExistingEventKeys runs, no reliable events to find), 5) the recheck
+    // immediately before degraded reconciliation (now exceeded).
+    const now = sequentialClock([base, base, base, base, base + 999_999]);
+    const { deps } = makeDeps({ repo, network, now });
+    const result = await pollSportsShadowWallet(WALLET, 0, deps, base + 500);
+    expect(result.newRows).toBe(0);
+    expect(repo.fillsByEventKey.size).toBe(0);
     expect(result.backlogTruncated).toBe(true);
   });
 
