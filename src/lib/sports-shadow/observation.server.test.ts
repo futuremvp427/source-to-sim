@@ -103,7 +103,7 @@ const SOURCE_TS = "2026-08-19T22:00:00Z";
 describe("persistVenueMatch — match persistence + scheduling", () => {
   it("1. an EXACT PM-US match is persisted and schedules observations", async () => {
     const { repo } = makeFakeRepo();
-    const result = await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo });
+    const result = await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     expect(result.scheduled).toBe(5);
     expect(result.downgradeSkipped).toBe(false);
   });
@@ -111,7 +111,7 @@ describe("persistVenueMatch — match persistence + scheduling", () => {
   it("2. an EXACT Kalshi match is persisted and schedules observations", async () => {
     const { repo } = makeFakeRepo();
     const kalshi = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" }, targetPmusOrientation: null });
-    const result = await persistVenueMatch("sig-1", kalshi, DETECTED_AT_MS, SOURCE_TS, null, { repo });
+    const result = await persistVenueMatch("sig-1", kalshi, DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     expect(result.scheduled).toBe(5);
   });
 
@@ -119,7 +119,7 @@ describe("persistVenueMatch — match persistence + scheduling", () => {
     for (const status of ["NEAR", "NONE", "UNVERIFIED"] as const) {
       const { repo, matches } = makeFakeRepo();
       const result = exactResult({ status, targetFetchKey: status === "NEAR" ? "some-key" : null, targetSide: null });
-      const out = await persistVenueMatch("sig-1", result, DETECTED_AT_MS, SOURCE_TS, null, { repo });
+      const out = await persistVenueMatch("sig-1", result, DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
       expect(out.scheduled).toBe(0);
       expect(matches.get("sig-1|PMUS")?.matchStatus).toBe(status);
     }
@@ -127,8 +127,8 @@ describe("persistVenueMatch — match persistence + scheduling", () => {
 
   it("6. repeated processing of the same signal+venue is idempotent (no duplicate scheduling)", async () => {
     const { repo } = makeFakeRepo();
-    const first = await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo });
-    const second = await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo });
+    const first = await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
+    const second = await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     expect(first.scheduled).toBe(5);
     expect(second.scheduled).toBe(0); // all 5 already exist -> 0 newly inserted
     expect(first.matchId).toBe(second.matchId); // stable id across repeated upserts
@@ -136,9 +136,9 @@ describe("persistVenueMatch — match persistence + scheduling", () => {
 
   it("7. an EXACT match is never silently downgraded by a later worse result (retry does not erase evidence)", async () => {
     const { repo, matches } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const worseLater = exactResult({ status: "UNVERIFIED", targetFetchKey: null, targetSide: null, reason: "transient discovery gap" });
-    const result = await persistVenueMatch("sig-1", worseLater, DETECTED_AT_MS, SOURCE_TS, null, { repo });
+    const result = await persistVenueMatch("sig-1", worseLater, DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     expect(result.downgradeSkipped).toBe(true);
     expect(matches.get("sig-1|PMUS")?.matchStatus).toBe("EXACT"); // untouched
     expect(matches.get("sig-1|PMUS")?.selectedSide).toBe("TEAM:NYY:LONG"); // original evidence intact
@@ -146,15 +146,15 @@ describe("persistVenueMatch — match persistence + scheduling", () => {
 
   it("an EXACT match CAN be re-confirmed by another EXACT result (not treated as a downgrade)", async () => {
     const { repo } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo });
-    const result = await persistVenueMatch("sig-1", exactResult({ reason: "re-confirmed" }), DETECTED_AT_MS, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
+    const result = await persistVenueMatch("sig-1", exactResult({ reason: "re-confirmed" }), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     expect(result.downgradeSkipped).toBe(false);
   });
 
   it("a non-EXACT match CAN be upgraded to EXACT by a later, better-informed result", async () => {
     const { repo, matches } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult({ status: "UNVERIFIED", targetFetchKey: null, targetSide: null }), DETECTED_AT_MS, SOURCE_TS, null, { repo });
-    const result = await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult({ status: "UNVERIFIED", targetFetchKey: null, targetSide: null }), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
+    const result = await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     expect(result.downgradeSkipped).toBe(false);
     expect(result.scheduled).toBe(5);
     expect(matches.get("sig-1|PMUS")?.matchStatus).toBe("EXACT");
@@ -168,45 +168,45 @@ describe("persistVenueMatch — match persistence + scheduling", () => {
 
   it("9/10/11. exactly 5 rows are scheduled with the exact 5 legal delays", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const delays = [...observations.values()].map((o) => o.requestedDelayMs).sort((a, b) => a - b);
     expect(delays).toEqual([0, 5_000, 10_000, 30_000, 60_000]);
   });
 
   it("16. a repeated scheduler call creates no duplicates", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo });
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     expect(observations.size).toBe(5);
   });
 
   it("17. a retry does not move an existing row's fire_at", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const originalFireAt = [...observations.values()].map((o) => o.fireAt);
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS + 999_999, SOURCE_TS, null, { repo }); // wildly different detectedAt on retry
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS + 999_999, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS }); // wildly different detectedAt on retry
     const laterFireAt = [...observations.values()].map((o) => o.fireAt);
     expect(laterFireAt).toEqual(originalFireAt);
   });
 
   it("18. a retry does not reset an already-captured observation's observed_at", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const firstRow = [...observations.values()][0]!;
     firstRow.observedAt = "2026-08-19T22:35:00.500Z"; // simulate a completed capture
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     expect(firstRow.observedAt).toBe("2026-08-19T22:35:00.500Z");
   });
 
   it("19. an invalid detectedAt schedules nothing (fails closed)", async () => {
     const { repo } = makeFakeRepo();
-    const result = await persistVenueMatch("sig-1", exactResult(), Number.NaN, SOURCE_TS, null, { repo });
+    const result = await persistVenueMatch("sig-1", exactResult(), Number.NaN, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     expect(result.scheduled).toBe(0);
   });
 
   it("20. an unresolved target side schedules nothing", async () => {
     const { repo } = makeFakeRepo();
-    const result = await persistVenueMatch("sig-1", exactResult({ targetSide: null }), DETECTED_AT_MS, SOURCE_TS, null, { repo });
+    const result = await persistVenueMatch("sig-1", exactResult({ targetSide: null }), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     expect(result.scheduled).toBe(0);
   });
 });
@@ -278,21 +278,21 @@ describe("persistVenueMatch — Task 12H / P1-M: durable non-EXACT recheck sched
 
   it("M-audit. firstMatchStatus is an immutable audit field: set once on the FIRST persisted status, never overwritten by later upgrades, even though matchStatus (current) does change", async () => {
     const { repo, matches } = makeFakeRepo();
-    await persistVenueMatch("sig-audit", exactResult({ status: "NONE", targetFetchKey: null, targetSide: null }), DETECTED_AT_MS, SOURCE_TS, "2026-08-19T22:35:00Z", { repo });
+    await persistVenueMatch("sig-audit", exactResult({ status: "NONE", targetFetchKey: null, targetSide: null }), DETECTED_AT_MS, SOURCE_TS, "2026-08-19T22:35:00Z", { repo, now: () => DETECTED_AT_MS });
     expect(matches.get("sig-audit|PMUS")?.firstMatchStatus).toBe("NONE");
 
-    await persistVenueMatch("sig-audit", exactResult({ status: "NEAR", targetFetchKey: "some-key", targetSide: null }), DETECTED_AT_MS, SOURCE_TS, "2026-08-19T22:35:00Z", { repo });
+    await persistVenueMatch("sig-audit", exactResult({ status: "NEAR", targetFetchKey: "some-key", targetSide: null }), DETECTED_AT_MS, SOURCE_TS, "2026-08-19T22:35:00Z", { repo, now: () => DETECTED_AT_MS });
     expect(matches.get("sig-audit|PMUS")?.matchStatus).toBe("NEAR"); // current status advanced
     expect(matches.get("sig-audit|PMUS")?.firstMatchStatus).toBe("NONE"); // first-ever evidence preserved
 
-    await persistVenueMatch("sig-audit", exactResult(), DETECTED_AT_MS, SOURCE_TS, "2026-08-19T22:35:00Z", { repo });
+    await persistVenueMatch("sig-audit", exactResult(), DETECTED_AT_MS, SOURCE_TS, "2026-08-19T22:35:00Z", { repo, now: () => DETECTED_AT_MS });
     expect(matches.get("sig-audit|PMUS")?.matchStatus).toBe("EXACT");
     expect(matches.get("sig-audit|PMUS")?.firstMatchStatus).toBe("NONE"); // still preserved, even after reaching EXACT
   });
 
   it("M-audit-exact-first. when the FIRST-ever result is already EXACT, firstMatchStatus is EXACT (correctly records the true first observation)", async () => {
     const { repo, matches } = makeFakeRepo();
-    await persistVenueMatch("sig-audit2", exactResult(), DETECTED_AT_MS, SOURCE_TS, "2026-08-19T22:35:00Z", { repo });
+    await persistVenueMatch("sig-audit2", exactResult(), DETECTED_AT_MS, SOURCE_TS, "2026-08-19T22:35:00Z", { repo, now: () => DETECTED_AT_MS });
     expect(matches.get("sig-audit2|PMUS")?.firstMatchStatus).toBe("EXACT");
   });
 
@@ -350,6 +350,124 @@ describe("persistVenueMatch — Task 12H / P1-M: durable non-EXACT recheck sched
   });
 });
 
+describe("persistVenueMatch — Task 12I / P1-O, O2/O3: execution-time cutoff guard (Layer B)", () => {
+  const CUTOFF_ISO = "2026-08-19T22:35:00Z";
+  const CUTOFF_MS = Date.parse(CUTOFF_ISO);
+
+  it("O2-1. a pre-cutoff next_recheck row that the worker actually processes AFTER cutoff cannot upgrade to a NEW EXACT -- the mission's exact 6:59pm/7:00pm/7:02pm example", async () => {
+    const { repo, matches } = makeFakeRepo();
+    // Legitimately scheduled just before cutoff (e.g. next_recheck_at = 6:59pm for a 7:00pm game).
+    await persistVenueMatch("sig-late-worker", exactResult({ status: "NONE", targetFetchKey: null, targetSide: null }), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS - 60_000 });
+    expect(matches.get("sig-late-worker|PMUS")?.matchStatus).toBe("NONE");
+
+    // Scheduler outage; the worker only actually resumes and processes this row at 7:02pm --
+    // after cutoff -- and the resolver genuinely found a real EXACT target this time.
+    const result = await persistVenueMatch("sig-late-worker", exactResult(), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS + 2 * 60_000 });
+
+    // Must NOT resolve to a newly accepted EXACT.
+    expect(matches.get("sig-late-worker|PMUS")?.matchStatus).not.toBe("EXACT");
+    expect(matches.get("sig-late-worker|PMUS")?.matchStatus).toBe("UNVERIFIED");
+    expect(matches.get("sig-late-worker|PMUS")?.reasonCode).toBe("UNVERIFIED_CUTOFF_EXCEEDED");
+    // Must NOT schedule +0/+5/+10/+30/+60 observations.
+    expect(result.scheduled).toBe(0);
+    // Must NOT remain indefinitely retryable -- final non-EXACT for the Phase-1 experiment.
+    expect(matches.get("sig-late-worker|PMUS")?.nextRecheckAt).toBeNull();
+  });
+
+  it("O2-2. delayed-scheduler cannot schedule a NEW observation burst after cutoff (no rows created at all for the rejected late EXACT)", async () => {
+    const { repo, observations } = makeFakeRepo();
+    await persistVenueMatch("sig-late-obs", exactResult({ status: "NONE", targetFetchKey: null, targetSide: null }), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS - 60_000 });
+    await persistVenueMatch("sig-late-obs", exactResult(), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS + 2 * 60_000 });
+    expect(observations.size).toBe(0);
+  });
+
+  it("O2-3. restart after cutoff cannot resurrect rechecking -- a fresh persistVenueMatch invocation (simulating a new process) sharing only the durable repo still sees nextRecheckAt=null and does not re-enable retry", async () => {
+    const { repo, matches } = makeFakeRepo();
+    await persistVenueMatch("sig-restart-cutoff", exactResult({ status: "NONE", targetFetchKey: null, targetSide: null }), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS - 60_000 });
+    await persistVenueMatch("sig-restart-cutoff", exactResult(), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS + 2 * 60_000 });
+    expect(matches.get("sig-restart-cutoff|PMUS")?.nextRecheckAt).toBeNull();
+
+    // "Restart": a brand-new deps object, same durable repo, another attempt well after cutoff.
+    const afterRestart = await persistVenueMatch("sig-restart-cutoff", exactResult({ status: "NONE", targetFetchKey: null, targetSide: null }), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS + 60 * 60_000 });
+    expect(matches.get("sig-restart-cutoff|PMUS")?.nextRecheckAt).toBeNull();
+    expect(afterRestart.scheduled).toBe(0);
+  });
+
+  it("O2-4. an EXACT legitimately obtained BEFORE cutoff remains protected from downgrade, even when a later worse result arrives AFTER cutoff (the pre-existing ratchet is untouched by the new cutoff logic)", async () => {
+    const { repo, matches } = makeFakeRepo();
+    await persistVenueMatch("sig-protected", exactResult(), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS - 60_000 });
+    expect(matches.get("sig-protected|PMUS")?.matchStatus).toBe("EXACT");
+
+    const worseLater = exactResult({ status: "UNVERIFIED", targetFetchKey: null, targetSide: null, reason: "transient discovery gap" });
+    const result = await persistVenueMatch("sig-protected", worseLater, DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS + 60_000 });
+    expect(result.downgradeSkipped).toBe(true);
+    expect(matches.get("sig-protected|PMUS")?.matchStatus).toBe("EXACT"); // still untouched
+    expect(matches.get("sig-protected|PMUS")?.selectedSide).toBe("TEAM:NYY:LONG"); // original evidence intact
+  });
+
+  it("O2-5. original firstMatchStatus remains intact through a rejected past-cutoff EXACT attempt", async () => {
+    const { repo, matches } = makeFakeRepo();
+    await persistVenueMatch("sig-first-status", exactResult({ status: "NONE", targetFetchKey: null, targetSide: null }), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS - 60_000 });
+    expect(matches.get("sig-first-status|PMUS")?.firstMatchStatus).toBe("NONE");
+
+    await persistVenueMatch("sig-first-status", exactResult(), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS + 2 * 60_000 });
+    expect(matches.get("sig-first-status|PMUS")?.firstMatchStatus).toBe("NONE"); // unchanged -- the rejected attempt did not overwrite the immutable audit field
+  });
+
+  it("O2-6. original detectedAt remains intact (verifiable indirectly: even the rejected result's own metadata still reflects the resolver's real evidence, and no observation rows were anchored to a different time)", async () => {
+    const { repo, observations } = makeFakeRepo();
+    await persistVenueMatch("sig-detectedat", exactResult({ status: "NONE", targetFetchKey: null, targetSide: null }), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS - 60_000 });
+    await persistVenueMatch("sig-detectedat", exactResult(), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS + 2 * 60_000 });
+    // No observation rows were created at all (rejected), so there is nothing anchored to the
+    // wrong time -- detectedAtMs is never even consulted for scheduling once isSchedulable is false.
+    expect(observations.size).toBe(0);
+  });
+
+  it("O2-7. PMUS/Kalshi independence remains intact through the cutoff guard -- a rejected past-cutoff PMUS EXACT does not affect Kalshi's independent match row for the same signal", async () => {
+    const { repo, matches } = makeFakeRepo();
+    await persistVenueMatch("sig-venue-indep", exactResult({ status: "NONE", targetFetchKey: null, targetSide: null }), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS - 60_000 });
+    await persistVenueMatch(
+      "sig-venue-indep",
+      exactResult({ venue: "KALSHI", status: "NONE", targetFetchKey: null, targetSide: null, targetPmusOrientation: null }),
+      DETECTED_AT_MS,
+      SOURCE_TS,
+      CUTOFF_ISO,
+      { repo, now: () => CUTOFF_MS - 60_000 },
+    );
+    const kalshiBefore = { ...matches.get("sig-venue-indep|KALSHI")! };
+
+    // The PMUS attempt happens late (past cutoff) and gets clamped -- Kalshi's row must be untouched.
+    await persistVenueMatch("sig-venue-indep", exactResult(), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS + 2 * 60_000 });
+    const kalshiAfter = matches.get("sig-venue-indep|KALSHI")!;
+    expect(kalshiAfter.matchStatus).toBe(kalshiBefore.matchStatus);
+    expect(kalshiAfter.nextRecheckAt).toBe(kalshiBefore.nextRecheckAt);
+    expect(kalshiAfter.recheckCount).toBe(kalshiBefore.recheckCount);
+    expect(matches.get("sig-venue-indep|PMUS")?.matchStatus).toBe("UNVERIFIED"); // PMUS was the one rejected
+  });
+
+  it("O2-8. Task 12H NONE/NEAR/UNVERIFIED -> EXACT still works normally when the later market genuinely appears BEFORE cutoff (the new guard only rejects PAST-cutoff results, never legitimate pregame ones)", async () => {
+    const { repo, matches } = makeFakeRepo();
+    for (const status of ["NONE", "NEAR", "UNVERIFIED"] as const) {
+      const signalId = `sig-pregame-${status}`;
+      await persistVenueMatch(signalId, exactResult({ status, targetFetchKey: status === "NEAR" ? "some-key" : null, targetSide: null }), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, {
+        repo,
+        now: () => CUTOFF_MS - 60_000,
+      });
+      const result = await persistVenueMatch(signalId, exactResult(), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS - 30_000 });
+      expect(matches.get(`${signalId}|PMUS`)?.matchStatus).toBe("EXACT");
+      expect(result.scheduled).toBe(5);
+    }
+  });
+
+  it("re-confirming an already-EXACT result AFTER cutoff is not treated as a rejected new EXACT (it is not creating anything new)", async () => {
+    const { repo, matches } = makeFakeRepo();
+    await persistVenueMatch("sig-reconfirm", exactResult(), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS - 60_000 });
+    const result = await persistVenueMatch("sig-reconfirm", exactResult({ reason: "re-confirmed" }), DETECTED_AT_MS, SOURCE_TS, CUTOFF_ISO, { repo, now: () => CUTOFF_MS + 60_000 });
+    expect(result.downgradeSkipped).toBe(false);
+    expect(matches.get("sig-reconfirm|PMUS")?.matchStatus).toBe("EXACT");
+  });
+});
+
 describe("takeDueSportsShadowObservations — due queue", () => {
   function baseDeps(repoOverride: ObservationRepository, extra: Partial<ObservationDeps> = {}): Partial<ObservationDeps> {
     return { repo: repoOverride, now: () => DETECTED_AT_MS, ...extra };
@@ -357,7 +475,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("21/22. only fire_at <= now is due; future rows are untouched", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo }); // all in the past relative to now
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS }); // all in the past relative to now
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
     await takeDueSportsShadowObservations("PMUS", baseDeps(repo, { fetchPmusBook }));
     // all 5 fire_at are <= now (detectedAt-120000 + up to 60000 < now), so all should be observed
@@ -366,7 +484,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("future rows remain untouched when detectedAt is effectively now", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo }); // +30/+60 fire in the future relative to "now"
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS }); // +30/+60 fire in the future relative to "now"
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
     await takeDueSportsShadowObservations("PMUS", baseDeps(repo, { fetchPmusBook }));
     const stillPending = [...observations.values()].filter((o) => o.observedAt === null);
@@ -376,7 +494,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("23. already-observed rows are untouched (not re-fetched)", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const zeroDelayRow = [...observations.values()].find((o) => o.requestedDelayMs === 0)!;
     zeroDelayRow.observedAt = "2026-01-01T00:00:00Z";
     delete zeroDelayRow.patch;
@@ -392,7 +510,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("24b. an explicit maxRows overrides DUE_BATCH_LIMIT without changing any other behavior", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo }); // 5 due rows
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS }); // 5 due rows
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
     const out = await takeDueSportsShadowObservations("PMUS", baseDeps(repo, { fetchPmusBook }), 2);
     expect(fetchPmusBook).toHaveBeenCalledTimes(2);
@@ -403,7 +521,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("24c. omitting maxRows preserves the exact prior DUE_BATCH_LIMIT default behavior", async () => {
     const { repo } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
     const out = await takeDueSportsShadowObservations("PMUS", baseDeps(repo, { fetchPmusBook })); // no maxRows arg
     expect(fetchPmusBook).toHaveBeenCalledTimes(5); // all 5 due rows, same as before this change
@@ -412,7 +530,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("24d. omitting deadlineAtMs (null default) preserves exact prior behavior -- no row is ever skipped for time", async () => {
     const { repo } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
     const out = await takeDueSportsShadowObservations("PMUS", baseDeps(repo, { fetchPmusBook }), DUE_BATCH_LIMIT); // maxRows explicit, deadlineAtMs omitted
     expect(fetchPmusBook).toHaveBeenCalledTimes(5);
@@ -421,7 +539,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("24e. once the deadline is reached, remaining rows are left completely untouched (observed_at stays null), never marked a terminal failure", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo }); // 5 due rows
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS }); // 5 due rows
     let call = 0;
     // Simulate wall-clock advancing: the deadline check reads d.now() before each row;
     // return a time past the deadline starting on the 3rd row.
@@ -437,7 +555,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("24f. a deadline already in the past when the pass starts processes zero rows, all left untouched", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
     const out = await takeDueSportsShadowObservations("PMUS", { repo, fetchPmusBook, now: () => DETECTED_AT_MS }, 5, DETECTED_AT_MS - 1);
     expect(fetchPmusBook).not.toHaveBeenCalled();
@@ -447,7 +565,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("25. oldest fire_at is handled first", async () => {
     const { repo } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const order: string[] = [];
     const fetchPmusBook = vi.fn(async (key: string): Promise<BookSnapshot> => {
       order.push(key);
@@ -460,7 +578,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("26/27/28. a due PM-US row invokes fetchPmusBook and persists real bid/ask + top-of-book depth", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({
       venue: "PMUS",
       marketId: "aec-mlb-nyy-bal-2026-08-19",
@@ -481,7 +599,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("29. fewer than five levels is preserved, never padded", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [{ price: 0.5, size: 1 }], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
     await takeDueSportsShadowObservations("PMUS", baseDeps(repo, { fetchPmusBook }));
     const zeroRow = [...observations.values()].find((o) => o.requestedDelayMs === 0)!;
@@ -490,7 +608,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("30. a PM-US fetch failure is persisted explicitly", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: null, bestAsk: null, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: "gateway.polymarket.us request failed (HTTP 500)" }));
     const out = await takeDueSportsShadowObservations("PMUS", baseDeps(repo, { fetchPmusBook }));
     expect(out.failed).toBe(5);
@@ -499,7 +617,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("31. a valid empty book is distinguished from a transport failure", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: null, bestAsk: null, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
     const out = await takeDueSportsShadowObservations("PMUS", baseDeps(repo, { fetchPmusBook }));
     expect(out.captured).toBe(5); // valid, just empty -- not a failure
@@ -509,7 +627,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
   it("32/33/34. a due Kalshi row invokes fetchKalshiBook and persists the resolved side's executable view", async () => {
     const { repo, observations } = makeFakeRepo();
     const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "NO" }, targetPmusOrientation: null });
-    await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchKalshiBook = vi.fn(async (): Promise<KalshiBookSnapshot> => ({
       venue: "KALSHI",
       marketId: "KXMLBGAME-1-NYY",
@@ -530,7 +648,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
   it("35. source BUY does not automatically choose YES — the persisted view matches the resolved side, here NO", async () => {
     const { repo, observations } = makeFakeRepo();
     const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "NO" }, targetPmusOrientation: null });
-    await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchKalshiBook = vi.fn(async (): Promise<KalshiBookSnapshot> => ({
       venue: "KALSHI",
       marketId: "KXMLBGAME-1-NYY",
@@ -549,7 +667,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
   it("36/37. sub-cent prices and fractional quantities survive the persistence path", async () => {
     const { repo, observations } = makeFakeRepo();
     const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" }, targetPmusOrientation: null });
-    await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchKalshiBook = vi.fn(async (): Promise<KalshiBookSnapshot> => ({
       venue: "KALSHI",
       marketId: "KXMLBGAME-1-NYY",
@@ -569,7 +687,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
   it("38. Kalshi top-five depth preserved without fabrication", async () => {
     const { repo, observations } = makeFakeRepo();
     const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" }, targetPmusOrientation: null });
-    await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchKalshiBook = vi.fn(async (): Promise<KalshiBookSnapshot> => ({
       venue: "KALSHI",
       marketId: "x",
@@ -588,7 +706,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
   it("39. a valid empty Kalshi side is handled distinctly, not as a failure", async () => {
     const { repo, observations } = makeFakeRepo();
     const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "NO" }, targetPmusOrientation: null });
-    await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchKalshiBook = vi.fn(async (): Promise<KalshiBookSnapshot> => ({
       venue: "KALSHI",
       marketId: "x",
@@ -607,7 +725,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
   it("40. a crossed/invalid Kalshi snapshot never becomes a fake executable quote", async () => {
     const { repo, observations } = makeFakeRepo();
     const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" }, targetPmusOrientation: null });
-    await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchKalshiBook = vi.fn(async (): Promise<KalshiBookSnapshot> => ({
       venue: "KALSHI",
       marketId: "x",
@@ -629,7 +747,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 describe("time evidence", () => {
   it("41/42/43/44/45. requested_delay_ms preserved, observed_at is the actual injected time, late capture never rewrites fire_at, actual delay is derivable", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const lateObservedMs = DETECTED_AT_MS + 7_150; // captured late relative to +5s
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: lateObservedMs, staleReason: null }));
     await takeDueSportsShadowObservations("PMUS", { repo, fetchPmusBook, now: () => DETECTED_AT_MS - 120_000 + 60_000 });
@@ -642,7 +760,7 @@ describe("time evidence", () => {
 describe("failures / concurrency", () => {
   it("46. a timeout terminally persists an explicit failure", async () => {
     const { repo } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: null, bestAsk: null, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: "gateway.polymarket.us request failed: The operation was aborted" }));
     const out = await takeDueSportsShadowObservations("PMUS", { repo, fetchPmusBook, now: () => DETECTED_AT_MS });
     expect(out.failed).toBe(5);
@@ -650,7 +768,7 @@ describe("failures / concurrency", () => {
 
   it("47. a 429 terminally persists an explicit failure", async () => {
     const { repo } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: null, bestAsk: null, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: "gateway.polymarket.us rate limited (429) on /x" }));
     const out = await takeDueSportsShadowObservations("PMUS", { repo, fetchPmusBook, now: () => DETECTED_AT_MS });
     expect(out.failed).toBe(5);
@@ -658,7 +776,7 @@ describe("failures / concurrency", () => {
 
   it("48. a malformed book terminally persists an explicit failure", async () => {
     const { repo } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: null, bestAsk: null, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: "malformed book payload: not an object" }));
     const out = await takeDueSportsShadowObservations("PMUS", { repo, fetchPmusBook, now: () => DETECTED_AT_MS });
     expect(out.failed).toBe(5);
@@ -666,7 +784,7 @@ describe("failures / concurrency", () => {
 
   it("49/50/51/52. CAS succeeds when observed_at IS NULL; an overlapping second CAS loses, cannot overwrite the winner, and is not counted as captured", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     const row = [...observations.values()].find((o) => o.requestedDelayMs === 0)!;
 
     const winnerPatch = { observedAt: "2026-01-01T00:00:00.100Z", fetchStartedAt: null, fetchEndedAt: null, detectionLatencyMs: null, bestBid: 0.6, bestAsk: 0.61, spread: 0.01, bidDepth: [], askDepth: [], marketStatus: null, stale: false, errorCode: null, reason: null, rawMetadata: {} };
@@ -682,7 +800,7 @@ describe("failures / concurrency", () => {
 
   it("53. a repeated worker cycle skips an already-terminal row entirely (no fetch attempted)", async () => {
     const { repo, observations } = makeFakeRepo();
-    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo });
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     for (const o of observations.values()) o.observedAt = "2026-01-01T00:00:00Z"; // simulate a fully-completed prior cycle
     const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
     const out = await takeDueSportsShadowObservations("PMUS", { repo, fetchPmusBook, now: () => DETECTED_AT_MS });
@@ -711,7 +829,7 @@ describe("auth / safety", () => {
     const { repo } = makeFakeRepo();
     // The mere fact every test in this file passes `repo` explicitly and never imports
     // supabaseAdmin proves this; this test documents that guarantee directly.
-    const result = await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo });
+    const result = await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     expect(result.matchId).toBeDefined();
   });
 });

@@ -19,9 +19,9 @@ import type { BookSnapshot } from "./types";
 export const PMUS_HOST = "gateway.polymarket.us";
 
 const REQUEST_TIMEOUT_MS = 12_000;
-const DISCOVERY_PAGE_SIZE = 200;
+export const DISCOVERY_PAGE_SIZE = 200;
 /** Bounded: at most 2,000 sports events per baseline discovery refresh. */
-const DISCOVERY_MAX_PAGES = 10;
+export const DISCOVERY_MAX_PAGES = 10;
 const DISCOVERY_CACHE_TTL_MS = 5 * 60 * 1000;
 
 function sleep(ms: number): Promise<void> {
@@ -104,6 +104,14 @@ export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}
   if (discoveryCache && discoveryCache.expiresAt > now) return discoveryCache.value;
 
   const byMarketSlug = new Map<string, PmusCandidate>();
+  // Task 12I / P2-P2: PM-US uses fixed offset/page-size pagination (no continuation
+  // cursor), so a FULL final page (events.length === DISCOVERY_PAGE_SIZE) at the page cap
+  // proves nothing -- there could be an unread page 11 sitting right behind it. Only a
+  // SHORT final page (< DISCOVERY_PAGE_SIZE) proves the catalog is exhausted. Same
+  // completeness-flag pattern as kalshi.server.ts's paginate: stays true only when every
+  // one of the DISCOVERY_MAX_PAGES iterations ran full, i.e. the loop ended purely
+  // because the page budget ran out, never because pagination naturally proved complete.
+  let pageBudgetExhausted = true;
   for (let page = 0; page < DISCOVERY_MAX_PAGES; page += 1) {
     // Task 12F / P1-G: a full discovery pass can take up to DISCOVERY_MAX_PAGES * 12s --
     // checked BEFORE each page fetch so a lease lost mid-pagination stops issuing further
@@ -132,7 +140,15 @@ export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}
         if (candidate.marketSlug) byMarketSlug.set(candidate.marketSlug, candidate);
       }
     }
-    if (events.length < DISCOVERY_PAGE_SIZE) break;
+    if (events.length < DISCOVERY_PAGE_SIZE) {
+      pageBudgetExhausted = false;
+      break;
+    }
+  }
+  if (pageBudgetExhausted) {
+    throw new Error(
+      `PM-US discovery truncated: DISCOVERY_MAX_PAGES (${DISCOVERY_MAX_PAGES}) exhausted while the final page was still full (${DISCOVERY_PAGE_SIZE} events) -- completeness unproven, refusing to return/cache a partial catalog`,
+    );
   }
 
   const value = [...byMarketSlug.values()];

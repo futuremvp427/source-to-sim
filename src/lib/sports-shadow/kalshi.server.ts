@@ -28,7 +28,7 @@ export const KALSHI_BASE_URL = "https://external-api.kalshi.com/trade-api/v2";
 const REQUEST_TIMEOUT_MS = 12_000;
 const PAGE_LIMIT = 200;
 /** Bounded: at most 10 pages per series per endpoint (markets and events each), well under Kalshi's documented max limit of 1000/page. */
-const MAX_PAGES_PER_SERIES = 10;
+export const MAX_PAGES_PER_SERIES = 10;
 const DISCOVERY_CACHE_TTL_MS = 5 * 60 * 1000;
 
 function sleep(ms: number): Promise<void> {
@@ -102,10 +102,22 @@ type PaginatedKalshiResponse = { cursor?: string; markets?: unknown; events?: un
  * immediately, discarding whatever this call had already accumulated in `out` -- a partial
  * catalog is not complete enough to justify a semantic NONE either. A genuinely well-formed
  * empty array remains a valid, successful (possibly final) page.
+ *
+ * Task 12I / P2-P1: hitting MAX_PAGES_PER_SERIES while the final page STILL carried a
+ * non-empty continuation cursor means upstream evidence says more data exists that this
+ * call never fetched -- a resolver NONE must mean "complete trustworthy discovery found
+ * no exact target," never "we only inspected the first N pages." That is discovery
+ * FAILURE, not a successful (if large) result, so it must never be returned OR cached.
+ * `pageBudgetExhausted` starts true and is set false the instant the loop breaks for a
+ * genuinely proven-complete reason (an empty final cursor, or a legitimately empty final
+ * page) -- it stays true ONLY when every single one of the MAX_PAGES_PER_SERIES
+ * iterations ran without ever proving completeness, i.e. the loop ended purely because
+ * the page budget ran out, not because pagination naturally finished.
  */
 async function paginate<T>(pathBuilder: (cursor: string | null) => string, itemsKey: "markets" | "events", deps: KalshiNetworkDeps): Promise<T[]> {
   const out: T[] = [];
   let cursor: string | null = null;
+  let pageBudgetExhausted = true;
   for (let page = 0; page < MAX_PAGES_PER_SERIES; page += 1) {
     // Task 12F / P1-G: see pmus.server.ts's discoverPmusMlbMarkets for the identical
     // checkpoint rationale -- Kalshi discovery has a WORSE worst case (3 series x 2
@@ -127,7 +139,15 @@ async function paginate<T>(pathBuilder: (cursor: string | null) => string, items
     }
     out.push(...(items as T[]));
     cursor = record.cursor && record.cursor.length > 0 ? record.cursor : null;
-    if (!cursor || items.length === 0) break;
+    if (!cursor || items.length === 0) {
+      pageBudgetExhausted = false;
+      break;
+    }
+  }
+  if (pageBudgetExhausted) {
+    throw new Error(
+      `Kalshi discovery truncated: MAX_PAGES_PER_SERIES (${MAX_PAGES_PER_SERIES}) exhausted while the final page still carried a non-empty continuation cursor -- catalog is incomplete, refusing to return/cache a partial result`,
+    );
   }
   return out;
 }

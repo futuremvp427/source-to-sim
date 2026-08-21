@@ -5,8 +5,10 @@ import {
   buildObservationRows,
   buildPmusObservationPatch,
   buildTerminalFailurePatch,
+  clampPastCutoffResult,
   classifyKalshiFailure,
   classifyPmusFailure,
+  computeCutoffMs,
   computeRecheckDecision,
   isSchedulable,
   isValidDetectedAt,
@@ -155,10 +157,11 @@ describe("computeRecheckDecision — Task 12H / P1-M durable retry scheduling", 
     expect(decision.nextRecheckAt).toBeNull();
   });
 
-  it("M5. when scheduledStartAt is unknown (null), the fallback cutoff is detectedAtMs + RECHECK_FALLBACK_CUTOFF_MS -- before it, still retryable", () => {
-    const justBeforeFallbackCutoff = DETECTED_AT + RECHECK_FALLBACK_CUTOFF_MS - 1;
-    const decision = computeRecheckDecision("NONE", justBeforeFallbackCutoff, DETECTED_AT, null);
-    expect(decision.nextRecheckAt).toBe(new Date(justBeforeFallbackCutoff + RECHECK_INTERVAL_MS).toISOString());
+  it("M5. when scheduledStartAt is unknown (null), the fallback cutoff is detectedAtMs + RECHECK_FALLBACK_CUTOFF_MS -- strictly before (cutoff - RECHECK_INTERVAL_MS), still retryable", () => {
+    const fallbackCutoff = DETECTED_AT + RECHECK_FALLBACK_CUTOFF_MS;
+    const justBeforeSchedulableBoundary = fallbackCutoff - RECHECK_INTERVAL_MS - 1;
+    const decision = computeRecheckDecision("NONE", justBeforeSchedulableBoundary, DETECTED_AT, null);
+    expect(decision.nextRecheckAt).toBe(new Date(justBeforeSchedulableBoundary + RECHECK_INTERVAL_MS).toISOString());
   });
 
   it("M5b. past the fallback cutoff (scheduledStartAt unknown), rechecks stop -- this is a real, deterministic, tested cutoff, not unbounded retry", () => {
@@ -168,13 +171,128 @@ describe("computeRecheckDecision — Task 12H / P1-M durable retry scheduling", 
   });
 
   it("M5c. an unparseable scheduledStartAtIso also falls back to the detection-based cutoff, not to permanent retry or permanent stop", () => {
-    const justBefore = DETECTED_AT + RECHECK_FALLBACK_CUTOFF_MS - 1;
+    const fallbackCutoff = DETECTED_AT + RECHECK_FALLBACK_CUTOFF_MS;
+    const justBefore = fallbackCutoff - RECHECK_INTERVAL_MS - 1;
     const decision = computeRecheckDecision("NONE", justBefore, DETECTED_AT, "not-a-date");
     expect(decision.nextRecheckAt).not.toBeNull();
   });
 
   it("M2b. the recheck interval is exactly 5 minutes, matching the venues' own DISCOVERY_CACHE_TTL_MS -- rechecking faster is provably pointless", () => {
     expect(RECHECK_INTERVAL_MS).toBe(5 * 60 * 1000);
+  });
+});
+
+describe("computeRecheckDecision — Task 12I / P1-O, O1: hard 'next < cutoff' boundary (candidate recheck itself must not cross cutoff)", () => {
+  const DETECTED_AT = Date.parse("2026-08-19T11:00:00Z");
+  const SCHEDULED_START_AT_ISO = "2026-08-19T20:00:00Z";
+  const CUTOFF = Date.parse(SCHEDULED_START_AT_ISO);
+
+  it("O1-1. now = cutoff - interval - 1ms -> next < cutoff -> a recheck IS scheduled", () => {
+    const now = CUTOFF - RECHECK_INTERVAL_MS - 1;
+    const decision = computeRecheckDecision("NONE", now, DETECTED_AT, SCHEDULED_START_AT_ISO);
+    expect(decision.nextRecheckAt).toBe(new Date(now + RECHECK_INTERVAL_MS).toISOString());
+    expect(new Date(decision.nextRecheckAt!).getTime()).toBeLessThan(CUTOFF);
+  });
+
+  it("O1-2. now = cutoff - interval -> next would EQUAL cutoff exactly -> terminal, next_recheck_at NULL (a recheck exactly at scheduled game start is NOT pregame)", () => {
+    const now = CUTOFF - RECHECK_INTERVAL_MS;
+    const decision = computeRecheckDecision("NONE", now, DETECTED_AT, SCHEDULED_START_AT_ISO);
+    expect(decision.nextRecheckAt).toBeNull();
+  });
+
+  it("O1-3. now = cutoff - interval + 1ms -> next would exceed cutoff -> terminal", () => {
+    const now = CUTOFF - RECHECK_INTERVAL_MS + 1;
+    const decision = computeRecheckDecision("NONE", now, DETECTED_AT, SCHEDULED_START_AT_ISO);
+    expect(decision.nextRecheckAt).toBeNull();
+  });
+
+  it("O1-4. now = cutoff - 1ms -> terminal after this current non-EXACT result (still just barely pregame itself, but no further recheck fits before cutoff)", () => {
+    const now = CUTOFF - 1;
+    const decision = computeRecheckDecision("NONE", now, DETECTED_AT, SCHEDULED_START_AT_ISO);
+    expect(decision.nextRecheckAt).toBeNull();
+  });
+
+  it("O1-5. now >= cutoff -> terminal", () => {
+    expect(computeRecheckDecision("NONE", CUTOFF, DETECTED_AT, SCHEDULED_START_AT_ISO).nextRecheckAt).toBeNull();
+    expect(computeRecheckDecision("NONE", CUTOFF + 60_000, DETECTED_AT, SCHEDULED_START_AT_ISO).nextRecheckAt).toBeNull();
+  });
+
+  it("O1-1/2/3/4/5 hold identically for NEAR and UNVERIFIED, not just NONE", () => {
+    for (const status of ["NEAR", "UNVERIFIED"] as const) {
+      expect(computeRecheckDecision(status, CUTOFF - RECHECK_INTERVAL_MS - 1, DETECTED_AT, SCHEDULED_START_AT_ISO).nextRecheckAt).not.toBeNull();
+      expect(computeRecheckDecision(status, CUTOFF - RECHECK_INTERVAL_MS, DETECTED_AT, SCHEDULED_START_AT_ISO).nextRecheckAt).toBeNull();
+      expect(computeRecheckDecision(status, CUTOFF - RECHECK_INTERVAL_MS + 1, DETECTED_AT, SCHEDULED_START_AT_ISO).nextRecheckAt).toBeNull();
+      expect(computeRecheckDecision(status, CUTOFF - 1, DETECTED_AT, SCHEDULED_START_AT_ISO).nextRecheckAt).toBeNull();
+      expect(computeRecheckDecision(status, CUTOFF, DETECTED_AT, SCHEDULED_START_AT_ISO).nextRecheckAt).toBeNull();
+    }
+  });
+
+  it("O1-fallback. the identical 5-case boundary holds for the 4-hour fallback cutoff (scheduledStartAt unknown)", () => {
+    const fallbackCutoff = DETECTED_AT + RECHECK_FALLBACK_CUTOFF_MS;
+    expect(computeRecheckDecision("NONE", fallbackCutoff - RECHECK_INTERVAL_MS - 1, DETECTED_AT, null).nextRecheckAt).not.toBeNull();
+    expect(computeRecheckDecision("NONE", fallbackCutoff - RECHECK_INTERVAL_MS, DETECTED_AT, null).nextRecheckAt).toBeNull();
+    expect(computeRecheckDecision("NONE", fallbackCutoff - RECHECK_INTERVAL_MS + 1, DETECTED_AT, null).nextRecheckAt).toBeNull();
+    expect(computeRecheckDecision("NONE", fallbackCutoff - 1, DETECTED_AT, null).nextRecheckAt).toBeNull();
+    expect(computeRecheckDecision("NONE", fallbackCutoff, DETECTED_AT, null).nextRecheckAt).toBeNull();
+  });
+});
+
+describe("computeCutoffMs — Task 12I / P1-O shared cutoff derivation", () => {
+  it("uses scheduledStartAt when known", () => {
+    expect(computeCutoffMs(1_000, "2026-08-19T20:00:00Z")).toBe(Date.parse("2026-08-19T20:00:00Z"));
+  });
+
+  it("falls back to detectedAtMs + RECHECK_FALLBACK_CUTOFF_MS when scheduledStartAt is null", () => {
+    expect(computeCutoffMs(1_000, null)).toBe(1_000 + RECHECK_FALLBACK_CUTOFF_MS);
+  });
+
+  it("falls back identically for an unparseable scheduledStartAtIso", () => {
+    expect(computeCutoffMs(1_000, "not-a-date")).toBe(1_000 + RECHECK_FALLBACK_CUTOFF_MS);
+  });
+});
+
+describe("clampPastCutoffResult — Task 12I / P1-O, O2/O3", () => {
+  const exact: VenueMatchResult = {
+    venue: "PMUS",
+    status: "EXACT",
+    reasonCode: "EXACT_MATCH",
+    reason: "matched",
+    sourceConditionId: "0xcond",
+    sourceMarketSlug: "mlb-nyy-bal-2026-08-19",
+    targetEventId: "ev-1",
+    targetMarketId: "444031",
+    targetFetchKey: "aec-mlb-nyy-bal-2026-08-19",
+    targetGameIdentifier: "game-1",
+    targetAwayTeam: "NYY",
+    targetHomeTeam: "BAL",
+    targetBetType: "MONEYLINE",
+    sourceLine: null,
+    targetLine: null,
+    sourceStartTime: "2026-08-19T22:35:00Z",
+    targetStartTime: "2026-08-19T22:35:00Z",
+    targetSide: { kind: "TEAM", team: "NYY" },
+    targetPmusOrientation: "LONG",
+    settlementCompatibility: "COMPATIBLE",
+    settlementProfile: { extraInnings: "EXACT_COMPATIBLE", postponement: "EXACT_COMPATIBLE", pushRisk: "EXACT_COMPATIBLE" },
+    candidateCounts: { exact: 1, near: 0, unverified: 0, total: 1 },
+    evidence: [],
+  };
+
+  it("downgrades status to UNVERIFIED with a dedicated reason code, without deleting the discovered evidence", () => {
+    const clamped = clampPastCutoffResult(exact);
+    expect(clamped.status).toBe("UNVERIFIED");
+    expect(clamped.reasonCode).toBe("UNVERIFIED_CUTOFF_EXCEEDED");
+    // Do not delete initial match evidence (mission requirement) -- the discovered target
+    // fields survive the clamp verbatim, even though status/reasonCode/reason changed.
+    expect(clamped.targetEventId).toBe("ev-1");
+    expect(clamped.targetMarketId).toBe("444031");
+    expect(clamped.targetFetchKey).toBe("aec-mlb-nyy-bal-2026-08-19");
+    expect(clamped.targetSide).toEqual({ kind: "TEAM", team: "NYY" });
+    expect(clamped.settlementCompatibility).toBe("COMPATIBLE");
+  });
+
+  it("the clamped result is never schedulable (isSchedulable requires status === EXACT)", () => {
+    expect(isSchedulable(clampPastCutoffResult(exact))).toBe(false);
   });
 });
 

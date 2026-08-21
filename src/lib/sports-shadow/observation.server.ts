@@ -23,6 +23,8 @@ import {
   buildObservationRows,
   buildPmusObservationPatch,
   buildTerminalFailurePatch,
+  clampPastCutoffResult,
+  computeCutoffMs,
   computeRecheckDecision,
   isSchedulable,
   type MatchRow,
@@ -228,6 +230,16 @@ export type PersistMatchResult = { matchId: string; scheduled: number; downgrade
  * existing EXACT-never-downgraded ratchet below is unchanged and is exactly what makes
  * an EXACT row's next_recheck_at permanently null in practice (a downgrade attempt
  * returns before ever reaching buildMatchRow).
+ *
+ * Task 12I / P1-O, O2/O3: a SECOND, execution-time cutoff guard runs after the ratchet
+ * check, using `d.now()` at the moment of THIS call (never the time the row was
+ * selected/scheduled) — see observation.ts's clampPastCutoffResult doc comment. This is
+ * deliberately independent of the RPC-level selection-time guard (Layer A, in the
+ * migration): a row can be legitimately selected as due just before cutoff and then
+ * actually get processed by a delayed worker after cutoff has since passed, and only a
+ * fresh client-side check at persistence time catches that race. A result that is
+ * already a re-confirmation of an existing EXACT (the ratchet's "both EXACT" pass-through
+ * above) is never clamped — it is not creating a NEW EXACT.
  */
 export async function persistVenueMatch(
   signalId: string,
@@ -244,15 +256,20 @@ export async function persistVenueMatch(
     return { matchId: existing.id, scheduled: 0, downgradeSkipped: true };
   }
 
-  const { nextRecheckAt } = computeRecheckDecision(result.status, d.now(), detectedAtMs, scheduledStartAtIso);
-  const row = buildMatchRow(signalId, result, {
-    firstMatchStatus: existing?.firstMatchStatus ?? result.status,
+  const nowMs = d.now();
+  const cutoffMs = computeCutoffMs(detectedAtMs, scheduledStartAtIso);
+  const isNewExactPastCutoff = result.status === "EXACT" && existing?.status !== "EXACT" && nowMs >= cutoffMs;
+  const effectiveResult = isNewExactPastCutoff ? clampPastCutoffResult(result) : result;
+
+  const { nextRecheckAt } = computeRecheckDecision(effectiveResult.status, nowMs, detectedAtMs, scheduledStartAtIso);
+  const row = buildMatchRow(signalId, effectiveResult, {
+    firstMatchStatus: existing?.firstMatchStatus ?? effectiveResult.status,
     recheckCount: existing ? existing.recheckCount + 1 : 0,
     nextRecheckAt,
   });
   const { id: matchId } = await d.repo.upsertMatch(row);
 
-  if (!isSchedulable(result)) return { matchId, scheduled: 0, downgradeSkipped: false };
+  if (!isSchedulable(effectiveResult)) return { matchId, scheduled: 0, downgradeSkipped: false };
 
   const scheduleRows = buildObservationRows(signalId, matchId, result.venue, detectedAtMs, sourceTimestampIso);
   if (scheduleRows === null) return { matchId, scheduled: 0, downgradeSkipped: false };

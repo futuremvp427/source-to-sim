@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildPmusObservationPatch } from "./observation";
-import { clearPmusDiscoveryCache, discoverPmusMlbMarkets, fetchPmusBook, PMUS_HOST, type PmusNetworkDeps } from "./pmus.server";
+import { clearPmusDiscoveryCache, discoverPmusMlbMarkets, DISCOVERY_MAX_PAGES, DISCOVERY_PAGE_SIZE, fetchPmusBook, PMUS_HOST, type PmusNetworkDeps } from "./pmus.server";
 import { NO_OP_LEASE_CHECKPOINT } from "./sports-lease.server";
 
 function okDeps(overrides: Partial<PmusNetworkDeps> = {}): PmusNetworkDeps {
@@ -137,6 +137,78 @@ describe("discoverPmusMlbMarkets", () => {
     const getHostCooldown = vi.fn(async () => ({ blocked: true, reason: "cooling down" }));
     await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl, getHostCooldown }))).rejects.toThrow(/cooldown/i);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  describe("Task 12I / P2-P2: pagination truncation must fail closed, never cache a partial catalog", () => {
+    function fullPageOfEvents(pageIndex: number) {
+      return Array.from({ length: DISCOVERY_PAGE_SIZE }, (_, i) => eventFixture(`p${pageIndex}-${i}`, `aec-mlb-p${pageIndex}-${i}`));
+    }
+
+    it("final page < DISCOVERY_PAGE_SIZE -> valid complete result (baseline, already covered by test 17, re-asserted for the boundary suite's own clarity)", async () => {
+      clearPmusDiscoveryCache();
+      const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ events: [eventFixture("1", "aec-mlb-nyy-bal-1")] }), { status: 200 }));
+      await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).resolves.not.toThrow();
+    });
+
+    it("exactly DISCOVERY_MAX_PAGES pages, the final page short (< DISCOVERY_PAGE_SIZE) -> valid complete result", async () => {
+      clearPmusDiscoveryCache();
+      let calls = 0;
+      const fetchImpl = vi.fn(async () => {
+        calls += 1;
+        const isFinalPage = calls === DISCOVERY_MAX_PAGES;
+        return new Response(JSON.stringify({ events: isFinalPage ? [eventFixture("last", "aec-mlb-last")] : fullPageOfEvents(calls) }), { status: 200 });
+      });
+      await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).resolves.not.toThrow();
+      expect(calls).toBe(DISCOVERY_MAX_PAGES); // proves the loop actually ran the full page budget, not fewer
+    });
+
+    it("exactly DISCOVERY_MAX_PAGES pages, the final page STILL full (=== DISCOVERY_PAGE_SIZE) -> explicit truncation failure, not a returned/cached partial catalog", async () => {
+      clearPmusDiscoveryCache();
+      let calls = 0;
+      const fetchImpl = vi.fn(async () => {
+        calls += 1;
+        return new Response(JSON.stringify({ events: fullPageOfEvents(calls) }), { status: 200 });
+      });
+      await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/truncated/i);
+      expect(calls).toBe(DISCOVERY_MAX_PAGES); // bounded at exactly DISCOVERY_MAX_PAGES, not runaway
+    });
+
+    it("missing/non-array events on any page (including the last) still fails as malformed, independent of the new truncation check", async () => {
+      clearPmusDiscoveryCache();
+      let calls = 0;
+      const fetchImpl = vi.fn(async () => {
+        calls += 1;
+        if (calls < DISCOVERY_MAX_PAGES) return new Response(JSON.stringify({ events: fullPageOfEvents(calls) }), { status: 200 });
+        return new Response(JSON.stringify({ events: "not-an-array" }), { status: 200 });
+      });
+      await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/malformed response/i);
+    });
+
+    it("a valid empty array (events: []) at the page cap remains valid completion, never a truncation failure", async () => {
+      clearPmusDiscoveryCache();
+      let calls = 0;
+      const fetchImpl = vi.fn(async () => {
+        calls += 1;
+        if (calls < DISCOVERY_MAX_PAGES) return new Response(JSON.stringify({ events: fullPageOfEvents(calls) }), { status: 200 });
+        return new Response(JSON.stringify({ events: [] }), { status: 200 });
+      });
+      await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).resolves.not.toThrow();
+      expect(calls).toBe(DISCOVERY_MAX_PAGES);
+    });
+
+    it("a truncation failure never poisons the discovery cache -- a subsequent call with a healthy short-final-page response succeeds normally", async () => {
+      clearPmusDiscoveryCache();
+      const truncatingFetchImpl = vi.fn(async () => new Response(JSON.stringify({ events: fullPageOfEvents(1) }), { status: 200 }));
+      await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl: truncatingFetchImpl }))).rejects.toThrow(/truncated/i);
+
+      const healthyFetchImpl = vi.fn(async () => new Response(JSON.stringify({ events: [eventFixture("1", "aec-mlb-nyy-bal-1")] }), { status: 200 }));
+      const candidates = await discoverPmusMlbMarkets(okDeps({ fetchImpl: healthyFetchImpl }));
+      expect(candidates.length).toBeGreaterThan(0);
+    });
+
+    it("the truncation error explicitly does NOT merely raise DISCOVERY_MAX_PAGES -- the constant itself stays the mission-specified safety bound", () => {
+      expect(DISCOVERY_MAX_PAGES).toBe(10);
+    });
   });
 
   it("waits out a granted pacing reservation before fetching", async () => {

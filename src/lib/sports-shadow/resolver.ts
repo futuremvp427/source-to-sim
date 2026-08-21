@@ -71,7 +71,9 @@ export type ResolverReasonCode =
   | "UNVERIFIED_MISSING_START_TIME"
   | "UNVERIFIED_SIDE_ORIENTATION"
   | "UNVERIFIED_RULES"
-  | "UNVERIFIED_SOURCE_OUTCOME";
+  | "UNVERIFIED_SOURCE_OUTCOME"
+  /** Task 12I / P1-O: the resolver genuinely found an EXACT target, but observation.ts's clampPastCutoffResult downgraded it to UNVERIFIED because persistence happened at or after the signal's pregame recheck cutoff -- never assigned by the resolver itself. */
+  | "UNVERIFIED_CUTOFF_EXCEEDED";
 
 /**
  * Already-ELIGIBLE (Task 3) source market identity, plus the one piece Task 3's

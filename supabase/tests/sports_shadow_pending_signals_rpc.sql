@@ -1,9 +1,10 @@
--- Task 11B + Task 12D/P1-C: find_pending_sports_shadow_signals(p_venue, p_limit)
+-- Task 11B + Task 12D/P1-C + Task 12H/P1-M + Task 12I/P1-O: find_pending_sports_shadow_signals(p_venue, p_limit)
 -- real-SQL semantic + privilege contract, run against the ACTUAL migrated database
 -- (never a mocked/fake WorkerRepository). Reproduces the specific starvation defect
--- Task 11B fixed AND the per-venue head-of-line-blocking defect Task 12D/P1-C fixed
--- (supabase/migrations/20260820230000_sports_shadow_pending_signals_rpc.sql) with real
--- rows, not an in-memory reference implementation.
+-- Task 11B fixed, the per-venue head-of-line-blocking defect Task 12D/P1-C fixed, the
+-- permanent-non-retryable defect Task 12H/P1-M fixed, and the pregame-recheck-cutoff
+-- defect Task 12I/P1-O fixed (supabase/migrations/20260820230000_..., 20260822050000_...,
+-- 20260823060000_...) with real rows, not an in-memory reference implementation.
 -- Run via: psql -f supabase/tests/sports_shadow_pending_signals_rpc.sql (after
 -- `supabase db reset --local`)
 BEGIN;
@@ -41,6 +42,27 @@ CREATE FUNCTION pg_temp.seed_non_exact_match(p_signal_id uuid, p_venue text, p_s
 BEGIN
   INSERT INTO public.sports_market_matches (signal_id, venue, match_status, first_match_status, next_recheck_at)
   VALUES (p_signal_id, p_venue, p_status, p_status, p_next_recheck_at);
+END;
+$$ LANGUAGE plpgsql;
+
+-- Task 12I/P1-O: like seed_pending_signal, but also sets scheduled_start_at explicitly --
+-- seed_pending_signal alone leaves it NULL (falling back to the created_at+4h cutoff),
+-- which is not enough to exercise the primary (scheduled_start_at-derived) cutoff branch
+-- of the RPC's own selection-time guard (Layer A).
+CREATE FUNCTION pg_temp.seed_pending_signal_scheduled(p_key text, p_created_at timestamptz, p_scheduled_start_at timestamptz) RETURNS uuid AS $$
+DECLARE
+  v_fill_id uuid;
+  v_signal_id uuid;
+BEGIN
+  INSERT INTO public.sports_shadow_source_fills (event_key, wallet, asset, side, source_ts, identity_basis)
+  VALUES ('fill-' || p_key, '0xtestwallet', '0xtestasset-' || p_key, 'BUY', 1, 'source_id')
+  RETURNING id INTO v_fill_id;
+
+  INSERT INTO public.sports_shadow_signals (episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at, bet_type, selected_side, created_at, updated_at, scheduled_start_at)
+  VALUES ('episode-' || p_key, '0xtestwallet', '0xtestasset-' || p_key, v_fill_id, p_created_at, p_created_at, 'MONEYLINE', 'TEAM', p_created_at, p_created_at, p_scheduled_start_at)
+  RETURNING id INTO v_signal_id;
+
+  RETURN v_signal_id;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -326,7 +348,56 @@ BEGIN
     RAISE EXCEPTION 'scenario 17 P1-C REGRESSION: expected exactly 1 KALSHI-due-for-recheck row, unaffected by the saturated PMUS backlog, got %', v_count;
   END IF;
 
-  RAISE NOTICE 'find_pending_sports_shadow_signals semantic scenarios 1-17 passed';
+  ------------------------------------------------------------------
+  -- Scenario 18 (Task 12I/P1-O, Layer A): a due-for-recheck NONE row IS still returned
+  -- when scheduled_start_at is still in the FUTURE (pregame, cutoff not reached) --
+  -- baseline confirming the new cutoff predicate does not wrongly exclude a genuinely
+  -- still-pregame due recheck.
+  ------------------------------------------------------------------
+  DELETE FROM public.sports_shadow_signals; DELETE FROM public.sports_shadow_source_fills;
+  v_signal_id := pg_temp.seed_pending_signal_scheduled('s18', v_base, now() + interval '2 hours');
+  PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'PMUS', 'NONE', now() - interval '1 minute');
+  IF NOT EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 18 P1-O REGRESSION: a due recheck must still be returned while genuinely pregame (scheduled_start_at in the future)';
+  END IF;
+
+  ------------------------------------------------------------------
+  -- Scenario 19 (Task 12I/P1-O, Layer A -- THE core new requirement): a due-for-recheck
+  -- NONE row is EXCLUDED once DB now() has reached/passed scheduled_start_at, regardless
+  -- of what next_recheck_at says. This is the RPC-level defense against a row that was
+  -- legitimately scheduled for recheck before cutoff but never got processed until after.
+  ------------------------------------------------------------------
+  DELETE FROM public.sports_shadow_signals; DELETE FROM public.sports_shadow_source_fills;
+  v_signal_id := pg_temp.seed_pending_signal_scheduled('s19', v_base, now() - interval '1 minute');
+  PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'PMUS', 'NONE', now() - interval '30 seconds');
+  IF EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 19 P1-O REGRESSION: a recheck must never be selected once scheduled_start_at has already passed, even if next_recheck_at is still due';
+  END IF;
+
+  ------------------------------------------------------------------
+  -- Scenario 20 (Task 12I/P1-O, Layer A fallback cutoff): scheduled_start_at is NULL
+  -- (unknown) and the 4-hour fallback cutoff (created_at + 4h) has already passed --
+  -- excluded, exactly like the primary cutoff.
+  ------------------------------------------------------------------
+  DELETE FROM public.sports_shadow_signals; DELETE FROM public.sports_shadow_source_fills;
+  v_signal_id := pg_temp.seed_pending_signal('s20', now() - interval '5 hours');
+  PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'PMUS', 'NONE', now() - interval '30 seconds');
+  IF EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 20 P1-O REGRESSION: the 4-hour fallback cutoff must also be enforced at selection time when scheduled_start_at is unknown';
+  END IF;
+
+  ------------------------------------------------------------------
+  -- Scenario 21 (Task 12I/P1-O, Layer A fallback cutoff, not-yet-reached): scheduled_start_at
+  -- is NULL and the 4-hour fallback cutoff has NOT yet passed -- still returned.
+  ------------------------------------------------------------------
+  DELETE FROM public.sports_shadow_signals; DELETE FROM public.sports_shadow_source_fills;
+  v_signal_id := pg_temp.seed_pending_signal('s21', now() - interval '1 hour');
+  PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'PMUS', 'NONE', now() - interval '30 seconds');
+  IF NOT EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 21 P1-O REGRESSION: a due recheck must still be returned before the 4-hour fallback cutoff is reached';
+  END IF;
+
+  RAISE NOTICE 'find_pending_sports_shadow_signals semantic scenarios 1-21 passed';
 END $$;
 
 ------------------------------------------------------------------

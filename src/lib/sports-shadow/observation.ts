@@ -93,18 +93,73 @@ export const RECHECK_FALLBACK_CUTOFF_MS = 4 * 60 * 60 * 1000;
 export type RecheckDecision = { nextRecheckAt: string | null };
 
 /**
- * `status` is the just-computed resolver result for THIS call (not the previous stored
- * status) — EXACT always yields nextRecheckAt=null (terminal success, ratcheted by
- * persistVenueMatch before this is even reached for a downgrade attempt). For any other
- * status: null once `nowMs` has reached the cutoff (scheduledStartAt when known, else
- * detectedAtMs + RECHECK_FALLBACK_CUTOFF_MS), otherwise nowMs + RECHECK_INTERVAL_MS.
+ * The durable pregame recheck cutoff for one signal: its own `scheduled_start_at` when
+ * known, else `detectedAtMs + RECHECK_FALLBACK_CUTOFF_MS`. Pulled out as its own function
+ * (Task 12I / P1-O) because it is now needed in THREE places that must all agree
+ * byte-for-byte: computeRecheckDecision (deciding whether to schedule another recheck),
+ * persistVenueMatch's execution-time guard (observation.server.ts, deciding whether a
+ * result arriving THIS call may still be accepted as a new EXACT), and the
+ * find_pending_sports_shadow_signals RPC's own SQL predicate (supabase/migrations/
+ * 20260822...isolation.sql), which recomputes the identical
+ * `COALESCE(scheduled_start_at, created_at + interval '4 hours')` directly in SQL so the
+ * cutoff is enforced at selection time too, not only client-side.
+ */
+export function computeCutoffMs(detectedAtMs: number, scheduledStartAtIso: string | null): number {
+  const scheduledStartMs = scheduledStartAtIso !== null ? Date.parse(scheduledStartAtIso) : Number.NaN;
+  return Number.isFinite(scheduledStartMs) ? scheduledStartMs : detectedAtMs + RECHECK_FALLBACK_CUTOFF_MS;
+}
+
+/**
+ * ============================== TASK 12I / P1-O: HARD PREGAME RECHECK CUTOFF ==============================
+ * ROOT CAUSE (Codex P1 finding): the original check was `nowMs >= cutoffMs`, i.e. it only
+ * refused to schedule ANOTHER recheck once the cutoff had ALREADY been reached by the
+ * time of THIS call. It never checked whether the recheck it was about to schedule
+ * (`nowMs + RECHECK_INTERVAL_MS`) would itself land at or after the cutoff -- so a
+ * non-EXACT result resolved in the final RECHECK_INTERVAL_MS window before cutoff could
+ * still get a `next_recheck_at` timestamp AFTER the game had already started, defeating
+ * the entire pregame-only design.
+ *
+ * FIX: also refuse to schedule when the CANDIDATE next recheck time itself would reach
+ * or exceed the cutoff (`next >= cutoffMs`, matching the mission's explicit "strictly
+ * before cutoff" / "a recheck exactly at scheduled game start is NOT pregame" language).
+ * This alone is NOT sufficient by itself (a row legitimately scheduled just before cutoff
+ * can still be PROCESSED by a delayed worker after cutoff has passed) -- see
+ * observation.server.ts's persistVenueMatch for the companion execution-time guard, and
+ * the RPC migration for the companion selection-time guard.
+ * ================================================================================
  */
 export function computeRecheckDecision(status: MatchStatus, nowMs: number, detectedAtMs: number, scheduledStartAtIso: string | null): RecheckDecision {
   if (status === "EXACT") return { nextRecheckAt: null };
-  const scheduledStartMs = scheduledStartAtIso !== null ? Date.parse(scheduledStartAtIso) : Number.NaN;
-  const cutoffMs = Number.isFinite(scheduledStartMs) ? scheduledStartMs : detectedAtMs + RECHECK_FALLBACK_CUTOFF_MS;
+  const cutoffMs = computeCutoffMs(detectedAtMs, scheduledStartAtIso);
   if (nowMs >= cutoffMs) return { nextRecheckAt: null };
-  return { nextRecheckAt: new Date(nowMs + RECHECK_INTERVAL_MS).toISOString() };
+  const nextMs = nowMs + RECHECK_INTERVAL_MS;
+  if (nextMs >= cutoffMs) return { nextRecheckAt: null }; // the candidate recheck itself would cross the cutoff -- terminal now instead
+  return { nextRecheckAt: new Date(nextMs).toISOString() };
+}
+
+/**
+ * Task 12I / P1-O, O2/O3: the execution-time companion to the cutoff above. A row can be
+ * legitimately selected as due (next_recheck_at before cutoff, or this is the signal's
+ * very first-ever resolution attempt) and then actually get PROCESSED after the cutoff
+ * has since passed (scheduler outage, long discovery pass, resumed-late worker). In that
+ * case the resolver may have honestly found a real EXACT target, but Phase-1's own rule
+ * (mission-specified) is that the MATCH DECISION must occur while recheck eligibility was
+ * still pregame -- a stale worker beginning resolution after cutoff must never be allowed
+ * to create a NEW EXACT. This downgrades such a result to UNVERIFIED (reasonCode
+ * UNVERIFIED_CUTOFF_EXCEEDED) for PERSISTENCE purposes only: the resolver's own evidence
+ * (target*, settlement*, candidateCounts, etc.) is preserved verbatim (never deleted, per
+ * the mission's explicit "do not delete initial match evidence") so the row remains
+ * useful audit evidence -- only `status`/`reasonCode`/`reason` are overridden, which is
+ * what actually gates scheduling (isSchedulable requires status === "EXACT") and what
+ * next_recheck_at is computed from (a non-EXACT status past cutoff -> null, terminal).
+ */
+export function clampPastCutoffResult(result: VenueMatchResult): VenueMatchResult {
+  return {
+    ...result,
+    status: "UNVERIFIED",
+    reasonCode: "UNVERIFIED_CUTOFF_EXCEEDED",
+    reason: `Phase-1 pregame recheck cutoff already reached by persistence time (resolver's own result: ${result.status}/${result.reasonCode}${result.reason ? ` -- ${result.reason}` : ""}); not accepted as EXACT.`,
+  };
 }
 
 /** Builds the durable row for one venue's resolver result. Persisted for EVERY status (EXACT/NEAR/NONE/UNVERIFIED) — the mission's first-100 experiment needs true match-rate accounting, not only successful matches. `recheck` carries the Task 12H/P1-M audit/scheduling fields, computed by the caller (persistVenueMatch) since they depend on durable prior state (existing.firstMatchStatus/recheckCount) this pure function does not have access to. */

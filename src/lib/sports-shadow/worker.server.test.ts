@@ -727,6 +727,36 @@ describe("runSportsShadowCycle — resolution and persistence semantics", () => 
     expect(pmusCalls).toHaveLength(1);
   });
 
+  it("Task 12I / P2-P3: a Kalshi discovery TRUNCATION failure (the new fail-closed error kalshi.server.ts's paginate now throws) is handled exactly like any other discovery failure -- discoveryFailed=true, no false NONE persisted, venue remains retryable, and PM-US proceeds independently", async () => {
+    const workerRepo = makeFakeWorkerRepo([signalRow()], []);
+    const discoverKalshi = vi.fn(async () => {
+      throw new Error("Kalshi discovery truncated: MAX_PAGES_PER_SERIES (10) exhausted while the final page still carried a non-empty continuation cursor -- catalog is incomplete, refusing to return/cache a partial result");
+    });
+    const persistVenueMatch = vi.fn(async (_signalId: string, _result: VenueMatchResult, _detectedAtMs: number, _sourceTimestampIso: string) => ({ matchId: "m1", scheduled: 0, downgradeSkipped: false }));
+    const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ workerRepo, discoverKalshi, persistVenueMatch: persistVenueMatch as never }));
+    expect(summary.sourceLane?.kalshi.discoveryFailed).toBe(true);
+    expect(summary.sourceLane?.kalshi.attempted).toBe(0);
+    const kalshiCalls = persistVenueMatch.mock.calls.filter((c) => (c[1] as VenueMatchResult).venue === "KALSHI");
+    expect(kalshiCalls).toHaveLength(0); // never persisted as NONE, not persisted at all -- remains retryable next cycle
+    const pmusCalls = persistVenueMatch.mock.calls.filter((c) => (c[1] as VenueMatchResult).venue === "PMUS");
+    expect(pmusCalls).toHaveLength(1); // PM-US proceeds independently, unaffected by Kalshi's truncated catalog
+  });
+
+  it("Task 12I / P2-P3: a PM-US discovery TRUNCATION failure (the new fail-closed error pmus.server.ts's discoverPmusMlbMarkets now throws) is handled exactly like any other discovery failure -- discoveryFailed=true, no false NONE persisted, venue remains retryable, and Kalshi proceeds independently", async () => {
+    const workerRepo = makeFakeWorkerRepo([signalRow()], []);
+    const discoverPmus = vi.fn(async () => {
+      throw new Error("PM-US discovery truncated: DISCOVERY_MAX_PAGES (10) exhausted while the final page was still full (200 events) -- completeness unproven, refusing to return/cache a partial catalog");
+    });
+    const persistVenueMatch = vi.fn(async (_signalId: string, _result: VenueMatchResult, _detectedAtMs: number, _sourceTimestampIso: string) => ({ matchId: "m1", scheduled: 0, downgradeSkipped: false }));
+    const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ workerRepo, discoverPmus, persistVenueMatch: persistVenueMatch as never }));
+    expect(summary.sourceLane?.pmus.discoveryFailed).toBe(true);
+    expect(summary.sourceLane?.pmus.attempted).toBe(0);
+    const pmusCalls = persistVenueMatch.mock.calls.filter((c) => (c[1] as VenueMatchResult).venue === "PMUS");
+    expect(pmusCalls).toHaveLength(0);
+    const kalshiCalls = persistVenueMatch.mock.calls.filter((c) => (c[1] as VenueMatchResult).venue === "KALSHI");
+    expect(kalshiCalls).toHaveLength(1); // Kalshi proceeds independently, unaffected by PM-US's truncated catalog
+  });
+
   it("20. a genuine semantic NONE from the resolver (successful discovery, no matching candidate) IS persisted", async () => {
     const workerRepo = makeFakeWorkerRepo([signalRow()], []);
     const persistVenueMatch = vi.fn(async (_signalId: string, _result: VenueMatchResult, _detectedAtMs: number, _sourceTimestampIso: string) => ({ matchId: "m1", scheduled: 0, downgradeSkipped: false }));

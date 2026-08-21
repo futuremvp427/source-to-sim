@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { clearKalshiDiscoveryCache, discoverKalshiMlbMarkets, fetchKalshiBook, KALSHI_HOST, type KalshiNetworkDeps } from "./kalshi.server";
+import { clearKalshiDiscoveryCache, discoverKalshiMlbMarkets, fetchKalshiBook, KALSHI_HOST, MAX_PAGES_PER_SERIES, type KalshiNetworkDeps } from "./kalshi.server";
 import { buildKalshiObservationPatch } from "./observation";
 import { NO_OP_LEASE_CHECKPOINT } from "./sports-lease.server";
 
@@ -183,6 +183,111 @@ describe("discoverKalshiMlbMarkets", () => {
     const getHostCooldown = vi.fn(async () => ({ blocked: true, reason: "cooling down" }));
     await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl, getHostCooldown }))).rejects.toThrow(/cooldown/i);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  describe("Task 12I / P2-P1: pagination truncation must fail closed, never cache a partial catalog", () => {
+    /** Builds a fetchImpl where /markets (and, independently, /events) always returns one item plus a non-empty cursor -- i.e. upstream always claims there's more, page after page. */
+    function alwaysMorePagesFetchImpl() {
+      return vi.fn(async (url: string | URL) => {
+        const u = String(url);
+        if (u.includes("/markets")) return new Response(JSON.stringify({ markets: [market("KXMLBGAME-1-SD")], cursor: "more" }), { status: 200 });
+        return new Response(JSON.stringify({ events: [EVENT], cursor: "more" }), { status: 200 });
+      }) as unknown as typeof fetch;
+    }
+
+    it("fewer than max pages with an empty cursor -> valid, no truncation error (baseline, already covered by test 13/14, re-asserted here for the boundary suite's own clarity)", async () => {
+      clearKalshiDiscoveryCache();
+      const fetchImpl = routeByPath({ "/markets": { markets: [market("KXMLBGAME-1-SD")], cursor: "" }, "/events": { events: [EVENT], cursor: "" } });
+      await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).resolves.not.toThrow();
+    });
+
+    it("exactly MAX_PAGES_PER_SERIES pages, final page's cursor absent/empty -> valid complete result", async () => {
+      clearKalshiDiscoveryCache();
+      let marketsCalls = 0;
+      const fetchImpl = vi.fn(async (url: string | URL) => {
+        const u = String(url);
+        if (u.includes("/markets")) {
+          marketsCalls += 1;
+          const isFinalPage = marketsCalls % MAX_PAGES_PER_SERIES === 0;
+          return new Response(JSON.stringify({ markets: [market(`KXMLBGAME-1-P${marketsCalls}`)], cursor: isFinalPage ? "" : "more" }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ events: [EVENT], cursor: "" }), { status: 200 });
+      }) as unknown as typeof fetch;
+      await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).resolves.not.toThrow();
+      // 3 series x MAX_PAGES_PER_SERIES /markets pages each -- proves the loop actually ran the full budget, not fewer.
+      expect(marketsCalls).toBe(3 * MAX_PAGES_PER_SERIES);
+    });
+
+    it("exactly MAX_PAGES_PER_SERIES pages, final page's cursor still present -> explicit truncation failure, not a returned/cached partial catalog", async () => {
+      clearKalshiDiscoveryCache();
+      const fetchImpl = alwaysMorePagesFetchImpl();
+      await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/truncated/i);
+    });
+
+    it("the truncation-failing pagination call issues exactly MAX_PAGES_PER_SERIES page fetches for the failing endpoint, never more", async () => {
+      clearKalshiDiscoveryCache();
+      let marketsCalls = 0;
+      const fetchImpl = vi.fn(async (url: string | URL) => {
+        const u = String(url);
+        if (u.includes("/markets")) {
+          marketsCalls += 1;
+          return new Response(JSON.stringify({ markets: [market("KXMLBGAME-1-SD")], cursor: "more" }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ events: [EVENT], cursor: "" }), { status: 200 });
+      }) as unknown as typeof fetch;
+      await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/truncated/i);
+      // The FIRST series' /markets pagination is what throws (deterministic series order) -- bounded at exactly MAX_PAGES_PER_SERIES, not runaway.
+      expect(marketsCalls).toBe(MAX_PAGES_PER_SERIES);
+    });
+
+    it("truncation on /events (not just /markets) is caught the same way", async () => {
+      clearKalshiDiscoveryCache();
+      const fetchImpl = vi.fn(async (url: string | URL) => {
+        const u = String(url);
+        if (u.includes("/events")) return new Response(JSON.stringify({ events: [EVENT], cursor: "more" }), { status: 200 });
+        return new Response(JSON.stringify({ markets: [], cursor: "" }), { status: 200 });
+      }) as unknown as typeof fetch;
+      await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/truncated/i);
+    });
+
+    it("a genuinely empty final page (items.length === 0) at any point, even with a stray non-empty cursor, is treated as complete -- not a truncation failure", async () => {
+      clearKalshiDiscoveryCache();
+      const fetchImpl = routeByPath({ "/markets": { markets: [], cursor: "weird-but-empty-page" }, "/events": { events: [EVENT], cursor: "" } });
+      await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).resolves.not.toThrow();
+    });
+
+    it("a truncation failure never poisons the discovery cache -- a subsequent call with a healthy complete response succeeds normally", async () => {
+      clearKalshiDiscoveryCache();
+      await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl: alwaysMorePagesFetchImpl() }))).rejects.toThrow(/truncated/i);
+
+      const healthyFetchImpl = routeByPath({ "/markets": { markets: [market("KXMLBGAME-1-SD")], cursor: "" }, "/events": { events: [EVENT], cursor: "" } });
+      const candidates = await discoverKalshiMlbMarkets(okDeps({ fetchImpl: healthyFetchImpl }));
+      expect(candidates.some((c) => c.marketTicker === "KXMLBGAME-1-SD")).toBe(true);
+    });
+
+    it("malformed cursor semantics (Task 12F/P1-I) remain fail-closed and independent of the new truncation check", async () => {
+      clearKalshiDiscoveryCache();
+      const fetchImpl = vi.fn(async (url: string | URL) => {
+        if (String(url).includes("/markets")) return new Response(JSON.stringify({ markets: [], cursor: 12345 }), { status: 200 });
+        return new Response(JSON.stringify({ events: [], cursor: "" }), { status: 200 });
+      }) as unknown as typeof fetch;
+      await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/malformed response.*cursor/i);
+    });
+
+    it("a later-page malformed response still fails closed and is independent of the new truncation check", async () => {
+      clearKalshiDiscoveryCache();
+      let marketsPageCount = 0;
+      const fetchImpl = vi.fn(async (url: string | URL) => {
+        const u = String(url);
+        if (u.includes("/markets")) {
+          marketsPageCount += 1;
+          if (marketsPageCount === 1) return new Response(JSON.stringify({ markets: [market("KXMLBGAME-1-SD")], cursor: "next-page" }), { status: 200 });
+          return new Response(JSON.stringify({ markets: "not-an-array", cursor: "" }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ events: [EVENT], cursor: "" }), { status: 200 });
+      }) as unknown as typeof fetch;
+      await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/malformed response.*markets/i);
+    });
   });
 });
 
