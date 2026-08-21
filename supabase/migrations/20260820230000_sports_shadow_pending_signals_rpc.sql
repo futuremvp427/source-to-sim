@@ -13,13 +13,31 @@
 -- edge case; it is guaranteed the moment cumulative signal count exceeds 200.
 --
 -- Fix: push the "missing a match" condition into SQL itself via an explicit anti-join
--- (LEFT JOIN ... WHERE match.id IS NULL) against sports_market_matches, per venue,
--- BEFORE the ORDER BY/LIMIT is applied. This makes the boundedness apply to genuinely
--- pending rows, not to a fixed-size historical prefix -- the invariant the mission
--- requires: return the globally oldest PENDING signals, bounded by the caller's batch
--- size, full stop. No new table: everything needed already lives in
--- sports_shadow_signals + sports_market_matches (see
+-- (LEFT JOIN ... WHERE match.id IS NULL) against sports_market_matches. This makes the
+-- boundedness apply to genuinely pending rows, not to a fixed-size historical prefix --
+-- the invariant the mission requires: return the globally oldest PENDING signals,
+-- bounded by the caller's batch size, full stop. No new table: everything needed
+-- already lives in sports_shadow_signals + sports_market_matches (see
 -- 20260819220000_sports_forward_shadow_phase1.sql).
+--
+-- ============================== TASK 12D / P1-C: PER-VENUE FAIRNESS ==============================
+-- ROOT CAUSE (found by review after this RPC was first written): pooling BOTH venues into
+-- one globally-bounded batch (`WHERE pmus_match.id IS NULL OR kalshi_match.id IS NULL`)
+-- creates cross-venue head-of-line blocking. If PMUS has a sustained outage, the oldest
+-- PMUS-missing signals occupy every one of the batch's slots, cycle after cycle -- even
+-- though NEWER signals only missing Kalshi could resolve right now, independently. The
+-- symptom is structurally identical to the #201 starvation defect this RPC was built to
+-- fix, just recurring one level down: at the per-venue level instead of the whole-signal
+-- level.
+--
+-- FIX: this RPC is now venue-scoped (`p_venue`) rather than venue-combined. A caller
+-- queries PMUS-pending and KALSHI-pending as two SEPARATE bounded calls, each independently
+-- ordered (created_at ASC, id ASC) and independently limited -- so a stuck/failing venue's
+-- backlog can never consume the other venue's batch slots. This migration has never been
+-- applied to any database (confirmed throughout this unshipped PR), so the ORIGINAL
+-- single-arg venue-combined function is revised in place here rather than layered under a
+-- second, conflicting queue model -- see the mission's own explicit instruction to update
+-- this contract, not add another one.
 --
 -- Read-only, single SELECT, LANGUAGE sql (no procedural logic needed) -- deliberately
 -- the smallest correct fix, not a new subsystem. SECURITY INVOKER (not DEFINER, unlike
@@ -31,7 +49,10 @@
 -- default-deny), not a privilege escalation; service_role's BYPASSRLS makes this
 -- function behave identically to the application's existing service-role-only access
 -- pattern for every other sports_shadow_* table read.
+DROP FUNCTION IF EXISTS public.find_pending_sports_shadow_signals(integer);
+
 CREATE OR REPLACE FUNCTION public.find_pending_sports_shadow_signals(
+  p_venue text,
   p_limit integer
 )
 RETURNS TABLE (
@@ -79,7 +100,11 @@ AS $$
     ON pmus_match.signal_id = s.id AND pmus_match.venue = 'PMUS'
   LEFT JOIN public.sports_market_matches kalshi_match
     ON kalshi_match.signal_id = s.id AND kalshi_match.venue = 'KALSHI'
-  WHERE pmus_match.id IS NULL OR kalshi_match.id IS NULL
+  WHERE
+    -- Fails closed to zero rows for any p_venue value other than the two legal venues --
+    -- never silently falls back to the old combined-OR behavior.
+    (p_venue = 'PMUS' AND pmus_match.id IS NULL)
+    OR (p_venue = 'KALSHI' AND kalshi_match.id IS NULL)
   ORDER BY s.created_at ASC, s.id ASC
   -- NULL-safe, non-negative, and clamped to a sane ceiling: a bare `LIMIT p_limit`
   -- would silently become UNBOUNDED (Postgres treats LIMIT NULL as "no limit") if a
@@ -89,5 +114,5 @@ AS $$
   LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 0), 100);
 $$;
 
-REVOKE ALL ON FUNCTION public.find_pending_sports_shadow_signals(integer) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.find_pending_sports_shadow_signals(integer) TO service_role;
+REVOKE ALL ON FUNCTION public.find_pending_sports_shadow_signals(text, integer) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.find_pending_sports_shadow_signals(text, integer) TO service_role;

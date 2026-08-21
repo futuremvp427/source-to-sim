@@ -12,9 +12,11 @@
  *   - OBSERVATION lane (`OBSERVATION_LOCK_ID`): drains Task 8's existing durable due
  *     queue, bounded to a small row count so its worst-case wall time stays comfortably
  *     inside its own lease TTL.
- *   - SOURCE/MATCHING lane (`SOURCE_LOCK_ID`): polls each configured wallet through the
- *     EXISTING Task 10 poller, then recovers and resolves any signal (from this cycle OR
- *     any earlier, possibly crashed, cycle) still missing a PM-US or Kalshi match.
+ *   - SOURCE/MATCHING lane (`SOURCE_LOCK_ID`): polls each configured wallet (fairly
+ *     rotated — see Task 12D/P1-B below) through the EXISTING Task 10 poller, then
+ *     recovers and resolves any signal (from this cycle OR any earlier, possibly
+ *     crashed, cycle) still missing a PM-US or Kalshi match, independently PER VENUE
+ *     (see Task 12D/P1-C below).
  *
  * Never imports depth-walk.ts (Task 9) — nothing here consumes it; no direct contract
  * requires it. Never writes observation rows directly — that remains exclusively Task
@@ -29,11 +31,11 @@ import type { KalshiCandidate } from "./kalshi";
 import { persistVenueMatch, takeDueSportsShadowObservations, type ObservationDeps } from "./observation.server";
 import { discoverPmusMlbMarkets } from "./pmus.server";
 import type { PmusCandidate } from "./pmus";
-import { resolveKalshiMatch, resolvePmusMatch, type MatchStatus } from "./resolver";
+import { resolveKalshiMatch, resolvePmusMatch, type MatchStatus, type VenueMatchResult } from "./resolver";
 import { acquireSportsLease, releaseSportsLease, supabaseSportsLeaseRepository, type SportsLeaseRepository } from "./sports-lease.server";
 import { pollSportsShadowWallet, supabasePollRepository, type WalletPollDeps, type WalletPollResult } from "./source-poll.server";
-import type { BetType } from "./types";
-import { PENDING_BATCH_SIZE, budgetExceeded, detectedAtMsFromSignal, toSourceSignal, type PendingSignal } from "./worker";
+import type { BetType, Venue } from "./types";
+import { PENDING_BATCH_SIZE, budgetExceeded, detectedAtMsFromSignal, nextRotationIndex, rotateWallets, toSourceSignal, type PendingSignal } from "./worker";
 
 export const OBSERVATION_LOCK_ID = "sports_shadow_observations";
 export const SOURCE_LOCK_ID = "sports_shadow_source";
@@ -90,12 +92,27 @@ export const FINAL_OBSERVATION_STAGE_DEADLINE_MS_FOR_TEST = FINAL_OBSERVATION_ST
 export const SOURCE_LANE_BUDGET_MS = 30_000;
 export const SOURCE_LEASE_TTL_SECONDS = 60;
 
+const WALLET_CURSOR_ID = "source_wallet_rotation";
+
 /* ------------------------------------------------------------------ */
-/* Pending-signal repository — Task 11B: backed by a single RPC          */
+/* Repository — Task 11B pending RPC (now per-venue, Task 12D/P1-C)      */
+/* and the Task 12D/P1-B wallet rotation cursor                         */
 /* ------------------------------------------------------------------ */
 
 export type WorkerRepository = {
-  findPendingSignals(limit: number): Promise<PendingSignal[]>;
+  /**
+   * Backed by find_pending_sports_shadow_signals(p_venue, p_limit) — see
+   * supabase/migrations/20260820230000_sports_shadow_pending_signals_rpc.sql. Returns
+   * ONLY signals missing the ONE requested venue, ordered (created_at ASC, id ASC),
+   * clamped. Calling this once per venue (never combined) is what makes a stuck/failing
+   * venue's backlog structurally unable to consume the other venue's batch slots — see
+   * this module's Task 12D/P1-C doc comment.
+   */
+  findPendingSignalsForVenue(venue: Venue, limit: number): Promise<PendingSignal[]>;
+  /** Durable wallet-rotation cursor read, fresh every cycle — see Task 12D/P1-B. */
+  getWalletCursor(): Promise<number>;
+  /** Best-effort durable advance of the rotation cursor for the next cycle. */
+  setWalletCursor(next: number): Promise<void>;
 };
 
 type RawPendingSignalRow = {
@@ -118,20 +135,13 @@ type RawPendingSignalRow = {
 };
 
 /**
- * Backed by find_pending_sports_shadow_signals (see
- * supabase/migrations/20260820230000_sports_shadow_pending_signals_rpc.sql): a single
- * read-only SQL RPC that anti-joins sports_shadow_signals against
- * sports_market_matches per venue, orders by (created_at ASC, id ASC), and clamps the
- * caller-supplied limit — so the returned rows are always the globally oldest genuinely
- * pending signals, never a fixed-size historical prefix (see worker.ts's Task 11B doc
- * comment for the starvation bug this replaces). Cast `as never` on both the RPC name
- * and params — same established pattern as reserve_http_request_slot/
- * record_http_rate_limit/acquire_worker_lease: generated Supabase types lag this
- * unapplied migration.
+ * Cast `as never` on both the RPC name and params, and on the new sports_shadow_wallet_cursor
+ * table — same established pattern as reserve_http_request_slot/record_http_rate_limit/
+ * acquire_worker_lease: generated Supabase types lag these unapplied migrations.
  */
 export const supabaseWorkerRepository: WorkerRepository = {
-  async findPendingSignals(limit) {
-    const { data, error } = await supabaseAdmin.rpc("find_pending_sports_shadow_signals" as never, { p_limit: limit } as never);
+  async findPendingSignalsForVenue(venue, limit) {
+    const { data, error } = await supabaseAdmin.rpc("find_pending_sports_shadow_signals" as never, { p_venue: venue, p_limit: limit } as never);
     if (error) throw new Error(error.message);
     return ((data ?? []) as unknown as RawPendingSignalRow[]).map((r) => ({
       id: r.id,
@@ -152,11 +162,25 @@ export const supabaseWorkerRepository: WorkerRepository = {
       missingKalshi: r.missing_kalshi,
     }));
   },
-};
 
-export async function findPendingSignals(repo: WorkerRepository, batchSize: number = PENDING_BATCH_SIZE): Promise<PendingSignal[]> {
-  return repo.findPendingSignals(batchSize);
-}
+  async getWalletCursor() {
+    const { data, error } = await supabaseAdmin
+      .from("sports_shadow_wallet_cursor" as never)
+      .select("next_wallet_index")
+      .eq("id", WALLET_CURSOR_ID)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data as unknown as { next_wallet_index: number } | null)?.next_wallet_index ?? 0;
+  },
+
+  async setWalletCursor(next) {
+    const { error } = await supabaseAdmin
+      .from("sports_shadow_wallet_cursor" as never)
+      .update({ next_wallet_index: next, updated_at: new Date().toISOString() } as never)
+      .eq("id", WALLET_CURSOR_ID);
+    if (error) throw new Error(error.message);
+  },
+};
 
 /* ------------------------------------------------------------------ */
 /* Deps                                                                 */
@@ -205,10 +229,15 @@ export type WalletSummary = {
   isBootstrap: boolean;
   newSignals: number;
   backlogTruncated: boolean;
+  orphanedFillsRecovered: number;
   error: string | null;
 };
 
 export type VenueResolutionSummary = {
+  pendingFound: number;
+  pendingProcessed: number;
+  /** True when pendingFound === the bounded per-venue batch size — more pending work for THIS venue may exist beyond this cycle's batch. */
+  pendingRemainingHint: boolean;
   attempted: number;
   exact: number;
   near: number;
@@ -220,13 +249,11 @@ export type VenueResolutionSummary = {
 
 export type SourceLaneResult = {
   acquired: boolean;
+  /** The durable rotation cursor value this cycle started from — see Task 12D/P1-B. */
+  walletRotationStartIndex: number;
   walletsAttempted: number;
   walletSummaries: WalletSummary[];
   newSignalsCreated: number;
-  pendingFound: number;
-  pendingProcessed: number;
-  /** True when pendingFound === the bounded batch size — more pending work may exist beyond this cycle's batch. */
-  pendingRemainingHint: boolean;
   pmus: VenueResolutionSummary;
   kalshi: VenueResolutionSummary;
 };
@@ -248,7 +275,19 @@ function emptyObservationResult(): ObservationLaneResult {
 }
 
 function emptyVenueSummary(): VenueResolutionSummary {
-  return { attempted: 0, exact: 0, near: 0, none: 0, unverified: 0, discoveryFailed: false, errors: 0 };
+  return { pendingFound: 0, pendingProcessed: 0, pendingRemainingHint: false, attempted: 0, exact: 0, near: 0, none: 0, unverified: 0, discoveryFailed: false, errors: 0 };
+}
+
+function emptySourceLaneResult(acquired: boolean): SourceLaneResult {
+  return {
+    acquired,
+    walletRotationStartIndex: 0,
+    walletsAttempted: 0,
+    walletSummaries: [],
+    newSignalsCreated: 0,
+    pmus: emptyVenueSummary(),
+    kalshi: emptyVenueSummary(),
+  };
 }
 
 function tallyVenue(summary: VenueResolutionSummary, status: MatchStatus): void {
@@ -291,110 +330,123 @@ async function runObservationLane(d: SportsShadowWorkerDeps, maxRows: number, de
 /* Source / matching lane                                              */
 /* ------------------------------------------------------------------ */
 
-async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDeps, errors: string[]): Promise<SourceLaneResult> {
-  const walletSummaries: WalletSummary[] = [];
-  let newSignalsCreated = 0;
-  const laneStartMs = d.now();
+/**
+ * ============================== TASK 12D / P1-C: PER-VENUE PENDING FAIRNESS ==============================
+ * ROOT CAUSE (Codex P1 finding): the original combined query
+ * (`WHERE pmus_match.id IS NULL OR kalshi_match.id IS NULL`) pooled both venues into ONE
+ * globally-bounded batch. A sustained PMUS outage meant the oldest PMUS-missing signals
+ * occupied every one of the batch's slots, cycle after cycle — even though NEWER signals
+ * only missing Kalshi could resolve right now, independently. Structurally identical to
+ * the #201 starvation defect Task 11B fixed, recurring one level down.
+ *
+ * FIX: resolveVenuePending is called ONCE PER VENUE, each backed by its own bounded
+ * `findPendingSignalsForVenue` call and its own independent discovery/resolve/persist
+ * pass. A PMUS discovery failure returns early for PMUS ONLY (nothing for PMUS is
+ * resolved or persisted this cycle, left retryable) and never touches Kalshi's
+ * processing at all — the two are fully separate, sequential calls with no shared
+ * short-circuit between them.
+ * ================================================================================
+ */
+async function resolveVenuePending(venue: Venue, d: SportsShadowWorkerDeps, errors: string[]): Promise<VenueResolutionSummary> {
+  const summary = emptyVenueSummary();
 
-  for (const wallet of config.wallets) {
-    if (budgetExceeded(d.now() - laneStartMs, SOURCE_LANE_BUDGET_MS)) break; // remaining wallets stay durable for the next cycle
-    try {
-      const result: WalletPollResult = await d.pollSportsShadowWallet(wallet, config.goLiveAtMs, d.sourcePollDeps);
-      newSignalsCreated += result.newSignals.length;
-      walletSummaries.push({ wallet: result.wallet, isBootstrap: result.isBootstrap, newSignals: result.newSignals.length, backlogTruncated: result.backlogTruncated, error: result.error });
-      if (result.error) errors.push(`wallet ${wallet}: ${result.error}`);
-    } catch (err) {
-      // One bad wallet must not prevent the next wallet when budget allows.
-      const message = err instanceof Error ? err.message : "unknown error";
-      walletSummaries.push({ wallet, isBootstrap: false, newSignals: 0, backlogTruncated: false, error: message });
-      errors.push(`wallet ${wallet} poll threw: ${message}`);
-    }
+  let pending: PendingSignal[];
+  try {
+    pending = await d.workerRepo.findPendingSignalsForVenue(venue, PENDING_BATCH_SIZE);
+  } catch (err) {
+    errors.push(`${venue} pending query failed: ${err instanceof Error ? err.message : "unknown error"}`);
+    return summary;
   }
-
-  // Durable pending-signal recovery: re-queried fresh against the database every cycle
-  // via find_pending_sports_shadow_signals (Task 11B), so a signal orphaned by a crash
-  // between persist and resolution (this cycle's OR any earlier cycle's) is found here
-  // exactly the same way a same-cycle new signal is — and, critically, is the globally
-  // oldest genuinely-pending signal, never masked by a fixed-size historical prefix of
-  // already-resolved rows (see worker.ts's Task 11B doc comment).
-  const pending = await findPendingSignals(d.workerRepo, PENDING_BATCH_SIZE);
-
-  const needsPmus = pending.some((p) => p.missingPmus);
-  const needsKalshi = pending.some((p) => p.missingKalshi);
+  summary.pendingFound = pending.length;
+  summary.pendingRemainingHint = pending.length >= PENDING_BATCH_SIZE;
+  if (pending.length === 0) return summary;
 
   let pmusCandidates: PmusCandidate[] = [];
-  let pmusDiscoveryFailed = false;
-  if (needsPmus) {
-    try {
-      pmusCandidates = await d.discoverPmus();
-    } catch (err) {
-      pmusDiscoveryFailed = true;
-      errors.push(`PMUS discovery failed: ${err instanceof Error ? err.message : "unknown error"}`);
-    }
-  }
-
   let kalshiCandidates: KalshiCandidate[] = [];
-  let kalshiDiscoveryFailed = false;
-  if (needsKalshi) {
-    try {
-      kalshiCandidates = await d.discoverKalshi();
-    } catch (err) {
-      kalshiDiscoveryFailed = true;
-      errors.push(`Kalshi discovery failed: ${err instanceof Error ? err.message : "unknown error"}`);
-    }
+  try {
+    if (venue === "PMUS") pmusCandidates = await d.discoverPmus();
+    else kalshiCandidates = await d.discoverKalshi();
+  } catch (err) {
+    summary.discoveryFailed = true;
+    errors.push(`${venue} discovery failed: ${err instanceof Error ? err.message : "unknown error"}`);
+    return summary; // entire venue left retryable this cycle -- never converted into a semantic NONE
   }
 
-  const pmus = emptyVenueSummary();
-  pmus.discoveryFailed = pmusDiscoveryFailed;
-  const kalshi = emptyVenueSummary();
-  kalshi.discoveryFailed = kalshiDiscoveryFailed;
-
-  let pendingProcessed = 0;
   for (const signal of pending) {
     const source = toSourceSignal(signal);
     if (!source) continue; // missing conditionId -- should not happen for a Task-10-persisted signal; left pending rather than fabricated
     const detectedAtMs = detectedAtMsFromSignal(signal);
-    let touchedThisSignal = false;
-
-    // PMUS and Kalshi are resolved and persisted fully independently: a PMUS failure
-    // must never prevent a Kalshi result for the same signal, and vice versa.
-    if (signal.missingPmus && !pmusDiscoveryFailed) {
-      touchedThisSignal = true;
-      pmus.attempted += 1;
-      try {
-        const result = resolvePmusMatch(source, pmusCandidates);
-        await d.persistVenueMatch(signal.id, result, detectedAtMs, signal.sourceFirstFillAtIso, d.observationDeps);
-        tallyVenue(pmus, result.status);
-      } catch (err) {
-        pmus.errors += 1;
-        errors.push(`signal ${signal.id} PMUS resolve/persist failed: ${err instanceof Error ? err.message : "unknown error"}`);
-      }
+    summary.attempted += 1;
+    try {
+      const result: VenueMatchResult = venue === "PMUS" ? resolvePmusMatch(source, pmusCandidates) : resolveKalshiMatch(source, kalshiCandidates);
+      await d.persistVenueMatch(signal.id, result, detectedAtMs, signal.sourceFirstFillAtIso, d.observationDeps);
+      tallyVenue(summary, result.status);
+      summary.pendingProcessed += 1;
+    } catch (err) {
+      summary.errors += 1;
+      errors.push(`signal ${signal.id} ${venue} resolve/persist failed: ${err instanceof Error ? err.message : "unknown error"}`);
     }
-
-    if (signal.missingKalshi && !kalshiDiscoveryFailed) {
-      touchedThisSignal = true;
-      kalshi.attempted += 1;
-      try {
-        const result = resolveKalshiMatch(source, kalshiCandidates);
-        await d.persistVenueMatch(signal.id, result, detectedAtMs, signal.sourceFirstFillAtIso, d.observationDeps);
-        tallyVenue(kalshi, result.status);
-      } catch (err) {
-        kalshi.errors += 1;
-        errors.push(`signal ${signal.id} Kalshi resolve/persist failed: ${err instanceof Error ? err.message : "unknown error"}`);
-      }
-    }
-
-    if (touchedThisSignal) pendingProcessed += 1;
   }
+
+  return summary;
+}
+
+async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDeps, errors: string[]): Promise<SourceLaneResult> {
+  let startIndex = 0;
+  try {
+    startIndex = await d.workerRepo.getWalletCursor();
+  } catch (err) {
+    errors.push(`wallet cursor read failed: ${err instanceof Error ? err.message : "unknown error"}`); // falls back to 0 -- safe, just temporarily less fair
+  }
+  const orderedWallets = rotateWallets(config.wallets, startIndex);
+
+  const walletSummaries: WalletSummary[] = [];
+  let newSignalsCreated = 0;
+  let walletsAttempted = 0;
+  const laneStartMs = d.now();
+
+  for (const wallet of orderedWallets) {
+    if (budgetExceeded(d.now() - laneStartMs, SOURCE_LANE_BUDGET_MS)) break; // remaining wallets stay durable for the next cycle -- and the rotation cursor below advances only past what WAS attempted, so they are tried FIRST next cycle
+    try {
+      const result: WalletPollResult = await d.pollSportsShadowWallet(wallet, config.goLiveAtMs, d.sourcePollDeps);
+      newSignalsCreated += result.newSignals.length;
+      walletSummaries.push({
+        wallet: result.wallet,
+        isBootstrap: result.isBootstrap,
+        newSignals: result.newSignals.length,
+        backlogTruncated: result.backlogTruncated,
+        orphanedFillsRecovered: result.orphanedFillsRecovered,
+        error: result.error,
+      });
+      if (result.error) errors.push(`wallet ${wallet}: ${result.error}`);
+    } catch (err) {
+      // One bad wallet must not prevent the next wallet when budget allows.
+      const message = err instanceof Error ? err.message : "unknown error";
+      walletSummaries.push({ wallet, isBootstrap: false, newSignals: 0, backlogTruncated: false, orphanedFillsRecovered: 0, error: message });
+      errors.push(`wallet ${wallet} poll threw: ${message}`);
+    }
+    walletsAttempted += 1;
+  }
+
+  try {
+    const next = nextRotationIndex(startIndex, walletsAttempted, config.wallets.length);
+    await d.workerRepo.setWalletCursor(next);
+  } catch (err) {
+    // Best-effort: a failed cursor write just means fairness does not advance THIS
+    // cycle -- the next cycle reads the same (stale) startIndex and tries again, no
+    // worse than the pre-Task-12D behavior, never a crash or lost work.
+    errors.push(`wallet cursor write failed: ${err instanceof Error ? err.message : "unknown error"}`);
+  }
+
+  const pmus = await resolveVenuePending("PMUS", d, errors);
+  const kalshi = await resolveVenuePending("KALSHI", d, errors);
 
   return {
     acquired: true,
-    walletsAttempted: walletSummaries.length,
+    walletRotationStartIndex: startIndex,
+    walletsAttempted,
     walletSummaries,
     newSignalsCreated,
-    pendingFound: pending.length,
-    pendingProcessed,
-    pendingRemainingHint: pending.length >= PENDING_BATCH_SIZE,
     pmus,
     kalshi,
   };
@@ -437,17 +489,7 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
   let sourceLane: SourceLaneResult;
   const sourceLease = await acquireSportsLease(SOURCE_LOCK_ID, randomWorkerId("sports-source"), SOURCE_LEASE_TTL_SECONDS, d.leaseRepo);
   if (sourceLease === null) {
-    sourceLane = {
-      acquired: false,
-      walletsAttempted: 0,
-      walletSummaries: [],
-      newSignalsCreated: 0,
-      pendingFound: 0,
-      pendingProcessed: 0,
-      pendingRemainingHint: false,
-      pmus: emptyVenueSummary(),
-      kalshi: emptyVenueSummary(),
-    };
+    sourceLane = emptySourceLaneResult(false);
   } else {
     try {
       sourceLane = await runSourceLane(config, d, errors);
@@ -456,17 +498,7 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
       const message = err instanceof Error ? err.message : "unknown error";
       errors.push(`source lane failed: ${message}`);
       await releaseSportsLease(sourceLease, { state: "error", lastError: message }, d.leaseRepo);
-      sourceLane = {
-        acquired: true,
-        walletsAttempted: 0,
-        walletSummaries: [],
-        newSignalsCreated: 0,
-        pendingFound: 0,
-        pendingProcessed: 0,
-        pendingRemainingHint: false,
-        pmus: emptyVenueSummary(),
-        kalshi: emptyVenueSummary(),
-      };
+      sourceLane = emptySourceLaneResult(true);
     }
   }
 

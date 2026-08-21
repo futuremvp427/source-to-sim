@@ -79,3 +79,41 @@ export function detectedAtMsFromSignal(row: SignalRow): number {
 export function budgetExceeded(elapsedMs: number, budgetMs: number): boolean {
   return elapsedMs >= budgetMs;
 }
+
+/**
+ * ============================== TASK 12D / P1-B: WALLET FAIRNESS ==============================
+ * ROOT CAUSE (Codex P1 finding): runSourceLane iterated `config.wallets` in the same fixed
+ * (alphabetically sorted) order every cycle. If an early wallet consistently consumed the
+ * entire SOURCE_LANE_BUDGET_MS, budgetExceeded() broke the loop before later wallets were
+ * ever attempted — not delayed, permanently skipped, cycle after cycle, forever.
+ *
+ * FIX: a durable rotation cursor (see worker.server.ts's WorkerRepository — one row,
+ * matching the smallest-possible-table philosophy already used for http_rate_limits/
+ * worker_status). `rotateWallets` is the pure array-rotation this cursor drives: each
+ * cycle starts iterating from `startIndex` (already read fresh from the DB, never an
+ * in-memory value carried across invocations), wrapped modulo the CURRENT cohort size so
+ * a cohort add/remove/reorder between cycles can never index out of bounds or crash — it
+ * just means the rotation's exact wallet alignment may shift when the cohort size
+ * changes, which is an accepted, documented limitation (fairness is approximately
+ * maintained across a resize, not wallet-identity-tracked through one). `nextRotationIndex`
+ * durably advances the cursor by however many wallets were ACTUALLY attempted this cycle
+ * — specifically including a cycle that only got partway through before hitting its
+ * budget, since that is exactly the scenario a fixed start index would otherwise repeat
+ * forever. Over a bounded number of cycles, every configured wallet is therefore
+ * guaranteed to eventually become the FIRST wallet attempted, so no wallet can be
+ * permanently starved merely because an earlier one in cohort order is slow/busy.
+ * ================================================================================
+ */
+
+/** Pure array rotation, wrapped modulo `wallets.length` so any startIndex (including one stale from a since-resized cohort) is always safely in range. Returns [] for an empty cohort. */
+export function rotateWallets(wallets: readonly string[], startIndex: number): string[] {
+  if (wallets.length === 0) return [];
+  const offset = ((startIndex % wallets.length) + wallets.length) % wallets.length;
+  return [...wallets.slice(offset), ...wallets.slice(0, offset)];
+}
+
+/** The durable cursor value to persist for the NEXT cycle: advances by exactly how many wallets this cycle actually attempted (even a partial, budget-truncated cycle), wrapped modulo the current cohort size. */
+export function nextRotationIndex(startIndex: number, walletsAttempted: number, totalWallets: number): number {
+  if (totalWallets <= 0) return 0;
+  return (((startIndex + walletsAttempted) % totalWallets) + totalWallets) % totalWallets;
+}

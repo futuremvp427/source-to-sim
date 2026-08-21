@@ -241,6 +241,39 @@ BEGIN
     RAISE EXCEPTION 'sports_quote_observations_due_idx partial index (fire_at) WHERE observed_at IS NULL is missing';
   END IF;
 
+  -- H. TASK 12D SCHEMA: downstream_status (P1-A) and the wallet rotation cursor (P1-B).
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'sports_shadow_source_fills' AND column_name = 'downstream_status'
+  ) THEN
+    RAISE EXCEPTION 'sports_shadow_source_fills.downstream_status column is missing (Task 12D/P1-A)';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'public.sports_shadow_source_fills'::regclass
+      AND conname = 'sports_shadow_source_fills_downstream_status_check'
+      AND pg_get_constraintdef(oid) LIKE '%PENDING%COMPLETE%TERMINAL_INELIGIBLE%TERMINAL_INVALID%'
+  ) THEN
+    RAISE EXCEPTION 'sports_shadow_source_fills.downstream_status CHECK constraint missing or unexpected';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname = 'public' AND tablename = 'sports_shadow_source_fills'
+      AND indexname = 'sports_shadow_source_fills_pending_idx'
+      AND indexdef LIKE '%WHERE ((downstream_status = ''PENDING''%'
+  ) THEN
+    RAISE EXCEPTION 'sports_shadow_source_fills_pending_idx partial index is missing';
+  END IF;
+  IF to_regclass('public.sports_shadow_wallet_cursor') IS NULL THEN
+    RAISE EXCEPTION 'sports_shadow_wallet_cursor table is missing (Task 12D/P1-B)';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.sports_shadow_wallet_cursor WHERE id = 'source_wallet_rotation') THEN
+    RAISE EXCEPTION 'sports_shadow_wallet_cursor seed row (source_wallet_rotation) is missing';
+  END IF;
+  IF has_table_privilege('anon', 'public.sports_shadow_wallet_cursor', 'SELECT') THEN
+    RAISE EXCEPTION 'anon must not have direct SELECT on public.sports_shadow_wallet_cursor';
+  END IF;
+
   RAISE NOTICE 'sports_shadow_phase1 schema contract passed';
 END $$;
 

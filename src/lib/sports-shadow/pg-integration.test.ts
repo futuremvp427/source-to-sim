@@ -262,13 +262,12 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       const counts = await supabasePollRepository.countDurableOrdinalFills(wallet, [ordinalPrefix]);
       expect(counts.get(ordinalPrefix)).toBe(1);
 
-      const newEpisode = await supabasePollRepository.insertNewEpisode({
+      const newEpisode = await supabasePollRepository.insertEpisodeAtomic(insertResult.id, {
         episodeKey: uniqueId("episode-t10"),
         wallet,
         walletHandle: null,
         conditionId: "0xcondition",
         asset: "0xasset",
-        firstFillId: insertResult.id,
         firstFillAtIso: new Date(1_700_000_000 * 1000).toISOString(),
         lastFillAtIso: new Date(1_700_000_000 * 1000).toISOString(),
         vwap: 0.5,
@@ -303,7 +302,11 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       expect(latest?.state.lastSellAt).toBeNull();
       expect(latest?.state.sellCount).toBe(0);
 
-      await supabasePollRepository.updateEpisode(newEpisode.id, { ...latest!.state, totalShares: 20, vwap: 0.6, buyFillCount: 2, sellSeen: true });
+      // insertEpisodeAtomic must have atomically marked the anchor fill COMPLETE (Task 12D/P1-A).
+      const { data: anchorFillRow } = await supabaseAdmin.from("sports_shadow_source_fills" as never).select("downstream_status").eq("id", insertResult.id).single();
+      expect((anchorFillRow as unknown as { downstream_status: string }).downstream_status).toBe("COMPLETE");
+
+      await supabasePollRepository.updateEpisodeAtomic(insertResult.id, newEpisode.id, { ...latest!.state, totalShares: 20, vwap: 0.6, buyFillCount: 2, sellSeen: true });
       const afterUpdate = await supabasePollRepository.findLatestEpisode(wallet, "0xcondition", "0xasset");
       expect(afterUpdate?.state.totalShares).toBe(20);
       expect(afterUpdate?.state.vwap).toBeCloseTo(0.6);
@@ -315,10 +318,97 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       await supabaseAdmin.from("sports_shadow_signals" as never).delete().eq("source_wallet", wallet);
       await supabaseAdmin.from("sports_shadow_source_fills" as never).delete().eq("wallet", wallet);
     }, 30_000);
+
+    it("Task 12D/P1-A HARD DESIGN GATE, real Postgres: a failed insertEpisodeAtomic call rolls back BOTH the episode insert and the fill's downstream_status together (real transactional proof, not a fake's approximation)", async () => {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { supabasePollRepository } = await import("./source-poll.server");
+
+      const wallet = "0x" + "5".repeat(40);
+      const eventKey = uniqueId("sid:fill-gate");
+      const insertResult = await supabasePollRepository.insertRawFill({
+        eventKey,
+        wallet,
+        walletHandle: null,
+        conditionId: "0xcondition",
+        asset: "0xasset",
+        marketTitle: "Test Market",
+        outcome: "AWY",
+        eventSlug: null,
+        marketSlug: null,
+        side: "BUY",
+        shares: 10,
+        price: 0.5,
+        sourceTs: 1_700_000_000,
+        identityBasis: "source_id",
+        identityDegraded: false,
+        raw: {},
+      });
+
+      // Deliberately violate the CHECK constraint on bet_type so the RPC's INSERT fails
+      // partway through its own transaction -- proving the REAL database rolls back the
+      // whole function call, not just the JS layer's happy-path assumption.
+      await expect(
+        supabasePollRepository.insertEpisodeAtomic(insertResult.id, {
+          episodeKey: uniqueId("episode-gate"),
+          wallet,
+          walletHandle: null,
+          conditionId: "0xcondition",
+          asset: "0xasset",
+          firstFillAtIso: new Date().toISOString(),
+          lastFillAtIso: new Date().toISOString(),
+          vwap: 0.5,
+          shares: 10,
+          notional: 5,
+          fillCount: 1,
+          sellSeen: false,
+          league: "MLB",
+          scheduledStartAt: null,
+          awayTeam: "AWY",
+          homeTeam: "HOM",
+          betType: "INVALID_BET_TYPE" as never,
+          selectedSide: "AWY",
+          line: null,
+          sourceEventSlug: null,
+          sourceMarketSlug: null,
+          sourceOutcome: "AWY",
+        }),
+      ).rejects.toThrow();
+
+      // Neither side effect landed: no episode row, and the fill is still PENDING.
+      const { data: episodeRows } = await supabaseAdmin.from("sports_shadow_signals" as never).select("id").eq("source_wallet", wallet);
+      expect(((episodeRows ?? []) as unknown[]).length).toBe(0);
+      const { data: fillRow } = await supabaseAdmin.from("sports_shadow_source_fills" as never).select("downstream_status").eq("id", insertResult.id).single();
+      expect((fillRow as unknown as { downstream_status: string }).downstream_status).toBe("PENDING");
+
+      await supabaseAdmin.from("sports_shadow_source_fills" as never).delete().eq("id", insertResult.id);
+    }, 20_000);
+
+    it("findPendingDownstreamFills returns only PENDING fills for the wallet, oldest source_ts first, bounded", async () => {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { supabasePollRepository } = await import("./source-poll.server");
+      const wallet = "0x" + "6".repeat(40);
+
+      const older = await supabasePollRepository.insertRawFill({
+        eventKey: uniqueId("sid:older"), wallet, walletHandle: null, conditionId: "0xcondition", asset: "0xasset",
+        marketTitle: "M", outcome: "AWY", eventSlug: null, marketSlug: null, side: "BUY", shares: 1, price: 0.5,
+        sourceTs: 1_700_000_000, identityBasis: "source_id", identityDegraded: false, raw: {},
+      });
+      const newer = await supabasePollRepository.insertRawFill({
+        eventKey: uniqueId("sid:newer"), wallet, walletHandle: null, conditionId: "0xcondition", asset: "0xasset",
+        marketTitle: "M", outcome: "AWY", eventSlug: null, marketSlug: null, side: "BUY", shares: 1, price: 0.5,
+        sourceTs: 1_700_000_100, identityBasis: "source_id", identityDegraded: false, raw: {},
+      });
+      await supabasePollRepository.markFillTerminal(newer.id, "TERMINAL_INVALID"); // no longer PENDING
+
+      const pending = await supabasePollRepository.findPendingDownstreamFills(wallet, 10);
+      expect(pending.map((p) => p.id)).toEqual([older.id]); // newer excluded (terminal), older included, oldest-first trivially satisfied
+
+      await supabaseAdmin.from("sports_shadow_source_fills" as never).delete().eq("wallet", wallet);
+    }, 20_000);
   });
 
-  describe("Task 11: supabaseWorkerRepository.findPendingSignals (RPC application-mapping semantics)", () => {
-    it("maps missing_pmus/missing_kalshi correctly from find_pending_sports_shadow_signals and respects the caller-supplied limit", async () => {
+  describe("Task 11: supabaseWorkerRepository.findPendingSignalsForVenue (RPC application-mapping semantics, Task 12D/P1-C venue-scoped)", () => {
+    it("maps missing_pmus/missing_kalshi correctly from find_pending_sports_shadow_signals(p_venue, p_limit) and respects the caller-supplied limit, per venue independently", async () => {
       const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
       const { supabaseWorkerRepository } = await import("./worker.server");
 
@@ -339,20 +429,87 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       const realSignalId = (signal as unknown as { id: string }).id;
       await supabaseAdmin.from("sports_market_matches" as never).insert({ signal_id: realSignalId, venue: "KALSHI", match_status: "EXACT" } as never);
 
-      const pending = await supabaseWorkerRepository.findPendingSignals(1000);
-      const ours = pending.find((p) => p.id === realSignalId);
+      const pmusPending = await supabaseWorkerRepository.findPendingSignalsForVenue("PMUS", 1000);
+      const ours = pmusPending.find((p) => p.id === realSignalId);
       expect(ours).toBeDefined();
       expect(ours?.missingPmus).toBe(true);
       expect(ours?.missingKalshi).toBe(false);
       expect(ours?.conditionId).toBe("0xcondition");
       expect(ours?.betType).toBe("MONEYLINE");
 
-      const bounded = await supabaseWorkerRepository.findPendingSignals(1);
+      // Task 12D/P1-C: this signal is already resolved for KALSHI, so the KALSHI-scoped
+      // query must NOT return it -- proving the RPC genuinely filters per venue, not combined.
+      const kalshiPending = await supabaseWorkerRepository.findPendingSignalsForVenue("KALSHI", 1000);
+      expect(kalshiPending.find((p) => p.id === realSignalId)).toBeUndefined();
+
+      const bounded = await supabaseWorkerRepository.findPendingSignalsForVenue("PMUS", 1);
       expect(bounded.length).toBeLessThanOrEqual(1);
 
       await supabaseAdmin.from("sports_shadow_signals" as never).delete().eq("id", realSignalId);
       await supabaseAdmin.from("sports_shadow_source_fills" as never).delete().eq("id", fillId);
     }, 20_000);
+
+    it("Task 12D/P1-C real Postgres: a saturated PMUS-missing batch does not prevent an independent KALSHI-missing signal from being returned", async () => {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { supabaseWorkerRepository } = await import("./worker.server");
+      const wallet = "0x" + "7".repeat(40);
+      const fillIds: string[] = [];
+      const signalIds: string[] = [];
+
+      // 3 old signals missing ONLY PMUS (KALSHI already resolved).
+      for (let i = 0; i < 3; i += 1) {
+        const { data: fill } = await supabaseAdmin
+          .from("sports_shadow_source_fills" as never)
+          .insert({ event_key: uniqueId(`sid:pc-old-${i}`), wallet, asset: "0xasset", side: "BUY", source_ts: 1, identity_basis: "source_id" } as never)
+          .select("id").single();
+        const fillId = (fill as unknown as { id: string }).id;
+        fillIds.push(fillId);
+        const { data: signal } = await supabaseAdmin
+          .from("sports_shadow_signals" as never)
+          .insert({ episode_key: uniqueId(`ep-pc-old-${i}`), source_wallet: wallet, source_asset: "0xasset", source_condition_id: "0xcondition", first_fill_id: fillId, source_first_fill_at: new Date(2026, 0, 1 + i).toISOString(), source_last_fill_at: new Date().toISOString(), bet_type: "MONEYLINE", selected_side: "AWY", created_at: new Date(2026, 0, 1 + i).toISOString() } as never)
+          .select("id").single();
+        const sid = (signal as unknown as { id: string }).id;
+        signalIds.push(sid);
+        await supabaseAdmin.from("sports_market_matches" as never).insert({ signal_id: sid, venue: "KALSHI", match_status: "EXACT" } as never);
+      }
+
+      // 1 NEWER signal missing ONLY KALSHI.
+      const { data: newerFill } = await supabaseAdmin
+        .from("sports_shadow_source_fills" as never)
+        .insert({ event_key: uniqueId("sid:pc-newer"), wallet, asset: "0xasset", side: "BUY", source_ts: 1, identity_basis: "source_id" } as never)
+        .select("id").single();
+      const newerFillId = (newerFill as unknown as { id: string }).id;
+      fillIds.push(newerFillId);
+      const { data: newerSignal } = await supabaseAdmin
+        .from("sports_shadow_signals" as never)
+        .insert({ episode_key: uniqueId("ep-pc-newer"), source_wallet: wallet, source_asset: "0xasset", source_condition_id: "0xcondition", first_fill_id: newerFillId, source_first_fill_at: new Date().toISOString(), source_last_fill_at: new Date().toISOString(), bet_type: "MONEYLINE", selected_side: "AWY", created_at: new Date(2026, 0, 10).toISOString() } as never)
+        .select("id").single();
+      const newerSignalId = (newerSignal as unknown as { id: string }).id;
+      signalIds.push(newerSignalId);
+      await supabaseAdmin.from("sports_market_matches" as never).insert({ signal_id: newerSignalId, venue: "PMUS", match_status: "EXACT" } as never);
+
+      const pmusPending = await supabaseWorkerRepository.findPendingSignalsForVenue("PMUS", 1000);
+      expect(pmusPending.map((p) => p.id)).toEqual(expect.arrayContaining(signalIds.slice(0, 3)));
+      expect(pmusPending.find((p) => p.id === newerSignalId)).toBeUndefined(); // resolved for PMUS
+
+      const kalshiPending = await supabaseWorkerRepository.findPendingSignalsForVenue("KALSHI", 1000);
+      expect(kalshiPending.find((p) => p.id === newerSignalId)).toBeDefined(); // independent -- not blocked by PMUS backlog
+      for (const oldId of signalIds.slice(0, 3)) expect(kalshiPending.find((p) => p.id === oldId)).toBeUndefined(); // already resolved for KALSHI
+
+      await supabaseAdmin.from("sports_shadow_signals" as never).delete().in("id", signalIds);
+      await supabaseAdmin.from("sports_shadow_source_fills" as never).delete().in("id", fillIds);
+    }, 20_000);
+  });
+
+  describe("Task 12D/P1-B: wallet rotation cursor, real Postgres", () => {
+    it("supabaseWorkerRepository.getWalletCursor/setWalletCursor round-trip through the real sports_shadow_wallet_cursor table", async () => {
+      const { supabaseWorkerRepository } = await import("./worker.server");
+      const before = await supabaseWorkerRepository.getWalletCursor();
+      await supabaseWorkerRepository.setWalletCursor(before + 1);
+      const after = await supabaseWorkerRepository.getWalletCursor();
+      expect(after).toBe(before + 1);
+      await supabaseWorkerRepository.setWalletCursor(before); // restore
+    }, 15_000);
   });
 
   describe("Sports lease: supabaseSportsLeaseRepository (acquire_worker_lease)", () => {

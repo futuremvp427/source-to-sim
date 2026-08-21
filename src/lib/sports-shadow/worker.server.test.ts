@@ -23,6 +23,7 @@ import {
 
 const WALLET_A = "0xa71093cafc0c099b4ccab24c3cb8018d817923c4";
 const WALLET_B = "0x32ed517a571c01b6e9adecf61ba81ca48ff2f960";
+const WALLET_C = "0x5268527977f700f9bf9b6d5cd843859e4e70135d";
 
 function enabledConfig(overrides: Partial<SportsShadowConfig> = {}): SportsShadowConfig {
   return { enabled: true, wallets: [WALLET_A], goLiveAtMs: 1_700_000_000_000, ...overrides };
@@ -75,17 +76,19 @@ type ExistingMatchRow = { signalId: string; venue: Venue };
 
 /**
  * Mirrors find_pending_sports_shadow_signals' EXACT SQL semantics (see
- * supabase/migrations/20260820230000_sports_shadow_pending_signals_rpc.sql): a LEFT
- * JOIN anti-join per venue (never a fixed-size historical-prefix scan), ORDER BY
- * (created_at ASC, id ASC), LIMIT clamped to [0, 100] with a NULL-safe default of 20.
- * This is the reference implementation the Task 11B regression suite (see the
- * "find_pending_sports_shadow_signals RPC semantics" describe block) validates against,
- * standing in for the real-Postgres validation this environment could not perform (no
- * cached postgres:17 image, and pulling one was out of scope per the mission).
+ * supabase/migrations/20260820230000_sports_shadow_pending_signals_rpc.sql, revised for
+ * Task 12D/P1-C): a LEFT JOIN anti-join, now scoped to exactly ONE requested venue (never
+ * combined via OR), ORDER BY (created_at ASC, id ASC), LIMIT clamped to [0, 100] with a
+ * NULL-safe default of 20. Standing in for the real-Postgres validation this environment
+ * could not perform locally (no cached postgres:17 image) — the real proof lives in
+ * supabase/tests/sports_shadow_pending_signals_rpc.sql, run against a real database in CI.
  */
-function makeFakeWorkerRepo(signals: SignalRow[], matches: ExistingMatchRow[]): WorkerRepository {
-  return {
-    async findPendingSignals(limit: number) {
+function makeFakeWorkerRepo(signals: SignalRow[], matches: ExistingMatchRow[], initialCursor = 0) {
+  let cursor = initialCursor;
+  const cursorReadLog: number[] = [];
+  const cursorWriteLog: number[] = [];
+  const repo: WorkerRepository & { getCursorForTest: () => number; cursorReadLog: number[]; cursorWriteLog: number[] } = {
+    async findPendingSignalsForVenue(venue, limit) {
       const matchedVenuesBySignal = new Map<string, Set<Venue>>();
       for (const m of matches) {
         const set = matchedVenuesBySignal.get(m.signalId) ?? new Set<Venue>();
@@ -99,10 +102,22 @@ function makeFakeWorkerRepo(signals: SignalRow[], matches: ExistingMatchRow[]): 
           const venues = matchedVenuesBySignal.get(s.id) ?? new Set<Venue>();
           return { ...s, missingPmus: !venues.has("PMUS"), missingKalshi: !venues.has("KALSHI") };
         })
-        .filter((s) => s.missingPmus || s.missingKalshi);
+        .filter((s) => (venue === "PMUS" ? s.missingPmus : s.missingKalshi));
       return pending.slice(0, clampedLimit);
     },
+    async getWalletCursor() {
+      cursorReadLog.push(cursor);
+      return cursor;
+    },
+    async setWalletCursor(next) {
+      cursor = next;
+      cursorWriteLog.push(next);
+    },
+    getCursorForTest: () => cursor,
+    cursorReadLog,
+    cursorWriteLog,
   };
+  return repo;
 }
 
 function emptyWalletResult(wallet: string, overrides: Partial<WalletPollResult> = {}): WalletPollResult {
@@ -123,6 +138,7 @@ function emptyWalletResult(wallet: string, overrides: Partial<WalletPollResult> 
     sellRecordedCount: 0,
     lateReconciliationCount: 0,
     backlogTruncated: false,
+    orphanedFillsRecovered: 0,
     error: null,
     ...overrides,
   };
@@ -212,8 +228,8 @@ describe("runSportsShadowCycle — lane ordering and independence", () => {
   });
 });
 
-describe("runSportsShadowCycle — wallet polling", () => {
-  it("12. source poll is called exactly once per configured wallet, deterministically", async () => {
+describe("runSportsShadowCycle — wallet polling (fixed order)", () => {
+  it("12. source poll is called exactly once per configured wallet, deterministically (rotation cursor starts at 0)", async () => {
     const calls: string[] = [];
     const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
       calls.push(wallet);
@@ -238,6 +254,156 @@ describe("runSportsShadowCycle — wallet polling", () => {
     const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never }));
     expect(summary.sourceLane?.walletSummaries[0]?.backlogTruncated).toBe(true);
   });
+
+  it("Task 10's orphanedFillsRecovered is surfaced in the wallet summary, not hidden", async () => {
+    const pollSportsShadowWallet = vi.fn(async (wallet: string) => emptyWalletResult(wallet, { orphanedFillsRecovered: 3 }));
+    const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never }));
+    expect(summary.sourceLane?.walletSummaries[0]?.orphanedFillsRecovered).toBe(3);
+  });
+});
+
+describe("runSportsShadowCycle — Task 12D/P1-B wallet fairness", () => {
+  it("reads the durable wallet cursor at the start of the lane and starts iteration from it", async () => {
+    const workerRepo = makeFakeWorkerRepo([], [], 1); // cursor starts pointing at WALLET_B
+    const calls: string[] = [];
+    const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
+      calls.push(wallet);
+      return emptyWalletResult(wallet);
+    });
+    await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A, WALLET_B, WALLET_C] }), baseDeps({ workerRepo, pollSportsShadowWallet: pollSportsShadowWallet as never }));
+    expect(calls).toEqual([WALLET_B, WALLET_C, WALLET_A]); // rotated to start at index 1
+  });
+
+  it("advances the durable cursor by the number of wallets actually attempted, even when the budget truncates the cycle partway through", async () => {
+    const workerRepo = makeFakeWorkerRepo([], [], 0);
+    let now = 1_700_000_100_000;
+    const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
+      if (wallet === WALLET_A) now += 31_000; // consumes the whole 30s SOURCE_LANE_BUDGET_MS
+      return emptyWalletResult(wallet);
+    });
+    await runSportsShadowCycle(
+      enabledConfig({ wallets: [WALLET_A, WALLET_B, WALLET_C] }),
+      baseDeps({ workerRepo, pollSportsShadowWallet: pollSportsShadowWallet as never, now: () => now }),
+    );
+    // Only WALLET_A was attempted before the budget broke the loop -- cursor must advance
+    // by exactly 1, so WALLET_B is FIRST next cycle, not WALLET_A again.
+    expect(workerRepo.getCursorForTest()).toBe(1);
+  });
+
+  it("a persistently slow wallet A cannot permanently starve B/C -- successive cycles still give them opportunities", async () => {
+    const workerRepo = makeFakeWorkerRepo([], [], 0);
+    let now = 1_700_000_100_000;
+    const attemptedByCycle: string[][] = [];
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      const thisCycleAttempts: string[] = [];
+      const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
+        thisCycleAttempts.push(wallet);
+        now += 31_000; // EVERY wallet consumes the full budget -- worst-case slow-wallet scenario
+        return emptyWalletResult(wallet);
+      });
+      await runSportsShadowCycle(
+        enabledConfig({ wallets: [WALLET_A, WALLET_B, WALLET_C] }),
+        baseDeps({ workerRepo, pollSportsShadowWallet: pollSportsShadowWallet as never, now: () => now }),
+      );
+      attemptedByCycle.push(thisCycleAttempts);
+    }
+    // Each cycle attempts exactly one wallet (budget consumed immediately), but across 3
+    // cycles, all three DIFFERENT wallets got a turn -- none was skipped forever.
+    expect(attemptedByCycle.every((c) => c.length === 1)).toBe(true);
+    expect(new Set(attemptedByCycle.map((c) => c[0]))).toEqual(new Set([WALLET_A, WALLET_B, WALLET_C]));
+  });
+
+  it("a restart (fresh deps, no in-memory state) does not reset into permanent A-first starvation -- the cursor is read fresh from the durable repo every time", async () => {
+    const workerRepo = makeFakeWorkerRepo([], [], 2); // durable state says "start at C"
+    const calls: string[] = [];
+    const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
+      calls.push(wallet);
+      return emptyWalletResult(wallet);
+    });
+    // A brand new deps object standing in for a fresh process -- nothing carried over
+    // except the durable repo itself. baseDeps() spread FIRST so its own default
+    // workerRepo/pollSportsShadowWallet do not clobber the ones under test.
+    await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A, WALLET_B, WALLET_C] }), { ...baseDeps(), workerRepo, pollSportsShadowWallet: pollSportsShadowWallet as never });
+    expect(calls[0]).toBe(WALLET_C);
+  });
+
+  it("cohort resize (wallet removed) does not crash and stays within bounds", async () => {
+    const workerRepo = makeFakeWorkerRepo([], [], 2); // cursor pointed at index 2 of a 3-wallet cohort
+    const calls: string[] = [];
+    const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
+      calls.push(wallet);
+      return emptyWalletResult(wallet);
+    });
+    // Cohort shrunk to 2 wallets -- index 2 no longer exists, must wrap safely.
+    await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A, WALLET_B] }), baseDeps({ workerRepo, pollSportsShadowWallet: pollSportsShadowWallet as never }));
+    expect(calls).toHaveLength(2);
+    expect(new Set(calls)).toEqual(new Set([WALLET_A, WALLET_B]));
+  });
+
+  it("a wallet cursor read failure falls back to 0 (start of cohort) rather than crashing the cycle", async () => {
+    const workerRepo: WorkerRepository = {
+      async findPendingSignalsForVenue() {
+        return [];
+      },
+      async getWalletCursor() {
+        throw new Error("db unreachable");
+      },
+      async setWalletCursor() {},
+    };
+    const calls: string[] = [];
+    const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
+      calls.push(wallet);
+      return emptyWalletResult(wallet);
+    });
+    const summary = await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A, WALLET_B] }), baseDeps({ workerRepo, pollSportsShadowWallet: pollSportsShadowWallet as never }));
+    expect(calls).toEqual([WALLET_A, WALLET_B]);
+    expect(summary.errors.some((e) => e.includes("wallet cursor read failed"))).toBe(true);
+  });
+
+  it("a wallet cursor write failure is non-fatal -- the cycle's results are still returned", async () => {
+    const workerRepo: WorkerRepository = {
+      async findPendingSignalsForVenue() {
+        return [];
+      },
+      async getWalletCursor() {
+        return 0;
+      },
+      async setWalletCursor() {
+        throw new Error("db unreachable");
+      },
+    };
+    const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ workerRepo }));
+    expect(summary.sourceLane?.walletsAttempted).toBe(1);
+    expect(summary.errors.some((e) => e.includes("wallet cursor write failed"))).toBe(true);
+  });
+
+  it("duplicate source polling under rotation remains protected by Task 10 idempotency (rotation only changes ORDER, never causes a wallet to be polled twice in one cycle)", async () => {
+    const workerRepo = makeFakeWorkerRepo([], [], 1);
+    const calls: string[] = [];
+    const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
+      calls.push(wallet);
+      return emptyWalletResult(wallet);
+    });
+    await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A, WALLET_B, WALLET_C] }), baseDeps({ workerRepo, pollSportsShadowWallet: pollSportsShadowWallet as never }));
+    expect(calls).toHaveLength(3);
+    expect(new Set(calls).size).toBe(3); // every wallet exactly once
+  });
+
+  it("boundedness remains intact: the source lane budget still stops scheduling further wallets regardless of rotation start point", async () => {
+    const workerRepo = makeFakeWorkerRepo([], [], 1);
+    let now = 1_700_000_100_000;
+    const calls: string[] = [];
+    const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
+      calls.push(wallet);
+      now += 31_000;
+      return emptyWalletResult(wallet);
+    });
+    await runSportsShadowCycle(
+      enabledConfig({ wallets: [WALLET_A, WALLET_B, WALLET_C] }),
+      baseDeps({ workerRepo, pollSportsShadowWallet: pollSportsShadowWallet as never, now: () => now }),
+    );
+    expect(calls).toHaveLength(1); // budget stopped after the first (rotated) wallet
+  });
 });
 
 describe("runSportsShadowCycle — durable pending-signal recovery (crash-recovery hard gate)", () => {
@@ -245,7 +411,7 @@ describe("runSportsShadowCycle — durable pending-signal recovery (crash-recove
     // pollSportsShadowWallet returns ZERO newSignals this cycle (simulating: the source
     // fill is now a duplicate because it was already durably persisted before a crash).
     const pollSportsShadowWallet = vi.fn(async (wallet: string) => emptyWalletResult(wallet, { newSignals: [] }));
-    const workerRepo = makeFakeWorkerRepo([signalRow({ id: "orphaned-signal" })], []); // exists durably, zero match rows
+    const workerRepo = makeFakeWorkerRepo([signalRow({ id: "orphaned-signal" })], []); // exists durably, zero match rows -- pending for BOTH venues
     const persistVenueMatch = vi.fn(async (_signalId: string, _result: VenueMatchResult, _detectedAtMs: number, _sourceTimestampIso: string) => ({ matchId: "m1", scheduled: 0, downgradeSkipped: false }));
 
     const summary = await runSportsShadowCycle(
@@ -254,8 +420,10 @@ describe("runSportsShadowCycle — durable pending-signal recovery (crash-recove
     );
 
     expect(summary.sourceLane?.newSignalsCreated).toBe(0);
-    expect(summary.sourceLane?.pendingFound).toBe(1);
-    expect(summary.sourceLane?.pendingProcessed).toBe(1);
+    expect(summary.sourceLane?.pmus.pendingFound).toBe(1);
+    expect(summary.sourceLane?.kalshi.pendingFound).toBe(1);
+    expect(summary.sourceLane?.pmus.pendingProcessed).toBe(1);
+    expect(summary.sourceLane?.kalshi.pendingProcessed).toBe(1);
     expect(persistVenueMatch).toHaveBeenCalledWith("orphaned-signal", expect.anything(), expect.anything(), expect.anything(), expect.anything());
   });
 
@@ -270,6 +438,7 @@ describe("runSportsShadowCycle — durable pending-signal recovery (crash-recove
     );
     expect(discoverPmus).not.toHaveBeenCalled();
     expect(discoverKalshi).toHaveBeenCalledTimes(1);
+    expect(summary.sourceLane?.pmus.pendingFound).toBe(0);
     expect(summary.sourceLane?.pmus.attempted).toBe(0);
     expect(summary.sourceLane?.kalshi.attempted).toBe(1);
   });
@@ -285,16 +454,18 @@ describe("runSportsShadowCycle — durable pending-signal recovery (crash-recove
     expect(summary.sourceLane?.kalshi.attempted).toBe(0);
   });
 
-  it("25. a bounded pending-signal batch leaves excess work durable for a future cycle", async () => {
+  it("25. a bounded pending-signal batch (per venue) leaves excess work durable for a future cycle", async () => {
     const many = Array.from({ length: 25 }, (_, i) => signalRow({ id: `sig-${i}`, createdAtIso: `2026-08-19T00:${String(i).padStart(2, "0")}:00.000Z` }));
     const workerRepo = makeFakeWorkerRepo(many, []);
     const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ workerRepo }));
-    expect(summary.sourceLane?.pendingFound).toBeLessThan(25); // capped at PENDING_BATCH_SIZE (20)
-    expect(summary.sourceLane?.pendingRemainingHint).toBe(true);
+    expect(summary.sourceLane?.pmus.pendingFound).toBeLessThan(25); // capped at PENDING_BATCH_SIZE (20)
+    expect(summary.sourceLane?.pmus.pendingRemainingHint).toBe(true);
+    expect(summary.sourceLane?.kalshi.pendingFound).toBeLessThan(25);
+    expect(summary.sourceLane?.kalshi.pendingRemainingHint).toBe(true);
   });
 });
 
-describe("find_pending_sports_shadow_signals RPC semantics (Task 11B starvation fix)", () => {
+describe("find_pending_sports_shadow_signals RPC semantics, per venue (Task 11B + Task 12D/P1-C)", () => {
   function idOf(i: number): string {
     return `sig-${String(i).padStart(4, "0")}`;
   }
@@ -303,117 +474,133 @@ describe("find_pending_sports_shadow_signals RPC semantics (Task 11B starvation 
     return new Date(base + minuteOffset * 60_000).toISOString();
   }
 
-  it("1. 220 signals, 1-200 fully resolved, 201 unresolved => signal 201 is returned (the confirmed starvation scenario)", async () => {
+  it("1. 220 signals, 1-200 fully resolved for PMUS, 201 unresolved for PMUS => signal 201 is returned first (the confirmed starvation scenario, now proven per-venue)", async () => {
     const signals = Array.from({ length: 220 }, (_, i) => signalRow({ id: idOf(i), createdAtIso: ts(i) }));
     const matches: ExistingMatchRow[] = [];
-    for (let i = 0; i < 200; i += 1) {
-      matches.push({ signalId: idOf(i), venue: "PMUS" }, { signalId: idOf(i), venue: "KALSHI" }); // fully resolved
-    }
-    // signal 200 (0-indexed) is left unresolved, matching "signal 201" in the mission's 1-indexed framing.
+    for (let i = 0; i < 200; i += 1) matches.push({ signalId: idOf(i), venue: "PMUS" });
     const workerRepo = makeFakeWorkerRepo(signals, matches);
-    const pending = await workerRepo.findPendingSignals(20);
+    const pending = await workerRepo.findPendingSignalsForVenue("PMUS", 20);
     expect(pending.map((p) => p.id)).toContain(idOf(200));
-    expect(pending[0]?.id).toBe(idOf(200)); // globally oldest pending, not silently absent
+    expect(pending[0]?.id).toBe(idOf(200));
   });
 
   it("2. unresolved rows scattered above and below index 200 => the globally oldest unresolved one wins, regardless of position", async () => {
     const signals = Array.from({ length: 300 }, (_, i) => signalRow({ id: idOf(i), createdAtIso: ts(i) }));
     const matches: ExistingMatchRow[] = [];
     for (let i = 0; i < 300; i += 1) {
-      if (i === 50 || i === 250) continue; // leave these two unresolved; everything else fully resolved
-      matches.push({ signalId: idOf(i), venue: "PMUS" }, { signalId: idOf(i), venue: "KALSHI" });
+      if (i === 50 || i === 250) continue;
+      matches.push({ signalId: idOf(i), venue: "PMUS" });
     }
     const workerRepo = makeFakeWorkerRepo(signals, matches);
-    const pending = await workerRepo.findPendingSignals(20);
+    const pending = await workerRepo.findPendingSignalsForVenue("PMUS", 20);
     expect(pending.map((p) => p.id)).toEqual([idOf(50), idOf(250)]);
   });
 
-  it("3. a signal missing PMUS only is returned with missingPmus=true, missingKalshi=false", async () => {
-    const workerRepo = makeFakeWorkerRepo([signalRow()], [{ signalId: "sig-1", venue: "KALSHI" }]);
-    const pending = await workerRepo.findPendingSignals(20);
-    expect(pending).toEqual([expect.objectContaining({ id: "sig-1", missingPmus: true, missingKalshi: false })]);
+  it("3/4/5. missingPmus/missingKalshi flags are still both reported even in a venue-scoped result", async () => {
+    const pmusOnly = makeFakeWorkerRepo([signalRow()], [{ signalId: "sig-1", venue: "KALSHI" }]);
+    expect(await pmusOnly.findPendingSignalsForVenue("PMUS", 20)).toEqual([expect.objectContaining({ id: "sig-1", missingPmus: true, missingKalshi: false })]);
+
+    const kalshiOnly = makeFakeWorkerRepo([signalRow()], [{ signalId: "sig-1", venue: "PMUS" }]);
+    expect(await kalshiOnly.findPendingSignalsForVenue("KALSHI", 20)).toEqual([expect.objectContaining({ id: "sig-1", missingPmus: false, missingKalshi: true })]);
+
+    const both = makeFakeWorkerRepo([signalRow()], []);
+    expect(await both.findPendingSignalsForVenue("PMUS", 20)).toEqual([expect.objectContaining({ missingPmus: true, missingKalshi: true })]);
+    expect(await both.findPendingSignalsForVenue("KALSHI", 20)).toEqual([expect.objectContaining({ missingPmus: true, missingKalshi: true })]);
   });
 
-  it("4. a signal missing Kalshi only is returned with missingPmus=false, missingKalshi=true", async () => {
-    const workerRepo = makeFakeWorkerRepo([signalRow()], [{ signalId: "sig-1", venue: "PMUS" }]);
-    const pending = await workerRepo.findPendingSignals(20);
-    expect(pending).toEqual([expect.objectContaining({ id: "sig-1", missingPmus: false, missingKalshi: true })]);
-  });
-
-  it("5. a signal missing both venues is returned with missingPmus=true, missingKalshi=true", async () => {
-    const workerRepo = makeFakeWorkerRepo([signalRow()], []);
-    const pending = await workerRepo.findPendingSignals(20);
-    expect(pending).toEqual([expect.objectContaining({ id: "sig-1", missingPmus: true, missingKalshi: true })]);
-  });
-
-  it("6. a fully resolved signal (both venues matched) is excluded entirely", async () => {
+  it("6. a fully resolved signal is excluded from BOTH venue queries", async () => {
     const workerRepo = makeFakeWorkerRepo([signalRow()], [{ signalId: "sig-1", venue: "PMUS" }, { signalId: "sig-1", venue: "KALSHI" }]);
-    const pending = await workerRepo.findPendingSignals(20);
-    expect(pending).toHaveLength(0);
+    expect(await workerRepo.findPendingSignalsForVenue("PMUS", 20)).toHaveLength(0);
+    expect(await workerRepo.findPendingSignalsForVenue("KALSHI", 20)).toHaveLength(0);
   });
 
-  it("7. more pending signals than the batch size => exactly the bounded, deterministic, oldest batch", async () => {
+  it("7. more pending than the batch size => exactly the bounded, deterministic, oldest batch", async () => {
     const signals = Array.from({ length: 50 }, (_, i) => signalRow({ id: idOf(i), createdAtIso: ts(i) }));
-    const workerRepo = makeFakeWorkerRepo(signals, []); // none resolved -- all 50 pending
-    const pending = await workerRepo.findPendingSignals(20);
+    const workerRepo = makeFakeWorkerRepo(signals, []);
+    const pending = await workerRepo.findPendingSignalsForVenue("PMUS", 20);
     expect(pending).toHaveLength(20);
     expect(pending.map((p) => p.id)).toEqual(Array.from({ length: 20 }, (_, i) => idOf(i)));
   });
 
-  it("8. a repeated, unchanged call returns an identical batch in identical order", async () => {
-    const signals = Array.from({ length: 30 }, (_, i) => signalRow({ id: idOf(i), createdAtIso: ts(i) }));
+  it("8. p_limit > 100 is clamped to 100", async () => {
+    const signals = Array.from({ length: 150 }, (_, i) => signalRow({ id: idOf(i), createdAtIso: ts(i) }));
     const workerRepo = makeFakeWorkerRepo(signals, []);
-    const first = await workerRepo.findPendingSignals(20);
-    const second = await workerRepo.findPendingSignals(20);
-    expect(first).toEqual(second);
+    expect((await workerRepo.findPendingSignalsForVenue("PMUS", 500)).length).toBeLessThanOrEqual(100);
   });
 
-  it("9. resolving the first pending signal advances the next call correctly", async () => {
+  it("9. resolving the first pending signal's PMUS venue advances the next PMUS call correctly, without touching the KALSHI queue", async () => {
     const signals = Array.from({ length: 5 }, (_, i) => signalRow({ id: idOf(i), createdAtIso: ts(i) }));
     const matches: ExistingMatchRow[] = [];
     const workerRepo = makeFakeWorkerRepo(signals, matches);
-    const first = await workerRepo.findPendingSignals(20);
-    expect(first[0]?.id).toBe(idOf(0));
+    const firstPmus = await workerRepo.findPendingSignalsForVenue("PMUS", 20);
+    expect(firstPmus[0]?.id).toBe(idOf(0));
 
-    // Simulate resolving signal 0's both venues, then re-querying (a fresh call, not a cursor).
-    matches.push({ signalId: idOf(0), venue: "PMUS" }, { signalId: idOf(0), venue: "KALSHI" });
-    const second = await workerRepo.findPendingSignals(20);
-    expect(second[0]?.id).toBe(idOf(1));
-    expect(second.map((p) => p.id)).not.toContain(idOf(0));
+    matches.push({ signalId: idOf(0), venue: "PMUS" });
+    const secondPmus = await workerRepo.findPendingSignalsForVenue("PMUS", 20);
+    expect(secondPmus[0]?.id).toBe(idOf(1));
+    expect(secondPmus.map((p) => p.id)).not.toContain(idOf(0));
+
+    // idOf(0) is still missing KALSHI -- resolving PMUS alone must not have advanced it out of the KALSHI queue.
+    const kalshi = await workerRepo.findPendingSignalsForVenue("KALSHI", 20);
+    expect(kalshi.map((p) => p.id)).toContain(idOf(0));
   });
 
   it("ties on identical created_at break deterministically by id ascending", async () => {
     const sameTs = ts(0);
     const signals = [signalRow({ id: "sig-b", createdAtIso: sameTs }), signalRow({ id: "sig-a", createdAtIso: sameTs })];
     const workerRepo = makeFakeWorkerRepo(signals, []);
-    const pending = await workerRepo.findPendingSignals(20);
+    const pending = await workerRepo.findPendingSignalsForVenue("PMUS", 20);
     expect(pending.map((p) => p.id)).toEqual(["sig-a", "sig-b"]);
   });
 
-  it("a limit clamp never allows an unbounded result even if a caller passes an absurd value", async () => {
-    const signals = Array.from({ length: 150 }, (_, i) => signalRow({ id: idOf(i), createdAtIso: ts(i) }));
-    const workerRepo = makeFakeWorkerRepo(signals, []);
-    const pending = await workerRepo.findPendingSignals(10_000);
-    expect(pending.length).toBeLessThanOrEqual(100); // clamped ceiling
-  });
-
-  it("the actual migration SQL matches the required semantics and security posture", () => {
+  it("the actual migration SQL matches the required venue-scoped semantics and security posture", () => {
     const sql = readFileSync(
       new URL("../../../supabase/migrations/20260820230000_sports_shadow_pending_signals_rpc.sql", import.meta.url),
       "utf8",
     );
     expect(sql).toContain("CREATE OR REPLACE FUNCTION public.find_pending_sports_shadow_signals");
+    expect(sql).toContain("p_venue text");
     expect(sql).toMatch(/LANGUAGE sql/i);
     expect(sql).toMatch(/\bSTABLE\b/);
     expect(sql).toMatch(/SECURITY INVOKER/);
     expect(sql).toContain("SET search_path = public");
     expect(sql).toMatch(/LEFT JOIN public\.sports_market_matches/);
-    expect(sql).toMatch(/WHERE\s+pmus_match\.id IS NULL OR kalshi_match\.id IS NULL/);
+    expect(sql).toMatch(/\(p_venue = 'PMUS' AND pmus_match\.id IS NULL\)/);
+    expect(sql).toMatch(/\(p_venue = 'KALSHI' AND kalshi_match\.id IS NULL\)/);
+    // The actual WHERE clause (not doc-comment prose describing the old behavior) must be
+    // the new venue-scoped form, never the old combined-OR clause.
+    const whereClause = sql.slice(sql.indexOf("$$\n  SELECT"));
+    expect(whereClause).not.toMatch(/WHERE\s+pmus_match\.id IS NULL OR kalshi_match\.id IS NULL/);
     expect(sql).toMatch(/ORDER BY s\.created_at ASC,\s*s\.id ASC/);
     expect(sql).toMatch(/LIMIT LEAST\(GREATEST\(COALESCE\(p_limit/);
-    expect(sql).toContain("REVOKE ALL ON FUNCTION public.find_pending_sports_shadow_signals(integer) FROM PUBLIC, anon, authenticated");
-    expect(sql).toContain("GRANT EXECUTE ON FUNCTION public.find_pending_sports_shadow_signals(integer) TO service_role");
+    expect(sql).toContain("REVOKE ALL ON FUNCTION public.find_pending_sports_shadow_signals(text, integer) FROM PUBLIC, anon, authenticated");
+    expect(sql).toContain("GRANT EXECUTE ON FUNCTION public.find_pending_sports_shadow_signals(text, integer) TO service_role");
     expect(sql).not.toMatch(/CREATE TABLE/); // no new table
+  });
+});
+
+describe("runSportsShadowCycle — Task 12D/P1-C per-venue head-of-line-blocking proof", () => {
+  it("a saturated PMUS-missing backlog (20+ old rows) does not prevent a newer Kalshi-only-missing signal from being resolved", async () => {
+    // 25 old signals genuinely stuck on PMUS specifically -- already resolved for Kalshi
+    // (a real match row exists), so they occupy the PMUS queue but never the Kalshi one.
+    // Enough to saturate the PMUS batch (limit 20) every cycle.
+    const oldSignals = Array.from({ length: 25 }, (_, i) => signalRow({ id: `old-${i}`, createdAtIso: `2026-08-01T00:${String(i).padStart(2, "0")}:00.000Z` }));
+    // One NEWER signal missing ONLY Kalshi (PMUS already resolved for it).
+    const newerSignal = signalRow({ id: "newer-kalshi-only", createdAtIso: "2026-08-02T00:00:00.000Z" });
+    const matches: ExistingMatchRow[] = [
+      ...oldSignals.map((s) => ({ signalId: s.id, venue: "KALSHI" as const })),
+      { signalId: "newer-kalshi-only", venue: "PMUS" },
+    ];
+    const workerRepo = makeFakeWorkerRepo([...oldSignals, newerSignal], matches);
+
+    const persistVenueMatch = vi.fn(async (_signalId: string, _result: VenueMatchResult, _detectedAtMs: number, _sourceTimestampIso: string) => ({ matchId: "m1", scheduled: 0, downgradeSkipped: false }));
+    const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ workerRepo, persistVenueMatch: persistVenueMatch as never }));
+
+    // PMUS batch is saturated with old rows (never reaches the newer signal -- it isn't even PMUS-pending).
+    expect(summary.sourceLane?.pmus.pendingFound).toBe(20);
+    // Kalshi's independent query DOES find and resolve the newer signal despite PMUS's backlog.
+    const kalshiCalls = persistVenueMatch.mock.calls.filter((c) => (c[1] as VenueMatchResult).venue === "KALSHI");
+    expect(kalshiCalls.some((c) => c[0] === "newer-kalshi-only")).toBe(true);
   });
 });
 
@@ -478,8 +665,6 @@ describe("runSportsShadowCycle — resolution and persistence semantics", () => 
   });
 
   it("20. a genuine semantic NONE from the resolver (successful discovery, no matching candidate) IS persisted", async () => {
-    // Empty candidate arrays + a real resolver call (not mocked) => resolvePmusMatch/resolveKalshiMatch
-    // legitimately return NONE_NO_CANDIDATE, which must reach persistVenueMatch.
     const workerRepo = makeFakeWorkerRepo([signalRow()], []);
     const persistVenueMatch = vi.fn(async (_signalId: string, _result: VenueMatchResult, _detectedAtMs: number, _sourceTimestampIso: string) => ({ matchId: "m1", scheduled: 0, downgradeSkipped: false }));
     await runSportsShadowCycle(enabledConfig(), baseDeps({ workerRepo, persistVenueMatch: persistVenueMatch as never }));
@@ -516,7 +701,8 @@ describe("runSportsShadowCycle — resolution and persistence semantics", () => 
     const workerRepo = makeFakeWorkerRepo(signals, []);
     const persistVenueMatch = vi.fn(async (_signalId: string, _result: VenueMatchResult, _detectedAtMs: number, _sourceTimestampIso: string) => ({ matchId: "m1", scheduled: 0, downgradeSkipped: false }));
     const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ workerRepo, persistVenueMatch: persistVenueMatch as never }));
-    expect(summary.sourceLane?.pendingProcessed).toBe(1); // only the good one
+    expect(summary.sourceLane?.pmus.pendingProcessed).toBe(1); // only the good one, per venue
+    expect(summary.sourceLane?.kalshi.pendingProcessed).toBe(1);
     expect(persistVenueMatch).toHaveBeenCalledTimes(2); // sig-good x 2 venues
   });
 });

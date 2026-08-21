@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { budgetExceeded, detectedAtMsFromSignal, toSourceSignal, type SignalRow } from "./worker";
+import { budgetExceeded, detectedAtMsFromSignal, nextRotationIndex, rotateWallets, toSourceSignal, type SignalRow } from "./worker";
 
 function signal(overrides: Partial<SignalRow> = {}): SignalRow {
   return {
@@ -63,5 +63,88 @@ describe("budgetExceeded", () => {
   it("true once elapsed meets or exceeds the budget", () => {
     expect(budgetExceeded(30_000, 30_000)).toBe(true);
     expect(budgetExceeded(31_000, 30_000)).toBe(true);
+  });
+});
+
+describe("rotateWallets", () => {
+  it("startIndex 0 returns the original order unchanged", () => {
+    expect(rotateWallets(["A", "B", "C"], 0)).toEqual(["A", "B", "C"]);
+  });
+
+  it("rotates so wallet at startIndex becomes first", () => {
+    expect(rotateWallets(["A", "B", "C"], 1)).toEqual(["B", "C", "A"]);
+    expect(rotateWallets(["A", "B", "C"], 2)).toEqual(["C", "A", "B"]);
+  });
+
+  it("wraps a startIndex equal to the cohort length back to the original order", () => {
+    expect(rotateWallets(["A", "B", "C"], 3)).toEqual(["A", "B", "C"]);
+  });
+
+  it("wraps an out-of-range startIndex safely (e.g. a stale cursor from a since-shrunk cohort)", () => {
+    expect(rotateWallets(["A", "B", "C"], 100)).toEqual(rotateWallets(["A", "B", "C"], 1));
+  });
+
+  it("never crashes or produces an out-of-bounds result for a single-wallet cohort", () => {
+    expect(rotateWallets(["A"], 5)).toEqual(["A"]);
+  });
+
+  it("returns an empty array for an empty cohort, never throws", () => {
+    expect(rotateWallets([], 3)).toEqual([]);
+  });
+
+  it("preserves every wallet exactly once regardless of startIndex", () => {
+    const wallets = ["A", "B", "C", "D", "E"];
+    for (let i = 0; i < 10; i += 1) {
+      expect([...rotateWallets(wallets, i)].sort()).toEqual([...wallets].sort());
+    }
+  });
+});
+
+describe("nextRotationIndex", () => {
+  it("advances by exactly the number of wallets attempted", () => {
+    expect(nextRotationIndex(0, 2, 5)).toBe(2);
+  });
+
+  it("wraps modulo the total wallet count once it reaches the end", () => {
+    expect(nextRotationIndex(3, 2, 5)).toBe(0);
+    expect(nextRotationIndex(4, 3, 5)).toBe(2);
+  });
+
+  it("a fully-completed cycle (all wallets attempted) wraps back to the start", () => {
+    expect(nextRotationIndex(0, 5, 5)).toBe(0);
+  });
+
+  it("a partial cycle (budget exhausted after only 1 wallet) still advances -- this is what prevents permanent starvation of later wallets", () => {
+    expect(nextRotationIndex(0, 1, 3)).toBe(1);
+  });
+
+  it("zero wallets attempted (e.g. the lane never ran) leaves the cursor unchanged", () => {
+    expect(nextRotationIndex(2, 0, 5)).toBe(2);
+  });
+
+  it("returns 0 for an empty cohort, never divides by zero", () => {
+    expect(nextRotationIndex(3, 0, 0)).toBe(0);
+  });
+
+  it("handles a stale startIndex from a since-shrunk cohort without going negative or out of range", () => {
+    const next = nextRotationIndex(50, 2, 3);
+    expect(next).toBeGreaterThanOrEqual(0);
+    expect(next).toBeLessThan(3);
+  });
+});
+
+describe("rotateWallets + nextRotationIndex fairness property", () => {
+  it("over enough cycles, every wallet in the cohort eventually becomes the first wallet attempted", () => {
+    const wallets = ["A", "B", "C", "D"];
+    let cursor = 0;
+    const firstWalletSeen = new Set<string>();
+    // Simulate a persistently slow first wallet: every cycle attempts exactly ONE wallet
+    // before "hitting its budget" -- the worst case for fairness.
+    for (let cycle = 0; cycle < wallets.length; cycle += 1) {
+      const ordered = rotateWallets(wallets, cursor);
+      firstWalletSeen.add(ordered[0]!);
+      cursor = nextRotationIndex(cursor, 1, wallets.length);
+    }
+    expect(firstWalletSeen).toEqual(new Set(wallets)); // every wallet got a turn as first
   });
 });
