@@ -110,9 +110,28 @@ export const FINAL_OBSERVATION_STAGE_DEADLINE_MS_FOR_TEST = FINAL_OBSERVATION_ST
  * continuation cursor, just the same deadline this constant already represents, enforced
  * at a finer grain. This is still not a hard AbortSignal mid-single-HTTP-request (a page
  * fetch or metadata fetch already in flight when the deadline is noticed still completes,
- * up to its own 12s/10s timeout) -- the real worst-case source-lane wall time is therefore
- * SOURCE_LANE_BUDGET_MS + max(single page timeout, single metadata timeout), not exactly
- * SOURCE_LANE_BUDGET_MS -- see worker.server.test.ts's Task 13F timing-bound tests.
+ * up to its own 12s/10s timeout).
+ *
+ * Task 13G / P1-R (CORRECTED): the formula above (SOURCE_LANE_BUDGET_MS + one in-flight
+ * request) was Codex-flagged as INCOMPLETE -- it ignored Phase 1's raw-fill persistence
+ * step (previously unbounded sequential inserts) entirely. source-poll.server.ts now (a)
+ * gates ALL persistence on `scanConfirmedComplete` -- an interrupted (deadline/lease-loss)
+ * scan persists nothing, so it contributes ZERO wall time beyond the fetch phase's own
+ * overrun; and (b) chunks a CONFIRMED-COMPLETE scan's persistence into PERSIST_BATCH_SIZE
+ * (250-row) batches with a deadline check between batches. Because Phase 1's fetch loop,
+ * Phase 1's persist loop, and Phase 2's pending-fill loop run SEQUENTIALLY within one
+ * wallet's poll and each phase's own top-of-loop check sees the SAME already-passed
+ * deadline once it fires, at most ONE of the three phases can have an operation in flight
+ * when the shared laneDeadlineAtMs is reached -- their overruns do not stack. The real
+ * worst-case PER-WALLET overrun beyond deadlineAtMs is therefore
+ * max(one trades-page fetch ~12s, one PERSIST_BATCH_SIZE upsert round trip ~low seconds,
+ * one metadata fetch ~10s) ~= 12s (the page-fetch timeout dominates), and since all wallets
+ * in one lane share ONE deadline, only the wallet in flight when it fires can overrun --
+ * earlier/later wallets' own top-of-poll checks stop them at/before the shared deadline.
+ * DEFENSIBLE WORST CASE for the source lane alone: SOURCE_LANE_BUDGET_MS + ~12s ~= 42s.
+ * NORMAL EXPECTED runtime (steady-state, short per-wallet gaps): low single-digit seconds
+ * for all 3 wallets combined. See worker.server.test.ts's Task 13F timing-bound tests and
+ * the Task 13G final report for the full-route (source + both observation stages) figure.
  */
 export const SOURCE_LANE_BUDGET_MS = 30_000;
 export const SOURCE_LEASE_TTL_SECONDS = 60;

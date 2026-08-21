@@ -134,8 +134,25 @@ import type { BetType, SourceMarketMetadata } from "./types";
  */
 export const MAX_PAGES_PER_WALLET = Math.floor(MAX_TRADES_OFFSET / PAGE_SIZE) + 1;
 
+/**
+ * Task 13G / P1-Q, Section 1-2: a wallet's FIRST-EVER poll (bootstrap, `!hasHistory`)
+ * fetches exactly ONE page — the newest <=PAGE_SIZE trades — instead of walking backward
+ * through up to MAX_PAGES_PER_WALLET (41) pages of history. See the module doc comment
+ * above `pollSportsShadowWallet` ("TASK 13G: FORWARD-ONLY BOOTSTRAP") for the full proof
+ * that one page is sufficient: `sports_shadow_signals` (the only durable source of
+ * `OpenEpisodeState`, via `findLatestEpisode`) is a brand-new, experiment-specific table
+ * that starts completely empty, so there is no pre-existing DCA/episode state to
+ * reconstruct from history at all; and `isEligibleForEpisodeTrigger` compares only a
+ * fill's own immutable `sourceTs` against the fixed, durable `goLiveAtMs` — never wallet
+ * history — so eligibility can never depend on how much backlog has been walked.
+ */
+export const BOOTSTRAP_MAX_PAGES = 1;
+
 /** Bounded per-poll cap on how many currently-PENDING fills are retried in phase 2 — generous relative to expected per-wallet volume, but never unbounded. Excess pending work simply stays durable for a later poll, exactly like Task 11B's pending-signal batch. */
 export const MAX_PENDING_FILLS_PER_POLL = 500;
+
+/** Task 13G / P1-R: raw-fill persistence is chunked into batches of this size, with a deadline check between batches (never mid-batch) — see Phase 1 persist below. Matches PAGE_SIZE, an already-proven-reasonable unit for one round trip. */
+export const PERSIST_BATCH_SIZE = PAGE_SIZE;
 
 const REQUEST_TIMEOUT_MS = 12_000;
 
@@ -228,6 +245,9 @@ export type RawFillRow = {
 
 export type InsertFillResult = { id: string; inserted: boolean };
 
+/** Task 13G / P1-R: batched form of InsertFillResult, one entry per input row, same order. */
+export type BatchInsertFillResult = { eventKey: string; id: string; inserted: boolean };
+
 export type EpisodeCacheEntry = { id: string; state: OpenEpisodeState };
 
 export type NewSignalRow = {
@@ -275,6 +295,13 @@ export type PollRepository = {
   hasAnyFillsForWallet(wallet: string): Promise<boolean>;
   findExistingEventKeys(wallet: string, eventKeys: string[]): Promise<Set<string>>;
   insertRawFill(row: RawFillRow): Promise<InsertFillResult>;
+  /**
+   * Task 13G / P1-R: batched equivalent of `insertRawFill`, same idempotent
+   * onConflict(event_key)/ignoreDuplicates semantics, one result per input row in the
+   * same order. Exists purely to bound the number of sequential DB round trips for a
+   * large genuinely-new batch — no schema change, same table, same dedup contract.
+   */
+  insertRawFillsBatch(rows: RawFillRow[]): Promise<BatchInsertFillResult[]>;
   /**
    * For tx_hash_ordinal (degraded) identity reconciliation ONLY — see the
    * STABLE EVENT-KEY WINDOW-SHIFT AUDIT doc comment above
@@ -385,6 +412,58 @@ export const supabasePollRepository: PollRepository = {
       .single();
     if (selectError) throw new Error(selectError.message);
     return { id: (existing as unknown as { id: string }).id, inserted: false };
+  },
+
+  async insertRawFillsBatch(rows) {
+    if (rows.length === 0) return [];
+    const { data, error } = await supabaseAdmin
+      .from("sports_shadow_source_fills" as never)
+      .upsert(
+        rows.map((row) => ({
+          event_key: row.eventKey,
+          wallet: row.wallet,
+          wallet_handle: row.walletHandle,
+          condition_id: row.conditionId,
+          asset: row.asset,
+          market_title: row.marketTitle,
+          outcome: row.outcome,
+          event_slug: row.eventSlug,
+          market_slug: row.marketSlug,
+          side: row.side,
+          shares: row.shares,
+          price: row.price,
+          source_ts: row.sourceTs,
+          identity_basis: row.identityBasis,
+          identity_degraded: row.identityDegraded,
+          raw: row.raw,
+        })) as never,
+        { onConflict: "event_key", ignoreDuplicates: true },
+      )
+      .select("id, event_key");
+    if (error) throw new Error(error.message);
+    const insertedByKey = new Map(
+      ((data as unknown as { id: string; event_key: string }[] | null) ?? []).map((r) => [r.event_key, r.id]),
+    );
+    const missingKeys = rows.map((r) => r.eventKey).filter((k) => !insertedByKey.has(k));
+    let existingByKey = new Map<string, string>();
+    if (missingKeys.length > 0) {
+      // Conflict path: these rows already existed (a concurrent poller, or a duplicate
+      // within this same batch — see reconcileDegradedEvents, whose output never contains
+      // same-batch duplicates, so this is the "already durable" case in practice).
+      const { data: existing, error: selectError } = await supabaseAdmin
+        .from("sports_shadow_source_fills" as never)
+        .select("id, event_key")
+        .in("event_key", missingKeys);
+      if (selectError) throw new Error(selectError.message);
+      existingByKey = new Map(
+        ((existing as unknown as { id: string; event_key: string }[] | null) ?? []).map((r) => [r.event_key, r.id]),
+      );
+    }
+    return rows.map((row) => {
+      const insertedId = insertedByKey.get(row.eventKey);
+      if (insertedId) return { eventKey: row.eventKey, id: insertedId, inserted: true };
+      return { eventKey: row.eventKey, id: existingByKey.get(row.eventKey) ?? "", inserted: false };
+    });
   },
 
   async countDurableOrdinalFills(wallet, tuplePrefixes) {
@@ -791,6 +870,93 @@ async function reconcileDegradedEvents(
  * the wallet's next poll turn and stops pagination there naturally -- durable progress,
  * exactly like a lease-loss-interrupted poll already relied on before Task 13F.
  * ================================================================================
+ *
+ * ============================== TASK 13G / P1-Q: FORWARD-ONLY BOOTSTRAP ==============================
+ * ROOT CAUSE (Codex P1 finding on PR #53, confirmed independently before review): Task
+ * 13F's deadline threading made an INTERRUPTED pagination pass safe from the "hold the
+ * HTTP response open forever" failure mode, but did not make it safe from a subtler one --
+ * `findExistingEventKeys` cannot tell the difference between "this row is durable because
+ * an earlier poll walked ALL THE WAY back to it" and "this row is durable merely because
+ * an earlier poll fetched it before being interrupted, without ever reaching a genuine
+ * historical boundary." Routine interruption (deadline, lease loss) of a poll that
+ * persisted SOME newly-fetched pages before stopping could therefore create a FALSE
+ * stepping-stone: a later poll, seeing new trades shift pagination, could encounter that
+ * falsely-early row, mistake it for the true completeness boundary, and stop -- silently
+ * stranding older, never-fetched real fills between the false boundary and the true one,
+ * forever (nothing ever re-attempts a range that overlap-detection believes is covered).
+ *
+ * REASSESSED BOOTSTRAP SEMANTICS (mission Section 1): the ROOT CAUSE of why this bug was
+ * essentially GUARANTEED to trigger routinely was that bootstrap tried to walk up to
+ * MAX_PAGES_PER_WALLET (41) pages -- up to 10,000 trades -- of history on a wallet's very
+ * first poll, an expensive multi-page pass with every opportunity to be interrupted. That
+ * walk turns out to be UNNECESSARY: `findLatestEpisode` (this file's PollRepository) reads
+ * `sports_shadow_signals` for `OpenEpisodeState`, and that table is BRAND NEW and
+ * EXPERIMENT-SPECIFIC -- it durably holds ZERO rows before this experiment's own signals
+ * start landing, so there is no pre-existing DCA/episode state to reconstruct from a
+ * wallet's trading history at all, no matter how deep. And `isEligibleForEpisodeTrigger`
+ * (source-poll.ts, Task 12E/P1-F) compares only a fill's own immutable `sourceTs` against
+ * the fixed, durable `goLiveAtMs` -- it has no dependency on `isBootstrap`, wallet history,
+ * or how many pages have ever been walked. Neither of the two things bootstrap could
+ * plausibly be FOR (DCA continuity, go-live eligibility) requires historical replay.
+ *
+ * FIX: a wallet's first-ever poll (`!hasHistory`) fetches EXACTLY ONE page (the newest
+ * <=PAGE_SIZE trades, see BOOTSTRAP_MAX_PAGES) and stops -- by design, not by deadline.
+ * This durably seeds `hasAnyFillsForWallet` (so every later poll is steady-state
+ * resumption) and gives steady-state polling its first overlap anchor. Forward
+ * requirements B1-B8 (mission Section 2) all hold: B1/B7 -- a single page fetch either
+ * genuinely completes (isBootstrap done, backlogTruncated=false) or is retried identically
+ * next poll (nothing "silently" completes via a deadline race, since BOOTSTRAP_MAX_PAGES=1
+ * IS the completion condition, not a truncation of one). B2 -- unaffected, already
+ * guaranteed by isEligibleForEpisodeTrigger regardless of how bootstrap is implemented.
+ * B3/B4 -- once bootstrap seeds an anchor, ordinary steady-state polling (short gaps
+ * between frequent invocations) reliably closes any remaining gap up to and past
+ * GO_LIVE_AT, the SAME mechanism already relied on for all later forward catch-up. B5 --
+ * the boundary is the durable content of `sports_shadow_source_fills` itself, not
+ * in-memory state, so a restart before/after bootstrap changes nothing. B6 -- wallets
+ * remain fully independent (unchanged). B8 -- proved above: one page suffices because
+ * there is no pre-existing DCA state to reconstruct and eligibility never depends on
+ * history depth.
+ *
+ * ============================== TASK 13G / P1-Q + P1-R: NO-STRANDING PERSISTENCE ==============================
+ * The bootstrap redesign above eliminates the GUARANTEED, every-cycle trigger for P1-Q
+ * (bootstrap no longer walks deep history), but a steady-state poll asked to close an
+ * unusually large gap (e.g. after a scheduler outage) can still, in principle, be
+ * interrupted before reaching a genuine completeness boundary. The invariant this section
+ * enforces UNCONDITIONALLY, for bootstrap and steady-state alike: AN INCOMPLETE SCAN MAY
+ * NEVER CREATE A DURABLE OVERLAP THAT CAUSES UNREAD SOURCE DATA TO BECOME UNREACHABLE.
+ *
+ * FIX: pagination already buffers every fetched page in memory (`rawPages`) rather than
+ * persisting per-page -- Phase 1's persist step runs only AFTER the pagination loop below
+ * exits. This poll now tracks WHY the loop exited and computes `scanConfirmedComplete`:
+ * true only if the loop stopped via a genuine overlap, a natural end (short/empty page),
+ * or (steady-state only) exhausting MAX_PAGES_PER_WALLET -- i.e. never via deadline or
+ * lease loss. If NOT confirmed complete, `rawPages` is discarded WITHOUT calling
+ * insertRawFillsBatch at all: zero new durable rows are created, so there is nothing a
+ * later poll could ever mistake for a completeness boundary. The discarded rows are not
+ * lost -- they were never durable evidence to begin with, and the wallet's next poll
+ * re-fetches from page 0 (always the cheapest page) and either completes (persisting the
+ * full, gapless range in one shot) or defers again. Because the ONLY way this poll ever
+ * advances the durable boundary is via a scan that walked CONTINUOUSLY from the newest row
+ * to a genuine stopping point, no interrupted scan -- regardless of how many times it
+ * repeats, how pages shift between attempts, or whether a restart happens between every
+ * attempt -- can ever manufacture a false stepping-stone. This is a safety property (no
+ * fill is ever incorrectly treated as "covered"), not a liveness one: under a sustained,
+ * pathological trading burst that outpaces every single poll's budget, forward progress
+ * could stall, but no data is ever silently stranded -- see the Task 13G final report for
+ * the exact bound at which this residual, bounded-probability liveness risk would require
+ * new durable state (a per-wallet coverage watermark) to fully eliminate.
+ *
+ * P1-R (persistence-phase bound): once a scan IS confirmed complete, `genuinelyNew` is a
+ * proven-complete, already-deduped set -- persisting a SUBSET of it (stopping partway
+ * through, deadline permitting) is safe in a way partial FETCHING is not, because
+ * `findExistingEventKeys` only ever reports rows that are genuinely durable; any row not
+ * yet inserted this poll is simply re-discovered as still-genuinely-new and retried next
+ * poll (fully idempotent). Persistence is therefore chunked into PERSIST_BATCH_SIZE-row
+ * batches (one bounded DB round trip each, via `insertRawFillsBatch`), with a deadline
+ * check BETWEEN batches (never mid-batch) -- bounding the previously-unbounded sequential
+ * per-row insert loop that Codex flagged as capable of holding the response open
+ * indefinitely for a large genuinely-new batch.
+ * ================================================================================
  */
 export async function pollSportsShadowWallet(
   wallet: string,
@@ -816,35 +982,55 @@ export async function pollSportsShadowWallet(
   }
   result.isBootstrap = !hasHistory;
 
+  const maxPagesThisScan = hasHistory ? MAX_PAGES_PER_WALLET : BOOTSTRAP_MAX_PAGES;
   const rawPages: RawTrade[][] = [];
   let overlapFound = false;
+  let naturalEnd = false;
   let deadlineExceeded = false;
   try {
-    for (let page = 0; page < MAX_PAGES_PER_WALLET; page += 1) {
+    for (let page = 0; page < maxPagesThisScan; page += 1) {
       const offset = page * PAGE_SIZE;
-      if (offset > MAX_TRADES_OFFSET) break;
+      if (offset > MAX_TRADES_OFFSET) {
+        naturalEnd = true;
+        break;
+      }
       // Task 13F: checked BEFORE each page, same spirit as the lease checkpoint below --
       // a wallet with a long real trade history must not hold this poll (and the HTTP
-      // response it blocks) open indefinitely. Pages already fetched are still processed
-      // below (Phase 1's raw-fill insert is idempotent/dedup-safe either way).
+      // response it blocks) open indefinitely. Task 13G / P1-Q: pages already fetched are
+      // now discarded, NOT persisted, when the loop is interrupted this way -- see
+      // scanConfirmedComplete below.
       if (d.now() >= deadlineAtMs) {
         deadlineExceeded = true;
         break;
       }
       // Task 12F / P1-G: a full pagination pass can take up to MAX_PAGES_PER_WALLET * 12s
       // -- checked before each page so a lease lost mid-pagination stops issuing further
-      // requests immediately. Pages already fetched are still processed below (Phase 1's
-      // raw-fill insert is idempotent/dedup-safe regardless of lease state); it is ONLY
-      // Phase 2's episode mutations that must never run under a stale fence.
+      // requests immediately. Task 13G / P1-Q: pages already fetched are now discarded,
+      // NOT persisted, when the loop is interrupted this way -- see scanConfirmedComplete
+      // below; it is ONLY Phase 2's episode mutations that ever needed this distinction
+      // before, but an interrupted Phase 1 fetch is no longer trusted as evidence either.
       if (!(await d.checkpointLease())) {
         result.leaseLost = true;
         break;
       }
       const rows = await pacedFetchTradesPage(normalizedWallet, offset, d.network);
       result.pagesFetched += 1;
-      if (rows.length === 0) break;
+      if (rows.length === 0) {
+        naturalEnd = true;
+        break;
+      }
       rawPages.push(rows);
       result.rowsFetched += rows.length;
+
+      if (!hasHistory) {
+        // Task 13G / P1-Q, Section 1-2: forward-only bootstrap is exactly one page by
+        // design -- see this file's "TASK 13G / P1-Q: FORWARD-ONLY BOOTSTRAP" doc comment
+        // above pollSportsShadowWallet for the full proof. There is no pre-existing
+        // durable state to overlap against (hasHistory is false), so this is a genuine,
+        // intentional completion, not a truncation.
+        naturalEnd = true;
+        break;
+      }
 
       // Overlap-to-stop must be proven with a RELIABLE key only (source_id or
       // tx_hash_log_index). A tx_hash_ordinal (degraded) key is re-derived fresh
@@ -863,7 +1049,10 @@ export async function pollSportsShadowWallet(
           break;
         }
       }
-      if (rows.length < PAGE_SIZE) break;
+      if (rows.length < PAGE_SIZE) {
+        naturalEnd = true;
+        break;
+      }
     }
   } catch (err) {
     result.error = `trade page fetch failed: ${err instanceof Error ? err.message : "unknown error"}`;
@@ -871,9 +1060,13 @@ export async function pollSportsShadowWallet(
 
   // Task 12F / P1-G: a pagination pass stopped early by lease loss is NOT genuine backlog
   // exhaustion -- there may well be more history the wallet's own overlap key would have
-  // found had the lease survived. Only a real MAX_PAGES_PER_WALLET exhaustion (or a
-  // genuine short/empty page) without lease loss counts as backlogTruncated.
-  if (hasHistory && !overlapFound && !result.leaseLost && result.error === null) {
+  // found had the lease survived. Only a real MAX_PAGES_PER_WALLET exhaustion (loop ran
+  // out of iterations without overlap, a natural end, a deadline stop, or an error) counts
+  // as backlogTruncated in this (accepted historical-depth boundary) sense. Never reachable
+  // for a bootstrap poll: BOOTSTRAP_MAX_PAGES=1 always exits via the explicit `naturalEnd`
+  // break above once page 0 is fetched, never by exhausting its (single) iteration budget.
+  const ranOutOfPages = !overlapFound && !naturalEnd && !deadlineExceeded && !result.leaseLost && result.error === null;
+  if (hasHistory && ranOutOfPages) {
     result.backlogTruncated = true;
   }
   // Task 13F: a deadline-triggered stop is NEVER an intentional completion boundary --
@@ -886,57 +1079,62 @@ export async function pollSportsShadowWallet(
     result.backlogTruncated = true;
   }
 
-  const normalizedEvents: NormalizedEvent[] = normalizeSourceEvents(rawPages.flat(), normalizedWallet);
-  const reliableEvents = normalizedEvents.filter((e) => !e.identityDegraded);
-  const degradedEvents = normalizedEvents.filter((e) => e.identityDegraded);
+  // Task 13G / P1-Q: the CENTRAL no-stranding invariant. `rawPages` is durable evidence
+  // ONLY if this scan reached a genuine, provable stopping point (overlap / natural end /
+  // accepted MAX_PAGES boundary) -- never if it was cut short by the deadline or lease
+  // loss. See the module doc comment's "NO-STRANDING PERSISTENCE" section for the full
+  // proof of why this is both necessary and sufficient to make an interrupted scan unable
+  // to ever create a false completeness boundary for a later poll.
+  const scanConfirmedComplete = !deadlineExceeded && !result.leaseLost && result.error === null;
 
-  let existingReliableKeys: Set<string>;
-  try {
-    existingReliableKeys = await d.repo.findExistingEventKeys(normalizedWallet, reliableEvents.map((e) => e.eventKey));
-  } catch (err) {
-    result.error = result.error ?? `findExistingEventKeys failed: ${err instanceof Error ? err.message : "unknown error"}`;
-    existingReliableKeys = new Set();
-  }
-  const newReliable = reliableEvents.filter((e) => !existingReliableKeys.has(e.eventKey));
-  result.duplicateRows += reliableEvents.length - newReliable.length;
-
-  const { newDegraded, duplicateCount: degradedDuplicates, error: reconcileError } = await reconcileDegradedEvents(degradedEvents, normalizedWallet, d.repo);
-  result.error = result.error ?? reconcileError;
-  result.duplicateRows += degradedDuplicates;
-
-  const genuinelyNew = [...newReliable, ...newDegraded].sort((a, b) => a.sourceTs - b.sourceTs || a.eventKey.localeCompare(b.eventKey));
-
-  /* -------------------- Phase 1: persist every genuinely-new fill as durable evidence -------------------- */
   const insertedThisPoll = new Set<string>();
-  for (const event of genuinelyNew) {
+  if (scanConfirmedComplete) {
+    const normalizedEvents: NormalizedEvent[] = normalizeSourceEvents(rawPages.flat(), normalizedWallet);
+    const reliableEvents = normalizedEvents.filter((e) => !e.identityDegraded);
+    const degradedEvents = normalizedEvents.filter((e) => e.identityDegraded);
+
+    let existingReliableKeys: Set<string>;
     try {
-      const insertResult = await d.repo.insertRawFill({
-        eventKey: event.eventKey,
-        wallet: normalizedWallet,
-        walletHandle: rawStr(event.raw, "name"),
-        conditionId: event.conditionId,
-        asset: event.asset,
-        marketTitle: event.marketTitle,
-        outcome: event.outcome,
-        eventSlug: rawStr(event.raw, "eventSlug"),
-        marketSlug: event.slug,
-        side: event.side,
-        shares: event.shares,
-        price: event.price,
-        sourceTs: event.sourceTs,
-        identityBasis: event.identityBasis,
-        identityDegraded: event.identityDegraded,
-        raw: event.raw,
-      });
-      if (insertResult.inserted) {
-        result.newRows += 1;
-        insertedThisPoll.add(insertResult.id);
-      } else {
-        result.duplicateRows += 1;
-      }
+      existingReliableKeys = await d.repo.findExistingEventKeys(normalizedWallet, reliableEvents.map((e) => e.eventKey));
     } catch (err) {
-      result.error = result.error ?? `insertRawFill failed: ${err instanceof Error ? err.message : "unknown error"}`;
-      result.invalidRows += 1;
+      result.error = result.error ?? `findExistingEventKeys failed: ${err instanceof Error ? err.message : "unknown error"}`;
+      existingReliableKeys = new Set();
+    }
+    const newReliable = reliableEvents.filter((e) => !existingReliableKeys.has(e.eventKey));
+    result.duplicateRows += reliableEvents.length - newReliable.length;
+
+    const { newDegraded, duplicateCount: degradedDuplicates, error: reconcileError } = await reconcileDegradedEvents(degradedEvents, normalizedWallet, d.repo);
+    result.error = result.error ?? reconcileError;
+    result.duplicateRows += degradedDuplicates;
+
+    const genuinelyNew = [...newReliable, ...newDegraded].sort((a, b) => a.sourceTs - b.sourceTs || a.eventKey.localeCompare(b.eventKey));
+
+    /* -------------------- Phase 1 persist: batched, deadline-checked BETWEEN (never mid-) batch -------------------- */
+    for (let i = 0; i < genuinelyNew.length; i += PERSIST_BATCH_SIZE) {
+      // Task 13G / P1-R: checked before every batch except the first (a scan that just
+      // confirmed complete deserves to persist at least one batch). Safe to stop here --
+      // see the module doc comment's P1-R paragraph: any row not yet inserted this poll is
+      // still genuinely-new (never durably written) and is simply re-discovered and
+      // retried on the wallet's next poll, fully idempotently.
+      if (i > 0 && d.now() >= deadlineAtMs) {
+        result.backlogTruncated = true;
+        break;
+      }
+      const batch = genuinelyNew.slice(i, i + PERSIST_BATCH_SIZE).map((event) => toRawFillRow(event));
+      try {
+        const batchResults = await d.repo.insertRawFillsBatch(batch);
+        for (const r of batchResults) {
+          if (r.inserted) {
+            result.newRows += 1;
+            insertedThisPoll.add(r.id);
+          } else {
+            result.duplicateRows += 1;
+          }
+        }
+      } catch (err) {
+        result.error = result.error ?? `insertRawFillsBatch failed: ${err instanceof Error ? err.message : "unknown error"}`;
+        result.invalidRows += batch.length;
+      }
     }
   }
 
@@ -1111,7 +1309,12 @@ export async function pollSportsShadowWallet(
         // Task 12F / P1-G, requirement E: re-verify ownership immediately before the
         // state-changing write, after whatever await (metadata fetch, findLatestEpisode)
         // preceded it this iteration -- a lease that was valid at the top of this
-        // iteration may have been lost during that await.
+        // iteration may have been lost during that await. Task 13G / P1-R: the deadline
+        // is re-checked here too -- CHECK BUDGET immediately before every mutating write,
+        // not just at the top of the loop -- even though a fill left un-mutated is always
+        // safe (stays PENDING, Task 12D/P1-A), this keeps the route's real worst-case
+        // overrun as small as possible.
+        if (d.now() >= deadlineAtMs) break;
         if (!(await d.checkpointLease())) {
           result.leaseLost = true;
           break;
@@ -1136,6 +1339,9 @@ export async function pollSportsShadowWallet(
       if (decision.kind === "AGGREGATED_BUY") result.aggregatedCount += 1;
       else result.lateReconciliationCount += 1;
       if (cacheEntry) {
+        // Task 13G / P1-R: CHECK BUDGET immediately before this mutating write too -- see
+        // the identical comment on the SELL_RECORDED branch above.
+        if (d.now() >= deadlineAtMs) break;
         if (!(await d.checkpointLease())) {
           result.leaseLost = true;
           break;
@@ -1177,6 +1383,9 @@ export async function pollSportsShadowWallet(
       sourceMarketSlug: metadata.marketSlug,
       sourceOutcome: fill.outcome,
     };
+    // Task 13G / P1-R: CHECK BUDGET immediately before this mutating write too -- see the
+    // identical comment on the SELL_RECORDED branch above.
+    if (d.now() >= deadlineAtMs) break;
     if (!(await d.checkpointLease())) {
       result.leaseLost = true;
       break;
@@ -1210,6 +1419,27 @@ export async function pollSportsShadowWallet(
   }
 
   return result;
+}
+
+function toRawFillRow(event: NormalizedEvent): RawFillRow {
+  return {
+    eventKey: event.eventKey,
+    wallet: event.wallet,
+    walletHandle: rawStr(event.raw, "name"),
+    conditionId: event.conditionId,
+    asset: event.asset,
+    marketTitle: event.marketTitle,
+    outcome: event.outcome,
+    eventSlug: rawStr(event.raw, "eventSlug"),
+    marketSlug: event.slug,
+    side: event.side,
+    shares: event.shares,
+    price: event.price,
+    sourceTs: event.sourceTs,
+    identityBasis: event.identityBasis,
+    identityDegraded: event.identityDegraded,
+    raw: event.raw,
+  };
 }
 
 function rawStr(raw: unknown, key: string): string | null {
