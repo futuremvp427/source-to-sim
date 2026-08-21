@@ -1215,6 +1215,256 @@ describe("pollSportsShadowWallet — Task 12F/P1-G: lease checkpoint stops non-i
   });
 });
 
+/** Returns each value in `values` in order on successive calls, then repeats the last one forever -- lets a test precisely script `d.now()`'s return sequence across an unknown number of internal calls. */
+function sequentialClock(values: number[]): () => number {
+  let i = 0;
+  return () => {
+    const v = values[Math.min(i, values.length - 1)]!;
+    i += 1;
+    return v;
+  };
+}
+
+describe("Task 13F: a per-wallet deadline bounds Phase 1 (pagination) and Phase 2 (pending-fill/metadata resolution) WITHIN one wallet's own poll, not just between wallets", () => {
+  function fullPageFetcher(callLog: number[]): SourcePollNetworkDeps {
+    let call = 0;
+    return {
+      fetchImpl: (async (url: string | URL) => {
+        call += 1;
+        callLog.push(call);
+        const u = new URL(String(url));
+        const offset = Number(u.searchParams.get("offset"));
+        // Always a FULL page with a unique tx hash per row, so pagination never finds a
+        // natural short-page stop or an overlap -- it would keep going indefinitely
+        // (bounded only by MAX_PAGES_PER_WALLET/MAX_TRADES_OFFSET) without a deadline.
+        const rows = Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `p${offset}-${i}`, transactionHash: `0xtx-${offset}-${i}` }));
+        return new Response(JSON.stringify(rows), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch,
+      reserveRequestSlot: async () => 0,
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      recordHostRateLimit: async () => {},
+    };
+  }
+
+  it("reproduction: WITHOUT a deadline, a wallet with substantial real trade history keeps paginating past what any single HTTP response should stay open for (bounded only by MAX_PAGES_PER_WALLET, not by wall time)", async () => {
+    const callLog: number[] = [];
+    const repo = new FakeRepo();
+    const result = await pollSportsShadowWallet(WALLET, 0, {
+      repo,
+      now: () => 1_700_000_500_000,
+      fetchSourceMarketMetadata: vi.fn(async () => ELIGIBLE_METADATA) as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
+      network: fullPageFetcher(callLog),
+    }); // no deadlineAtMs argument at all -- today's exact pre-Task-13F call shape
+    expect(result.pagesFetched).toBe(MAX_PAGES_PER_WALLET); // ran all the way to the hard page cap, unbounded by time
+  });
+
+  it("Phase 1: a deadline reached mid-pagination stops fetching further pages, but pages already fetched are still persisted (idempotent, durable evidence -- exactly like a lease-loss stop)", async () => {
+    const callLog: number[] = [];
+    const repo = new FakeRepo();
+    const base = 1_700_000_500_000;
+    // Called once for detectedAtMs, then once per page-loop iteration before each fetch.
+    // Exceeded exactly after the 2nd page's check.
+    const now = sequentialClock([base, base, base, base + 999_999]);
+    const deadlineAtMs = base + 500;
+    const result = await pollSportsShadowWallet(
+      WALLET,
+      0,
+      {
+        repo,
+        now,
+        fetchSourceMarketMetadata: vi.fn(async () => ELIGIBLE_METADATA) as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
+        network: fullPageFetcher(callLog),
+      },
+      deadlineAtMs,
+    );
+    expect(result.pagesFetched).toBeLessThan(MAX_PAGES_PER_WALLET); // stopped early, not at the hard cap
+    expect(result.pagesFetched).toBeGreaterThan(0); // at least the pages before the deadline were fetched
+    expect(result.newRows).toBe(result.pagesFetched * PAGE_SIZE); // every fetched page's rows were still persisted
+  });
+
+  it("Phase 1: a deadline-triggered stop sets backlogTruncated=true even for a BOOTSTRAP poll (no prior history) -- a genuine change from the pre-Task-13F rule that only a RESUMPTION poll's page-cap exhaustion counted as truncated", async () => {
+    const callLog: number[] = [];
+    const repo = new FakeRepo(); // empty -- this wallet has zero prior history, isBootstrap will be true
+    const base = 1_700_000_500_000;
+    const now = sequentialClock([base, base, base, base + 999_999]);
+    const result = await pollSportsShadowWallet(
+      WALLET,
+      0,
+      {
+        repo,
+        now,
+        fetchSourceMarketMetadata: vi.fn(async () => ELIGIBLE_METADATA) as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
+        network: fullPageFetcher(callLog),
+      },
+      base + 500,
+    );
+    expect(result.isBootstrap).toBe(true);
+    expect(result.backlogTruncated).toBe(true); // Task 13F: no longer silently treated as "done"
+  });
+
+  it("Phase 1: when NO new trades occur between polls, an interrupted poll's already-persisted pages are correctly recognized on the next poll -- no duplicate insert, no crash (the simple, static-history case)", async () => {
+    const callLog: number[] = [];
+    const repo = new FakeRepo();
+    const network = fullPageFetcher(callLog);
+    const base = 1_700_000_500_000;
+
+    const firstNow = sequentialClock([base, base, base, base + 999_999]);
+    const first = await pollSportsShadowWallet(
+      WALLET,
+      0,
+      { repo, now: firstNow, fetchSourceMarketMetadata: vi.fn(async () => ELIGIBLE_METADATA) as unknown as WalletPollDeps["fetchSourceMarketMetadata"], network },
+      base + 500,
+    );
+    expect(first.backlogTruncated).toBe(true);
+    const persistedAfterFirst = repo.fillsByEventKey.size;
+    expect(persistedAfterFirst).toBeGreaterThan(0);
+
+    // Second poll, same static page content (the wallet made no new trades in between) --
+    // page 0 is recognized immediately as already-durable, correctly deduplicated.
+    const second = await pollSportsShadowWallet(
+      WALLET,
+      0,
+      { repo, now: () => base + 10_000, fetchSourceMarketMetadata: vi.fn(async () => ELIGIBLE_METADATA) as unknown as WalletPollDeps["fetchSourceMarketMetadata"], network },
+      base + 10_000 + 999_999,
+    );
+    expect(second.newRows).toBe(0);
+    expect(repo.fillsByEventKey.size).toBe(persistedAfterFirst); // no duplicate insert
+  });
+
+  it("DOCUMENTED RESIDUAL RISK (Task 13F, mission Step 5 -- NOT resolved by this task, requires a follow-up decision before routine deadline-interruption is safe for a wallet with deep backlog): when NEW trades arrive between an interrupted poll and its resumption, overlap-based stopping can find a match too early and permanently strand older, never-yet-fetched history -- the exact scenario the mission's own architectural warning describes. This is a PRE-EXISTING structural property of the overlap-stop design (previously reachable only via the rare lease-loss path); Task 13F's deadline fix makes interruption routine for a wallet with substantial real history, which could turn this from a rare edge case into a regular one unless the per-wallet/lane deadline is sized generously enough that a real wallet's full bootstrap completes in one pass, or a durable per-wallet continuation watermark (a genuine schema change, out of scope for this timing-only task) is added.", async () => {
+    const repo = new FakeRepo();
+    // OLD_ANCHOR: durable history already known before this test begins (e.g. from a much
+    // earlier, fully-completed poll) -- represents the TRUE, long-ago start of this
+    // wallet's already-covered history.
+    await repo.insertRawFill({
+      wallet: WALLET,
+      eventKey: "OLD_ANCHOR",
+      conditionId: "0xcond",
+      asset: "0xasset",
+      side: "BUY",
+      sourceTs: 1_000,
+      shares: 1,
+      price: 0.5,
+      identityBasis: "source_id",
+      identityDegraded: false,
+      raw: {},
+    } as unknown as Parameters<FakeRepo["insertRawFill"]>[0]);
+    // MIDDLE_BATCH: real history that exists on the source, strictly between OLD_ANCHOR
+    // and the wallet's newest trades, but which NEITHER poll below ever actually fetches.
+    const middleBatchEventKeys = new Set(Array.from({ length: PAGE_SIZE }, (_, i) => `MIDDLE_BATCH-${i}`));
+
+    let wave = 1; // controls which page-0 content the SECOND poll sees (simulating new trades arriving between polls)
+    const network: SourcePollNetworkDeps = {
+      fetchImpl: (async (url: string | URL) => {
+        const offset = Number(new URL(String(url)).searchParams.get("offset"));
+        let rows: unknown[];
+        if (offset === 0 && wave === 1) {
+          rows = Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `NEW_BATCH_1-${i}`, transactionHash: `0xtx-nb1-${i}` }));
+        } else if (offset === 0 && wave === 2) {
+          // New trades arrived since poll 1 -- today's newest page 0 is now DIFFERENT content.
+          rows = Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `NEW_BATCH_2-${i}`, transactionHash: `0xtx-nb2-${i}` }));
+        } else if (offset === PAGE_SIZE && wave === 2) {
+          // NEW_BATCH_1 (already durable from poll 1) has been pushed to page 1.
+          rows = Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `NEW_BATCH_1-${i}`, transactionHash: `0xtx-nb1-${i}` }));
+        } else if (offset === PAGE_SIZE * 2) {
+          rows = Array.from(middleBatchEventKeys).map((id) => trade({ id, transactionHash: `0xtx-${id}` }));
+        } else {
+          rows = []; // OLD_ANCHOR's page, or beyond -- never actually reached below
+        }
+        return new Response(JSON.stringify(rows), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch,
+      reserveRequestSlot: async () => 0,
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      recordHostRateLimit: async () => {},
+    };
+
+    const base = 1_700_000_500_000;
+    // Poll 1: deadline hits right after page 0 (NEW_BATCH_1) -- never reaches MIDDLE_BATCH or OLD_ANCHOR.
+    const firstNow = sequentialClock([base, base, base + 999_999]);
+    const first = await pollSportsShadowWallet(
+      WALLET,
+      0,
+      { repo, now: firstNow, fetchSourceMarketMetadata: vi.fn(async () => ELIGIBLE_METADATA) as unknown as WalletPollDeps["fetchSourceMarketMetadata"], network },
+      base + 500,
+    );
+    expect(first.backlogTruncated).toBe(true);
+
+    // New trades arrive; wave 2 begins.
+    wave = 2;
+
+    // Poll 2: generous deadline, should in principle walk far enough to reach MIDDLE_BATCH
+    // and OLD_ANCHOR -- but overlap-based stopping finds NEW_BATCH_1 (already durable) at
+    // page 1 and stops there, never reaching MIDDLE_BATCH at page 2.
+    const second = await pollSportsShadowWallet(
+      WALLET,
+      0,
+      { repo, now: () => base + 10_000, fetchSourceMarketMetadata: vi.fn(async () => ELIGIBLE_METADATA) as unknown as WalletPollDeps["fetchSourceMarketMetadata"], network },
+      base + 10_000 + 999_999,
+    );
+
+    const middleBatchPersisted = [...repo.fillsByEventKey.keys()].some((k) => middleBatchEventKeys.has(k));
+    // This assertion documents the CURRENT (undesired) behavior -- MIDDLE_BATCH is NOT
+    // discovered, i.e. it is stranded. If a future fix (durable per-wallet watermark, or a
+    // provably-sufficient deadline sizing) closes this gap, this specific assertion should
+    // start failing, which is the intended signal to update this test and its comment.
+    expect(middleBatchPersisted).toBe(false);
+    expect(second.pagesFetched).toBeLessThanOrEqual(2); // stopped at NEW_BATCH_1 (page 1), never reached MIDDLE_BATCH (page 2)
+  });
+
+  it("Phase 2: a deadline reached mid-pending-fill-processing stops resolving further fills, but unprocessed ones simply stay PENDING (Task 12D/P1-A's existing retry contract, zero new mechanism)", async () => {
+    const repo = new FakeRepo();
+    // Seed 5 already-raw-persisted PENDING fills directly (skip Phase 1 entirely).
+    for (let i = 0; i < 5; i += 1) {
+      await repo.insertRawFill({
+        wallet: WALLET,
+        eventKey: `seeded-${i}`,
+        conditionId: "0xcond",
+        asset: "0xasset",
+        side: "BUY",
+        sourceTs: 1_700_000_000 + i,
+        shares: 1,
+        price: 0.5,
+        identityBasis: "source_id",
+        identityDegraded: false,
+        raw: {},
+      } as unknown as Parameters<FakeRepo["insertRawFill"]>[0]);
+    }
+    let metadataCalls = 0;
+    const base = 1_700_000_500_000;
+    // detectedAtMs + hasAnyFillsForWallet path uses `now` too, but the critical checks are
+    // the per-fill deadline checks in Phase 2 -- give it enough budget to pass Phase 1
+    // (no pages to fetch here) then run out partway through the 5 pending fills.
+    let call = 0;
+    const now = () => {
+      call += 1;
+      return call <= 2 ? base : base + 999_999; // first couple of calls "before deadline", rest "after"
+    };
+    const result = await pollSportsShadowWallet(WALLET, 0, {
+      repo,
+      now,
+      fetchSourceMarketMetadata: vi.fn(async () => {
+        metadataCalls += 1;
+        return ELIGIBLE_METADATA;
+      }) as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
+      network: fullPageFetcher([]),
+    }, base + 1);
+    expect(metadataCalls).toBeLessThan(5); // stopped before processing every pending fill
+    const stillPending = [...repo.fillsByEventKey.values()].filter((f) => f.downstreamStatus === "PENDING");
+    expect(stillPending.length).toBeGreaterThan(0); // unprocessed fills remain safely PENDING, not lost or fabricated as terminal
+  });
+
+  it("omitting deadlineAtMs entirely preserves the exact prior unbounded-by-time behavior (default is Number.POSITIVE_INFINITY -- existing callers/tests are completely unaffected)", async () => {
+    const repo = new FakeRepo();
+    const result = await pollSportsShadowWallet(WALLET, 0, {
+      repo,
+      now: () => 1_700_000_500_000,
+      fetchSourceMarketMetadata: vi.fn(async () => ELIGIBLE_METADATA) as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
+      network: makeNetworkDeps({ 0: [] }),
+    });
+    expect(result.error).toBeNull();
+  });
+});
+
 describe("Task 13E, C: the default network path (no fetchImpl override) uses the Cloudflare-Workers-safe runtimeFetch adapter, not a bare detached `fetch` reference", () => {
   function installThisSensitiveGlobalFetch(): () => void {
     const original = globalThis.fetch;

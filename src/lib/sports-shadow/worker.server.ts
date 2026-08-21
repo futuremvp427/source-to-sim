@@ -93,13 +93,26 @@ export const FINAL_OBSERVATION_STAGE_DEADLINE_MS_FOR_TEST = FINAL_OBSERVATION_ST
 
 /**
  * Typical steady-state completion (a short/empty page per wallet, or one reliable-key
- * overlap match) is fast. The 30s inter-wallet budget only stops SCHEDULING further
- * wallets once elapsed exceeds it, leaving the remainder durable for the next cycle — it
- * cannot abort a wallet poll already in flight (pollSportsShadowWallet has no internal
- * AbortSignal). That is safe, not merely tolerated: Task 10 is explicitly designed so an
- * overlapping/duplicated poll reconciles idempotently against durable state (see its own
- * STABLE EVENT-KEY WINDOW-SHIFT AUDIT), so even a lease expiring mid-poll never corrupts
- * anything — the worst outcome is wasted duplicate work, never a wrong result.
+ * overlap match) is fast. The 30s budget stops SCHEDULING further wallets once elapsed
+ * exceeds it, leaving the remainder durable for the next cycle.
+ *
+ * Task 13F: this SAME deadline (laneStartMs + SOURCE_LANE_BUDGET_MS) is now ALSO threaded
+ * into `pollSportsShadowWallet` as `deadlineAtMs` and checked between every page (Phase 1)
+ * and every pending fill (Phase 2) WITHIN one wallet's own poll -- closing the gap a
+ * production canary exposed: an already-in-flight wallet poll against a wallet with
+ * substantial real trade history could previously run for 60-90+ real seconds, because
+ * the 30s budget was only ever checked BETWEEN wallets, never within one. Stopping a
+ * wallet's poll early this way is safe, not merely tolerated -- exactly like a lease
+ * expiring mid-poll always was: Task 10's idempotent reconciliation against durable state
+ * (see its own STABLE EVENT-KEY WINDOW-SHIFT AUDIT) means an interrupted poll's
+ * already-fetched pages are durably persisted and safely picked back up (via the existing
+ * overlap-detection mechanism) on the wallet's next rotation turn -- no new schema, no new
+ * continuation cursor, just the same deadline this constant already represents, enforced
+ * at a finer grain. This is still not a hard AbortSignal mid-single-HTTP-request (a page
+ * fetch or metadata fetch already in flight when the deadline is noticed still completes,
+ * up to its own 12s/10s timeout) -- the real worst-case source-lane wall time is therefore
+ * SOURCE_LANE_BUDGET_MS + max(single page timeout, single metadata timeout), not exactly
+ * SOURCE_LANE_BUDGET_MS -- see worker.server.test.ts's Task 13F timing-bound tests.
  */
 export const SOURCE_LANE_BUDGET_MS = 30_000;
 export const SOURCE_LEASE_TTL_SECONDS = 60;
@@ -476,6 +489,9 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
   let walletsAttempted = 0;
   let leaseLost = false;
   const laneStartMs = d.now();
+  // Task 13F: the SAME lane-level deadline now bounds each wallet's OWN poll internally
+  // too (see SOURCE_LANE_BUDGET_MS's doc comment) -- not just whether to start the next one.
+  const laneDeadlineAtMs = laneStartMs + SOURCE_LANE_BUDGET_MS;
 
   for (const wallet of orderedWallets) {
     if (budgetExceeded(d.now() - laneStartMs, SOURCE_LANE_BUDGET_MS)) break; // remaining wallets stay durable for the next cycle -- and the rotation cursor below advances only past what WAS attempted, so they are tried FIRST next cycle
@@ -485,7 +501,7 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
       break;
     }
     try {
-      const result: WalletPollResult = await d.pollSportsShadowWallet(wallet, config.goLiveAtMs, { ...d.sourcePollDeps, checkpointLease: checkpoint });
+      const result: WalletPollResult = await d.pollSportsShadowWallet(wallet, config.goLiveAtMs, { ...d.sourcePollDeps, checkpointLease: checkpoint }, laneDeadlineAtMs);
       newSignalsCreated += result.newSignals.length;
       walletSummaries.push({
         wallet: result.wallet,

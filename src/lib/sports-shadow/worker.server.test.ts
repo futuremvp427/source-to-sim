@@ -16,6 +16,7 @@ import {
   OBSERVATION_LOCK_ID_KALSHI,
   OBSERVATION_LOCK_ID_PMUS,
   OBSERVATION_STAGE_DEADLINE_MS,
+  SOURCE_LANE_BUDGET_MS,
   SOURCE_LOCK_ID,
   runSportsShadowCycle,
   type SportsShadowWorkerDeps,
@@ -300,6 +301,29 @@ describe("runSportsShadowCycle — wallet polling (fixed order)", () => {
     });
     await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A, WALLET_B] }), baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never }));
     expect(calls).toEqual([WALLET_A, WALLET_B]);
+  });
+
+  it("Task 13F: every wallet call receives an explicit deadlineAtMs (4th argument) -- not merely 'no deadline at all' as before", async () => {
+    const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, _deps: unknown, _deadlineAtMs: number) => emptyWalletResult(wallet));
+    await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A, WALLET_B, WALLET_C] }), baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never }));
+    for (const call of pollSportsShadowWallet.mock.calls) {
+      expect(typeof call[3]).toBe("number");
+      expect(Number.isFinite(call[3])).toBe(true);
+    }
+  });
+
+  it("Task 13F: all wallets in ONE lane share the SAME lane-wide deadline (laneStartMs + SOURCE_LANE_BUDGET_MS) -- not a fresh per-wallet budget that would let N wallets each independently consume up to 30s", async () => {
+    const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, _deps: unknown, _deadlineAtMs: number) => emptyWalletResult(wallet));
+    await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A, WALLET_B, WALLET_C] }), baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never }));
+    const deadlines = pollSportsShadowWallet.mock.calls.map((call) => call[3]);
+    expect(new Set(deadlines).size).toBe(1); // identical deadline value passed to every wallet this lane
+  });
+
+  it("Task 13F: the lane deadline equals now() + SOURCE_LANE_BUDGET_MS at lane start, proving the SAME existing 30s constant now bounds a wallet's OWN in-flight work too, not just whether to start the next wallet", async () => {
+    const fixedNow = 1_700_000_000_000;
+    const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, _deps: unknown, _deadlineAtMs: number) => emptyWalletResult(wallet));
+    await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A] }), baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never, now: () => fixedNow }));
+    expect(pollSportsShadowWallet.mock.calls[0]?.[3]).toBe(fixedNow + SOURCE_LANE_BUDGET_MS);
   });
 
   it("one bad wallet does not prevent the next wallet from being attempted", async () => {

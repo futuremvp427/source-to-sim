@@ -761,11 +761,42 @@ async function reconcileDegradedEvents(
  * source-poll.ts for exactly how it gates a wallet's first-ever (bootstrap) poll.
  * Never throws: every failure mode is reported via `result.error` plus whatever partial
  * progress was made, so Task 11 can log/retry without special-casing exceptions.
+ *
+ * ============================== TASK 13F: PER-WALLET WALL-CLOCK DEADLINE ==============================
+ * ROOT CAUSE (production canary, Task 13F): `SOURCE_LANE_BUDGET_MS` (worker.server.ts) was
+ * only ever checked BETWEEN wallets ("do not START another wallet"), never WITHIN one
+ * wallet's own pagination (Phase 1) or pending-fill/metadata-resolution loop (Phase 2). A
+ * single wallet with substantial real trade history -- exactly the case for the three
+ * approved, already-active wallets -- can legitimately need up to MAX_PAGES_PER_WALLET
+ * (41) trade pages plus up to MAX_PENDING_FILLS_PER_POLL (500) Gamma metadata lookups,
+ * each individually bounded (12s / 10s) but with NO aggregate bound, so one wallet's poll
+ * alone measurably consumed 66-91 real seconds in production -- far longer than any HTTP
+ * client/edge proxy reliably keeps a connection open for.
+ *
+ * FIX: `deadlineAtMs` (optional, defaults to no deadline — existing callers/tests
+ * unaffected) is checked at the top of EVERY page iteration (Phase 1) and EVERY pending-
+ * fill iteration (Phase 2), alongside the existing lease-checkpoint check. Stopping early
+ * this way is safe by the SAME reasoning already established for lease loss: Phase 1's
+ * already-fetched pages are still persisted (idempotent, durable), and Phase 2's
+ * unprocessed fills simply stay PENDING (re-evaluated identically next poll — this was
+ * already Task 12D/P1-A's exact retry contract, requiring zero new mechanism). The one
+ * addition needed is `backlogTruncated`: previously only set for a RESUMPTION poll that
+ * exhausted MAX_PAGES_PER_WALLET (an intentional, accepted historical-depth boundary,
+ * per Task 10). A deadline-triggered stop is NOT that -- it is an unintentional, must-
+ * retry-soon incompleteness, for EITHER a bootstrap or a resumption poll, so it now sets
+ * `backlogTruncated = true` unconditionally (never gated on `hasHistory`).
+ *
+ * Continuation is durable with NO new schema: once a page's rows are persisted, the
+ * EXISTING overlap-detection mechanism (`findExistingEventKeys`, unchanged) finds them on
+ * the wallet's next poll turn and stops pagination there naturally -- durable progress,
+ * exactly like a lease-loss-interrupted poll already relied on before Task 13F.
+ * ================================================================================
  */
 export async function pollSportsShadowWallet(
   wallet: string,
   goLiveAtMs: number | null,
   deps: Partial<WalletPollDeps> = {},
+  deadlineAtMs: number = Number.POSITIVE_INFINITY,
 ): Promise<WalletPollResult> {
   const d: WalletPollDeps = {
     ...defaultWalletPollDeps,
@@ -787,10 +818,19 @@ export async function pollSportsShadowWallet(
 
   const rawPages: RawTrade[][] = [];
   let overlapFound = false;
+  let deadlineExceeded = false;
   try {
     for (let page = 0; page < MAX_PAGES_PER_WALLET; page += 1) {
       const offset = page * PAGE_SIZE;
       if (offset > MAX_TRADES_OFFSET) break;
+      // Task 13F: checked BEFORE each page, same spirit as the lease checkpoint below --
+      // a wallet with a long real trade history must not hold this poll (and the HTTP
+      // response it blocks) open indefinitely. Pages already fetched are still processed
+      // below (Phase 1's raw-fill insert is idempotent/dedup-safe either way).
+      if (d.now() >= deadlineAtMs) {
+        deadlineExceeded = true;
+        break;
+      }
       // Task 12F / P1-G: a full pagination pass can take up to MAX_PAGES_PER_WALLET * 12s
       // -- checked before each page so a lease lost mid-pagination stops issuing further
       // requests immediately. Pages already fetched are still processed below (Phase 1's
@@ -834,6 +874,15 @@ export async function pollSportsShadowWallet(
   // found had the lease survived. Only a real MAX_PAGES_PER_WALLET exhaustion (or a
   // genuine short/empty page) without lease loss counts as backlogTruncated.
   if (hasHistory && !overlapFound && !result.leaseLost && result.error === null) {
+    result.backlogTruncated = true;
+  }
+  // Task 13F: a deadline-triggered stop is NEVER an intentional completion boundary --
+  // unlike MAX_PAGES_PER_WALLET (an accepted historical-depth ceiling, Task 10), running
+  // out of THIS invocation's time budget proves nothing about how much history remains.
+  // Applies to a bootstrap poll too (unlike the hasHistory-gated case above), since a
+  // deadline-truncated bootstrap is exactly as incomplete as a deadline-truncated
+  // resumption -- both must be retried, not silently treated as "done."
+  if (deadlineExceeded && !overlapFound && !result.leaseLost && result.error === null) {
     result.backlogTruncated = true;
   }
 
@@ -923,6 +972,12 @@ export async function pollSportsShadowWallet(
   const metadataCache = new Map<string, SourceMarketMetadata>();
 
   for (const fill of pendingFills) {
+    // Task 13F: checked BEFORE every iteration's own (up to 10s) metadata fetch -- once
+    // the deadline is reached, the remaining batch is abandoned exactly like a lease loss
+    // below: every unprocessed fill simply stays PENDING, re-evaluated identically next
+    // poll (Task 12D/P1-A's existing retry contract already makes this fully safe; no new
+    // mechanism needed).
+    if (d.now() >= deadlineAtMs) break;
     // Task 12F / P1-G: checked at the top of every iteration, BEFORE this fill's own
     // (up to 10s) metadata fetch -- once lost, the entire remaining batch is abandoned
     // (safely PENDING) rather than continuing to spend metadata-fetch budget on fills
