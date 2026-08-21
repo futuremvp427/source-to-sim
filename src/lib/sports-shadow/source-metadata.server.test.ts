@@ -279,7 +279,10 @@ describe("fetchSourceMarketMetadata", () => {
       gameId: "1",
       marketId: "mkt-1",
       marketSlug: "aec-mlb-nyy-bal-2026-08-19",
-      scheduledStartAt: "2026-08-19T22:35:00Z",
+      // Task 12G/P1-K: must exactly match the source's gameStartTime ("2026-08-20
+      // 00:05:00+00" from GAMMA_TOTAL_FIXTURE, parsed as 2026-08-20T00:05:00Z) --
+      // groupByGame now requires exact-timestamp proof even for a same-team singleton.
+      scheduledStartAt: "2026-08-20T00:05:00Z",
       league: "mlb",
       // The PM-US/Kalshi discovery pipelines have always used canonical codes here (see
       // pmus.ts/kalshi.ts's own classifiers) -- P1-D was that the SOURCE side alone used

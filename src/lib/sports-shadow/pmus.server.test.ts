@@ -247,7 +247,7 @@ describe("fetchPmusBook", () => {
       return new Response(JSON.stringify({ marketData: { bids: [], offers: [] } }), { status: 200 });
     });
     const snap = await fetchPmusBook("some-slug", okDeps({ fetchImpl, now: () => now }));
-    const patch = buildPmusObservationPatch(snap, new Date(fireAtMs).toISOString(), requestedDelayMs);
+    const patch = buildPmusObservationPatch(snap, "LONG", new Date(fireAtMs).toISOString(), requestedDelayMs);
     // detectionLatencyMs = observedAt - (fireAt - requestedDelayMs); with requestedDelayMs=0
     // and fireAt=now-at-due-time, this must be ~7000ms, not ~0ms (which is what the pre-fix
     // pre-fetch timestamp would have silently produced).

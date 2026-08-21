@@ -37,6 +37,7 @@ function exactResult(overrides: Partial<VenueMatchResult> = {}): VenueMatchResul
     sourceStartTime: "2026-08-19T22:35:00Z",
     targetStartTime: "2026-08-19T22:35:00Z",
     targetSide: { kind: "TEAM", team: "NYY" },
+    targetPmusOrientation: "LONG",
     settlementCompatibility: "COMPATIBLE",
     settlementProfile: { extraInnings: "EXACT_COMPATIBLE", postponement: "EXACT_COMPATIBLE", pushRisk: "EXACT_COMPATIBLE" },
     candidateCounts: { exact: 1, near: 0, unverified: 0, total: 1 },
@@ -62,13 +63,25 @@ describe("toDbSettlementCompatibility", () => {
 });
 
 describe("serializeTargetSide", () => {
-  it("serializes a team side, YES/NO/OVER/UNDER, and null", () => {
+  it("serializes a team side, YES/NO/OVER/UNDER, and null (no orientation argument -- unchanged legacy shape)", () => {
     expect(serializeTargetSide({ kind: "TEAM", team: "NYY" })).toBe("TEAM:NYY");
     expect(serializeTargetSide({ kind: "YES" })).toBe("YES");
     expect(serializeTargetSide({ kind: "NO" })).toBe("NO");
     expect(serializeTargetSide({ kind: "OVER" })).toBe("OVER");
     expect(serializeTargetSide({ kind: "UNDER" })).toBe("UNDER");
     expect(serializeTargetSide(null)).toBeNull();
+  });
+
+  it("Task 12G/P1-J: appends a durable :LONG/:SHORT suffix when a pmusOrientation is given", () => {
+    expect(serializeTargetSide({ kind: "TEAM", team: "NYY" }, "LONG")).toBe("TEAM:NYY:LONG");
+    expect(serializeTargetSide({ kind: "TEAM", team: "BAL" }, "SHORT")).toBe("TEAM:BAL:SHORT");
+    expect(serializeTargetSide({ kind: "OVER" }, "LONG")).toBe("OVER:LONG");
+    expect(serializeTargetSide({ kind: "UNDER" }, "SHORT")).toBe("UNDER:SHORT");
+  });
+
+  it("Task 12G/P1-J: Kalshi YES/NO is never suffixed, even if an orientation were somehow passed (defense in depth -- resolveKalshiMatch never produces one)", () => {
+    expect(serializeTargetSide({ kind: "YES" }, null)).toBe("YES");
+    expect(serializeTargetSide({ kind: "NO" }, null)).toBe("NO");
   });
 });
 
@@ -78,14 +91,14 @@ describe("buildMatchRow — match persistence for every status", () => {
     expect(row.matchStatus).toBe("EXACT");
     expect(row.targetMarketId).toBe("aec-mlb-nyy-bal-2026-08-19"); // the FETCH KEY, not the raw numeric id
     expect(row.targetIdentifier).toBe("444031");
-    expect(row.selectedSide).toBe("TEAM:NYY");
+    expect(row.selectedSide).toBe("TEAM:NYY:LONG"); // Task 12G/P1-J: orientation suffix durably persisted
     expect(row.settlementCompatibility).toBe("COMPATIBLE");
   });
 
   it("2. an EXACT Kalshi match row is built", () => {
     const row = buildMatchRow(
       "sig-1",
-      exactResult({ venue: "KALSHI", targetMarketId: "KXMLBGAME-1-NYY", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" } }),
+      exactResult({ venue: "KALSHI", targetMarketId: "KXMLBGAME-1-NYY", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" }, targetPmusOrientation: null }),
     );
     expect(row.venue).toBe("KALSHI");
     expect(row.targetMarketId).toBe("KXMLBGAME-1-NYY");
@@ -113,6 +126,14 @@ describe("isSchedulable", () => {
 
   it("is false for EXACT missing a resolved side (defensive)", () => {
     expect(isSchedulable(exactResult({ targetSide: null }))).toBe(false);
+  });
+
+  it("J9: is false for a PMUS EXACT result missing pmusOrientation (never schedulable without a resolved LONG/SHORT view)", () => {
+    expect(isSchedulable(exactResult({ targetPmusOrientation: null }))).toBe(false);
+  });
+
+  it("a Kalshi EXACT result is unaffected by targetPmusOrientation (always null, never checked for Kalshi)", () => {
+    expect(isSchedulable(exactResult({ venue: "KALSHI", targetSide: { kind: "YES" }, targetPmusOrientation: null }))).toBe(true);
   });
 
   it("is false for NEAR/NONE/UNVERIFIED even if a fetch key happens to be present", () => {
@@ -198,7 +219,7 @@ describe("buildPmusObservationPatch — capture patch building", () => {
   }
 
   it("27/28. persists real best bid/ask and top-of-book depth", () => {
-    const patch = buildPmusObservationPatch(book(), fireAt, requestedDelayMs);
+    const patch = buildPmusObservationPatch(book(), "LONG", fireAt, requestedDelayMs);
     expect(patch.bestBid).toBe(0.58);
     expect(patch.bestAsk).toBe(0.6);
     expect(patch.bidDepth).toEqual([{ price: 0.58, size: 100 }]);
@@ -207,19 +228,19 @@ describe("buildPmusObservationPatch — capture patch building", () => {
   });
 
   it("29. fewer than five levels are preserved as-is, never padded", () => {
-    const patch = buildPmusObservationPatch(book({ bidLevels: [{ price: 0.58, size: 100 }] }), fireAt, requestedDelayMs);
+    const patch = buildPmusObservationPatch(book({ bidLevels: [{ price: 0.58, size: 100 }] }), "LONG", fireAt, requestedDelayMs);
     expect(patch.bidDepth).toHaveLength(1);
   });
 
   it("30. a PM-US fetch failure is persisted explicitly with a classified error code", () => {
-    const patch = buildPmusObservationPatch(book({ bestBid: null, bestAsk: null, bidLevels: [], askLevels: [], staleReason: "gateway.polymarket.us request failed (HTTP 500)" }), fireAt, requestedDelayMs);
+    const patch = buildPmusObservationPatch(book({ bestBid: null, bestAsk: null, bidLevels: [], askLevels: [], staleReason: "gateway.polymarket.us request failed (HTTP 500)" }), "LONG", fireAt, requestedDelayMs);
     expect(patch.stale).toBe(true);
     expect(patch.errorCode).toBe("TRANSPORT_HTTP_ERROR");
     expect(patch.reason).toMatch(/HTTP 500/);
   });
 
   it("31. a genuinely valid empty book is distinguished from a transport failure", () => {
-    const patch = buildPmusObservationPatch(book({ bestBid: null, bestAsk: null, bidLevels: [], askLevels: [], staleReason: null }), fireAt, requestedDelayMs);
+    const patch = buildPmusObservationPatch(book({ bestBid: null, bestAsk: null, bidLevels: [], askLevels: [], staleReason: null }), "LONG", fireAt, requestedDelayMs);
     expect(patch.stale).toBe(false);
     expect(patch.errorCode).toBeNull();
     expect(patch.bidDepth).toEqual([]);
@@ -227,23 +248,127 @@ describe("buildPmusObservationPatch — capture patch building", () => {
   });
 
   it("41/42. requested_delay_ms is preserved via the caller, observed_at is the ACTUAL injected book.observedAt", () => {
-    const patch = buildPmusObservationPatch(book(), fireAt, requestedDelayMs);
+    const patch = buildPmusObservationPatch(book(), "LONG", fireAt, requestedDelayMs);
     expect(patch.observedAt).toBe(new Date(book().observedAt).toISOString());
   });
 
   it("43/44. a late collection does not rewrite fire_at and does not pretend observed_at == fire_at", () => {
     const lateBook = book({ observedAt: new Date("2026-08-19T22:35:12.150Z").getTime() }); // fired for +5s, actually captured ~7s late
-    const patch = buildPmusObservationPatch(lateBook, fireAt, requestedDelayMs);
+    const patch = buildPmusObservationPatch(lateBook, "LONG", fireAt, requestedDelayMs);
     expect(patch.observedAt).toBe("2026-08-19T22:35:12.150Z");
     expect(patch.observedAt).not.toBe(fireAt); // never coerced to match fire_at
   });
 
   it("45. actual delay is derivable: observedAt - (fireAt - requestedDelayMs) reconstructs true detection latency", () => {
     const lateBook = book({ observedAt: new Date("2026-08-19T22:35:12.150Z").getTime() });
-    const patch = buildPmusObservationPatch(lateBook, fireAt, requestedDelayMs);
+    const patch = buildPmusObservationPatch(lateBook, "LONG", fireAt, requestedDelayMs);
     // detectedAt = fireAt(22:35:05.000) - requestedDelayMs(5000ms) = 22:35:00.000
     // detectionLatencyMs = observedAt(22:35:12.150) - detectedAt(22:35:00.000) = 12150ms
     expect(patch.detectionLatencyMs).toBe(12_150);
+  });
+
+  /**
+   * Task 12G / P1-J: J6/J7/J8 -- the LONG/SHORT executable-view transform. Proven against
+   * the SAME real-market shape confirmed live during this task: bestBid=0.3950,
+   * bestAsk=0.4000 (an asymmetric market, deliberately NOT near 0.5, so a complement bug
+   * would be immediately visible rather than hidden by near-symmetric numbers).
+   */
+  const asymmetricBook = book({
+    bestBid: 0.395,
+    bestAsk: 0.4,
+    bidLevels: [
+      { price: 0.395, size: 303.49 },
+      { price: 0.39, size: 3 },
+      { price: 0.385, size: 445.29 },
+    ],
+    askLevels: [
+      { price: 0.4, size: 254 },
+      { price: 0.405, size: 64 },
+      { price: 0.41, size: 1162.95 },
+    ],
+  });
+
+  it("J6: the LONG view leaves bestBid/bestAsk/bidLevels/askLevels completely unchanged from the raw fetched book", () => {
+    const patch = buildPmusObservationPatch(asymmetricBook, "LONG", fireAt, requestedDelayMs);
+    expect(patch.bestBid).toBe(0.395);
+    expect(patch.bestAsk).toBe(0.4);
+    expect(patch.bidDepth).toEqual(asymmetricBook.bidLevels);
+    expect(patch.askDepth).toEqual(asymmetricBook.askLevels);
+  });
+
+  it("J7: the SHORT view complements bestBid/bestAsk (short_bid=1-long_ask, short_ask=1-long_bid) and ALL depth levels", () => {
+    const patch = buildPmusObservationPatch(asymmetricBook, "SHORT", fireAt, requestedDelayMs);
+    expect(patch.bestBid).toBeCloseTo(1 - 0.4, 12); // 0.6
+    expect(patch.bestAsk).toBeCloseTo(1 - 0.395, 12); // 0.605
+    // SHORT bids derive from LONG asks (price -> 1-price).
+    expect(patch.bidDepth).toEqual([
+      { price: 1 - 0.4, size: 254 },
+      { price: 1 - 0.405, size: 64 },
+      { price: 1 - 0.41, size: 1162.95 },
+    ]);
+    // SHORT asks derive from LONG bids (price -> 1-price).
+    expect(patch.askDepth).toEqual([
+      { price: 1 - 0.395, size: 303.49 },
+      { price: 1 - 0.39, size: 3 },
+      { price: 1 - 0.385, size: 445.29 },
+    ]);
+  });
+
+  it("J8: SHORT transformation preserves sizes exactly and produces correctly-sorted executable depth (bids descending, asks ascending)", () => {
+    const patch = buildPmusObservationPatch(asymmetricBook, "SHORT", fireAt, requestedDelayMs);
+    const bidPrices = patch.bidDepth.map((l) => l.price);
+    const askPrices = patch.askDepth.map((l) => l.price);
+    expect(bidPrices).toEqual([...bidPrices].sort((a, b) => b - a)); // descending
+    expect(askPrices).toEqual([...askPrices].sort((a, b) => a - b)); // ascending
+    expect(patch.bidDepth.map((l) => l.size)).toEqual([254, 64, 1162.95]); // sizes preserved, unrounded
+    expect(patch.askDepth.map((l) => l.size)).toEqual([303.49, 3, 445.29]);
+  });
+
+  it("SHORT spread is computed from the SHORT view's own bestBid/bestAsk, not the raw LONG spread", () => {
+    const patch = buildPmusObservationPatch(asymmetricBook, "SHORT", fireAt, requestedDelayMs);
+    expect(patch.spread).toBeCloseTo((1 - 0.395) - (1 - 0.4), 9); // 0.005, same magnitude as the LONG spread but on the complementary side
+  });
+
+  it("a stale/failed fetch (bestBid/bestAsk already null) is unaffected by orientation -- 1-null is never computed for either LONG or SHORT", () => {
+    const failedBook = book({ bestBid: null, bestAsk: null, bidLevels: [], askLevels: [], staleReason: "gateway.polymarket.us request failed (HTTP 500)" });
+    const longPatch = buildPmusObservationPatch(failedBook, "LONG", fireAt, requestedDelayMs);
+    const shortPatch = buildPmusObservationPatch(failedBook, "SHORT", fireAt, requestedDelayMs);
+    expect(longPatch.bestBid).toBeNull();
+    expect(longPatch.bestAsk).toBeNull();
+    expect(shortPatch.bestBid).toBeNull();
+    expect(shortPatch.bestAsk).toBeNull();
+    expect(shortPatch.stale).toBe(true);
+    expect(shortPatch.errorCode).toBe("TRANSPORT_HTTP_ERROR");
+  });
+
+  it("retains the RAW fetched LONG-side book in rawMetadata when the persisted view is transformed to SHORT (auditability)", () => {
+    const patch = buildPmusObservationPatch(asymmetricBook, "SHORT", fireAt, requestedDelayMs);
+    expect(patch.rawMetadata).toMatchObject({
+      orientation: "SHORT",
+      rawLongBook: { bestBid: 0.395, bestAsk: 0.4 },
+    });
+  });
+
+  it("LONG rawMetadata does not carry a redundant rawLongBook copy (the persisted view already IS the raw long book)", () => {
+    const patch = buildPmusObservationPatch(asymmetricBook, "LONG", fireAt, requestedDelayMs);
+    expect(patch.rawMetadata).toEqual({ venue: "PMUS", orientation: "LONG" });
+  });
+
+  /**
+   * J11: Task 9's depth-walk (walkBuyDepth) is a pure consumer of whatever askLevels it's
+   * given -- it never remaps venue/orientation itself (see its own doc comment). Proving
+   * the SHORT-transformed ask depth this module persists is exactly what a later
+   * depth-walk call would correctly consume is therefore a property of the persisted
+   * data being correct, not of depth-walk.ts, which needs no changes.
+   */
+  it("J11: the persisted SHORT ask depth is exactly what a Task 9 depth-walk over the executable SHORT contract would need (oriented, not the raw LONG ask depth)", () => {
+    const patch = buildPmusObservationPatch(asymmetricBook, "SHORT", fireAt, requestedDelayMs);
+    // The SHORT ask depth must NOT equal the raw LONG ask depth -- if it did, a
+    // depth-walk consumer would be executing against the wrong contract's liquidity.
+    expect(patch.askDepth).not.toEqual(asymmetricBook.askLevels);
+    // It must instead be the complement of the LONG bid depth (what SHORT buyers
+    // actually walk through).
+    expect(patch.askDepth[0]!.price).toBeCloseTo(1 - asymmetricBook.bidLevels[0]!.price, 12);
   });
 });
 

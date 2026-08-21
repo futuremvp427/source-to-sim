@@ -25,11 +25,19 @@ export function toDbSettlementCompatibility(v: ResolverSettlementCompatibility):
   return v === "UNVERIFIED" ? "UNKNOWN" : v;
 }
 
-/** Serializes a resolved TargetSide into the plain-text form sports_market_matches.selected_side expects. */
-export function serializeTargetSide(side: TargetSide | null): string | null {
+/**
+ * Serializes a resolved TargetSide into the plain-text form sports_market_matches.selected_side
+ * expects. Task 12G / P1-J: when `pmusOrientation` is non-null (PMUS EXACT results only --
+ * see resolver.ts's PmusOrientation doc comment), it is durably appended as a `:LONG`/`:SHORT`
+ * suffix so the PM-US book orientation survives the round trip through the DB's plain-text
+ * `selected_side` column without a schema migration. Kalshi's `YES`/`NO` serialization is
+ * completely untouched (pmusOrientation is always null for Kalshi results), so this is a
+ * strictly additive change for PMUS, zero behavior change for Kalshi.
+ */
+export function serializeTargetSide(side: TargetSide | null, pmusOrientation: "LONG" | "SHORT" | null = null): string | null {
   if (side === null) return null;
-  if (side.kind === "TEAM") return `TEAM:${side.team}`;
-  return side.kind;
+  const base = side.kind === "TEAM" ? `TEAM:${side.team}` : side.kind;
+  return pmusOrientation === null ? base : `${base}:${pmusOrientation}`;
 }
 
 export type MatchRow = {
@@ -61,7 +69,7 @@ export function buildMatchRow(signalId: string, result: VenueMatchResult): Match
     targetIdentifier: result.targetMarketId,
     normalizedGameId: result.targetGameIdentifier,
     line: result.targetLine,
-    selectedSide: serializeTargetSide(result.targetSide),
+    selectedSide: serializeTargetSide(result.targetSide, result.targetPmusOrientation),
     settlementCompatibility: toDbSettlementCompatibility(result.settlementCompatibility),
     reason: result.reason,
     reasonCode: result.reasonCode,
@@ -87,9 +95,16 @@ export function buildMatchRow(signalId: string, result: VenueMatchResult): Match
  * authoritative — NEAR/NONE/UNVERIFIED are never promoted here, and a match missing its
  * fetch key or side (should not happen for a genuine EXACT result, but checked
  * defensively) is also refused rather than scheduled with a hole in it.
+ *
+ * Task 12G / P1-J, J9: a PMUS EXACT result additionally requires a resolved
+ * targetPmusOrientation — defense in depth on top of resolver.ts's own guarantee that
+ * EXACT can never be reached with a null orientation, so a future regression there fails
+ * closed to unschedulable rather than silently persisting an unoriented book.
  */
 export function isSchedulable(result: VenueMatchResult): boolean {
-  return result.status === "EXACT" && result.targetFetchKey !== null && result.targetSide !== null;
+  if (result.status !== "EXACT" || result.targetFetchKey === null || result.targetSide === null) return false;
+  if (result.venue === "PMUS" && result.targetPmusOrientation === null) return false;
+  return true;
 }
 
 /* ------------------------------- Observation scheduling ------------------------------- */
@@ -183,28 +198,62 @@ export function classifyKalshiFailure(staleReason: string): string {
 }
 
 /**
+ * ============================== TASK 12G / P1-J: PM-US LONG/SHORT ORIENTATION ==============================
+ * PM-US's /book endpoint returns exactly ONE order book per market slug. EMPIRICALLY
+ * confirmed (live, read-only requests during this task -- never guessed): the book's
+ * best bid/ask exactly match the market's own `stats.lastPriceSample.{longPx,shortPx}`
+ * field, and longPx + shortPx sum to EXACTLY 1.0000 (verified on two independent real
+ * markets, moneyline and spread). This proves the fetched book is the market's LONG
+ * side, and the SHORT side is the standard complementary-binary-market transform:
+ *   short_bid = 1 - long_ask   (price to SELL short / receive)
+ *   short_ask = 1 - long_bid   (price to BUY short / pay)
+ * applied per-level (price -> 1-price, size unchanged), with bids re-sorted descending
+ * and asks re-sorted ascending -- see `deriveShortView` below. No cent rounding is
+ * introduced; plain floating-point subtraction is used throughout.
+ * ================================================================================
+ */
+function deriveShortView(book: BookSnapshot): { bestBid: number | null; bestAsk: number | null; bidLevels: DepthLevel[]; askLevels: DepthLevel[] } {
+  return {
+    bestBid: book.bestAsk === null ? null : 1 - book.bestAsk,
+    bestAsk: book.bestBid === null ? null : 1 - book.bestBid,
+    bidLevels: book.askLevels.map((l) => ({ price: 1 - l.price, size: l.size })).sort((a, b) => b.price - a.price),
+    askLevels: book.bidLevels.map((l) => ({ price: 1 - l.price, size: l.size })).sort((a, b) => a.price - b.price),
+  };
+}
+
+/**
  * Builds the persistence patch for a PM-US due observation. `staleReason === null`
  * (Task 5's own contract) is what distinguishes a genuinely VALID_EMPTY_BOOK
  * (stale=false, errorCode=null, possibly-empty bidDepth/askDepth) from a real
  * TRANSPORT/malformed/crossed failure (stale=true, errorCode set) — never collapsed.
+ *
+ * `orientation` is REQUIRED (never defaulted) -- see resolver.ts's PmusOrientation doc
+ * comment and the module doc above. LONG leaves the raw fetched book completely
+ * unchanged (J6). SHORT applies `deriveShortView` to bestBid/bestAsk/bidLevels/askLevels
+ * (J7/J8) and retains the RAW fetched LONG-side book in rawMetadata for audit (the
+ * persisted best_bid/best_ask/bid_depth/ask_depth/spread always represent the
+ * source-selected EXECUTABLE contract, never merely the raw underlying LONG book). A
+ * stale/failed fetch (bestBid/bestAsk already null) is unaffected by orientation either
+ * way -- `1 - null` is never computed.
  */
-export function buildPmusObservationPatch(book: BookSnapshot, fireAt: string, requestedDelayMs: number): ObservationCapturePatch {
+export function buildPmusObservationPatch(book: BookSnapshot, orientation: "LONG" | "SHORT", fireAt: string, requestedDelayMs: number): ObservationCapturePatch {
   const hasError = book.staleReason !== null;
+  const view = orientation === "LONG" ? { bestBid: book.bestBid, bestAsk: book.bestAsk, bidLevels: book.bidLevels, askLevels: book.askLevels } : deriveShortView(book);
   return {
     observedAt: new Date(book.observedAt).toISOString(),
     fetchStartedAt: null,
     fetchEndedAt: null,
     detectionLatencyMs: computeDetectionLatencyMs(book.observedAt, fireAt, requestedDelayMs),
-    bestBid: book.bestBid,
-    bestAsk: book.bestAsk,
-    spread: book.bestBid !== null && book.bestAsk !== null ? book.bestAsk - book.bestBid : null,
-    bidDepth: book.bidLevels,
-    askDepth: book.askLevels,
+    bestBid: view.bestBid,
+    bestAsk: view.bestAsk,
+    spread: view.bestBid !== null && view.bestAsk !== null ? view.bestAsk - view.bestBid : null,
+    bidDepth: view.bidLevels,
+    askDepth: view.askLevels,
     marketStatus: book.marketStatus,
     stale: hasError,
     errorCode: hasError ? classifyPmusFailure(book.staleReason!) : null,
     reason: book.staleReason,
-    rawMetadata: { venue: "PMUS" as const },
+    rawMetadata: orientation === "LONG" ? { venue: "PMUS" as const, orientation } : { venue: "PMUS" as const, orientation, rawLongBook: { bestBid: book.bestBid, bestAsk: book.bestAsk, bidLevels: book.bidLevels, askLevels: book.askLevels } },
   };
 }
 

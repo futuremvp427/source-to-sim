@@ -39,6 +39,27 @@ export type MatchStatus = "EXACT" | "NEAR" | "NONE" | "UNVERIFIED";
 
 export type TargetSide = { kind: "TEAM"; team: string } | { kind: "YES" } | { kind: "NO" } | { kind: "OVER" } | { kind: "UNDER" };
 
+/**
+ * Task 12G / P1-J: PM-US's /book endpoint returns exactly ONE order book per market
+ * slug -- confirmed EMPIRICALLY (never guessed) via live read-only requests during this
+ * task: for a real moneyline market, the book's best bid (0.3950) and best offer
+ * (0.4000) exactly matched the market's own `stats.lastPriceSample.longPx` (0.3950) and
+ * the complementary `1 - longPx` relationship confirmed by the SAME field's `shortPx`
+ * (0.6050 = 1 - 0.3950 exactly); an independently-checked spread market showed the
+ * identical relationship (longPx 0.1520, shortPx 0.8480, sum exactly 1.0000). This
+ * PROVES: the fetched book represents the market's LONG side, and the SHORT side's
+ * economics are the standard complementary-binary-market transform (short_bid =
+ * 1 - long_ask, short_ask = 1 - long_bid) -- not a guess, not an invented formula.
+ *
+ * A PM-US EXACT result's `targetPmusOrientation` (on VenueMatchResult, below) durably
+ * carries which side of that ONE book the resolved outcome actually is, independently
+ * of the semantic TargetSide (TEAM/OVER/UNDER) -- so downstream quote capture
+ * (observation.ts's buildPmusObservationPatch) can apply the complementary transform
+ * exactly when required and never when it is not. Always null for Kalshi (YES/NO has no
+ * such concept) and for any non-EXACT PMUS result.
+ */
+export type PmusOrientation = "LONG" | "SHORT";
+
 export type ResolverReasonCode =
   | "EXACT_MATCH"
   | "NEAR_DIFFERENT_LINE"
@@ -103,6 +124,8 @@ export type VenueMatchResult = {
   sourceStartTime: string | null;
   targetStartTime: string | null;
   targetSide: TargetSide | null;
+  /** Task 12G / P1-J: PM-US LONG/SHORT book orientation for this EXACT match -- see PmusOrientation's doc comment. Always null for Kalshi and for any non-EXACT PMUS result. */
+  targetPmusOrientation: PmusOrientation | null;
   settlementCompatibility: SettlementCompatibility;
   settlementProfile: SettlementProfile | null;
   candidateCounts: { exact: number; near: number; unverified: number; total: number };
@@ -198,6 +221,8 @@ function opponentOf(source: SourceSignal, team: string): string {
 type GameBucketResult<C> =
   | { kind: "NONE" }
   | { kind: "UNVERIFIED_AMBIGUOUS"; reason: string }
+  /** Task 12G / P1-K: a source or candidate start time is simply absent (as opposed to present-but-contradictory) -- distinct reasonCode (UNVERIFIED_MISSING_START_TIME) from a genuine ambiguity/contradiction. */
+  | { kind: "UNVERIFIED_MISSING_TIME"; reason: string }
   | { kind: "FOUND"; candidates: C[]; matchedByUniqueTeams: boolean };
 
 /**
@@ -207,9 +232,26 @@ type GameBucketResult<C> =
  * land in the same bucket — confirmed empirically consistent within one venue, see module doc).
  * A null timestamp never merges with anything (including another null) — each forms its own
  * singleton bucket, since two unknown-timestamp candidates are not positively proven to be the
- * same game. Returns the bucket for the source's game: unique-by-teams if only one bucket
- * exists, exact-timestamp-disambiguated if multiple exist (a genuine doubleheader-shaped
- * situation).
+ * same game.
+ *
+ * ============================== TASK 12G / P1-K: SINGLETON TIME IDENTITY ==============================
+ * ROOT CAUSE (Codex P1 finding): a lone bucket (only one distinct game discovered for this
+ * team pair) was previously accepted as FOUND unconditionally -- "only one candidate happened
+ * to be discovered" is NOT positive game-identity evidence. The same two MLB teams routinely
+ * play on consecutive days; if discovery happened to return only Day 2's game while the
+ * source signal is from Day 1, the team-pair-only match would silently resolve against the
+ * WRONG physical game.
+ *
+ * FIX: a singleton bucket must now ALSO pass the exact same start-time proof multi-bucket
+ * disambiguation already required -- source timestamp present, candidate timestamp present,
+ * and millisecond-exact equal. No tolerance of any kind is introduced (this project's own
+ * module doc already documents a real 3-hour PM-US/Kalshi cross-venue discrepancy that
+ * deliberately does NOT justify one). A source or candidate timestamp that is missing, or a
+ * present-but-unequal pair, now fails closed to UNVERIFIED_MISSING_START_TIME rather than a
+ * false EXACT -- per the mission's explicit preference for fail-closed UNVERIFIED over a
+ * silently-wrong match. Multi-bucket (genuine doubleheader-shaped) disambiguation below is
+ * completely unchanged.
+ * ================================================================================
  */
 function groupByGame<C extends { awayTeam: string | null; homeTeam: string | null; scheduledStartAt: string | null }>(
   source: SourceSignal,
@@ -231,7 +273,22 @@ function groupByGame<C extends { awayTeam: string | null; homeTeam: string | nul
   }
 
   if (buckets.length === 1) {
-    return { kind: "FOUND", candidates: buckets[0] ?? [], matchedByUniqueTeams: true };
+    const onlyBucket = buckets[0] ?? [];
+    const bucketTs = toEpochMs(onlyBucket[0]?.scheduledStartAt ?? null);
+    const sourceTs = toEpochMs(source.gameStartTime);
+    if (sourceTs === null) {
+      return { kind: "UNVERIFIED_MISSING_TIME", reason: "the only candidate game for this team pair cannot be confirmed: source has no start time to verify against" };
+    }
+    if (bucketTs === null) {
+      return { kind: "UNVERIFIED_MISSING_TIME", reason: "the only candidate game for this team pair cannot be confirmed: candidate has no start time to verify against" };
+    }
+    if (bucketTs !== sourceTs) {
+      return {
+        kind: "UNVERIFIED_AMBIGUOUS",
+        reason: `the only candidate game for this team pair has a start time (${onlyBucket[0]?.scheduledStartAt}) that does not exactly match the source's start time (${source.gameStartTime}) -- same-team-pair alone is not positive game identity (e.g. consecutive-day games)`,
+      };
+    }
+    return { kind: "FOUND", candidates: onlyBucket, matchedByUniqueTeams: true };
   }
 
   // Multiple buckets: a doubleheader-shaped situation. Require exact timestamp equality to disambiguate.
@@ -277,6 +334,7 @@ function baseResult(venue: "PMUS" | "KALSHI", source: SourceSignal): Omit<VenueM
     sourceStartTime: source.gameStartTime,
     targetStartTime: null,
     targetSide: null,
+    targetPmusOrientation: null,
     settlementCompatibility: "UNVERIFIED",
     settlementProfile: null,
     candidateCounts: { exact: 0, near: 0, unverified: 0, total: 0 },
@@ -297,21 +355,43 @@ function simpleResult(
 
 /* ------------------------------- PM-US resolution ------------------------------- */
 
-type PmusEvalOutcome = { status: "EXACT" | "NEAR" | "UNVERIFIED"; candidate: PmusCandidate; targetSide: TargetSide | null; profile: SettlementProfile | null; reason: string };
+type PmusEvalOutcome = {
+  status: "EXACT" | "NEAR" | "UNVERIFIED";
+  candidate: PmusCandidate;
+  targetSide: TargetSide | null;
+  /** Task 12G / P1-J: the matched PM-US side's actual `long` flag, translated to LONG/SHORT. Never inferred from team identity, favorite/underdog, price, BUY/SELL, or the sign of a spread -- always read directly off the specific `PmusCandidateSide` the resolver matched. */
+  pmusOrientation: PmusOrientation | null;
+  profile: SettlementProfile | null;
+  reason: string;
+};
+
+/** Task 12G / P1-J: translates a matched PmusCandidateSide's `long` flag to PmusOrientation. Returns null (never a guessed default) when `long` is null/undefined -- missing orientation data, not a boolean false. */
+function sideOrientation(side: { long: boolean | null }): PmusOrientation | null {
+  if (side.long === true) return "LONG";
+  if (side.long === false) return "SHORT";
+  return null;
+}
 
 function evaluatePmusCandidate(source: SourceSignal, outcome: SourceOutcome, candidate: PmusCandidate): PmusEvalOutcome | null {
   if (candidate.betType !== source.betType) return null; // not a candidate for this query at all
 
   if (outcome.kind === "MONEYLINE") {
     const side = candidate.sides.find((s) => s.teamAbbreviation && normalizeTeamName(s.teamAbbreviation) === outcome.team);
-    if (!side) return { status: "UNVERIFIED", candidate, targetSide: null, profile: null, reason: "source team not found among PM-US market sides" };
+    if (!side) return { status: "UNVERIFIED", candidate, targetSide: null, pmusOrientation: null, profile: null, reason: "source team not found among PM-US market sides" };
+    const orientation = sideOrientation(side);
+    if (orientation === null) {
+      // J9: missing/ambiguous PM-US orientation must never default LONG -- fails closed to UNVERIFIED.
+      return { status: "UNVERIFIED", candidate, targetSide: null, pmusOrientation: null, profile: null, reason: "matched PM-US moneyline side has no resolvable LONG/SHORT orientation" };
+    }
     const profile = buildSettlementProfile(candidate.rulesDescription, null);
     const compat = overallCompatibility(profile);
     const status = compat === "COMPATIBLE" ? "EXACT" : compat === "INCOMPATIBLE" ? "NEAR" : "UNVERIFIED";
-    return { status, candidate, targetSide: { kind: "TEAM", team: outcome.team }, profile, reason: `moneyline side matched for ${outcome.team}` };
+    return { status, candidate, targetSide: { kind: "TEAM", team: outcome.team }, pmusOrientation: orientation, profile, reason: `moneyline side matched for ${outcome.team}` };
   }
 
   if (outcome.kind === "SPREAD") {
+    // s.long === null/undefined is already excluded by this filter -- sideOrientation
+    // below is therefore guaranteed non-null for any matchingSide found here.
     const matchingSide = candidate.sides.find((s) => {
       if (!s.teamAbbreviation || s.long === null || s.long === undefined || candidate.line === null) return false;
       const code = normalizeTeamName(s.teamAbbreviation);
@@ -323,23 +403,27 @@ function evaluatePmusCandidate(source: SourceSignal, outcome: SourceOutcome, can
       const profile = buildSettlementProfile(candidate.rulesDescription, candidate.line);
       const compat = overallCompatibility(profile);
       const status = compat === "COMPATIBLE" ? "EXACT" : compat === "INCOMPATIBLE" ? "NEAR" : "UNVERIFIED";
-      return { status, candidate, targetSide: { kind: "TEAM", team: outcome.team }, profile, reason: `spread side matched: ${outcome.team} ${outcome.line}` };
+      return { status, candidate, targetSide: { kind: "TEAM", team: outcome.team }, pmusOrientation: sideOrientation(matchingSide), profile, reason: `spread side matched: ${outcome.team} ${outcome.line}` };
     }
     // Same game, same bet type, but this specific candidate's line/team doesn't match -> NEAR diagnostic.
-    return { status: "NEAR", candidate, targetSide: null, profile: null, reason: `spread candidate line ${candidate.line} does not match source line ${outcome.line} for ${outcome.team}` };
+    return { status: "NEAR", candidate, targetSide: null, pmusOrientation: null, profile: null, reason: `spread candidate line ${candidate.line} does not match source line ${outcome.line} for ${outcome.team}` };
   }
 
   // TOTAL
   if (candidate.line === null || Math.abs(candidate.line - outcome.line) > 1e-9) {
-    return { status: "NEAR", candidate, targetSide: null, profile: null, reason: `total candidate line ${candidate.line} does not match source line ${outcome.line}` };
+    return { status: "NEAR", candidate, targetSide: null, pmusOrientation: null, profile: null, reason: `total candidate line ${candidate.line} does not match source line ${outcome.line}` };
   }
   const directionText = outcome.direction === "OVER" ? "over" : "under";
   const side = candidate.sides.find((s) => (s.description ?? "").toLowerCase().includes(directionText));
-  if (!side) return { status: "UNVERIFIED", candidate, targetSide: null, profile: null, reason: "over/under side not found among PM-US market sides" };
+  if (!side) return { status: "UNVERIFIED", candidate, targetSide: null, pmusOrientation: null, profile: null, reason: "over/under side not found among PM-US market sides" };
+  const orientation = sideOrientation(side);
+  if (orientation === null) {
+    return { status: "UNVERIFIED", candidate, targetSide: null, pmusOrientation: null, profile: null, reason: "matched PM-US total side has no resolvable LONG/SHORT orientation" };
+  }
   const profile = buildSettlementProfile(candidate.rulesDescription, candidate.line);
   const compat = overallCompatibility(profile);
   const status = compat === "COMPATIBLE" ? "EXACT" : compat === "INCOMPATIBLE" ? "NEAR" : "UNVERIFIED";
-  return { status, candidate, targetSide: { kind: outcome.direction }, profile, reason: `total side matched: ${outcome.direction} ${outcome.line}` };
+  return { status, candidate, targetSide: { kind: outcome.direction }, pmusOrientation: orientation, profile, reason: `total side matched: ${outcome.direction} ${outcome.line}` };
 }
 
 export function resolvePmusMatch(source: SourceSignal, candidates: PmusCandidate[]): VenueMatchResult {
@@ -356,6 +440,9 @@ export function resolvePmusMatch(source: SourceSignal, candidates: PmusCandidate
   }
   if (bucket.kind === "UNVERIFIED_AMBIGUOUS") {
     return simpleResult("PMUS", source, "UNVERIFIED", "UNVERIFIED_AMBIGUOUS_GAME", bucket.reason);
+  }
+  if (bucket.kind === "UNVERIFIED_MISSING_TIME") {
+    return simpleResult("PMUS", source, "UNVERIFIED", "UNVERIFIED_MISSING_START_TIME", bucket.reason);
   }
 
   const evidence: string[] = [];
@@ -395,6 +482,7 @@ export function resolvePmusMatch(source: SourceSignal, candidates: PmusCandidate
         targetLine: e.candidate.line,
         targetStartTime: e.candidate.scheduledStartAt,
         targetSide: e.targetSide,
+        targetPmusOrientation: e.pmusOrientation,
         settlementCompatibility: e.profile ? overallCompatibility(e.profile) : "UNVERIFIED",
         settlementProfile: e.profile,
       }),
@@ -473,6 +561,9 @@ export function resolveKalshiMatch(source: SourceSignal, candidates: KalshiCandi
   }
   if (bucket.kind === "UNVERIFIED_AMBIGUOUS") {
     return simpleResult("KALSHI", source, "UNVERIFIED", "UNVERIFIED_AMBIGUOUS_GAME", bucket.reason);
+  }
+  if (bucket.kind === "UNVERIFIED_MISSING_TIME") {
+    return simpleResult("KALSHI", source, "UNVERIFIED", "UNVERIFIED_MISSING_START_TIME", bucket.reason);
   }
 
   const evidence: string[] = [];

@@ -94,6 +94,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_terminal_unverified.sql
+      - name: Verify insert_sports_shadow_episode anchors signal.created_at to the fill's first_seen_at (Task 12G/P1-L)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_signal_detection_time.sql
       - name: Export local Supabase connection env for the PostgREST integration harness
         run: |
           eval "$(supabase status -o env)"

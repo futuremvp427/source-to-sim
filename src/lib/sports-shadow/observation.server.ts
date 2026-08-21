@@ -293,8 +293,26 @@ export async function takeDueSportsShadowObservations(
     }
 
     if (row.venue === "PMUS") {
+      // Task 12G / P1-J: LONG/SHORT orientation is durably encoded as a `:LONG`/`:SHORT`
+      // suffix on the persisted selected_side (see observation.ts's serializeTargetSide).
+      // J9: missing/unresolvable orientation must NEVER silently default to LONG --
+      // fails closed to a terminal failure, mirroring Kalshi's existing
+      // UNRESOLVED_SIDE_ORIENTATION contract below exactly.
+      const pmusOrientation = row.selectedSide?.endsWith(":LONG") ? "LONG" : row.selectedSide?.endsWith(":SHORT") ? "SHORT" : null;
+      if (!pmusOrientation) {
+        const patch = buildTerminalFailurePatch(
+          d.now(),
+          "UNRESOLVED_SIDE_ORIENTATION",
+          `linked match has no resolvable PM-US LONG/SHORT orientation ('${row.selectedSide ?? "null"}')`,
+          row.fireAt,
+          row.requestedDelayMs,
+        );
+        if (await d.repo.claimObservationTerminal(row.id, patch)) failed += 1;
+        else skipped += 1;
+        continue;
+      }
       const book = await d.fetchPmusBook(row.targetFetchKey);
-      const patch = buildPmusObservationPatch(book, row.fireAt, row.requestedDelayMs);
+      const patch = buildPmusObservationPatch(book, pmusOrientation, row.fireAt, row.requestedDelayMs);
       if (await d.repo.claimObservationTerminal(row.id, patch)) {
         if (patch.errorCode) failed += 1;
         else captured += 1;

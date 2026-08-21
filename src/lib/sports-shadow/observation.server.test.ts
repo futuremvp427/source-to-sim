@@ -88,6 +88,7 @@ function exactResult(overrides: Partial<VenueMatchResult> = {}): VenueMatchResul
     sourceStartTime: "2026-08-19T22:35:00Z",
     targetStartTime: "2026-08-19T22:35:00Z",
     targetSide: { kind: "TEAM", team: "NYY" },
+    targetPmusOrientation: "LONG",
     settlementCompatibility: "COMPATIBLE",
     settlementProfile: { extraInnings: "EXACT_COMPATIBLE", postponement: "EXACT_COMPATIBLE", pushRisk: "EXACT_COMPATIBLE" },
     candidateCounts: { exact: 1, near: 0, unverified: 0, total: 1 },
@@ -109,7 +110,7 @@ describe("persistVenueMatch — match persistence + scheduling", () => {
 
   it("2. an EXACT Kalshi match is persisted and schedules observations", async () => {
     const { repo } = makeFakeRepo();
-    const kalshi = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" } });
+    const kalshi = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" }, targetPmusOrientation: null });
     const result = await persistVenueMatch("sig-1", kalshi, DETECTED_AT_MS, SOURCE_TS, { repo });
     expect(result.scheduled).toBe(5);
   });
@@ -140,7 +141,7 @@ describe("persistVenueMatch — match persistence + scheduling", () => {
     const result = await persistVenueMatch("sig-1", worseLater, DETECTED_AT_MS, SOURCE_TS, { repo });
     expect(result.downgradeSkipped).toBe(true);
     expect(matches.get("sig-1|PMUS")?.matchStatus).toBe("EXACT"); // untouched
-    expect(matches.get("sig-1|PMUS")?.selectedSide).toBe("TEAM:NYY"); // original evidence intact
+    expect(matches.get("sig-1|PMUS")?.selectedSide).toBe("TEAM:NYY:LONG"); // original evidence intact
   });
 
   it("an EXACT match CAN be re-confirmed by another EXACT result (not treated as a downgrade)", async () => {
@@ -368,7 +369,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("32/33/34. a due Kalshi row invokes fetchKalshiBook and persists the resolved side's executable view", async () => {
     const { repo, observations } = makeFakeRepo();
-    const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "NO" } });
+    const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "NO" }, targetPmusOrientation: null });
     await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, { repo });
     const fetchKalshiBook = vi.fn(async (): Promise<KalshiBookSnapshot> => ({
       venue: "KALSHI",
@@ -389,7 +390,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("35. source BUY does not automatically choose YES — the persisted view matches the resolved side, here NO", async () => {
     const { repo, observations } = makeFakeRepo();
-    const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "NO" } });
+    const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "NO" }, targetPmusOrientation: null });
     await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, { repo });
     const fetchKalshiBook = vi.fn(async (): Promise<KalshiBookSnapshot> => ({
       venue: "KALSHI",
@@ -408,7 +409,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("36/37. sub-cent prices and fractional quantities survive the persistence path", async () => {
     const { repo, observations } = makeFakeRepo();
-    const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" } });
+    const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" }, targetPmusOrientation: null });
     await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, { repo });
     const fetchKalshiBook = vi.fn(async (): Promise<KalshiBookSnapshot> => ({
       venue: "KALSHI",
@@ -428,7 +429,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("38. Kalshi top-five depth preserved without fabrication", async () => {
     const { repo, observations } = makeFakeRepo();
-    const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" } });
+    const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" }, targetPmusOrientation: null });
     await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, { repo });
     const fetchKalshiBook = vi.fn(async (): Promise<KalshiBookSnapshot> => ({
       venue: "KALSHI",
@@ -447,7 +448,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("39. a valid empty Kalshi side is handled distinctly, not as a failure", async () => {
     const { repo, observations } = makeFakeRepo();
-    const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "NO" } });
+    const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "NO" }, targetPmusOrientation: null });
     await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, { repo });
     const fetchKalshiBook = vi.fn(async (): Promise<KalshiBookSnapshot> => ({
       venue: "KALSHI",
@@ -466,7 +467,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
 
   it("40. a crossed/invalid Kalshi snapshot never becomes a fake executable quote", async () => {
     const { repo, observations } = makeFakeRepo();
-    const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" } });
+    const kalshiResult = exactResult({ venue: "KALSHI", targetFetchKey: "KXMLBGAME-1-NYY", targetSide: { kind: "YES" }, targetPmusOrientation: null });
     await persistVenueMatch("sig-1", kalshiResult, DETECTED_AT_MS - 120_000, SOURCE_TS, { repo });
     const fetchKalshiBook = vi.fn(async (): Promise<KalshiBookSnapshot> => ({
       venue: "KALSHI",

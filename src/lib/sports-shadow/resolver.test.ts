@@ -538,3 +538,180 @@ describe("source outcome parsing failure", () => {
     expect(r.reasonCode).toBe("UNVERIFIED_SOURCE_OUTCOME");
   });
 });
+
+describe("Task 12G / P1-J: PM-US LONG/SHORT orientation preservation", () => {
+  it("J1: moneyline matched side long=true durably carries orientation LONG", () => {
+    const r = resolvePmusMatch(source(), [pmusCandidate()]); // default side "New York Yankees" has long:true
+    expect(r.status).toBe("EXACT");
+    expect(r.targetPmusOrientation).toBe("LONG");
+  });
+
+  it("J2: moneyline matched side long=false durably carries orientation SHORT", () => {
+    const r = resolvePmusMatch(source({ selectedOutcomeRaw: "Baltimore Orioles" }), [pmusCandidate()]); // "Baltimore Orioles" side has long:false
+    expect(r.status).toBe("EXACT");
+    expect(r.targetPmusOrientation).toBe("SHORT");
+  });
+
+  it("J3: spread matching preserves the exact matched side's long flag (both LONG and SHORT sides of the same market)", () => {
+    const spreadSource = (overrides: Partial<SourceSignal> = {}) => source({ betType: "SPREAD", line: -1.5, selectedOutcomeRaw: "New York Yankees", ...overrides });
+    const pmusSpread = (overrides: Partial<PmusCandidate> = {}) =>
+      pmusCandidate({
+        betType: "SPREAD",
+        reasonCode: "ELIGIBLE_FULL_GAME_SPREAD",
+        marketSlug: "asc-mlb-nyy-bal-2026-08-19-neg-1pt5",
+        line: -1.5,
+        sides: [
+          { description: "-1.50", teamAbbreviation: "nyy", long: true },
+          { description: "+1.50", teamAbbreviation: "bal", long: false },
+        ],
+        ...overrides,
+      });
+    const longSide = resolvePmusMatch(spreadSource(), [pmusSpread()]);
+    expect(longSide.status).toBe("EXACT");
+    expect(longSide.targetPmusOrientation).toBe("LONG");
+
+    const shortSide = resolvePmusMatch(spreadSource({ selectedOutcomeRaw: "Baltimore Orioles", line: 1.5 }), [pmusSpread()]);
+    expect(shortSide.status).toBe("EXACT");
+    expect(shortSide.targetPmusOrientation).toBe("SHORT");
+  });
+
+  it("J4: total OVER/UNDER matching preserves the actual matching side's long flag", () => {
+    const totalSource = (overrides: Partial<SourceSignal> = {}) => source({ betType: "TOTAL", line: 8.5, selectedOutcomeRaw: "Over", ...overrides });
+    const pmusTotal = (overrides: Partial<PmusCandidate> = {}) =>
+      pmusCandidate({
+        betType: "TOTAL",
+        reasonCode: "ELIGIBLE_FULL_GAME_TOTAL",
+        marketSlug: "tsc-mlb-nyy-bal-2026-08-19-8pt5",
+        line: 8.5,
+        sides: [
+          { description: "Over", teamAbbreviation: null, long: true },
+          { description: "Under", teamAbbreviation: null, long: false },
+        ],
+        ...overrides,
+      });
+    const over = resolvePmusMatch(totalSource(), [pmusTotal()]);
+    expect(over.status).toBe("EXACT");
+    expect(over.targetPmusOrientation).toBe("LONG");
+
+    const under = resolvePmusMatch(totalSource({ selectedOutcomeRaw: "Under" }), [pmusTotal()]);
+    expect(under.status).toBe("EXACT");
+    expect(under.targetPmusOrientation).toBe("SHORT");
+  });
+
+  it("J5: serialization/persistence round-trip preserves semantic outcome + LONG/SHORT without ambiguity", async () => {
+    const { buildMatchRow } = await import("./observation");
+    const longResult = resolvePmusMatch(source(), [pmusCandidate()]);
+    const shortResult = resolvePmusMatch(source({ selectedOutcomeRaw: "Baltimore Orioles" }), [pmusCandidate()]);
+    const longRow = buildMatchRow("sig-1", longResult);
+    const shortRow = buildMatchRow("sig-2", shortResult);
+    expect(longRow.selectedSide).toBe("TEAM:NYY:LONG");
+    expect(shortRow.selectedSide).toBe("TEAM:BAL:SHORT");
+    // Round-trip is unambiguous: parsing the suffix back off recovers the exact orientation.
+    expect(longRow.selectedSide?.endsWith(":LONG")).toBe(true);
+    expect(shortRow.selectedSide?.endsWith(":SHORT")).toBe(true);
+  });
+
+  it("J9: a PM-US side missing the long flag entirely fails closed to UNVERIFIED, never defaults to LONG", () => {
+    const missingOrientation = pmusCandidate({
+      sides: [
+        { description: "New York Yankees", teamAbbreviation: "nyy", long: null },
+        { description: "Baltimore Orioles", teamAbbreviation: "bal", long: false },
+      ],
+    });
+    const r = resolvePmusMatch(source(), [missingOrientation]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.status).toBe("UNVERIFIED");
+    expect(r.targetPmusOrientation).toBeNull();
+  });
+
+  it("J10: Kalshi YES/NO results never carry a PM-US orientation (always null)", () => {
+    const yes = resolveKalshiMatch(source(), [kalshiCandidate()]);
+    expect(yes.status).toBe("EXACT");
+    expect(yes.targetPmusOrientation).toBeNull();
+  });
+});
+
+describe("Task 12G / P1-K: singleton same-team candidate must prove start-time identity", () => {
+  it("K1: one candidate, exact teams, exact timestamp -> remains eligible for normal EXACT evaluation", () => {
+    const r = resolvePmusMatch(source(), [pmusCandidate()]); // both default to 2026-08-19T22:35:00Z
+    expect(r.status).toBe("EXACT");
+  });
+
+  it("K2: one candidate, exact teams, next-day timestamp -> NOT EXACT", () => {
+    const nextDay = pmusCandidate({ scheduledStartAt: "2026-08-20T22:35:00Z" }); // same team pair, next day
+    const r = resolvePmusMatch(source(), [nextDay]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.status).toBe("UNVERIFIED");
+    expect(r.reasonCode).toBe("UNVERIFIED_AMBIGUOUS_GAME");
+  });
+
+  it("K3: one candidate, exact teams, same date but different clock time -> NOT EXACT", () => {
+    const sameDayDifferentTime = pmusCandidate({ scheduledStartAt: "2026-08-19T18:00:00Z" }); // same calendar day, different first pitch
+    const r = resolvePmusMatch(source(), [sameDayDifferentTime]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.reasonCode).toBe("UNVERIFIED_AMBIGUOUS_GAME");
+  });
+
+  it("K4: source timestamp null -> NOT EXACT (even with a same-team singleton)", () => {
+    const r = resolvePmusMatch(source({ gameStartTime: null }), [pmusCandidate()]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.status).toBe("UNVERIFIED");
+    expect(r.reasonCode).toBe("UNVERIFIED_MISSING_START_TIME");
+  });
+
+  it("K5: target timestamp null -> NOT EXACT (even with a same-team singleton)", () => {
+    const noTimestamp = pmusCandidate({ scheduledStartAt: null });
+    const r = resolvePmusMatch(source(), [noTimestamp]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.status).toBe("UNVERIFIED");
+    expect(r.reasonCode).toBe("UNVERIFIED_MISSING_START_TIME");
+  });
+
+  it("K6: two same-team game buckets -> existing exact timestamp disambiguation still works", () => {
+    const g1 = pmusCandidate({ marketId: "g1", gameId: "g1", scheduledStartAt: "2026-08-19T18:00:00Z" });
+    const g2 = pmusCandidate({ marketId: "g2", gameId: "g2", scheduledStartAt: "2026-08-19T23:00:00Z" });
+    const r = resolvePmusMatch(source({ gameStartTime: "2026-08-19T23:00:00Z" }), [g1, g2]);
+    expect(r.status).toBe("EXACT");
+    expect(r.targetMarketId).toBe("g2");
+  });
+
+  it("K7: multiple buckets, no exact source timestamp -> remains UNVERIFIED (unaffected by the singleton fix)", () => {
+    const g1 = pmusCandidate({ marketId: "g1", gameId: "g1", scheduledStartAt: "2026-08-19T18:00:00Z" });
+    const g2 = pmusCandidate({ marketId: "g2", gameId: "g2", scheduledStartAt: "2026-08-19T23:00:00Z" });
+    const r = resolvePmusMatch(source({ gameStartTime: null }), [g1, g2]);
+    expect(r.status).toBe("UNVERIFIED");
+    expect(r.reasonCode).toBe("UNVERIFIED_AMBIGUOUS_GAME");
+  });
+
+  it("K8: a Kalshi-style 3-hour timestamp discrepancy is NOT silently accepted through a new tolerance", () => {
+    const threeHoursOff = pmusCandidate({ scheduledStartAt: "2026-08-20T01:35:00Z" }); // source is 2026-08-19T22:35:00Z, +3h off
+    const r = resolvePmusMatch(source(), [threeHoursOff]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.reasonCode).toBe("UNVERIFIED_AMBIGUOUS_GAME");
+  });
+
+  it("K9: consecutive-day series regression -- the wrong game can never become EXACT merely because discovery returned a singleton for either day", () => {
+    // Day 1 game only discovered, source is actually Day 2.
+    const day1Only = pmusCandidate({ scheduledStartAt: "2026-08-18T22:35:00Z" });
+    const r1 = resolvePmusMatch(source({ gameStartTime: "2026-08-19T22:35:00Z" }), [day1Only]);
+    expect(r1.status).not.toBe("EXACT");
+
+    // Day 2 game only discovered, source is actually Day 1.
+    const day2Only = pmusCandidate({ scheduledStartAt: "2026-08-20T22:35:00Z" });
+    const r2 = resolvePmusMatch(source({ gameStartTime: "2026-08-19T22:35:00Z" }), [day2Only]);
+    expect(r2.status).not.toBe("EXACT");
+  });
+
+  it("K10: PM-US and Kalshi both use the identical fail-closed singleton game-identity rule (shared groupByGame)", () => {
+    const nextDayKalshi = kalshiCandidate({ scheduledStartAt: "2026-08-20T22:35:00Z" });
+    const r = resolveKalshiMatch(source(), [nextDayKalshi]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.reasonCode).toBe("UNVERIFIED_AMBIGUOUS_GAME");
+  });
+
+  it("confirms no timestamp tolerance was introduced anywhere -- even 1 millisecond off fails the singleton check", () => {
+    const oneMsOff = pmusCandidate({ scheduledStartAt: "2026-08-19T22:35:00.001Z" });
+    const r = resolvePmusMatch(source(), [oneMsOff]);
+    expect(r.status).not.toBe("EXACT");
+  });
+});

@@ -77,6 +77,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
         sourceStartTime: null,
         targetStartTime: null,
         targetSide: { kind: "TEAM" as const, team: "AWY" },
+        targetPmusOrientation: "LONG" as const,
         settlementCompatibility: "COMPATIBLE" as const,
         settlementProfile: { extraInnings: "EXACT_COMPATIBLE" as const, postponement: "EXACT_COMPATIBLE" as const, pushRisk: "EXACT_COMPATIBLE" as const },
         candidateCounts: { exact: 1, near: 0, unverified: 0, total: 1 },
