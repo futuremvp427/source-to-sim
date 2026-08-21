@@ -42,26 +42,38 @@ BEGIN
   ------------------------------------------------------------------
   -- 2. Acquire a real lease via the REAL (unmodified) acquire_worker_lease RPC.
   ------------------------------------------------------------------
-  v_fence := public.acquire_worker_lease(v_lock_id, 'worker-a', 60);
+  -- Acquired with a deliberately SHORT (10s) TTL, distinct from the renewal's below --
+  -- see the note at "3." for why the two must differ.
+  v_fence := public.acquire_worker_lease(v_lock_id, 'worker-a', 10);
   IF v_fence IS NULL THEN
     RAISE EXCEPTION 'expected acquire_worker_lease to succeed on a fresh lock id';
   END IF;
 
   SELECT lease_expires_at INTO v_expires_before FROM public.worker_status WHERE id = v_lock_id;
+  IF v_expires_before <> (now() + interval '10 seconds') THEN
+    RAISE EXCEPTION 'sanity check failed: acquire_worker_lease did not set the expected 10s expiry';
+  END IF;
 
   ------------------------------------------------------------------
   -- 3. G2: a renewal with the current id/worker/fence before expiry succeeds and
-  -- extends lease_expires_at, measured from the DATABASE's own now() (never a
-  -- client-supplied timestamp).
+  -- extends lease_expires_at to a FRESH TTL computed from the DATABASE's own now()
+  -- (never a client-supplied timestamp). Renewed with a DELIBERATELY DIFFERENT
+  -- (999s) lease_seconds than the original acquire (10s) -- now() is
+  -- transaction_timestamp(), frozen for this whole wrapping BEGIN/ROLLBACK block, so a
+  -- naive "expires_after > expires_before" comparison using the SAME lease_seconds
+  -- both times would be a false-negative-proof artifact (both calls would compute the
+  -- identical now()+10s and the comparison could never distinguish a real renewal from
+  -- a no-op). Using a different TTL makes the assertion below a genuine, discriminating
+  -- proof: it can only pass if the UPDATE actually re-ran with p_lease_seconds=999.
   ------------------------------------------------------------------
-  v_renewed := public.renew_sports_shadow_lease(v_lock_id, 'worker-a', v_fence, 60);
+  v_renewed := public.renew_sports_shadow_lease(v_lock_id, 'worker-a', v_fence, 999);
   IF NOT v_renewed THEN
     RAISE EXCEPTION 'expected renew_sports_shadow_lease to succeed for the current owner before expiry';
   END IF;
 
   SELECT lease_expires_at INTO v_expires_after FROM public.worker_status WHERE id = v_lock_id;
-  IF v_expires_after <= v_expires_before THEN
-    RAISE EXCEPTION 'expected lease_expires_at to be extended by a successful renewal';
+  IF v_expires_after <> (now() + interval '999 seconds') THEN
+    RAISE EXCEPTION 'expected lease_expires_at to be renewed to now()+999s, got % (now()=%)', v_expires_after, now();
   END IF;
 
   -- Renewal must not have bumped the fence -- it is the SAME owner, SAME fence,
