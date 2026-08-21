@@ -308,3 +308,35 @@ describe("fetchSourceMarketMetadata", () => {
     expect(result.reasonCode).not.toBe("NONE_NO_CANDIDATE");
   });
 });
+
+describe("Task 13E, F: the default fetch path (no fetchImpl argument) uses the Cloudflare-Workers-safe runtimeFetch adapter, not a bare detached `fetch` reference", () => {
+  function installThisSensitiveGlobalFetch(): () => void {
+    const original = globalThis.fetch;
+    function brandedFetch(this: unknown): ReturnType<typeof fetch> {
+      if (this !== globalThis) {
+        throw new TypeError("Illegal invocation: function called with incorrect `this` reference.");
+      }
+      return Promise.resolve(new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } }));
+    }
+    globalThis.fetch = brandedFetch as typeof fetch;
+    return () => {
+      globalThis.fetch = original;
+    };
+  }
+
+  it("fetchSourceMarketMetadata completes without an Illegal-invocation failure when no fetchImpl argument is supplied at all", async () => {
+    const restore = installThisSensitiveGlobalFetch();
+    try {
+      // Deliberately omitting the second (fetchImpl) argument entirely -- must fall
+      // through to the function's own default parameter, which Task 13E fixed to be
+      // runtimeFetch instead of a bare captured `fetch` reference.
+      const result = await fetchSourceMarketMetadata("0xcanary");
+      // The branded fetch really was called and returned successfully -- an empty
+      // markets array resolves to UNVERIFIED_EMPTY_RESPONSE, never a thrown error.
+      expect(result.status).toBe("UNVERIFIED");
+      expect(result.reasonCode).toBe("UNVERIFIED_EMPTY_RESPONSE");
+    } finally {
+      restore();
+    }
+  });
+});

@@ -119,6 +119,7 @@ import { buildTradesUrl, MAX_TRADES_OFFSET, PAGE_SIZE } from "../shadow.server";
 import { normalizeSourceEvents, type NormalizedEvent, type RawTrade } from "../shadow-core";
 import { classifyUnverifiedDisposition, type UnverifiedReasonCode } from "./eligibility";
 import { decideFill, type EligibleFill, type OpenEpisodeState } from "./episode";
+import { runtimeFetch } from "./runtime-fetch.server";
 import { fetchSourceMarketMetadata } from "./source-metadata.server";
 import { isEligibleForEpisodeTrigger } from "./source-poll";
 import { NO_OP_LEASE_CHECKPOINT, type LeaseCheckpoint } from "./sports-lease.server";
@@ -154,7 +155,9 @@ export type SourcePollNetworkDeps = {
 };
 
 const defaultNetworkDeps: SourcePollNetworkDeps = {
-  fetchImpl: fetch,
+  // Task 13E: never the bare `fetch` reference -- see runtime-fetch.server.ts's doc
+  // comment for why that breaks in Cloudflare Workers (confirmed live in production).
+  fetchImpl: runtimeFetch,
   reserveRequestSlot,
   getHostCooldown,
   recordHostRateLimit,
