@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyGammaMarket, type GammaMarket } from "./eligibility";
+import { classifyGammaMarket, classifyUnverifiedDisposition, type GammaMarket, type UnverifiedReasonCode } from "./eligibility";
 
 const moneyline: GammaMarket = {
   slug: "mlb-nyy-bal-2026-08-19",
@@ -248,5 +248,64 @@ describe("classifyGammaMarket — STRUCTURED PRIORITY", () => {
   it("31. a structured/text conflict never becomes ELIGIBLE", () => {
     const conflicting: GammaMarket = { ...total, line: 7.5, slug: "mlb-nyy-bal-2026-08-19-total-8pt5" };
     expect(classifyGammaMarket(conflicting).status).not.toBe("ELIGIBLE");
+  });
+});
+
+/**
+ * Task 12F / P1-H: exhaustive over the real UnverifiedReasonCode union (9 members) --
+ * H3/H4/H5 (retryable/transport) and H6/H7/H8/H9/H10 (terminal/classifier-level).
+ */
+describe("classifyUnverifiedDisposition", () => {
+  const RETRYABLE: UnverifiedReasonCode[] = ["UNVERIFIED_FETCH_FAILED", "UNVERIFIED_EMPTY_RESPONSE", "UNVERIFIED_MALFORMED_RESPONSE"];
+  const TERMINAL: UnverifiedReasonCode[] = [
+    "UNVERIFIED_METADATA_MISSING",
+    "UNVERIFIED_AMBIGUOUS_PERIOD",
+    "UNVERIFIED_PARSE_FAILURE",
+    "UNVERIFIED_CONFLICTING_METADATA",
+    "UNVERIFIED_UNKNOWN_TEAM",
+    "UNVERIFIED_MISSING_LINE",
+  ];
+
+  it("H3: UNVERIFIED_FETCH_FAILED is RETRYABLE", () => {
+    expect(classifyUnverifiedDisposition("UNVERIFIED_FETCH_FAILED")).toBe("RETRYABLE");
+  });
+
+  it("H4: UNVERIFIED_EMPTY_RESPONSE is RETRYABLE", () => {
+    expect(classifyUnverifiedDisposition("UNVERIFIED_EMPTY_RESPONSE")).toBe("RETRYABLE");
+  });
+
+  it("H5: UNVERIFIED_MALFORMED_RESPONSE is RETRYABLE", () => {
+    expect(classifyUnverifiedDisposition("UNVERIFIED_MALFORMED_RESPONSE")).toBe("RETRYABLE");
+  });
+
+  it("H6: UNVERIFIED_AMBIGUOUS_PERIOD is TERMINAL", () => {
+    expect(classifyUnverifiedDisposition("UNVERIFIED_AMBIGUOUS_PERIOD")).toBe("TERMINAL");
+  });
+
+  it("H7: UNVERIFIED_PARSE_FAILURE is TERMINAL", () => {
+    expect(classifyUnverifiedDisposition("UNVERIFIED_PARSE_FAILURE")).toBe("TERMINAL");
+  });
+
+  it("H8: UNVERIFIED_CONFLICTING_METADATA is TERMINAL", () => {
+    expect(classifyUnverifiedDisposition("UNVERIFIED_CONFLICTING_METADATA")).toBe("TERMINAL");
+  });
+
+  it("H9: UNVERIFIED_MISSING_LINE is TERMINAL", () => {
+    expect(classifyUnverifiedDisposition("UNVERIFIED_MISSING_LINE")).toBe("TERMINAL");
+  });
+
+  it("H10: UNVERIFIED_UNKNOWN_TEAM is TERMINAL", () => {
+    expect(classifyUnverifiedDisposition("UNVERIFIED_UNKNOWN_TEAM")).toBe("TERMINAL");
+  });
+
+  it("UNVERIFIED_METADATA_MISSING is TERMINAL (a successfully-read Gamma response simply lacking usable structured/slug fields is a deterministic property of that conditionId, not a transient failure)", () => {
+    expect(classifyUnverifiedDisposition("UNVERIFIED_METADATA_MISSING")).toBe("TERMINAL");
+  });
+
+  it("the RETRYABLE and TERMINAL sets are exhaustive and disjoint over the full 9-member union", () => {
+    const all = [...RETRYABLE, ...TERMINAL];
+    expect(new Set(all).size).toBe(9); // no duplicates
+    for (const code of RETRYABLE) expect(classifyUnverifiedDisposition(code)).toBe("RETRYABLE");
+    for (const code of TERMINAL) expect(classifyUnverifiedDisposition(code)).toBe("TERMINAL");
   });
 });

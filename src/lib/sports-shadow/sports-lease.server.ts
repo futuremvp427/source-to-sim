@@ -29,6 +29,16 @@ export type SportsLeaseRepository = {
    * immediately available again — no lingering TTL tail after a clean release.
    */
   release(lease: SportsLease, patch: { state: string; lastError: string | null }): Promise<void>;
+  /**
+   * Task 12F / P1-G: atomic renewal via renew_sports_shadow_lease (see
+   * supabase/migrations/20260822020000_sports_shadow_lease_renewal.sql) — extends the
+   * SAME lease (same id/worker_id/fence) from the database's own `now()`, ONLY while it
+   * is still the current, non-expired owner. Returns false (never throws to the caller of
+   * `renewSportsLease` below) the moment this worker is no longer provably the owner —
+   * expired, or superseded by a newer fence/worker — which is the ordinary "lease lost"
+   * outcome, not an exceptional one.
+   */
+  renew(lease: SportsLease, leaseSeconds: number): Promise<boolean>;
 };
 
 export const supabaseSportsLeaseRepository: SportsLeaseRepository = {
@@ -57,6 +67,17 @@ export const supabaseSportsLeaseRepository: SportsLeaseRepository = {
       .eq("id", lease.lockId)
       .eq("fence", lease.fence)
       .eq("worker_id", lease.workerId);
+  },
+
+  async renew(lease, leaseSeconds) {
+    const { data, error } = await supabaseAdmin.rpc("renew_sports_shadow_lease" as never, {
+      p_id: lease.lockId,
+      p_worker_id: lease.workerId,
+      p_fence: lease.fence,
+      p_lease_seconds: leaseSeconds,
+    } as never);
+    if (error) throw new Error(error.message);
+    return data === true;
   },
 };
 
@@ -92,4 +113,82 @@ export async function releaseSportsLease(
   } catch {
     // Best-effort: the lease's own leaseSeconds TTL is the backstop.
   }
+}
+
+/**
+ * Fails CLOSED to `false` (lease lost) on any RPC error — a renewal-coordination hiccup
+ * must never be silently treated as "still renewed," exactly like acquireSportsLease
+ * fails closed to null rather than assuming ownership.
+ */
+export async function renewSportsLease(
+  lease: SportsLease,
+  leaseSeconds: number,
+  repo: SportsLeaseRepository = supabaseSportsLeaseRepository,
+): Promise<boolean> {
+  try {
+    return await repo.renew(lease, leaseSeconds);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ============================== TASK 12F / P1-G: COOPERATIVE LEASE CHECKPOINTS ==============================
+ * A single source/matching cycle can perform far longer sequential work than
+ * SOURCE_LEASE_TTL_SECONDS (60s): up to 41 trade-page fetches at up to 12s each, up to
+ * 500 Gamma metadata fetches at up to 10s each, then independent PM-US/Kalshi discovery
+ * pagination at up to 12s per page. `LeaseCheckpoint` is a zero-timer, work-driven
+ * renewal primitive: the bounded work itself calls it between iterations (never a
+ * background setInterval/heartbeat), and it renews the underlying lease only often
+ * enough to stay safely ahead of expiry.
+ *
+ * RENEWAL MARGIN MATH: the longest single network operation anywhere in the source lane
+ * between two checkpoint calls is 12_000ms (pmus.server.ts/kalshi.server.ts's
+ * pacedGetJson REQUEST_TIMEOUT_MS, and source-poll.server.ts's own trade-page
+ * REQUEST_TIMEOUT_MS — source-metadata.server.ts's Gamma fetch is smaller, at 10_000ms).
+ * LEASE_RENEWAL_MARGIN_MS=20_000 means a checkpoint call is a cheap in-memory freshness
+ * check (no DB round trip) until 20s have elapsed since the lease was last (re)newed; the
+ * FIRST checkpoint call after that 20s mark performs a real renewal RPC. Worst case: the
+ * margin ticks over to "due" the instant a checkpoint call has just decided NOT to renew
+ * (because elapsed was still <20s), so one more full 12s await elapses before the NEXT
+ * checkpoint call (at the top of the following loop iteration) actually renews — a
+ * worst-case unrenewed span of 20_000 + 12_000 = 32_000ms, still comfortably inside the
+ * 60_000ms TTL with a ~28s (~47%) safety margin. If that renewal RPC itself then fails
+ * (network hiccup, or the lease has genuinely been superseded), the checkpoint returns
+ * false immediately — fail closed, never silently continues.
+ * ================================================================================
+ */
+export const LEASE_RENEWAL_MARGIN_MS = 20_000;
+
+/**
+ * Returns true while ownership is still (or was just re-)confirmed; false the FIRST time
+ * renewal fails, and STICKY false forever after (a superseded/expired lease can never
+ * become valid again, so there is no point re-attempting the RPC on every subsequent
+ * call — this also keeps renewal calls bounded rather than hammering the DB once lost).
+ */
+export type LeaseCheckpoint = () => Promise<boolean>;
+
+/** Always reports the lease as valid — the safe default for any deps bag/test that isn't exercising lease-loss behavior. */
+export const NO_OP_LEASE_CHECKPOINT: LeaseCheckpoint = async () => true;
+
+export function createLeaseCheckpoint(
+  lease: SportsLease,
+  leaseSeconds: number,
+  repo: SportsLeaseRepository = supabaseSportsLeaseRepository,
+  now: () => number = () => Date.now(),
+  renewalMarginMs: number = LEASE_RENEWAL_MARGIN_MS,
+): LeaseCheckpoint {
+  let lastRenewedAtMs = now();
+  let lost = false;
+  return async () => {
+    if (lost) return false;
+    if (now() - lastRenewedAtMs < renewalMarginMs) return true;
+    const ok = await renewSportsLease(lease, leaseSeconds, repo);
+    if (!ok) {
+      lost = true;
+      return false;
+    }
+    lastRenewedAtMs = now();
+    return true;
+  };
 }

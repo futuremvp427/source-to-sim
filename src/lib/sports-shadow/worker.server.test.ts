@@ -48,6 +48,13 @@ function makeFakeLeaseRepo() {
       if (!existing || existing.fence !== lease.fence || existing.workerId !== lease.workerId) return;
       rows.set(lease.lockId, { ...existing, expiresAtMs: Date.now() - 1 }); // immediate release
     },
+    async renew(lease, leaseSeconds) {
+      const existing = rows.get(lease.lockId);
+      if (!existing || existing.fence !== lease.fence || existing.workerId !== lease.workerId) return false;
+      if (existing.expiresAtMs <= Date.now()) return false;
+      rows.set(lease.lockId, { ...existing, expiresAtMs: Date.now() + leaseSeconds * 1000 });
+      return true;
+    },
   };
   return { repo, rows, acquireCalls };
 }
@@ -132,6 +139,7 @@ function emptyWalletResult(wallet: string, overrides: Partial<WalletPollResult> 
     metadataFetchFailures: 0,
     ineligibleRows: 0,
     unverifiedRows: 0,
+    terminalUnverifiedRows: 0,
     suppressedPreGoLive: 0,
     newSignals: [],
     aggregatedCount: 0,
@@ -139,6 +147,7 @@ function emptyWalletResult(wallet: string, overrides: Partial<WalletPollResult> 
     lateReconciliationCount: 0,
     backlogTruncated: false,
     orphanedFillsRecovered: 0,
+    leaseLost: false,
     error: null,
     ...overrides,
   };
@@ -707,6 +716,46 @@ describe("runSportsShadowCycle — resolution and persistence semantics", () => 
   });
 });
 
+describe("runSportsShadowCycle — Task 12F/P1-G: lease loss stops the source lane", () => {
+  it("G8: lease loss during a wallet poll stops remaining wallets AND both venues' pending resolution for that source cycle", async () => {
+    const attemptedWallets: string[] = [];
+    const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
+      attemptedWallets.push(wallet);
+      if (wallet === WALLET_A) return emptyWalletResult(wallet, { leaseLost: true });
+      return emptyWalletResult(wallet);
+    });
+    const discoverPmus = vi.fn(async () => [] as PmusCandidate[]);
+    const discoverKalshi = vi.fn(async () => [] as KalshiCandidate[]);
+    const summary = await runSportsShadowCycle(
+      enabledConfig({ wallets: [WALLET_A, WALLET_B, WALLET_C] }),
+      baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never, discoverPmus, discoverKalshi }),
+    );
+    expect(attemptedWallets).toEqual([WALLET_A]); // WALLET_B/WALLET_C never attempted
+    expect(summary.sourceLane?.leaseLost).toBe(true);
+    expect(discoverPmus).not.toHaveBeenCalled();
+    expect(discoverKalshi).not.toHaveBeenCalled();
+    expect(summary.sourceLane?.pmus.pendingFound).toBe(0);
+    expect(summary.sourceLane?.kalshi.pendingFound).toBe(0);
+  });
+
+  it("G9: the observation lane runs and completes independently even when the source lane reports lease loss", async () => {
+    const pollSportsShadowWallet = vi.fn(async (wallet: string) => emptyWalletResult(wallet, { leaseLost: true }));
+    const takeDueSportsShadowObservations = vi.fn(async () => ({ captured: 1, failed: 0, skipped: 0 }));
+    const summary = await runSportsShadowCycle(
+      enabledConfig({ wallets: [WALLET_A, WALLET_B] }),
+      baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never, takeDueSportsShadowObservations: takeDueSportsShadowObservations as never }),
+    );
+    expect(summary.sourceLane?.leaseLost).toBe(true);
+    expect(summary.observationLane.acquired).toBe(true);
+    expect(summary.observationLane.captured).toBe(1);
+  });
+
+  it("a source lane that never loses the lease reports leaseLost=false", async () => {
+    const summary = await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A] }), baseDeps());
+    expect(summary.sourceLane?.leaseLost).toBe(false);
+  });
+});
+
 describe("runSportsShadowCycle — final +0 observation pass", () => {
   it("23. a final observation pass runs after the source lane and can capture a newly-due +0 row", async () => {
     let call = 0;
@@ -734,6 +783,7 @@ describe("runSportsShadowCycle — final +0 observation pass", () => {
         return leaseRepo.acquire(lockId, workerId, leaseSeconds);
       },
       release: originalRelease,
+      renew: leaseRepo.renew.bind(leaseRepo),
     };
     const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ leaseRepo: wrappedRepo, takeDueSportsShadowObservations: takeDueSportsShadowObservations as never }));
     expect(summary.finalObservationPass.acquired).toBe(false);

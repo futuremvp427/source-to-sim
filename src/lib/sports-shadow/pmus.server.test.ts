@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildPmusObservationPatch } from "./observation";
 import { clearPmusDiscoveryCache, discoverPmusMlbMarkets, fetchPmusBook, PMUS_HOST, type PmusNetworkDeps } from "./pmus.server";
+import { NO_OP_LEASE_CHECKPOINT } from "./sports-lease.server";
 
 function okDeps(overrides: Partial<PmusNetworkDeps> = {}): PmusNetworkDeps {
   return {
@@ -9,6 +10,7 @@ function okDeps(overrides: Partial<PmusNetworkDeps> = {}): PmusNetworkDeps {
     getHostCooldown: vi.fn(async () => ({ blocked: false, reason: null })),
     recordHostRateLimit: vi.fn(async () => {}),
     now: () => 1_700_000_000_000,
+    checkpointLease: NO_OP_LEASE_CHECKPOINT,
     ...overrides,
   };
 }
@@ -69,11 +71,42 @@ describe("discoverPmusMlbMarkets", () => {
     await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/malformed json/i);
   });
 
-  it("19b. an unexpected response shape (events not an array) is treated as zero events for that page, not a crash", async () => {
+  it("Task 12F/P1-I: an unexpected response shape (events not an array) now THROWS rather than being silently treated as zero events -- a malformed collection is not a legitimate empty page (was the P1-I defect: this used to resolve to [], letting a schema/proxy hiccup be confused with a genuine 'nothing found')", async () => {
     clearPmusDiscoveryCache();
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ events: "not-an-array" }), { status: 200 }));
-    const candidates = await discoverPmusMlbMarkets(okDeps({ fetchImpl }));
-    expect(candidates).toEqual([]);
+    await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/malformed response/i);
+  });
+
+  it("I1: `{}` (events entirely missing) throws a discovery failure", async () => {
+    clearPmusDiscoveryCache();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/malformed response/i);
+  });
+
+  it("I2: `{ events: null }` throws a discovery failure", async () => {
+    clearPmusDiscoveryCache();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ events: null }), { status: 200 }));
+    await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/malformed response/i);
+  });
+
+  it("I3: `{ events: {} }` (an object, not an array) throws a discovery failure", async () => {
+    clearPmusDiscoveryCache();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ events: {} }), { status: 200 }));
+    await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/malformed response/i);
+  });
+
+  it("I4: `{ events: [] }` is a valid, successful empty page -- resolves to an empty candidate list, does not throw", async () => {
+    clearPmusDiscoveryCache();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ events: [] }), { status: 200 }));
+    await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).resolves.toEqual([]);
+  });
+
+  it("I11: a malformed response is never written to the discovery cache -- the very next call issues a real request again, not a cached failure or cached partial result", async () => {
+    clearPmusDiscoveryCache();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow();
+    await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow();
+    expect(fetchImpl).toHaveBeenCalledTimes(2); // no caching of the malformed attempt
   });
 
   it("20. a timeout/network failure fails explicitly (throws)", async () => {

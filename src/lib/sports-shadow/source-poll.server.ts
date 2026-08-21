@@ -117,9 +117,11 @@ import {
 } from "../http-rate-limit.server";
 import { buildTradesUrl, MAX_TRADES_OFFSET, PAGE_SIZE } from "../shadow.server";
 import { normalizeSourceEvents, type NormalizedEvent, type RawTrade } from "../shadow-core";
+import { classifyUnverifiedDisposition, type UnverifiedReasonCode } from "./eligibility";
 import { decideFill, type EligibleFill, type OpenEpisodeState } from "./episode";
 import { fetchSourceMarketMetadata } from "./source-metadata.server";
 import { isEligibleForEpisodeTrigger } from "./source-poll";
+import { NO_OP_LEASE_CHECKPOINT, type LeaseCheckpoint } from "./sports-lease.server";
 import type { BetType, SourceMarketMetadata } from "./types";
 
 /**
@@ -291,6 +293,8 @@ export type PollRepository = {
   markFillComplete(fillId: string): Promise<void>;
   /** Marks a fill permanently terminal — its own immutable data will never produce a different outcome on retry. */
   markFillTerminal(fillId: string, status: "TERMINAL_INELIGIBLE" | "TERMINAL_INVALID"): Promise<void>;
+  /** Task 12F / P1-H: marks a fill TERMINAL_UNVERIFIED, durably retaining the exact classifier reason code for later audit/accounting -- distinct from TERMINAL_INELIGIBLE (a positive ineligibility determination) since "could not verify" and "determined ineligible" remain different outcomes. */
+  markFillTerminalUnverified(fillId: string, reasonCode: UnverifiedReasonCode): Promise<void>;
 };
 
 type RawPendingFillRow = {
@@ -531,6 +535,14 @@ export const supabasePollRepository: PollRepository = {
       .eq("id", fillId);
     if (error) throw new Error(error.message);
   },
+
+  async markFillTerminalUnverified(fillId, reasonCode) {
+    const { error } = await supabaseAdmin
+      .from("sports_shadow_source_fills" as never)
+      .update({ downstream_status: "TERMINAL_UNVERIFIED", downstream_unverified_reason: reasonCode } as never)
+      .eq("id", fillId);
+    if (error) throw new Error(error.message);
+  },
 };
 
 /* ------------------------------------------------------------------ */
@@ -542,6 +554,8 @@ export type WalletPollDeps = {
   repo: PollRepository;
   fetchSourceMarketMetadata: typeof fetchSourceMarketMetadata;
   now: () => number;
+  /** Task 12F / P1-G: checked between trade pages and before each pending fill's downstream write so this poll can never continue non-idempotent episode mutations after its caller's source lease has been lost. Defaults to always-true for any caller not exercising lease-loss behavior. */
+  checkpointLease: LeaseCheckpoint;
 };
 
 const defaultWalletPollDeps: WalletPollDeps = {
@@ -549,6 +563,7 @@ const defaultWalletPollDeps: WalletPollDeps = {
   repo: supabasePollRepository,
   fetchSourceMarketMetadata,
   now: () => Date.now(),
+  checkpointLease: NO_OP_LEASE_CHECKPOINT,
 };
 
 export type NewSignalSummary = {
@@ -582,6 +597,8 @@ export type WalletPollResult = {
   metadataFetchFailures: number;
   ineligibleRows: number;
   unverifiedRows: number;
+  /** Task 12F / P1-H: the subset of unverifiedRows classified TERMINAL (see eligibility.ts's classifyUnverifiedDisposition) and marked TERMINAL_UNVERIFIED rather than left PENDING. */
+  terminalUnverifiedRows: number;
   suppressedPreGoLive: number;
   newSignals: NewSignalSummary[];
   aggregatedCount: number;
@@ -591,6 +608,8 @@ export type WalletPollResult = {
   backlogTruncated: boolean;
   /** How many fills processed this poll (phase 2) were NOT part of this poll's freshly-inserted batch — i.e. genuinely recovered from an earlier failed/crashed poll. Direct evidence of the Task 12D/P1-A durable-retry mechanism actually doing something, not just existing. */
   orphanedFillsRecovered: number;
+  /** Task 12F / P1-G: true when checkpointLease() reported the source lease lost at any point this poll -- pagination and/or phase-2 downstream processing stopped immediately rather than continuing under a stale fence. */
+  leaseLost: boolean;
   /** First error encountered, if any. Partial progress made before the error is still reflected in the other fields above — one bad page/row does not discard already-persisted evidence. */
   error: string | null;
 };
@@ -607,6 +626,7 @@ function emptyResult(wallet: string): WalletPollResult {
     metadataFetchFailures: 0,
     ineligibleRows: 0,
     unverifiedRows: 0,
+    terminalUnverifiedRows: 0,
     suppressedPreGoLive: 0,
     newSignals: [],
     aggregatedCount: 0,
@@ -614,6 +634,7 @@ function emptyResult(wallet: string): WalletPollResult {
     lateReconciliationCount: 0,
     backlogTruncated: false,
     orphanedFillsRecovered: 0,
+    leaseLost: false,
     error: null,
   };
 }
@@ -767,6 +788,15 @@ export async function pollSportsShadowWallet(
     for (let page = 0; page < MAX_PAGES_PER_WALLET; page += 1) {
       const offset = page * PAGE_SIZE;
       if (offset > MAX_TRADES_OFFSET) break;
+      // Task 12F / P1-G: a full pagination pass can take up to MAX_PAGES_PER_WALLET * 12s
+      // -- checked before each page so a lease lost mid-pagination stops issuing further
+      // requests immediately. Pages already fetched are still processed below (Phase 1's
+      // raw-fill insert is idempotent/dedup-safe regardless of lease state); it is ONLY
+      // Phase 2's episode mutations that must never run under a stale fence.
+      if (!(await d.checkpointLease())) {
+        result.leaseLost = true;
+        break;
+      }
       const rows = await pacedFetchTradesPage(normalizedWallet, offset, d.network);
       result.pagesFetched += 1;
       if (rows.length === 0) break;
@@ -796,7 +826,11 @@ export async function pollSportsShadowWallet(
     result.error = `trade page fetch failed: ${err instanceof Error ? err.message : "unknown error"}`;
   }
 
-  if (hasHistory && !overlapFound && result.error === null) {
+  // Task 12F / P1-G: a pagination pass stopped early by lease loss is NOT genuine backlog
+  // exhaustion -- there may well be more history the wallet's own overlap key would have
+  // found had the lease survived. Only a real MAX_PAGES_PER_WALLET exhaustion (or a
+  // genuine short/empty page) without lease loss counts as backlogTruncated.
+  if (hasHistory && !overlapFound && !result.leaseLost && result.error === null) {
     result.backlogTruncated = true;
   }
 
@@ -859,7 +893,20 @@ export async function pollSportsShadowWallet(
    * Bounded, oldest source_ts first. Naturally includes fills just inserted above AND any
    * orphaned by an earlier failed/crashed poll — see this module's Task 12D/P1-A doc
    * comment for why re-running this against the same fill is always safe.
+   *
+   * Task 12F / P1-G: if the lease was already lost during pagination (or the checkpoint
+   * below fails immediately), Phase 2 does not even start -- no metadata fetch, no
+   * findLatestEpisode, no episode mutation is attempted under a lease this worker can no
+   * longer prove it still holds. Every fill that would have been processed simply stays
+   * PENDING, safely retryable by whichever worker holds the lease next.
    */
+  if (!result.leaseLost && !(await d.checkpointLease())) {
+    result.leaseLost = true;
+  }
+  if (result.leaseLost) {
+    return result;
+  }
+
   let pendingFills: PendingDownstreamFillRow[];
   try {
     pendingFills = await d.repo.findPendingDownstreamFills(normalizedWallet, MAX_PENDING_FILLS_PER_POLL);
@@ -873,6 +920,14 @@ export async function pollSportsShadowWallet(
   const metadataCache = new Map<string, SourceMarketMetadata>();
 
   for (const fill of pendingFills) {
+    // Task 12F / P1-G: checked at the top of every iteration, BEFORE this fill's own
+    // (up to 10s) metadata fetch -- once lost, the entire remaining batch is abandoned
+    // (safely PENDING) rather than continuing to spend metadata-fetch budget on fills
+    // that could not be safely written anyway.
+    if (!(await d.checkpointLease())) {
+      result.leaseLost = true;
+      break;
+    }
     if (!fill.conditionId) {
       result.unverifiedRows += 1;
       try {
@@ -905,9 +960,32 @@ export async function pollSportsShadowWallet(
       }
       continue;
     }
-    if (metadata.status === "UNVERIFIED" || !metadata.betType) {
+    if (metadata.status === "UNVERIFIED") {
       result.unverifiedRows += 1;
-      continue; // stays PENDING -- temporary uncertainty is never silently treated as permanent
+      // Task 12F / P1-H: retryable (transport/response-availability) reasons stay
+      // PENDING exactly as before -- temporary uncertainty is never silently treated as
+      // permanent. Terminal (classifier-level, deterministic-given-this-conditionId)
+      // reasons are marked TERMINAL_UNVERIFIED so they stop permanently occupying this
+      // bounded batch's retry capacity, while durably retaining the reason code as
+      // evidence (see eligibility.ts's classifyUnverifiedDisposition for the exact split
+      // and rationale).
+      if (classifyUnverifiedDisposition(metadata.reasonCode as UnverifiedReasonCode) === "TERMINAL") {
+        result.terminalUnverifiedRows += 1;
+        try {
+          await d.repo.markFillTerminalUnverified(fill.id, metadata.reasonCode as UnverifiedReasonCode);
+        } catch {
+          // Best-effort; stays PENDING and is re-evaluated identically next poll.
+        }
+      }
+      continue;
+    }
+    if (!metadata.betType) {
+      // Defensive: status claims something other than UNVERIFIED/INELIGIBLE but betType
+      // is still null (should never happen for a genuine ELIGIBLE result). Fail closed to
+      // PENDING rather than guessing a disposition from a reasonCode that may not even be
+      // a real UnverifiedReasonCode in this anomalous state.
+      result.unverifiedRows += 1;
+      continue;
     }
 
     const eligibleFill: EligibleFill = {
@@ -972,6 +1050,14 @@ export async function pollSportsShadowWallet(
     if (decision.kind === "SELL_RECORDED") {
       result.sellRecordedCount += 1;
       if (decision.nextState && cacheEntry) {
+        // Task 12F / P1-G, requirement E: re-verify ownership immediately before the
+        // state-changing write, after whatever await (metadata fetch, findLatestEpisode)
+        // preceded it this iteration -- a lease that was valid at the top of this
+        // iteration may have been lost during that await.
+        if (!(await d.checkpointLease())) {
+          result.leaseLost = true;
+          break;
+        }
         try {
           await d.repo.updateEpisodeAtomic(fill.id, cacheEntry.id, decision.nextState);
           positionCache.set(positionKey, { id: cacheEntry.id, state: decision.nextState });
@@ -992,6 +1078,10 @@ export async function pollSportsShadowWallet(
       if (decision.kind === "AGGREGATED_BUY") result.aggregatedCount += 1;
       else result.lateReconciliationCount += 1;
       if (cacheEntry) {
+        if (!(await d.checkpointLease())) {
+          result.leaseLost = true;
+          break;
+        }
         try {
           await d.repo.updateEpisodeAtomic(fill.id, cacheEntry.id, decision.nextState);
           positionCache.set(positionKey, { id: cacheEntry.id, state: decision.nextState });
@@ -1029,6 +1119,10 @@ export async function pollSportsShadowWallet(
       sourceMarketSlug: metadata.marketSlug,
       sourceOutcome: fill.outcome,
     };
+    if (!(await d.checkpointLease())) {
+      result.leaseLost = true;
+      break;
+    }
     try {
       const inserted = await d.repo.insertEpisodeAtomic(fill.id, newRow);
       positionCache.set(positionKey, { id: inserted.id, state: decision.nextState });

@@ -32,7 +32,14 @@ import { persistVenueMatch, takeDueSportsShadowObservations, type ObservationDep
 import { discoverPmusMlbMarkets } from "./pmus.server";
 import type { PmusCandidate } from "./pmus";
 import { resolveKalshiMatch, resolvePmusMatch, type MatchStatus, type VenueMatchResult } from "./resolver";
-import { acquireSportsLease, releaseSportsLease, supabaseSportsLeaseRepository, type SportsLeaseRepository } from "./sports-lease.server";
+import {
+  acquireSportsLease,
+  createLeaseCheckpoint,
+  releaseSportsLease,
+  supabaseSportsLeaseRepository,
+  type LeaseCheckpoint,
+  type SportsLeaseRepository,
+} from "./sports-lease.server";
 import { pollSportsShadowWallet, supabasePollRepository, type WalletPollDeps, type WalletPollResult } from "./source-poll.server";
 import type { BetType, Venue } from "./types";
 import { PENDING_BATCH_SIZE, budgetExceeded, detectedAtMsFromSignal, nextRotationIndex, rotateWallets, toSourceSignal, type PendingSignal } from "./worker";
@@ -245,6 +252,8 @@ export type VenueResolutionSummary = {
   unverified: number;
   discoveryFailed: boolean;
   errors: number;
+  /** Task 12F / P1-G: true when the source lease checkpoint reported the lease lost partway through this venue's resolution — remaining pending signals for this venue were left untouched this cycle, safely retryable. */
+  leaseLost: boolean;
 };
 
 export type SourceLaneResult = {
@@ -256,6 +265,8 @@ export type SourceLaneResult = {
   newSignalsCreated: number;
   pmus: VenueResolutionSummary;
   kalshi: VenueResolutionSummary;
+  /** Task 12F / P1-G: true when the source lease was lost at any point this cycle (during a wallet poll or venue resolution) — the lane stopped starting new work immediately once detected. */
+  leaseLost: boolean;
 };
 
 export type SportsShadowCycleSummary = {
@@ -275,7 +286,7 @@ function emptyObservationResult(): ObservationLaneResult {
 }
 
 function emptyVenueSummary(): VenueResolutionSummary {
-  return { pendingFound: 0, pendingProcessed: 0, pendingRemainingHint: false, attempted: 0, exact: 0, near: 0, none: 0, unverified: 0, discoveryFailed: false, errors: 0 };
+  return { pendingFound: 0, pendingProcessed: 0, pendingRemainingHint: false, attempted: 0, exact: 0, near: 0, none: 0, unverified: 0, discoveryFailed: false, errors: 0, leaseLost: false };
 }
 
 function emptySourceLaneResult(acquired: boolean): SourceLaneResult {
@@ -287,6 +298,7 @@ function emptySourceLaneResult(acquired: boolean): SourceLaneResult {
     newSignalsCreated: 0,
     pmus: emptyVenueSummary(),
     kalshi: emptyVenueSummary(),
+    leaseLost: false,
   };
 }
 
@@ -347,8 +359,16 @@ async function runObservationLane(d: SportsShadowWorkerDeps, maxRows: number, de
  * short-circuit between them.
  * ================================================================================
  */
-async function resolveVenuePending(venue: Venue, d: SportsShadowWorkerDeps, errors: string[]): Promise<VenueResolutionSummary> {
+async function resolveVenuePending(venue: Venue, d: SportsShadowWorkerDeps, errors: string[], checkpoint: LeaseCheckpoint): Promise<VenueResolutionSummary> {
   const summary = emptyVenueSummary();
+
+  // Task 12F / P1-G: do not even query pending work once the lease is already known lost
+  // — "stop starting new source/matching work immediately" applies to PM-US/Kalshi
+  // resolution exactly as it does to wallet polling.
+  if (!(await checkpoint())) {
+    summary.leaseLost = true;
+    return summary;
+  }
 
   let pending: PendingSignal[];
   try {
@@ -364,8 +384,14 @@ async function resolveVenuePending(venue: Venue, d: SportsShadowWorkerDeps, erro
   let pmusCandidates: PmusCandidate[] = [];
   let kalshiCandidates: KalshiCandidate[] = [];
   try {
-    if (venue === "PMUS") pmusCandidates = await d.discoverPmus();
-    else kalshiCandidates = await d.discoverKalshi();
+    // Task 12F / P1-G: threaded into discovery so a slow multi-page PM-US/Kalshi
+    // discovery pass (up to 12s per page) checks ownership between pages too, not just
+    // at this call boundary. Task 12F / P1-I: a malformed discovery envelope now THROWS
+    // (see pmus.server.ts/kalshi.server.ts) rather than silently degrading to an empty
+    // catalog, which this existing catch already correctly treats as discoveryFailed --
+    // the entire venue left retryable, never converted into a semantic NONE.
+    if (venue === "PMUS") pmusCandidates = await d.discoverPmus({ checkpointLease: checkpoint });
+    else kalshiCandidates = await d.discoverKalshi({ checkpointLease: checkpoint });
   } catch (err) {
     summary.discoveryFailed = true;
     errors.push(`${venue} discovery failed: ${err instanceof Error ? err.message : "unknown error"}`);
@@ -373,6 +399,13 @@ async function resolveVenuePending(venue: Venue, d: SportsShadowWorkerDeps, erro
   }
 
   for (const signal of pending) {
+    // Task 12F / P1-G: checked before EACH signal's persist -- the exact same
+    // "verify ownership again after a potentially long await" requirement as
+    // source-poll.server.ts's phase-2 loop.
+    if (!(await checkpoint())) {
+      summary.leaseLost = true;
+      break;
+    }
     const source = toSourceSignal(signal);
     if (!source) continue; // missing conditionId -- should not happen for a Task-10-persisted signal; left pending rather than fabricated
     const detectedAtMs = detectedAtMsFromSignal(signal);
@@ -391,7 +424,7 @@ async function resolveVenuePending(venue: Venue, d: SportsShadowWorkerDeps, erro
   return summary;
 }
 
-async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDeps, errors: string[]): Promise<SourceLaneResult> {
+async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDeps, errors: string[], checkpoint: LeaseCheckpoint): Promise<SourceLaneResult> {
   let startIndex = 0;
   try {
     startIndex = await d.workerRepo.getWalletCursor();
@@ -403,12 +436,18 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
   const walletSummaries: WalletSummary[] = [];
   let newSignalsCreated = 0;
   let walletsAttempted = 0;
+  let leaseLost = false;
   const laneStartMs = d.now();
 
   for (const wallet of orderedWallets) {
     if (budgetExceeded(d.now() - laneStartMs, SOURCE_LANE_BUDGET_MS)) break; // remaining wallets stay durable for the next cycle -- and the rotation cursor below advances only past what WAS attempted, so they are tried FIRST next cycle
+    // Task 12F / P1-G: "do not continue another wallet" once the lease is lost.
+    if (!(await checkpoint())) {
+      leaseLost = true;
+      break;
+    }
     try {
-      const result: WalletPollResult = await d.pollSportsShadowWallet(wallet, config.goLiveAtMs, d.sourcePollDeps);
+      const result: WalletPollResult = await d.pollSportsShadowWallet(wallet, config.goLiveAtMs, { ...d.sourcePollDeps, checkpointLease: checkpoint });
       newSignalsCreated += result.newSignals.length;
       walletSummaries.push({
         wallet: result.wallet,
@@ -419,13 +458,18 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
         error: result.error,
       });
       if (result.error) errors.push(`wallet ${wallet}: ${result.error}`);
+      walletsAttempted += 1;
+      if (result.leaseLost) {
+        leaseLost = true;
+        break; // do not continue another wallet
+      }
     } catch (err) {
       // One bad wallet must not prevent the next wallet when budget allows.
       const message = err instanceof Error ? err.message : "unknown error";
       walletSummaries.push({ wallet, isBootstrap: false, newSignals: 0, backlogTruncated: false, orphanedFillsRecovered: 0, error: message });
       errors.push(`wallet ${wallet} poll threw: ${message}`);
+      walletsAttempted += 1;
     }
-    walletsAttempted += 1;
   }
 
   try {
@@ -434,12 +478,20 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
   } catch (err) {
     // Best-effort: a failed cursor write just means fairness does not advance THIS
     // cycle -- the next cycle reads the same (stale) startIndex and tries again, no
-    // worse than the pre-Task-12D behavior, never a crash or lost work.
+    // worse than the pre-Task-12D behavior, never a crash or lost work. Cursor
+    // advancement itself is idempotent-safe bookkeeping, not an episode mutation, so it
+    // is written regardless of leaseLost -- it only ever reflects how many wallets were
+    // ATTEMPTED, which remains true even if the lease was lost partway through.
     errors.push(`wallet cursor write failed: ${err instanceof Error ? err.message : "unknown error"}`);
   }
 
-  const pmus = await resolveVenuePending("PMUS", d, errors);
-  const kalshi = await resolveVenuePending("KALSHI", d, errors);
+  // Task 12F / P1-G: "do not continue PM-US/Kalshi resolution" once the lease is lost --
+  // resolveVenuePending's own leading checkpoint would catch this too, but skipping the
+  // calls entirely avoids two pointless DB round trips when the outcome is already known.
+  const pmus = leaseLost ? emptyVenueSummary() : await resolveVenuePending("PMUS", d, errors, checkpoint);
+  if (pmus.leaseLost) leaseLost = true;
+  const kalshi = leaseLost ? emptyVenueSummary() : await resolveVenuePending("KALSHI", d, errors, checkpoint);
+  if (kalshi.leaseLost) leaseLost = true;
 
   return {
     acquired: true,
@@ -449,6 +501,7 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
     newSignalsCreated,
     pmus,
     kalshi,
+    leaseLost,
   };
 }
 
@@ -491,8 +544,13 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
   if (sourceLease === null) {
     sourceLane = emptySourceLaneResult(false);
   } else {
+    // Task 12F / P1-G: one checkpoint, created fresh from THIS cycle's freshly-acquired
+    // lease/fence, shared across the entire source lane (every wallet poll + both venues'
+    // resolution) so its "time since last renewal" state is meaningful lane-wide, not
+    // reset per wallet.
+    const checkpoint = createLeaseCheckpoint(sourceLease, SOURCE_LEASE_TTL_SECONDS, d.leaseRepo, d.now);
     try {
-      sourceLane = await runSourceLane(config, d, errors);
+      sourceLane = await runSourceLane(config, d, errors, checkpoint);
       await releaseSportsLease(sourceLease, { state: "idle", lastError: null }, d.leaseRepo);
     } catch (err) {
       const message = err instanceof Error ? err.message : "unknown error";

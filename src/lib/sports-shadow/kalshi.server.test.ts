@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { clearKalshiDiscoveryCache, discoverKalshiMlbMarkets, fetchKalshiBook, KALSHI_HOST, type KalshiNetworkDeps } from "./kalshi.server";
 import { buildKalshiObservationPatch } from "./observation";
+import { NO_OP_LEASE_CHECKPOINT } from "./sports-lease.server";
 
 function okDeps(overrides: Partial<KalshiNetworkDeps> = {}): KalshiNetworkDeps {
   return {
@@ -9,6 +10,7 @@ function okDeps(overrides: Partial<KalshiNetworkDeps> = {}): KalshiNetworkDeps {
     getHostCooldown: vi.fn(async () => ({ blocked: false, reason: null })),
     recordHostRateLimit: vi.fn(async () => {}),
     now: () => 1_700_000_000_000,
+    checkpointLease: NO_OP_LEASE_CHECKPOINT,
     ...overrides,
   };
 }
@@ -94,6 +96,75 @@ describe("discoverKalshiMlbMarkets", () => {
     clearKalshiDiscoveryCache();
     const fetchImpl = vi.fn(async () => new Response("{}", { status: 503 }));
     await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/HTTP 503/);
+  });
+
+  it("I5: `markets` missing on a /markets page throws a discovery failure", async () => {
+    clearKalshiDiscoveryCache();
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      if (String(url).includes("/markets")) return new Response(JSON.stringify({ cursor: "" }), { status: 200 });
+      return new Response(JSON.stringify({ events: [], cursor: "" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/malformed response.*markets/i);
+  });
+
+  it("I6: `markets` non-array on a /markets page throws a discovery failure", async () => {
+    clearKalshiDiscoveryCache();
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      if (String(url).includes("/markets")) return new Response(JSON.stringify({ markets: "not-an-array", cursor: "" }), { status: 200 });
+      return new Response(JSON.stringify({ events: [], cursor: "" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/malformed response.*markets/i);
+  });
+
+  it("I7: `events` missing on an /events page throws a discovery failure", async () => {
+    clearKalshiDiscoveryCache();
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      if (String(url).includes("/markets")) return new Response(JSON.stringify({ markets: [], cursor: "" }), { status: 200 });
+      return new Response(JSON.stringify({ cursor: "" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/malformed response.*events/i);
+  });
+
+  it("I8: `events` non-array on an /events page throws a discovery failure", async () => {
+    clearKalshiDiscoveryCache();
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      if (String(url).includes("/markets")) return new Response(JSON.stringify({ markets: [], cursor: "" }), { status: 200 });
+      return new Response(JSON.stringify({ events: {}, cursor: "" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/malformed response.*events/i);
+  });
+
+  it("a non-string cursor throws a discovery failure rather than being coerced", async () => {
+    clearKalshiDiscoveryCache();
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      if (String(url).includes("/markets")) return new Response(JSON.stringify({ markets: [], cursor: 12345 }), { status: 200 });
+      return new Response(JSON.stringify({ events: [], cursor: "" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/malformed response.*cursor/i);
+  });
+
+  it("I9: a genuinely empty `markets: []` / `events: []` page is valid and successful, not a malformed-response error", async () => {
+    clearKalshiDiscoveryCache();
+    const fetchImpl = routeByPath({ "/markets": { markets: [], cursor: "" }, "/events": { events: [], cursor: "" } });
+    await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).resolves.toEqual([]);
+  });
+
+  it("I10: a malformed SECOND page (after a valid first page) throws rather than returning the partial catalog accumulated so far", async () => {
+    clearKalshiDiscoveryCache();
+    let marketsPageCount = 0;
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      const u = String(url);
+      if (u.includes("/markets")) {
+        marketsPageCount += 1;
+        if (marketsPageCount === 1) {
+          return new Response(JSON.stringify({ markets: [market("KXMLBGAME-1-SD")], cursor: "next-page" }), { status: 200 });
+        }
+        // Second page: malformed (markets not an array).
+        return new Response(JSON.stringify({ markets: "not-an-array", cursor: "" }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ events: [EVENT], cursor: "" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl }))).rejects.toThrow(/malformed response.*markets/i);
   });
 
   it("caches within the TTL and does not re-fetch", async () => {

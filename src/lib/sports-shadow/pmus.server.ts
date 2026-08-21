@@ -13,6 +13,7 @@
 import { getHostCooldown, parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "../http-rate-limit.server";
 import { PMUS_PUBLIC_BASE } from "../pmus/us-markets.server";
 import { eventToCandidates, normalizePmusBook, type PmusCandidate, type PmusRawEvent } from "./pmus";
+import { NO_OP_LEASE_CHECKPOINT, type LeaseCheckpoint } from "./sports-lease.server";
 import type { BookSnapshot } from "./types";
 
 export const PMUS_HOST = "gateway.polymarket.us";
@@ -33,6 +34,8 @@ export type PmusNetworkDeps = {
   getHostCooldown: (host: string) => Promise<{ blocked: boolean; reason: string | null }>;
   recordHostRateLimit: (host: string, retryAfterMs: number | null) => Promise<void>;
   now: () => number;
+  /** Task 12F / P1-G: checked between discovery pages so a slow multi-page discovery pass can never silently outlive the caller's source lease. Defaults to always-true for any caller not exercising lease-loss behavior. */
+  checkpointLease: LeaseCheckpoint;
 };
 
 const defaultDeps: PmusNetworkDeps = {
@@ -41,6 +44,7 @@ const defaultDeps: PmusNetworkDeps = {
   getHostCooldown,
   recordHostRateLimit,
   now: () => Date.now(),
+  checkpointLease: NO_OP_LEASE_CHECKPOINT,
 };
 
 /**
@@ -101,12 +105,28 @@ export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}
 
   const byMarketSlug = new Map<string, PmusCandidate>();
   for (let page = 0; page < DISCOVERY_MAX_PAGES; page += 1) {
+    // Task 12F / P1-G: a full discovery pass can take up to DISCOVERY_MAX_PAGES * 12s --
+    // checked BEFORE each page fetch so a lease lost mid-pagination stops issuing further
+    // requests immediately rather than completing an unbounded discovery pass under a
+    // stale fence.
+    if (!(await d.checkpointLease())) {
+      throw new Error("PM-US discovery aborted: source lease lost mid-pagination");
+    }
     const offset = page * DISCOVERY_PAGE_SIZE;
     const json = await pacedGetJson<{ events?: unknown }>(
       `/v1/events?limit=${DISCOVERY_PAGE_SIZE}&offset=${offset}&active=true&closed=false&category=sports`,
       d,
     );
-    const events = Array.isArray(json.events) ? (json.events as PmusRawEvent[]) : [];
+    // Task 12F / P1-I: a missing/non-array `events` field is a MALFORMED response, not a
+    // legitimate empty page -- collapsing the two let a schema/proxy hiccup silently
+    // become "zero candidates found," which the caller could then resolve a pending
+    // signal against and persist a false semantic NONE. A genuinely empty `events: []`
+    // remains a valid, successful empty page. Nothing malformed is ever added to the
+    // cache: this throws before byMarketSlug/discoveryCache are touched for this call.
+    if (json === null || typeof json !== "object" || !Array.isArray(json.events)) {
+      throw new Error("PM-US discovery returned a malformed response: `events` is missing or not an array");
+    }
+    const events = json.events as PmusRawEvent[];
     for (const event of events) {
       for (const candidate of eventToCandidates(event)) {
         if (candidate.marketSlug) byMarketSlug.set(candidate.marketSlug, candidate);

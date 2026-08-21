@@ -86,6 +86,14 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_fill_retry_rpcs.sql
+      - name: Verify renew_sports_shadow_lease CAS/fencing semantics and privileges (Task 12F/P1-G)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_lease_renewal.sql
+      - name: Verify TERMINAL_UNVERIFIED downstream status and reason-code retention (Task 12F/P1-H)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_terminal_unverified.sql
       - name: Export local Supabase connection env for the PostgREST integration harness
         run: |
           eval "$(supabase status -o env)"

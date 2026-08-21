@@ -20,6 +20,7 @@
 
 import { getHostCooldown, parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "../http-rate-limit.server";
 import { classifyKalshiMarket, normalizeKalshiBook, PHASE1_KALSHI_SERIES, type KalshiBookSnapshot, type KalshiCandidate, type KalshiRawEvent, type KalshiRawMarket } from "./kalshi";
+import { NO_OP_LEASE_CHECKPOINT, type LeaseCheckpoint } from "./sports-lease.server";
 
 export const KALSHI_HOST = "external-api.kalshi.com";
 export const KALSHI_BASE_URL = "https://external-api.kalshi.com/trade-api/v2";
@@ -40,6 +41,8 @@ export type KalshiNetworkDeps = {
   getHostCooldown: (host: string) => Promise<{ blocked: boolean; reason: string | null }>;
   recordHostRateLimit: (host: string, retryAfterMs: number | null) => Promise<void>;
   now: () => number;
+  /** Task 12F / P1-G: checked between discovery pages so a slow multi-page discovery pass can never silently outlive the caller's source lease. Defaults to always-true for any caller not exercising lease-loss behavior. */
+  checkpointLease: LeaseCheckpoint;
 };
 
 const defaultDeps: KalshiNetworkDeps = {
@@ -48,6 +51,7 @@ const defaultDeps: KalshiNetworkDeps = {
   getHostCooldown,
   recordHostRateLimit,
   now: () => Date.now(),
+  checkpointLease: NO_OP_LEASE_CHECKPOINT,
 };
 
 /**
@@ -88,15 +92,42 @@ async function pacedGetJson<T>(path: string, deps: KalshiNetworkDeps): Promise<T
 
 type PaginatedKalshiResponse = { cursor?: string; markets?: unknown; events?: unknown };
 
+/**
+ * Task 12F / P1-I: strict envelope validation. Previously, a missing/non-array
+ * `markets`/`events` field was silently treated as `[]` and pagination simply broke as
+ * if the venue had run dry -- collapsing "this page's collection is malformed/untrustworthy"
+ * into "the venue genuinely has zero more candidates." The caller (discoverKalshiMlbMarkets,
+ * and above that resolveVenuePending) could then resolve a pending signal against an
+ * incomplete catalog and persist a false semantic NONE. A malformed LATER page now throws
+ * immediately, discarding whatever this call had already accumulated in `out` -- a partial
+ * catalog is not complete enough to justify a semantic NONE either. A genuinely well-formed
+ * empty array remains a valid, successful (possibly final) page.
+ */
 async function paginate<T>(pathBuilder: (cursor: string | null) => string, itemsKey: "markets" | "events", deps: KalshiNetworkDeps): Promise<T[]> {
   const out: T[] = [];
   let cursor: string | null = null;
   for (let page = 0; page < MAX_PAGES_PER_SERIES; page += 1) {
-    const json: PaginatedKalshiResponse = await pacedGetJson<PaginatedKalshiResponse>(pathBuilder(cursor), deps);
-    const items = json[itemsKey];
-    if (Array.isArray(items)) out.push(...(items as T[]));
-    cursor = json.cursor && json.cursor.length > 0 ? json.cursor : null;
-    if (!cursor || !Array.isArray(items) || items.length === 0) break;
+    // Task 12F / P1-G: see pmus.server.ts's discoverPmusMlbMarkets for the identical
+    // checkpoint rationale -- Kalshi discovery has a WORSE worst case (3 series x 2
+    // endpoints x up to 10 pages x up to 12s each).
+    if (!(await deps.checkpointLease())) {
+      throw new Error("Kalshi discovery aborted: source lease lost mid-pagination");
+    }
+    const json: unknown = await pacedGetJson<unknown>(pathBuilder(cursor), deps);
+    if (json === null || typeof json !== "object") {
+      throw new Error("Kalshi discovery returned a malformed response: not an object");
+    }
+    const record = json as PaginatedKalshiResponse;
+    const items = record[itemsKey];
+    if (!Array.isArray(items)) {
+      throw new Error(`Kalshi discovery returned a malformed response: \`${itemsKey}\` is missing or not an array`);
+    }
+    if (record.cursor !== undefined && record.cursor !== null && typeof record.cursor !== "string") {
+      throw new Error("Kalshi discovery returned a malformed response: `cursor` is present but not a string");
+    }
+    out.push(...(items as T[]));
+    cursor = record.cursor && record.cursor.length > 0 ? record.cursor : null;
+    if (!cursor || items.length === 0) break;
   }
   return out;
 }
