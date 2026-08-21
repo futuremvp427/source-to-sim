@@ -111,7 +111,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       expect(dueForThisSignal).toHaveLength(5);
       for (const row of dueForThisSignal) {
         expect(row.targetFetchKey).toBe("target-slug-123"); // resolved via the embedded sports_market_matches(...) join
-        expect(row.selectedSide).toBe("TEAM:AWY");
+        expect(row.selectedSide).toBe("TEAM:AWY:LONG"); // Task 12G/P1-J: durable :LONG/:SHORT orientation suffix
       }
       // Oldest fire_at first.
       const fireAts = dueForThisSignal.map((r) => r.fireAt);
