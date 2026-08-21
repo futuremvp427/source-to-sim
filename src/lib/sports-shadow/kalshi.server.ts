@@ -159,16 +159,17 @@ export function clearKalshiDiscoveryCache(): void {
  */
 export async function fetchKalshiBook(ticker: string, deps: Partial<KalshiNetworkDeps> = {}): Promise<KalshiBookSnapshot> {
   const d: KalshiNetworkDeps = { ...defaultDeps, ...deps };
-  const observedAt = d.now();
+  // Task 12E / P1-E: same fix, same rationale as fetchPmusBook above -- observedAt must
+  // be captured AFTER the awaited network work completes or fails, never before.
   try {
     const json = await pacedGetJson<unknown>(`/markets/${encodeURIComponent(ticker)}/orderbook`, d);
-    return normalizeKalshiBook(json, ticker, observedAt);
+    return normalizeKalshiBook(json, ticker, d.now());
   } catch (err) {
     const emptySide = { bestBid: null, bestAsk: null, bestBidUnits: null, bestAskUnits: null, bidLevels: [], askLevels: [] };
     return {
       venue: "KALSHI",
       marketId: ticker,
-      observedAt,
+      observedAt: d.now(),
       yes: { ...emptySide },
       no: { ...emptySide },
       rawYesBids: [],

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { buildPmusObservationPatch } from "./observation";
 import { clearPmusDiscoveryCache, discoverPmusMlbMarkets, fetchPmusBook, PMUS_HOST, type PmusNetworkDeps } from "./pmus.server";
 
 function okDeps(overrides: Partial<PmusNetworkDeps> = {}): PmusNetworkDeps {
@@ -170,6 +171,55 @@ describe("fetchPmusBook", () => {
     await fetchPmusBook("slug-a", deps);
     await fetchPmusBook("slug-a", deps);
     expect(fetchImpl).toHaveBeenCalledTimes(2); // real request every time, no caching
+  });
+
+  /**
+   * Task 12E / P1-E: observedAt must reflect when the book became observable (after the
+   * paced/network fetch), never when the request started. A fake, monotonically-advancing
+   * clock simulates a real fetch's wall-clock duration across the awaited `pacedGetJson`
+   * call -- `now()` is called once before the request (in reserveRequestSlot inside
+   * pacedGetJson, which these tests don't stub out separately) and once after, so a
+   * deterministic sequence of return values lets the test assert exactly which value ends
+   * up in the returned snapshot.
+   */
+  it("P1-E.1: observedAt is the POST-fetch timestamp (t=4500), not the pre-fetch timestamp (t=1000), for a 3.5s successful fetch", async () => {
+    let now = 1_000;
+    const fetchImpl = vi.fn(async () => {
+      now = 4_500; // simulates time elapsing during the awaited network call
+      return new Response(JSON.stringify({ marketData: { bids: [], offers: [] } }), { status: 200 });
+    });
+    const snap = await fetchPmusBook("some-slug", okDeps({ fetchImpl, now: () => now }));
+    expect(snap.observedAt).toBe(4_500);
+    expect(snap.observedAt).not.toBe(1_000);
+  });
+
+  it("P1-E.2: on a timeout/failure at t=13000, the terminal snapshot's observedAt reflects the failure time, not the request-start time", async () => {
+    let now = 1_000;
+    const fetchImpl = vi.fn(async () => {
+      now = 13_000; // simulates the ~12s REQUEST_TIMEOUT_MS elapsing before the abort is caught
+      throw new DOMException("The operation was aborted", "AbortError");
+    });
+    const snap = await fetchPmusBook("some-slug", okDeps({ fetchImpl, now: () => now }));
+    expect(snap.staleReason).not.toBeNull();
+    expect(snap.observedAt).toBe(13_000);
+    expect(snap.observedAt).not.toBe(1_000);
+  });
+
+  it("P1-E.3: a 7-second slow fetch adds ~7 seconds to measured observation lateness rather than disappearing from the metric", async () => {
+    const fireAtMs = 1_700_000_000_000;
+    const requestedDelayMs = 0;
+    let now = fireAtMs; // the collector picks up this due row exactly at fire_at
+    const fetchImpl = vi.fn(async () => {
+      now = fireAtMs + 7_000; // the book itself takes 7s to arrive
+      return new Response(JSON.stringify({ marketData: { bids: [], offers: [] } }), { status: 200 });
+    });
+    const snap = await fetchPmusBook("some-slug", okDeps({ fetchImpl, now: () => now }));
+    const patch = buildPmusObservationPatch(snap, new Date(fireAtMs).toISOString(), requestedDelayMs);
+    // detectionLatencyMs = observedAt - (fireAt - requestedDelayMs); with requestedDelayMs=0
+    // and fireAt=now-at-due-time, this must be ~7000ms, not ~0ms (which is what the pre-fix
+    // pre-fetch timestamp would have silently produced).
+    expect(patch.detectionLatencyMs).toBeGreaterThanOrEqual(6_990);
+    expect(patch.detectionLatencyMs).toBeLessThanOrEqual(7_010);
   });
 });
 

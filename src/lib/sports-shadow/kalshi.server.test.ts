@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { clearKalshiDiscoveryCache, discoverKalshiMlbMarkets, fetchKalshiBook, KALSHI_HOST, type KalshiNetworkDeps } from "./kalshi.server";
+import { buildKalshiObservationPatch } from "./observation";
 
 function okDeps(overrides: Partial<KalshiNetworkDeps> = {}): KalshiNetworkDeps {
   return {
@@ -155,6 +156,44 @@ describe("fetchKalshiBook", () => {
     await fetchKalshiBook("t", deps);
     await fetchKalshiBook("t", deps);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  /** Task 12E / P1-E: same fix, same rationale, same test shape as pmus.server.test.ts's fetchPmusBook proofs. */
+  it("P1-E.1: observedAt is the POST-fetch timestamp (t=4500), not the pre-fetch timestamp (t=1000), for a 3.5s successful fetch", async () => {
+    let now = 1_000;
+    const fetchImpl = vi.fn(async () => {
+      now = 4_500;
+      return new Response(JSON.stringify({ orderbook_fp: { yes_dollars: [], no_dollars: [] } }), { status: 200 });
+    });
+    const snap = await fetchKalshiBook("t", okDeps({ fetchImpl, now: () => now }));
+    expect(snap.observedAt).toBe(4_500);
+    expect(snap.observedAt).not.toBe(1_000);
+  });
+
+  it("P1-E.2: on a timeout/failure at t=13000, the terminal snapshot's observedAt reflects the failure time, not the request-start time", async () => {
+    let now = 1_000;
+    const fetchImpl = vi.fn(async () => {
+      now = 13_000;
+      throw new DOMException("The operation was aborted", "AbortError");
+    });
+    const snap = await fetchKalshiBook("t", okDeps({ fetchImpl, now: () => now }));
+    expect(snap.staleReason).not.toBeNull();
+    expect(snap.observedAt).toBe(13_000);
+    expect(snap.observedAt).not.toBe(1_000);
+  });
+
+  it("P1-E.3: a 7-second slow fetch adds ~7 seconds to measured observation lateness rather than disappearing from the metric", async () => {
+    const fireAtMs = 1_700_000_000_000;
+    const requestedDelayMs = 0;
+    let now = fireAtMs;
+    const fetchImpl = vi.fn(async () => {
+      now = fireAtMs + 7_000;
+      return new Response(JSON.stringify({ orderbook_fp: { yes_dollars: [], no_dollars: [] } }), { status: 200 });
+    });
+    const snap = await fetchKalshiBook("t", okDeps({ fetchImpl, now: () => now }));
+    const patch = buildKalshiObservationPatch(snap, "YES", new Date(fireAtMs).toISOString(), requestedDelayMs);
+    expect(patch.detectionLatencyMs).toBeGreaterThanOrEqual(6_990);
+    expect(patch.detectionLatencyMs).toBeLessThanOrEqual(7_010);
   });
 });
 

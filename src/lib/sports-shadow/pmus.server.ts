@@ -136,10 +136,16 @@ export function clearPmusDiscoveryCache(): void {
  */
 export async function fetchPmusBook(marketSlug: string, deps: Partial<PmusNetworkDeps> = {}): Promise<BookSnapshot> {
   const d: PmusNetworkDeps = { ...defaultDeps, ...deps };
-  const observedAt = d.now();
+  // Task 12E / P1-E: observedAt must reflect when THIS book became observable to the
+  // collector, not when the request started. pacedGetJson may wait out a rate-limit
+  // reservation and then spend up to REQUEST_TIMEOUT_MS on the network round trip, so
+  // capturing d.now() before it and reusing that value understates detection latency by
+  // however long the fetch actually took -- silently corrupting the +0/+5/+10/+30/+60
+  // timing measurements this whole subsystem exists to produce. d.now() is therefore
+  // called again on EVERY exit path (success and failure), after the awaited work.
   try {
     const json = await pacedGetJson<unknown>(`/v1/markets/${encodeURIComponent(marketSlug)}/book`, d);
-    return normalizePmusBook(json, marketSlug, observedAt);
+    return normalizePmusBook(json, marketSlug, d.now());
   } catch (err) {
     return {
       venue: "PMUS",
@@ -149,7 +155,7 @@ export async function fetchPmusBook(marketSlug: string, deps: Partial<PmusNetwor
       bidLevels: [],
       askLevels: [],
       marketStatus: null,
-      observedAt,
+      observedAt: d.now(),
       staleReason: err instanceof Error ? err.message : "unknown fetch failure",
     };
   }
