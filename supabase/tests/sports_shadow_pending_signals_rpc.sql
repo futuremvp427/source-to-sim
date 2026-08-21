@@ -308,6 +308,7 @@ BEGIN
   FOR i IN 1..5 LOOP
     v_signal_id := pg_temp.seed_pending_signal('s17-pmus-' || i, v_base + (i || ' seconds')::interval);
     PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'PMUS', 'NONE', now() - interval '1 minute');
+    PERFORM pg_temp.seed_match(v_signal_id, 'KALSHI'); -- resolved EXACT for KALSHI, so each is genuinely KALSHI-done (not merely "missing"), isolating the KALSHI-scoped assertion below to recheck-due semantics only
   END LOOP;
   v_signal_id := pg_temp.seed_pending_signal('s17-kalshi', v_base + interval '1000 seconds');
   PERFORM pg_temp.seed_match(v_signal_id, 'PMUS'); -- resolved EXACT for PMUS, so this signal is genuinely PMUS-done (not merely "missing"), isolating the assertion below to recheck-due semantics only
