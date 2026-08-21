@@ -310,6 +310,7 @@ BEGIN
     PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'PMUS', 'NONE', now() - interval '1 minute');
   END LOOP;
   v_signal_id := pg_temp.seed_pending_signal('s17-kalshi', v_base + interval '1000 seconds');
+  PERFORM pg_temp.seed_match(v_signal_id, 'PMUS'); -- resolved EXACT for PMUS, so this signal is genuinely PMUS-done (not merely "missing"), isolating the assertion below to recheck-due semantics only
   PERFORM pg_temp.seed_non_exact_match(v_signal_id, 'KALSHI', 'NONE', now() - interval '1 minute');
 
   SELECT count(*) INTO v_count FROM public.find_pending_sports_shadow_signals('PMUS', 20);
