@@ -1,6 +1,7 @@
--- Task 12B: find_pending_sports_shadow_signals(integer) real-SQL semantic + privilege
--- contract, run against the ACTUAL migrated database (never a mocked/fake
--- WorkerRepository). Reproduces the specific starvation defect Task 11B fixed
+-- Task 11B + Task 12D/P1-C: find_pending_sports_shadow_signals(p_venue, p_limit)
+-- real-SQL semantic + privilege contract, run against the ACTUAL migrated database
+-- (never a mocked/fake WorkerRepository). Reproduces the specific starvation defect
+-- Task 11B fixed AND the per-venue head-of-line-blocking defect Task 12D/P1-C fixed
 -- (supabase/migrations/20260820230000_sports_shadow_pending_signals_rpc.sql) with real
 -- rows, not an in-memory reference implementation.
 -- Run via: psql -f supabase/tests/sports_shadow_pending_signals_rpc.sql (after
@@ -43,8 +44,8 @@ DECLARE
   v_ids uuid[];
 BEGIN
   ------------------------------------------------------------------
-  -- Scenario 1: 220 signals, 1-200 fully resolved (BOTH venues), 201
-  -- unresolved. This is the exact reproduction of the confirmed starvation
+  -- Scenario 1: 220 signals, 1-200 fully resolved for PMUS specifically, 201
+  -- unresolved for PMUS. This is the exact reproduction of the confirmed starvation
   -- defect: a fixed ORDER BY created_at ASC LIMIT 200 client-side scan would
   -- return only rows 1-200, all resolved, so signal 201 would never be seen.
   ------------------------------------------------------------------
@@ -55,33 +56,29 @@ BEGIN
     END IF;
     IF i <= 200 THEN
       PERFORM pg_temp.seed_match(v_signal_id, 'PMUS');
-      PERFORM pg_temp.seed_match(v_signal_id, 'KALSHI');
     END IF;
   END LOOP;
 
-  SELECT id INTO v_first_id FROM public.find_pending_sports_shadow_signals(20) LIMIT 1;
+  SELECT id INTO v_first_id FROM public.find_pending_sports_shadow_signals('PMUS', 20) LIMIT 1;
   IF v_first_id IS NULL OR v_first_id <> v_signal_201 THEN
     RAISE EXCEPTION 'STARVATION REGRESSION: expected signal 201 (id=%) as the first pending row, got %', v_signal_201, v_first_id;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals(220) WHERE id = v_signal_201) THEN
+  IF NOT EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('PMUS', 220) WHERE id = v_signal_201) THEN
     RAISE EXCEPTION 'STARVATION REGRESSION: signal 201 must be reachable at all -- it was never returned';
   END IF;
 
   ------------------------------------------------------------------
   -- Scenario 2: unresolved signals scattered above/below index 200 within
   -- the SAME 220-row set -- global oldest-pending wins by (created_at ASC,
-  -- id ASC), not by scan position. Signal at i=50 is also unresolved (only
-  -- 1..200 minus none were left unresolved above except 201-220; add one
-  -- more gap inside the "resolved" range to prove scattering).
+  -- id ASC), not by scan position.
   ------------------------------------------------------------------
   DELETE FROM public.sports_market_matches WHERE signal_id = (SELECT id FROM public.sports_shadow_signals WHERE episode_key = 'episode-s1-50');
-  SELECT id INTO v_first_id FROM public.find_pending_sports_shadow_signals(20) LIMIT 1;
+  SELECT id INTO v_first_id FROM public.find_pending_sports_shadow_signals('PMUS', 20) LIMIT 1;
   IF v_first_id <> (SELECT id FROM public.sports_shadow_signals WHERE episode_key = 'episode-s1-50') THEN
     RAISE EXCEPTION 'expected the newly-scattered older unresolved signal (i=50) to be the new global oldest pending, got %', v_first_id;
   END IF;
   -- Restore full resolution for signal 50 so it does not interfere with later scenarios.
   PERFORM pg_temp.seed_match((SELECT id FROM public.sports_shadow_signals WHERE episode_key = 'episode-s1-50'), 'PMUS');
-  PERFORM pg_temp.seed_match((SELECT id FROM public.sports_shadow_signals WHERE episode_key = 'episode-s1-50'), 'KALSHI');
 
   -- Clean slate for the remaining focused scenarios.
   DELETE FROM public.sports_shadow_signals;
@@ -92,9 +89,13 @@ BEGIN
   ------------------------------------------------------------------
   v_signal_id := pg_temp.seed_pending_signal('s3', v_base);
   PERFORM pg_temp.seed_match(v_signal_id, 'KALSHI');
-  SELECT missing_pmus, missing_kalshi INTO v_result FROM public.find_pending_sports_shadow_signals(20) WHERE id = v_signal_id;
+  SELECT missing_pmus, missing_kalshi INTO v_result FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id;
   IF v_result.missing_pmus IS DISTINCT FROM true OR v_result.missing_kalshi IS DISTINCT FROM false THEN
     RAISE EXCEPTION 'scenario 3: expected missing_pmus=true, missing_kalshi=false, got %/%', v_result.missing_pmus, v_result.missing_kalshi;
+  END IF;
+  -- Task 12D/P1-C: the KALSHI-scoped query must NOT return this signal (already resolved for KALSHI).
+  IF EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('KALSHI', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 3: a signal already resolved for KALSHI must not appear in the KALSHI-scoped pending query';
   END IF;
 
   ------------------------------------------------------------------
@@ -102,28 +103,37 @@ BEGIN
   ------------------------------------------------------------------
   v_signal_id := pg_temp.seed_pending_signal('s4', v_base + interval '1 second');
   PERFORM pg_temp.seed_match(v_signal_id, 'PMUS');
-  SELECT missing_pmus, missing_kalshi INTO v_result FROM public.find_pending_sports_shadow_signals(20) WHERE id = v_signal_id;
+  SELECT missing_pmus, missing_kalshi INTO v_result FROM public.find_pending_sports_shadow_signals('KALSHI', 20) WHERE id = v_signal_id;
   IF v_result.missing_pmus IS DISTINCT FROM false OR v_result.missing_kalshi IS DISTINCT FROM true THEN
     RAISE EXCEPTION 'scenario 4: expected missing_pmus=false, missing_kalshi=true, got %/%', v_result.missing_pmus, v_result.missing_kalshi;
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 4: a signal already resolved for PMUS must not appear in the PMUS-scoped pending query';
   END IF;
 
   ------------------------------------------------------------------
   -- Scenario 5: missing both.
   ------------------------------------------------------------------
   v_signal_id := pg_temp.seed_pending_signal('s5', v_base + interval '2 seconds');
-  SELECT missing_pmus, missing_kalshi INTO v_result FROM public.find_pending_sports_shadow_signals(20) WHERE id = v_signal_id;
+  SELECT missing_pmus, missing_kalshi INTO v_result FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id;
   IF v_result.missing_pmus IS DISTINCT FROM true OR v_result.missing_kalshi IS DISTINCT FROM true THEN
-    RAISE EXCEPTION 'scenario 5: expected missing_pmus=true, missing_kalshi=true, got %/%', v_result.missing_pmus, v_result.missing_kalshi;
+    RAISE EXCEPTION 'scenario 5: expected missing_pmus=true, missing_kalshi=true (via PMUS query), got %/%', v_result.missing_pmus, v_result.missing_kalshi;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('KALSHI', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 5: a signal missing both venues must appear in BOTH venue-scoped queries';
   END IF;
 
   ------------------------------------------------------------------
-  -- Scenario 6: fully resolved -- excluded entirely.
+  -- Scenario 6: fully resolved -- excluded from BOTH venue-scoped queries.
   ------------------------------------------------------------------
   v_signal_id := pg_temp.seed_pending_signal('s6', v_base + interval '3 seconds');
   PERFORM pg_temp.seed_match(v_signal_id, 'PMUS');
   PERFORM pg_temp.seed_match(v_signal_id, 'KALSHI');
-  IF EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals(20) WHERE id = v_signal_id) THEN
-    RAISE EXCEPTION 'scenario 6: a fully-resolved signal must be excluded';
+  IF EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('PMUS', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 6: a fully-resolved signal must be excluded from the PMUS-scoped query';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('KALSHI', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 6: a fully-resolved signal must be excluded from the KALSHI-scoped query';
   END IF;
 
   ------------------------------------------------------------------
@@ -134,11 +144,11 @@ BEGIN
   FOR i IN 1..5 LOOP
     PERFORM pg_temp.seed_pending_signal('s7-' || i, v_base + (i || ' seconds')::interval);
   END LOOP;
-  SELECT count(*) INTO v_count FROM public.find_pending_sports_shadow_signals(3);
+  SELECT count(*) INTO v_count FROM public.find_pending_sports_shadow_signals('PMUS', 3);
   IF v_count <> 3 THEN
     RAISE EXCEPTION 'scenario 7: expected exactly 3 rows for p_limit=3 with 5 pending, got %', v_count;
   END IF;
-  SELECT array_agg(id) INTO v_ids FROM public.find_pending_sports_shadow_signals(3);
+  SELECT array_agg(id) INTO v_ids FROM public.find_pending_sports_shadow_signals('PMUS', 3);
   IF v_ids <> ARRAY[
     (SELECT id FROM public.sports_shadow_signals WHERE episode_key = 'episode-s7-1'),
     (SELECT id FROM public.sports_shadow_signals WHERE episode_key = 'episode-s7-2'),
@@ -154,7 +164,7 @@ BEGIN
   FOR i IN 1..150 LOOP
     PERFORM pg_temp.seed_pending_signal('s8-' || i, v_base + (i || ' seconds')::interval);
   END LOOP;
-  SELECT count(*) INTO v_count FROM public.find_pending_sports_shadow_signals(500);
+  SELECT count(*) INTO v_count FROM public.find_pending_sports_shadow_signals('PMUS', 500);
   IF v_count <> 100 THEN
     RAISE EXCEPTION 'scenario 8: p_limit=500 with 150 pending must clamp to exactly 100 rows, got %', v_count;
   END IF;
@@ -163,7 +173,7 @@ BEGIN
   -- Scenario 9: p_limit NULL must stay bounded (the function's own
   -- COALESCE default), never become LIMIT ALL / unbounded.
   ------------------------------------------------------------------
-  SELECT count(*) INTO v_count FROM public.find_pending_sports_shadow_signals(NULL);
+  SELECT count(*) INTO v_count FROM public.find_pending_sports_shadow_signals('PMUS', NULL);
   IF v_count <> 20 THEN
     RAISE EXCEPTION 'scenario 9: p_limit=NULL with 150 pending must return the NULL-safe default (20), got %', v_count;
   END IF;
@@ -171,31 +181,66 @@ BEGIN
   ------------------------------------------------------------------
   -- Scenario 10: a negative p_limit must not become unbounded.
   ------------------------------------------------------------------
-  SELECT count(*) INTO v_count FROM public.find_pending_sports_shadow_signals(-5);
+  SELECT count(*) INTO v_count FROM public.find_pending_sports_shadow_signals('PMUS', -5);
   IF v_count <> 0 THEN
     RAISE EXCEPTION 'scenario 10: p_limit=-5 must return zero rows (clamped, never unbounded), got %', v_count;
   END IF;
 
   ------------------------------------------------------------------
-  -- Scenario 11: resolving the first pending signal's missing venues
-  -- advances the next call to the next globally oldest pending signal.
+  -- Scenario 10b: an invalid p_venue value fails closed to zero rows, never
+  -- silently falling back to the old combined-OR behavior.
+  ------------------------------------------------------------------
+  SELECT count(*) INTO v_count FROM public.find_pending_sports_shadow_signals('NOT_A_REAL_VENUE', 20);
+  IF v_count <> 0 THEN
+    RAISE EXCEPTION 'scenario 10b: an invalid p_venue must return zero rows (fail closed), got %', v_count;
+  END IF;
+
+  ------------------------------------------------------------------
+  -- Scenario 11: resolving the first pending signal's PMUS venue advances the
+  -- next PMUS call to the next globally oldest pending signal, without
+  -- touching the independent KALSHI queue.
   ------------------------------------------------------------------
   DELETE FROM public.sports_shadow_signals; DELETE FROM public.sports_shadow_source_fills;
   FOR i IN 1..3 LOOP
     PERFORM pg_temp.seed_pending_signal('s11-' || i, v_base + (i || ' seconds')::interval);
   END LOOP;
-  SELECT id INTO v_first_id FROM public.find_pending_sports_shadow_signals(20) LIMIT 1;
+  SELECT id INTO v_first_id FROM public.find_pending_sports_shadow_signals('PMUS', 20) LIMIT 1;
   IF v_first_id <> (SELECT id FROM public.sports_shadow_signals WHERE episode_key = 'episode-s11-1') THEN
-    RAISE EXCEPTION 'scenario 11 setup: expected s11-1 as the first pending signal, got %', v_first_id;
+    RAISE EXCEPTION 'scenario 11 setup: expected s11-1 as the first PMUS-pending signal, got %', v_first_id;
   END IF;
   PERFORM pg_temp.seed_match(v_first_id, 'PMUS');
-  PERFORM pg_temp.seed_match(v_first_id, 'KALSHI');
-  SELECT id INTO v_first_id FROM public.find_pending_sports_shadow_signals(20) LIMIT 1;
+  SELECT id INTO v_first_id FROM public.find_pending_sports_shadow_signals('PMUS', 20) LIMIT 1;
   IF v_first_id <> (SELECT id FROM public.sports_shadow_signals WHERE episode_key = 'episode-s11-2') THEN
-    RAISE EXCEPTION 'scenario 11: after resolving s11-1, expected s11-2 to advance to first pending, got %', v_first_id;
+    RAISE EXCEPTION 'scenario 11: after resolving s11-1 for PMUS, expected s11-2 to advance to first PMUS-pending, got %', v_first_id;
+  END IF;
+  -- s11-1 is still missing KALSHI -- resolving PMUS alone must not have advanced it out.
+  IF NOT EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('KALSHI', 20) WHERE id = (SELECT id FROM public.sports_shadow_signals WHERE episode_key = 'episode-s11-1')) THEN
+    RAISE EXCEPTION 'scenario 11: s11-1 must still appear in the KALSHI-scoped query after only its PMUS venue was resolved';
   END IF;
 
-  RAISE NOTICE 'find_pending_sports_shadow_signals semantic scenarios 1-11 passed';
+  ------------------------------------------------------------------
+  -- Scenario 12 (Task 12D/P1-C head-of-line-blocking proof): a saturated
+  -- PMUS-missing backlog of 20+ old rows does not prevent a newer
+  -- Kalshi-only-missing signal from being returned by the independent
+  -- KALSHI-scoped query.
+  ------------------------------------------------------------------
+  DELETE FROM public.sports_shadow_signals; DELETE FROM public.sports_shadow_source_fills;
+  FOR i IN 1..25 LOOP
+    v_signal_id := pg_temp.seed_pending_signal('s12-old-' || i, v_base + (i || ' seconds')::interval);
+    PERFORM pg_temp.seed_match(v_signal_id, 'KALSHI'); -- already resolved for KALSHI, stuck on PMUS only
+  END LOOP;
+  v_signal_id := pg_temp.seed_pending_signal('s12-newer', v_base + interval '1000 seconds');
+  PERFORM pg_temp.seed_match(v_signal_id, 'PMUS'); -- already resolved for PMUS, missing KALSHI only
+
+  SELECT count(*) INTO v_count FROM public.find_pending_sports_shadow_signals('PMUS', 20);
+  IF v_count <> 20 THEN
+    RAISE EXCEPTION 'scenario 12: expected the PMUS batch to be fully saturated with the 20 oldest old-stuck rows, got %', v_count;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.find_pending_sports_shadow_signals('KALSHI', 20) WHERE id = v_signal_id) THEN
+    RAISE EXCEPTION 'scenario 12 HEAD-OF-LINE-BLOCKING REGRESSION: the newer KALSHI-only-missing signal must still be returned by the independent KALSHI query despite the saturated PMUS backlog';
+  END IF;
+
+  RAISE NOTICE 'find_pending_sports_shadow_signals semantic scenarios 1-12 passed';
 END $$;
 
 ------------------------------------------------------------------
@@ -207,7 +252,7 @@ DECLARE
   v_oid oid;
   v_public_has_execute boolean;
 BEGIN
-  v_oid := 'public.find_pending_sports_shadow_signals(integer)'::regprocedure;
+  v_oid := 'public.find_pending_sports_shadow_signals(text, integer)'::regprocedure;
 
   SELECT EXISTS (
     SELECT 1 FROM pg_proc p,
@@ -233,7 +278,7 @@ BEGIN
   -- error for anon/authenticated even with zero rows in the table.
   BEGIN
     SET LOCAL ROLE anon;
-    PERFORM * FROM public.find_pending_sports_shadow_signals(20);
+    PERFORM * FROM public.find_pending_sports_shadow_signals('PMUS', 20);
     RAISE EXCEPTION 'anon must not be able to call find_pending_sports_shadow_signals';
   EXCEPTION WHEN insufficient_privilege THEN
     RESET ROLE;
@@ -241,14 +286,14 @@ BEGIN
 
   BEGIN
     SET LOCAL ROLE authenticated;
-    PERFORM * FROM public.find_pending_sports_shadow_signals(20);
+    PERFORM * FROM public.find_pending_sports_shadow_signals('PMUS', 20);
     RAISE EXCEPTION 'authenticated must not be able to call find_pending_sports_shadow_signals';
   EXCEPTION WHEN insufficient_privilege THEN
     RESET ROLE;
   END;
 
   -- service_role must succeed (function-level privilege, distinct from row content).
-  PERFORM * FROM public.find_pending_sports_shadow_signals(20);
+  PERFORM * FROM public.find_pending_sports_shadow_signals('PMUS', 20);
 
   -- Signature/behavior attributes match the intended contract exactly.
   DECLARE
