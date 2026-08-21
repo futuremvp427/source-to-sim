@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import type { PmusCandidate } from "./pmus";
+import { resolvePmusMatch, type SourceSignal } from "./resolver";
 import { fetchSourceMarketMetadata } from "./source-metadata.server";
 
 const GAMMA_TOTAL_FIXTURE = [
@@ -53,8 +55,8 @@ describe("fetchSourceMarketMetadata", () => {
       reasonCode: "ELIGIBLE_FULL_GAME_TOTAL",
       ineligibleReason: null,
       line: 7.5,
-      awayTeam: "Washington Nationals",
-      homeTeam: "Texas Rangers",
+      awayTeam: "WSH",
+      homeTeam: "TEX",
       gameStartTime: "2026-08-20 00:05:00+00",
       sourceGameId: "10079198",
       eventSlug: "mlb-wsh-tex-2026-08-19",
@@ -110,5 +112,196 @@ describe("fetchSourceMarketMetadata", () => {
     expect(result.status).toBe("UNVERIFIED");
     expect(result.betType).toBeNull();
     expect(result.reasonCode).toBe("UNVERIFIED_MALFORMED_RESPONSE");
+  });
+
+  /* ------------------------------------------------------------------ */
+  /* Task 12E / P1-D: canonical source team identity                     */
+  /* ------------------------------------------------------------------ */
+
+  it("P1-D.1: persists the classifier's canonical MLB codes, not the raw Gamma display names (New York Yankees/Boston Red Sox -> NYY/BOS)", async () => {
+    const fixture = [
+      {
+        ...GAMMA_TOTAL_FIXTURE[0],
+        conditionId: "0xyankees-redsox",
+        slug: "mlb-nyy-bos-2026-08-19",
+        sportsMarketType: "moneyline",
+        line: null,
+        events: [
+          {
+            gameId: 1,
+            slug: "mlb-nyy-bos-2026-08-19",
+            sport: { sport: "mlb" },
+            teams: [
+              { name: "New York Yankees", ordering: "away" },
+              { name: "Boston Red Sox", ordering: "home" },
+            ],
+          },
+        ],
+      },
+    ];
+    const result = await fetchSourceMarketMetadata("0xyankees-redsox", fakeFetch(fixture));
+    expect(result.status).toBe("ELIGIBLE");
+    expect(result.awayTeam).toBe("NYY");
+    expect(result.homeTeam).toBe("BOS");
+  });
+
+  it("P1-D.2: valid team aliases normalize to the same canonical code as the full franchise name", async () => {
+    const fixture = [
+      {
+        ...GAMMA_TOTAL_FIXTURE[0],
+        conditionId: "0xalias",
+        slug: "mlb-nyy-bos-2026-08-19",
+        sportsMarketType: "moneyline",
+        line: null,
+        events: [
+          {
+            gameId: 1,
+            slug: "mlb-nyy-bos-2026-08-19",
+            sport: { sport: "mlb" },
+            // "Yankees" / "Red Sox" are aliases, not the full franchise names.
+            teams: [
+              { name: "Yankees", ordering: "away" },
+              { name: "Red Sox", ordering: "home" },
+            ],
+          },
+        ],
+      },
+    ];
+    const result = await fetchSourceMarketMetadata("0xalias", fakeFetch(fixture));
+    expect(result.status).toBe("ELIGIBLE");
+    expect(result.awayTeam).toBe("NYY");
+    expect(result.homeTeam).toBe("BOS");
+  });
+
+  it("P1-D.3: an unrecognized team name remains UNVERIFIED with null awayTeam/homeTeam -- never fabricated into a canonical code", async () => {
+    const fixture = [
+      {
+        ...GAMMA_TOTAL_FIXTURE[0],
+        conditionId: "0xunknown-team",
+        slug: "mlb-xyz-bos-2026-08-19",
+        sportsMarketType: "moneyline",
+        line: null,
+        events: [
+          {
+            gameId: 1,
+            slug: "mlb-xyz-bos-2026-08-19",
+            sport: { sport: "mlb" },
+            teams: [
+              { name: "Some Minor League Team", ordering: "away" },
+              { name: "Boston Red Sox", ordering: "home" },
+            ],
+          },
+        ],
+      },
+    ];
+    const result = await fetchSourceMarketMetadata("0xunknown-team", fakeFetch(fixture));
+    expect(result.status).toBe("UNVERIFIED");
+    expect(result.reasonCode).toBe("UNVERIFIED_UNKNOWN_TEAM");
+    expect(result.awayTeam).toBeNull();
+    expect(result.homeTeam).toBeNull();
+  });
+
+  it("P1-D.4: a structured-vs-slug team conflict remains UNVERIFIED with null awayTeam/homeTeam", async () => {
+    const fixture = [
+      {
+        ...GAMMA_TOTAL_FIXTURE[0],
+        conditionId: "0xconflict",
+        slug: "mlb-lad-sf-2026-08-19", // slug says LAD@SF
+        sportsMarketType: "moneyline",
+        line: null,
+        events: [
+          {
+            gameId: 1,
+            slug: "mlb-lad-sf-2026-08-19",
+            sport: { sport: "mlb" },
+            teams: [
+              // structured says NYY@BAL -- conflicts with the slug
+              { name: "New York Yankees", ordering: "away" },
+              { name: "Baltimore Orioles", ordering: "home" },
+            ],
+          },
+        ],
+      },
+    ];
+    const result = await fetchSourceMarketMetadata("0xconflict", fakeFetch(fixture));
+    expect(result.status).toBe("UNVERIFIED");
+    expect(result.reasonCode).toBe("UNVERIFIED_CONFLICTING_METADATA");
+    expect(result.awayTeam).toBeNull();
+    expect(result.homeTeam).toBeNull();
+  });
+
+  it("P1-D.5 (source -> resolver integration): a real fetchSourceMarketMetadata result's canonical teams successfully EXACT-match a PM-US candidate, rather than NONE_NO_CANDIDATE from a full-name-vs-code mismatch", async () => {
+    const fixture = [
+      {
+        ...GAMMA_TOTAL_FIXTURE[0],
+        conditionId: "0xintegration",
+        slug: "mlb-nyy-bal-2026-08-19",
+        sportsMarketType: "moneyline",
+        line: null,
+        events: [
+          {
+            gameId: 1,
+            slug: "mlb-nyy-bal-2026-08-19",
+            sport: { sport: "mlb" },
+            teams: [
+              { name: "New York Yankees", ordering: "away" },
+              { name: "Baltimore Orioles", ordering: "home" },
+            ],
+          },
+        ],
+      },
+    ];
+    const metadata = await fetchSourceMarketMetadata("0xintegration", fakeFetch(fixture));
+    expect(metadata.status).toBe("ELIGIBLE");
+    expect(metadata.betType).toBe("MONEYLINE");
+
+    // Exactly the fields Task 11's worker.ts's toSourceSignal maps 1:1 from a persisted
+    // sports_shadow_signals row into resolver.ts's SourceSignal (see worker.ts).
+    const sourceSignal: SourceSignal = {
+      betType: metadata.betType!,
+      awayTeam: metadata.awayTeam ?? "",
+      homeTeam: metadata.homeTeam ?? "",
+      gameStartTime: metadata.gameStartTime,
+      line: metadata.line,
+      selectedOutcomeRaw: "New York Yankees",
+      conditionId: metadata.conditionId,
+      sourceGameId: metadata.sourceGameId,
+      eventSlug: metadata.eventSlug,
+      marketSlug: metadata.marketSlug,
+    };
+
+    const pmusCandidate: PmusCandidate = {
+      status: "ELIGIBLE",
+      reasonCode: "ELIGIBLE_FULL_GAME_MONEYLINE",
+      betType: "MONEYLINE",
+      eventId: "ev-1",
+      eventSlug: "mlb-nyy-bal-2026-08-19",
+      gameId: "1",
+      marketId: "mkt-1",
+      marketSlug: "aec-mlb-nyy-bal-2026-08-19",
+      scheduledStartAt: "2026-08-19T22:35:00Z",
+      league: "mlb",
+      // The PM-US/Kalshi discovery pipelines have always used canonical codes here (see
+      // pmus.ts/kalshi.ts's own classifiers) -- P1-D was that the SOURCE side alone used
+      // raw display names, breaking the strict-equality match in resolver.ts's
+      // groupByGame.
+      awayTeam: "NYY",
+      homeTeam: "BAL",
+      line: null,
+      active: true,
+      closed: false,
+      marketStatus: "MARKET_STATUS_OPEN",
+      question: "New York Yankees vs. Baltimore Orioles",
+      rulesDescription:
+        "This market will settle to the winner of the game. Extra innings are included if played. If the game is delayed, postponed, or suspended and not rescheduled within two weeks, the market will settle to the last fair market price.",
+      sides: [
+        { description: "New York Yankees", teamAbbreviation: "nyy", long: true },
+        { description: "Baltimore Orioles", teamAbbreviation: "bal", long: false },
+      ],
+    };
+
+    const result = resolvePmusMatch(sourceSignal, [pmusCandidate]);
+    expect(result.status).toBe("EXACT");
+    expect(result.reasonCode).not.toBe("NONE_NO_CANDIDATE");
   });
 });

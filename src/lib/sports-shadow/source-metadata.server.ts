@@ -75,8 +75,6 @@ export async function fetchSourceMarketMetadata(conditionId: string, fetchImpl: 
   if (!market) return unverifiedResult(conditionId, "UNVERIFIED_EMPTY_RESPONSE", "gamma-api returned no market for this conditionId");
 
   const event = market.events?.[0];
-  const away = event?.teams?.find((t) => t.ordering === "away")?.name ?? null;
-  const home = event?.teams?.find((t) => t.ordering === "home")?.name ?? null;
 
   const gammaMarket: GammaMarket = {
     slug: market.slug ?? null,
@@ -97,8 +95,13 @@ export async function fetchSourceMarketMetadata(conditionId: string, fetchImpl: 
     reasonCode: classification.reasonCode,
     ineligibleReason: classification.status === "ELIGIBLE" ? null : classification.reason,
     line: classification.status === "ELIGIBLE" ? classification.line : (market.line ?? null),
-    awayTeam: away,
-    homeTeam: home,
+    // Task 12E / P1-D: classification.awayTeam/homeTeam are already the classifier's
+    // normalized canonical MLB codes (null unless ELIGIBLE) -- persisting the raw Gamma
+    // display name here instead caused a real-name-vs-canonical-code mismatch against
+    // resolver.ts's strict-equality team matching, silently producing NONE_NO_CANDIDATE
+    // for otherwise-valid signals. Never recompute or discard the classifier's identity.
+    awayTeam: classification.awayTeam,
+    homeTeam: classification.homeTeam,
     gameStartTime: market.gameStartTime ?? null,
     sourceGameId: event?.gameId !== undefined ? String(event.gameId) : null,
     eventSlug: event?.slug ?? null,
