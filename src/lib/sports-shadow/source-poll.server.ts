@@ -108,7 +108,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
-import { fetchAllRowsAfterId } from "../db-pagination";
+import { PAGE_ROWS } from "../db-pagination";
 import {
   DATA_API_HOST,
   getHostCooldown,
@@ -137,6 +137,15 @@ export const MAX_PAGES_PER_WALLET = Math.floor(MAX_TRADES_OFFSET / PAGE_SIZE) + 
 
 /** Bounded per-poll cap on how many currently-PENDING fills are retried in phase 2 — generous relative to expected per-wallet volume, but never unbounded. Excess pending work simply stays durable for a later poll, exactly like Task 11B's pending-signal batch. */
 export const MAX_PENDING_FILLS_PER_POLL = 500;
+
+/**
+ * Task 13G (Codex re-review round 5, P1): a generous ceiling on how many times one exact
+ * (wallet, txHash, asset, side, sourceTs, shares, price) tuple could realistically collide
+ * -- e.g. multiple legs of one on-chain transaction matching at an identical price/size in
+ * the same block. Bounds `countDurableOrdinalFills`'s exact-key candidate set independent
+ * of a wallet's total cumulative degraded-history size (see its own doc comment).
+ */
+export const MAX_ORDINAL_COLLISIONS_PER_TUPLE = 50;
 
 
 const REQUEST_TIMEOUT_MS = 12_000;
@@ -295,7 +304,13 @@ export type PollRepository = {
    * this wallet — queried fresh against the database every call, never
    * cached, never derived from any single poll's own batch.
    */
-  countDurableOrdinalFills(wallet: string, tuplePrefixes: string[]): Promise<Map<string, number>>;
+  /**
+   * `deadline` (optional): if provided, checked BETWEEN this bounded read's own internal
+   * pages -- see the real implementation's doc comment for why the total candidate set is
+   * now naturally small regardless of wallet history size, but a caller-supplied deadline
+   * still takes priority over finishing every page.
+   */
+  countDurableOrdinalFills(wallet: string, tuplePrefixes: string[], deadline?: { now: () => number; deadlineAtMs: number }): Promise<Map<string, number>>;
   /** Most recent episode (by source_last_fill_at) for this exact position, if any. */
   findLatestEpisode(wallet: string, conditionId: string, asset: string): Promise<EpisodeCacheEntry | null>;
   /** Bounded, oldest-source_ts-first: every fill for this wallet whose downstream processing has not yet safely completed. Includes fills inserted THIS poll and any orphaned by an earlier failure/crash — see this module's Task 12D/P1-A doc comment. */
@@ -443,69 +458,70 @@ export const supabasePollRepository: PollRepository = {
     });
   },
 
-  async countDurableOrdinalFills(wallet, tuplePrefixes) {
+  async countDurableOrdinalFills(wallet, tuplePrefixes, deadline) {
     const out = new Map<string, number>();
     if (tuplePrefixes.length === 0) return out;
+    for (const prefix of tuplePrefixes) out.set(prefix, 0);
     // Task 13G / P1-R (Codex re-review, P1): a single bounded query, not one sequential
     // round trip per prefix -- for a large distinct-tuple-collision batch (worst case,
-    // every row in a page is a distinct colliding tuple), the prior per-prefix loop could
-    // issue up to PAGE_SIZE (250) sequential requests with no deadline check, an
-    // unaccounted-for contributor to the route's real wall time. Every degraded
-    // (tx_hash_ordinal) row for this wallet is fetched and counted client-side per prefix
-    // -- correct because `identity_basis` is set exactly once at insert time and never
-    // changes, so this is a complete, precise substitute for the per-prefix LIKE-count
-    // queries it replaces.
+    // every row in a page is a distinct colliding tuple), a naive per-prefix loop could
+    // issue up to PAGE_SIZE (250) sequential requests with no deadline check.
     //
-    // Task 13G (Codex re-review round 3, P1): a single unpaged `.select()` silently
-    // truncates at PostgREST's per-request row cap (see db-pagination.ts's own doc
-    // comment and shadow.server.ts's reconcileHeld, which hit exactly this bug for a
-    // different table) -- a wallet with more degraded rows than that cap would be
-    // UNDERCOUNTED, not merely slow. `fetchAllRowsAfterId` (keyset pagination, already
-    // proven elsewhere in this codebase) reads the complete set regardless of size.
+    // Task 13G (Codex re-review rounds 3-5, P1): reading the wallet's ENTIRE degraded
+    // (tx_hash_ordinal) history to answer a question about a handful of SPECIFIC prefixes
+    // is the wrong shape of query -- it is silently truncated by PostgREST's per-request
+    // row cap if unpaged; if paged (via fetchAllRowsAfterId), it is unbounded in real wall
+    // time for a wallet with a large degraded history, AND it can never distinguish
+    // "exactly at the page cap, genuinely complete" from "hit the cap, more remain" for a
+    // wallet whose degraded history exceeds that cap -- permanently misclassifying every
+    // future degraded fill as already-durable once crossed, since the table only grows.
     //
-    // Task 13G (Codex re-review round 4, P1): `fetchAllRowsAfterId` cannot distinguish
-    // "exactly PAGE_ROWS*MAX_PAGES rows, genuinely complete" from "hit the page cap, more
-    // remain" -- every page it reads would be exactly full in BOTH cases, so it always
-    // reports `complete: false` at that boundary even when nothing was actually missed.
-    // Since this table only grows, a wallet that ever reaches that count would trip the
-    // fail-closed branch below FOREVER, permanently treating every future degraded fill as
-    // already durable (never inserting a genuinely new one again) -- silent, unrecoverable
-    // data loss, strictly worse than the truncation bug this pagination was meant to fix.
-    // An independent exact total (`count: "exact", head: true` -- a single aggregate,
-    // never subject to the per-request ROW cap, since no rows are returned) resolves the
-    // ambiguity: if the paginated read's row count matches the independently-queried
-    // total, every row was genuinely seen regardless of whether the last page was short.
-    const { count: totalCount, error: countError } = await supabaseAdmin
-      .from("sports_shadow_source_fills" as never)
-      .select("id", { count: "exact", head: true })
-      .eq("wallet", wallet)
-      .eq("identity_basis", "tx_hash_ordinal");
-    if (countError) throw new Error(countError.message);
-    const paged = await fetchAllRowsAfterId<{ id: string; event_key: string }>(async (afterId, limit) => {
+    // FIX: query only the EXACT candidate keys this poll could possibly need -- for each
+    // requested prefix, `prefix#0` through `prefix#(MAX_ORDINAL_COLLISIONS_PER_TUPLE-1)`
+    // -- via `.in()` (exact match, no LIKE/OR filter-string construction, no escaping
+    // risk). This is bounded by tuplePrefixes.length (itself bounded by PAGE_SIZE, since
+    // it comes from one poll's own fetched page) regardless of how large the WALLET's
+    // cumulative degraded history has grown, so the ambiguous-page-cap scenario above
+    // essentially cannot recur: MAX_ORDINAL_COLLISIONS_PER_TUPLE is a generous ceiling on
+    // how many times one exact (wallet, txHash, asset, side, sourceTs, shares, price)
+    // tuple could realistically collide (multiple legs of one on-chain transaction
+    // matching at an identical price/size in the same block) -- not a claim about total
+    // wallet history size.
+    const candidateKeys: string[] = [];
+    for (const prefix of tuplePrefixes) {
+      for (let n = 0; n < MAX_ORDINAL_COLLISIONS_PER_TUPLE; n += 1) candidateKeys.push(`${prefix}${n}`);
+    }
+    const rows: { event_key: string }[] = [];
+    let afterId: string | null = null;
+    let pages = 0;
+    const maxPages = Math.ceil(candidateKeys.length / PAGE_ROWS) + 1;
+    while (pages < maxPages) {
+      // Task 13G (Codex re-review round 5, P1): deadline-checked BETWEEN pages of this
+      // bounded read too -- even though the total candidate set is now naturally small
+      // (see above), a caller-supplied deadline still takes priority over finishing every
+      // page. Exceeding it here fails closed (see below), exactly like any other
+      // unverifiable-count case.
+      if (deadline && deadline.now() >= deadline.deadlineAtMs) {
+        for (const prefix of tuplePrefixes) out.set(prefix, Number.POSITIVE_INFINITY);
+        return out;
+      }
       let query = supabaseAdmin
         .from("sports_shadow_source_fills" as never)
-        .select("id, event_key")
+        .select("event_key")
         .eq("wallet", wallet)
-        .eq("identity_basis", "tx_hash_ordinal")
-        .order("id", { ascending: true })
-        .limit(limit);
-      if (afterId) query = query.gt("id", afterId);
+        .in("event_key", candidateKeys)
+        .order("event_key", { ascending: true })
+        .limit(PAGE_ROWS);
+      if (afterId) query = query.gt("event_key", afterId);
       const { data, error } = await query;
       if (error) throw new Error(error.message);
-      return (data as unknown as { id: string; event_key: string }[] | null) ?? [];
-    });
-    for (const prefix of tuplePrefixes) out.set(prefix, 0);
-    if (paged.rows.length !== (totalCount ?? 0)) {
-      // Fail closed, matching reconcileDegradedEvents's own error-path convention: an
-      // unverifiable count must never be treated as "fewer durable rows than reality,"
-      // which would risk a duplicate insert. Treating every requested prefix as fully
-      // durable defers this poll's degraded rows to a later retry instead -- a genuinely
-      // temporary state (the wallet's degraded backlog isn't growing every poll), unlike
-      // the permanent version of this branch `paged.complete` alone would have produced.
-      for (const prefix of tuplePrefixes) out.set(prefix, Number.POSITIVE_INFINITY);
-      return out;
+      const page = (data as unknown as { event_key: string }[] | null) ?? [];
+      pages += 1;
+      rows.push(...page);
+      if (page.length < PAGE_ROWS) break;
+      afterId = page[page.length - 1]!.event_key;
     }
-    for (const row of paged.rows) {
+    for (const row of rows) {
       for (const prefix of tuplePrefixes) {
         if (row.event_key.startsWith(prefix)) {
           out.set(prefix, (out.get(prefix) ?? 0) + 1);
@@ -830,6 +846,7 @@ async function reconcileDegradedEvents(
   degradedEvents: NormalizedEvent[],
   wallet: string,
   repo: Pick<PollRepository, "countDurableOrdinalFills">,
+  deadline?: { now: () => number; deadlineAtMs: number },
 ): Promise<{ newDegraded: NormalizedEvent[]; duplicateCount: number; error: string | null }> {
   if (degradedEvents.length === 0) return { newDegraded: [], duplicateCount: 0, error: null };
 
@@ -844,7 +861,7 @@ async function reconcileDegradedEvents(
   let durableCounts: Map<string, number>;
   let error: string | null = null;
   try {
-    durableCounts = await repo.countDurableOrdinalFills(wallet, [...groups.keys()]);
+    durableCounts = await repo.countDurableOrdinalFills(wallet, [...groups.keys()], deadline);
   } catch (err) {
     // Fail closed: on a genuine reconciliation-query failure, treat every degraded tuple this
     // poll observed as already fully durable (skip, never insert) rather than risk a
@@ -1264,8 +1281,24 @@ export async function pollSportsShadowWallet(
     if (d.now() >= deadlineAtMs) {
       result.backlogTruncated = true;
     } else {
-    const { newDegraded, duplicateCount: degradedDuplicates, error: reconcileError } = await reconcileDegradedEvents(degradedEvents, normalizedWallet, d.repo);
+    const { newDegraded, duplicateCount: degradedDuplicates, error: reconcileError } = await reconcileDegradedEvents(
+      degradedEvents,
+      normalizedWallet,
+      d.repo,
+      { now: d.now, deadlineAtMs },
+    );
     result.error = result.error ?? reconcileError;
+
+    // Task 13G (Codex re-review round 5, P1): a reconciliation FAILURE (not just a
+    // deadline hit) must abort ALL persistence this poll too, not merely skip the
+    // degraded half -- persisting this scan's reliable events while skipping its
+    // degraded ones has the exact same partial-page stranding risk as the deadline-abort
+    // case immediately above: a later poll's overlap check would recognize the newly
+    // durable reliable keys and stop there, permanently skipping the un-reconciled
+    // degraded rows the same pages also contained.
+    if (reconcileError !== null) {
+      result.backlogTruncated = true;
+    } else {
     result.duplicateRows += degradedDuplicates;
     const newDegradedKeys = new Set(newDegraded.map((e) => e.eventKey));
 
@@ -1332,6 +1365,7 @@ export async function pollSportsShadowWallet(
         break;
       }
     }
+    } // end reconcileError check
     } // end deadline-check-before-degraded-reconciliation
     } // end readyToPersist
   }
@@ -1522,6 +1556,12 @@ export async function pollSportsShadowWallet(
           result.leaseLost = true;
           break;
         }
+        // Task 13G (Codex re-review round 5, P1): checkpointLease can itself perform a
+        // real renewal RPC -- re-checked immediately after it succeeds, before this
+        // mutating write, so that await's own latency can never let the deadline check
+        // above become stale (mirrors the identical fix already applied to the fetch and
+        // metadata-fetch call sites).
+        if (d.now() >= deadlineAtMs) break;
         try {
           await d.repo.updateEpisodeAtomic(fill.id, cacheEntry.id, decision.nextState);
           positionCache.set(positionKey, { id: cacheEntry.id, state: decision.nextState });
@@ -1549,6 +1589,10 @@ export async function pollSportsShadowWallet(
           result.leaseLost = true;
           break;
         }
+        // Task 13G (Codex re-review round 5, P1): re-checked immediately after
+        // checkpointLease succeeds -- see the identical comment on the SELL_RECORDED
+        // branch above.
+        if (d.now() >= deadlineAtMs) break;
         try {
           await d.repo.updateEpisodeAtomic(fill.id, cacheEntry.id, decision.nextState);
           positionCache.set(positionKey, { id: cacheEntry.id, state: decision.nextState });
@@ -1593,6 +1637,10 @@ export async function pollSportsShadowWallet(
       result.leaseLost = true;
       break;
     }
+    // Task 13G (Codex re-review round 5, P1): re-checked immediately after
+    // checkpointLease succeeds -- see the identical comment on the SELL_RECORDED branch
+    // above.
+    if (d.now() >= deadlineAtMs) break;
     try {
       const inserted = await d.repo.insertEpisodeAtomic(fill.id, newRow);
       positionCache.set(positionKey, { id: inserted.id, state: decision.nextState });
