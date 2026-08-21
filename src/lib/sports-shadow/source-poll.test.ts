@@ -80,40 +80,59 @@ describe("toEligibleFill", () => {
 describe("isEligibleForEpisodeTrigger", () => {
   const GO_LIVE_MS = 1_700_000_000_000; // matches sourceTs 1_700_000_000s exactly
 
-  it("resumption mode (isBootstrap=false) always returns true, regardless of sourceTs vs goLiveAtMs", () => {
-    expect(isEligibleForEpisodeTrigger(0, false, GO_LIVE_MS)).toBe(true);
-    expect(isEligibleForEpisodeTrigger(1, false, null)).toBe(true);
-    expect(isEligibleForEpisodeTrigger(Number.MAX_SAFE_INTEGER, false, 0)).toBe(true);
+  it("goLiveAtMs=null fails closed to false, even for a very recent fill", () => {
+    expect(isEligibleForEpisodeTrigger(Date.now() / 1000, null)).toBe(false);
   });
 
-  it("bootstrap mode with goLiveAtMs=null fails closed to false, even for a very recent fill", () => {
-    expect(isEligibleForEpisodeTrigger(Date.now() / 1000, true, null)).toBe(false);
+  it("a non-finite goLiveAtMs fails closed to false", () => {
+    expect(isEligibleForEpisodeTrigger(GO_LIVE_MS / 1000, Number.NaN)).toBe(false);
+    expect(isEligibleForEpisodeTrigger(GO_LIVE_MS / 1000, Number.POSITIVE_INFINITY)).toBe(false);
   });
 
-  it("bootstrap mode with a non-finite goLiveAtMs fails closed to false", () => {
-    expect(isEligibleForEpisodeTrigger(GO_LIVE_MS / 1000, true, Number.NaN)).toBe(false);
-    expect(isEligibleForEpisodeTrigger(GO_LIVE_MS / 1000, true, Number.POSITIVE_INFINITY)).toBe(false);
+  it("sourceTs strictly before the boundary returns false", () => {
+    expect(isEligibleForEpisodeTrigger(GO_LIVE_MS / 1000 - 1, GO_LIVE_MS)).toBe(false);
   });
 
-  it("bootstrap mode: sourceTs strictly before the boundary returns false", () => {
-    expect(isEligibleForEpisodeTrigger(GO_LIVE_MS / 1000 - 1, true, GO_LIVE_MS)).toBe(false);
+  it("sourceTs exactly at the boundary returns true (inclusive)", () => {
+    expect(isEligibleForEpisodeTrigger(GO_LIVE_MS / 1000, GO_LIVE_MS)).toBe(true);
   });
 
-  it("bootstrap mode: sourceTs exactly at the boundary returns true (inclusive)", () => {
-    expect(isEligibleForEpisodeTrigger(GO_LIVE_MS / 1000, true, GO_LIVE_MS)).toBe(true);
-  });
-
-  it("bootstrap mode: sourceTs after the boundary returns true", () => {
-    expect(isEligibleForEpisodeTrigger(GO_LIVE_MS / 1000 + 3600, true, GO_LIVE_MS)).toBe(true);
+  it("sourceTs after the boundary returns true", () => {
+    expect(isEligibleForEpisodeTrigger(GO_LIVE_MS / 1000 + 3600, GO_LIVE_MS)).toBe(true);
   });
 
   it("correctly converts sourceTs (seconds) to milliseconds before comparing", () => {
     // 1000 seconds = 1_000_000ms; boundary at exactly 1_000_000ms should be inclusive.
-    expect(isEligibleForEpisodeTrigger(1000, true, 1_000_000)).toBe(true);
-    expect(isEligibleForEpisodeTrigger(999, true, 1_000_000)).toBe(false);
+    expect(isEligibleForEpisodeTrigger(1000, 1_000_000)).toBe(true);
+    expect(isEligibleForEpisodeTrigger(999, 1_000_000)).toBe(false);
   });
 
-  it("bootstrap mode with goLiveAtMs=0 treats sourceTs=0 as at-boundary (true)", () => {
-    expect(isEligibleForEpisodeTrigger(0, true, 0)).toBe(true);
+  it("goLiveAtMs=0 treats sourceTs=0 as at-boundary (true)", () => {
+    expect(isEligibleForEpisodeTrigger(0, 0)).toBe(true);
+  });
+
+  /**
+   * Task 12E / P1-F: HARD REQUIREMENT -- the same fill must produce the same answer on
+   * every retry, regardless of any wallet-history/bootstrap concept. The old signature
+   * took an `isBootstrap` flag that could flip between polls; the new one takes only
+   * immutable/durable inputs, so there is no third argument left that COULD make the
+   * answer retry-dependent. These tests prove the property directly rather than merely
+   * asserting the removed parameter is gone.
+   */
+  it("HARD REQUIREMENT: a pre-go-live fill's answer never changes no matter how many times it's re-evaluated (simulated bootstrap, retry, and restart)", () => {
+    const preGoLiveSourceTs = GO_LIVE_MS / 1000 - 1;
+    // "first bootstrap poll", "later retry", and "process restart" are all just repeated
+    // calls with the identical (sourceTs, goLiveAtMs) pair -- there is no isBootstrap
+    // input left to vary between them.
+    for (let i = 0; i < 5; i += 1) {
+      expect(isEligibleForEpisodeTrigger(preGoLiveSourceTs, GO_LIVE_MS)).toBe(false);
+    }
+  });
+
+  it("HARD REQUIREMENT: a post-go-live fill's answer never changes no matter how many times it's re-evaluated, including when discovered late", () => {
+    const postGoLiveSourceTs = GO_LIVE_MS / 1000 + 3600;
+    for (let i = 0; i < 5; i += 1) {
+      expect(isEligibleForEpisodeTrigger(postGoLiveSourceTs, GO_LIVE_MS)).toBe(true);
+    }
   });
 });

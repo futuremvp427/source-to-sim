@@ -454,14 +454,70 @@ describe("pollSportsShadowWallet — bootstrap go-live gating", () => {
     expect(result.newSignals).toHaveLength(1);
   });
 
-  it("ignores goLiveAtMs entirely during a RESUMPTION poll (always processes)", async () => {
+  it("allows a genuinely post-go-live fill discovered during a RESUMPTION poll (unchanged from before)", async () => {
     const repo = new FakeRepo();
     repo.fillsByEventKey.set("sid:seed", { id: "fill-seed", row: { eventKey: "sid:seed", wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
     const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ timestamp: 1_700_000_000 })] }) });
-    const result = await pollSportsShadowWallet(WALLET, null, deps); // null goLiveAtMs, would fail-closed under bootstrap
+    const goLiveAtMs = 1_700_000_000_000 - 1000; // one second before this fill: genuinely post-go-live
+    const result = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps);
     expect(result.isBootstrap).toBe(false);
     expect(result.suppressedPreGoLive).toBe(0);
     expect(result.newSignals).toHaveLength(1);
+  });
+
+  /**
+   * Task 12E / P1-F: HARD REQUIREMENT proof, exercised through the ACTUAL Task 12D
+   * durable-retry path (a real PENDING fill row, real findPendingDownstreamFills
+   * re-query, real isBootstrap recomputed fresh from hasAnyFillsForWallet) -- not just
+   * the pure isEligibleForEpisodeTrigger unit tests in source-poll.test.ts.
+   *
+   * Reproduces the exact defect scenario: a fill's sourceTs is BEFORE goLiveAtMs during
+   * a wallet's bootstrap poll, but markFillComplete fails (simulating any transient
+   * failure -- network blip, DB hiccup), so the fill stays PENDING instead of being
+   * marked COMPLETE. Some other durable fill for the same wallet already exists, so on
+   * the NEXT poll hasAnyFillsForWallet returns true and isBootstrap flips to false. Under
+   * the pre-fix code (`if (!isBootstrap) return true`), this second poll would have
+   * wrongly let the stale pre-go-live fill trigger a new episode. Under the fix, the
+   * fill's OWN immutable sourceTs is still before the fixed goLiveAtMs, so it must be
+   * suppressed again, identically.
+   */
+  it("HARD REQUIREMENT: a pre-go-live fill left PENDING (markFillComplete failed) is STILL suppressed on a later resumption-mode retry", async () => {
+    const repo = new FakeRepo();
+    // Unrelated durable history for this wallet, so the SECOND poll below sees isBootstrap=false.
+    repo.fillsByEventKey.set("sid:unrelated-history", {
+      id: "fill-unrelated",
+      row: { eventKey: "sid:unrelated-history", wallet: WALLET.toLowerCase() } as RawFillRow,
+      downstreamStatus: "COMPLETE",
+    });
+    const goLiveAtMs = 1_700_000_000_000 + 3_600_000; // one hour after the pre-go-live fill below
+    const preGoLiveTrade = trade({ timestamp: 1_700_000_000, id: "pre-go-live-fill" });
+
+    // First poll: markFillComplete fails, so the correctly-suppressed fill stays PENDING
+    // instead of becoming the normal terminal COMPLETE.
+    const { deps: firstDeps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [preGoLiveTrade] }) });
+    repo.markFillComplete = async (fillId: string) => {
+      repo.markFillCompleteCalls.push(fillId);
+      throw new Error("simulated transient markFillComplete failure");
+    };
+    const firstResult = await pollSportsShadowWallet(WALLET, goLiveAtMs, firstDeps);
+    expect(firstResult.isBootstrap).toBe(false); // unrelated-history fill already made this a resumption poll
+    expect(firstResult.suppressedPreGoLive).toBe(1);
+    expect([...repo.fillsByEventKey.values()].find((f) => f.row.eventKey.includes("pre-go-live-fill"))?.downstreamStatus).toBe("PENDING");
+
+    // Restore a working markFillComplete and poll again with an EMPTY page (nothing new to
+    // fetch) -- the only thing this second poll has to do is retry the durably-PENDING fill.
+    repo.markFillComplete = async (fillId: string) => {
+      repo.markFillCompleteCalls.push(fillId);
+      const entry = repo.fillsById.get(fillId);
+      if (entry) entry.downstreamStatus = "COMPLETE";
+    };
+    const { deps: secondDeps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [] }) });
+    const secondResult = await pollSportsShadowWallet(WALLET, goLiveAtMs, secondDeps);
+    expect(secondResult.isBootstrap).toBe(false); // resumption mode, exactly the condition the old bug required
+    expect(secondResult.suppressedPreGoLive).toBe(1); // still suppressed -- NOT wrongly promoted to eligible
+    expect(secondResult.newSignals).toHaveLength(0);
+    expect(repo.findLatestEpisodeCalls).toBe(0); // never even reached the episode engine
+    expect([...repo.fillsByEventKey.values()].find((f) => f.row.eventKey.includes("pre-go-live-fill"))?.downstreamStatus).toBe("COMPLETE");
   });
 });
 

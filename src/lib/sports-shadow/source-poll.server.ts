@@ -64,10 +64,33 @@
  *     whereas terminally dropping a transient one would be.
  *   - pre-go-live suppression (isEligibleForEpisodeTrigger === false)  -> COMPLETE. This
  *     is the historically-correct, final answer for that exact fill: goLiveAtMs is fixed
- *     and durable (Task 10), so re-evaluating it on a LATER "resumption" poll (once the
- *     wallet has any history and isBootstrap flips to false) would wrongly retroactively
- *     trigger a fill that was legitimately excluded because collection was not live yet
- *     — retrying it would be a new bug, not a fix.
+ *     and durable (Task 10), and (as of Task 12E / P1-F below) the decision depends ONLY
+ *     on the fill's own immutable sourceTs vs. that fixed boundary — never on
+ *     wallet-history state — so re-evaluating it on a later retry always reproduces the
+ *     identical answer. Marking it COMPLETE here is a bounded-work optimization (stop
+ *     retrying a fill whose answer can never change), not a correctness requirement.
+ *
+ * ============================== TASK 12E / P1-F: IMMUTABLE GO-LIVE DECISION ==============================
+ * ROOT CAUSE (Codex P1 finding): isEligibleForEpisodeTrigger used to take an `isBootstrap`
+ * flag and return `true` unconditionally once it was false. `isBootstrap` is recomputed
+ * fresh every poll from `hasAnyFillsForWallet` — NOT an immutable property of any one
+ * fill. A pre-go-live fill left PENDING (e.g. past MAX_PENDING_FILLS_PER_POLL, or a
+ * transient markFillComplete failure) could therefore be retried on a later poll, once
+ * the wallet had accrued unrelated history, and wrongly become eligible — the SAME fill
+ * producing a DIFFERENT answer depending purely on when it happened to be retried.
+ *
+ * FIX: isEligibleForEpisodeTrigger(sourceTs, goLiveAtMs) now compares two immutable,
+ * durable values only — no wallet-history flag. Truth table (verified by
+ * source-poll.test.ts and this file's own P1-F integration tests):
+ *   sourceTs  < goLiveAt                          -> NEVER eligible, on any retry/restart
+ *   sourceTs == goLiveAt                           -> ELIGIBLE (inclusive boundary)
+ *   sourceTs  > goLiveAt                           -> ELIGIBLE, on any retry/restart
+ *   first bootstrap poll                           -> same pure rule, no special case
+ *   later retry of a durably-PENDING fill          -> identical answer (sourceTs/goLiveAtMs unchanged)
+ *   process restart                                -> identical answer (goLiveAtMs re-parsed from the same static config)
+ *   pre-go-live fill beyond the pending cap         -> stays ineligible forever
+ *   post-go-live fill recovered after worker downtime -> eligible regardless of how late it's discovered
+ * ================================================================================
  *   - DUPLICATE_FILL, or SELL_RECORDED with no matching open episode  -> COMPLETE
  *     (single fill-only write, safe alone: either the aggregation is already reflected
  *     elsewhere, or there is genuinely nothing durable left to do for a SELL against no
@@ -899,14 +922,15 @@ export async function pollSportsShadowWallet(
       detectedAt: detectedAtMs,
     };
 
-    if (!isEligibleForEpisodeTrigger(fill.sourceTs, result.isBootstrap, goLiveAtMs)) {
+    if (!isEligibleForEpisodeTrigger(fill.sourceTs, goLiveAtMs)) {
       result.suppressedPreGoLive += 1;
       try {
         await d.repo.markFillComplete(fill.id);
       } catch {
-        // Best-effort; stays PENDING and is re-evaluated identically next poll (isBootstrap
-        // is recomputed fresh each poll from hasAnyFillsForWallet, so this stays safe even
-        // if retried under a different isBootstrap value later -- see the doc comment above).
+        // Best-effort; stays PENDING and is re-evaluated identically next poll. Task 12E/P1-F:
+        // this stays safe under retry because the decision depends ONLY on this fill's own
+        // immutable sourceTs and the fixed, durable goLiveAtMs -- never on wallet-history
+        // state -- so it is guaranteed to still be false next time.
       }
       continue;
     }

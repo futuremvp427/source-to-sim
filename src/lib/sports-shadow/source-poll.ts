@@ -51,26 +51,45 @@ export function toEligibleFill(event: NormalizedEvent, detectedAtMs: number): El
 }
 
 /**
- * Bootstrap/historical-replay safety gate. During a wallet's FIRST-EVER poll
- * (`isBootstrap`), a fill is only allowed to reach the episode engine (and therefore
- * possibly trigger a NEW_EPISODE) when its source time is at or after the caller-
- * supplied go-live boundary. Fills strictly before it may still be persisted as raw
- * evidence, but must never be fed to decideFill.
+ * Forward-shadow go-live gate. A fill is only allowed to reach the episode engine (and
+ * therefore possibly trigger a NEW_EPISODE) when its OWN source time is at or after the
+ * fixed, durable go-live boundary. Fills strictly before it may still be persisted as
+ * raw evidence, but must never be fed to decideFill.
  *
- * A missing `goLiveAtMs` during a genuine bootstrap poll fails CLOSED — every fill is
- * treated as pre-go-live (never triggers) rather than guessing a boundary. Once a
- * wallet has ANY durable fill history (`isBootstrap = false`, i.e. a resumption poll),
- * this always returns true: durable database overlap has already established that
- * bootstrap is behind us, so the go-live boundary no longer applies at all — this is
- * what makes "a restart after prior successful polling resumes from durable history,
- * not bootstrap again" true by construction, without needing a separate flag.
+ * ============================== TASK 12E / P1-F: IMMUTABLE GO-LIVE DECISION ==============================
+ * ROOT CAUSE (Codex P1 finding): the previous signature was
+ * `isEligibleForEpisodeTrigger(sourceTs, isBootstrap, goLiveAtMs)`, unconditionally
+ * returning `true` whenever `isBootstrap` was false. `isBootstrap` is NOT an immutable
+ * fact about a fill — it is `!hasAnyFillsForWallet(wallet)`, recomputed fresh on EVERY
+ * poll from current wallet-wide state. Task 12D's durable per-fill retry (fills that
+ * stay `downstream_status = PENDING` across polls -- e.g. hitting
+ * MAX_PENDING_FILLS_PER_POLL, or a transient markFillComplete failure) meant a
+ * pre-go-live fill left PENDING during a wallet's bootstrap poll could be retried on a
+ * LATER poll once the wallet had accrued ANY history (e.g. from other, unrelated fills
+ * completing normally) -- at which point `isBootstrap` had flipped to `false` and the
+ * SAME fill's SAME sourceTs now produced a DIFFERENT (wrongly eligible) answer. That
+ * violates the forward-only experiment boundary: a historical fill could retroactively
+ * trigger episode creation, purely as a side effect of unrelated wallet activity.
+ *
+ * FIX: drop `isBootstrap` entirely. `goLiveAtMs` is a fixed, durable config value (see
+ * config.ts's own doc comment: "a fixed, durable configuration value must produce the
+ * identical goLiveAtMs on every invocation, forever") and `sourceTs` is immutable once a
+ * fill's raw row is persisted (see the source_ts column in
+ * sports_shadow_source_fills). Comparing two immutable, durable values needs no
+ * wallet-history flag at all, and by construction gives the SAME answer for the SAME
+ * fill on every retry, restart, or wallet-history transition -- see source-poll.server.ts's
+ * doc comment for the full truth table this was verified against.
  *
  * `sourceTs` is Unix SECONDS (matches EligibleFill.sourceTs / shadow-core.ts
  * convention); `goLiveAtMs` is epoch MILLISECONDS (ordinary JS convention) — the unit
- * conversion happens once, here, so callers never have to reconcile it themselves.
+ * conversion happens once, here, so callers never have to reconcile it themselves. A
+ * missing/non-finite `goLiveAtMs` fails CLOSED (never eligible) rather than guessing a
+ * boundary; in practice this never happens for an enabled config (parseSportsShadowConfig
+ * guarantees a finite goLiveAtMs whenever wallets are non-empty), but the function stays
+ * defensively fail-closed regardless.
+ * ================================================================================
  */
-export function isEligibleForEpisodeTrigger(sourceTs: number, isBootstrap: boolean, goLiveAtMs: number | null): boolean {
-  if (!isBootstrap) return true;
+export function isEligibleForEpisodeTrigger(sourceTs: number, goLiveAtMs: number | null): boolean {
   if (goLiveAtMs === null || !Number.isFinite(goLiveAtMs)) return false;
   return sourceTs * 1000 >= goLiveAtMs;
 }
