@@ -108,6 +108,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { fetchAllRowsAfterId } from "../db-pagination";
 import {
   DATA_API_HOST,
   getHostCooldown,
@@ -137,8 +138,6 @@ export const MAX_PAGES_PER_WALLET = Math.floor(MAX_TRADES_OFFSET / PAGE_SIZE) + 
 /** Bounded per-poll cap on how many currently-PENDING fills are retried in phase 2 — generous relative to expected per-wallet volume, but never unbounded. Excess pending work simply stays durable for a later poll, exactly like Task 11B's pending-signal batch. */
 export const MAX_PENDING_FILLS_PER_POLL = 500;
 
-/** Task 13G / P1-R: raw-fill persistence is chunked into batches of this size, with a deadline check between batches (never mid-batch) — see Phase 1 persist below. Matches PAGE_SIZE, an already-proven-reasonable unit for one round trip. */
-export const PERSIST_BATCH_SIZE = PAGE_SIZE;
 
 const REQUEST_TIMEOUT_MS = 12_000;
 
@@ -452,21 +451,42 @@ export const supabasePollRepository: PollRepository = {
     // every row in a page is a distinct colliding tuple), the prior per-prefix loop could
     // issue up to PAGE_SIZE (250) sequential requests with no deadline check, an
     // unaccounted-for contributor to the route's real wall time. Every degraded
-    // (tx_hash_ordinal) row for this wallet is fetched in ONE query and counted
-    // client-side per prefix -- correct because `identity_basis` is set exactly once at
-    // insert time and never changes, so this is a complete, precise substitute for the
-    // per-prefix LIKE-count queries it replaces.
-    const { data, error } = await supabaseAdmin
-      .from("sports_shadow_source_fills" as never)
-      .select("event_key")
-      .eq("wallet", wallet)
-      .eq("identity_basis", "tx_hash_ordinal");
-    if (error) throw new Error(error.message);
-    const keys = ((data as unknown as { event_key: string }[] | null) ?? []).map((r) => r.event_key);
+    // (tx_hash_ordinal) row for this wallet is fetched and counted client-side per prefix
+    // -- correct because `identity_basis` is set exactly once at insert time and never
+    // changes, so this is a complete, precise substitute for the per-prefix LIKE-count
+    // queries it replaces.
+    //
+    // Task 13G (Codex re-review round 3, P1): a single unpaged `.select()` silently
+    // truncates at PostgREST's per-request row cap (see db-pagination.ts's own doc
+    // comment and shadow.server.ts's reconcileHeld, which hit exactly this bug for a
+    // different table) -- a wallet with more degraded rows than that cap would be
+    // UNDERCOUNTED, not merely slow. `fetchAllRowsAfterId` (keyset pagination, already
+    // proven elsewhere in this codebase) reads the complete set regardless of size.
+    const paged = await fetchAllRowsAfterId<{ id: string; event_key: string }>(async (afterId, limit) => {
+      let query = supabaseAdmin
+        .from("sports_shadow_source_fills" as never)
+        .select("id, event_key")
+        .eq("wallet", wallet)
+        .eq("identity_basis", "tx_hash_ordinal")
+        .order("id", { ascending: true })
+        .limit(limit);
+      if (afterId) query = query.gt("id", afterId);
+      const { data, error } = await query;
+      if (error) throw new Error(error.message);
+      return (data as unknown as { id: string; event_key: string }[] | null) ?? [];
+    });
     for (const prefix of tuplePrefixes) out.set(prefix, 0);
-    for (const key of keys) {
+    if (!paged.complete) {
+      // Fail closed, matching reconcileDegradedEvents's own error-path convention: an
+      // unverifiable count must never be treated as "fewer durable rows than reality,"
+      // which would risk a duplicate insert. Treating every requested prefix as fully
+      // durable defers this poll's degraded rows to a later retry instead.
+      for (const prefix of tuplePrefixes) out.set(prefix, Number.POSITIVE_INFINITY);
+      return out;
+    }
+    for (const row of paged.rows) {
       for (const prefix of tuplePrefixes) {
-        if (key.startsWith(prefix)) {
+        if (row.event_key.startsWith(prefix)) {
           out.set(prefix, (out.get(prefix) ?? 0) + 1);
           break; // a key has exactly one ordinal prefix by construction
         }
@@ -964,11 +984,16 @@ async function reconcileDegradedEvents(
  * through, deadline permitting) is safe in a way partial FETCHING is not, because
  * `findExistingEventKeys` only ever reports rows that are genuinely durable; any row not
  * yet inserted this poll is simply re-discovered as still-genuinely-new and retried next
- * poll (fully idempotent). Persistence is therefore chunked into PERSIST_BATCH_SIZE-row
- * batches (one bounded DB round trip each, via `insertRawFillsBatch`), with a deadline
- * check BETWEEN batches (never mid-batch) -- bounding the previously-unbounded sequential
- * per-row insert loop that Codex flagged as capable of holding the response open
- * indefinitely for a large genuinely-new batch.
+ * poll (fully idempotent). Persistence is therefore chunked into one batch PER ORIGINATING
+ * PAGE (one bounded DB round trip each, via `insertRawFillsBatch`, never exceeding
+ * PAGE_SIZE rows since a page can never hold more), with a deadline check BEFORE every
+ * batch including the first -- bounding the previously-unbounded sequential per-row insert
+ * loop that Codex flagged as capable of holding the response open indefinitely for a large
+ * genuinely-new batch. Batches are aligned to page boundaries rather than an arbitrary
+ * fixed-size window (an earlier version of this fix used a flat PERSIST_BATCH_SIZE slice,
+ * which Codex flagged as able to leave a page PARTIALLY durable if a batch straddling two
+ * pages' rows committed while a later batch failed) -- see the "NO-STRANDING PERSISTENCE"
+ * section's per-page-batch paragraph below for the full reasoning.
  * ================================================================================
  */
 export async function pollSportsShadowWallet(
@@ -1139,25 +1164,56 @@ export async function pollSportsShadowWallet(
     // overlap check recognize newer content as covered while an older, still-unpersisted
     // page is not.
     //
-    // normalizeSourceEvents MUST still be called ONCE on the full, newest-page-first
-    // flattened array (not per-page): a degraded (tx_hash_ordinal) event's "#N" ordinal
-    // label is assigned fresh per call by counting occurrences of its raw tuple WITHIN
-    // that call's input -- calling it separately per page would independently label two
-    // genuinely distinct physical fills (split across two pages) as the SAME "#0",
-    // collapsing them into one durable row. `raw` is passed through by reference
-    // (shadow-core.ts's own `raw: r`), so page origin is instead recovered via a
-    // reference-keyed Map built BEFORE normalizing, without touching the durably-stored
-    // raw evidence blob at all.
+    // normalizeSourceEvents MUST still be called ONCE on the full flattened array (not
+    // per-page): a degraded (tx_hash_ordinal) event's "#N" ordinal label is assigned fresh
+    // per call by counting occurrences of its raw tuple WITHIN that call's input, in INPUT
+    // ORDER -- calling it separately per page would independently label two genuinely
+    // distinct physical fills (split across two pages) as the SAME "#0", collapsing them
+    // into one durable row.
+    //
+    // Task 13G (Codex re-review round 3, P1): the ordinal-assignment order and the
+    // persist order must be the SAME order. reconcileDegradedEvents's count-based
+    // reconciliation assumes "N rows already durable" means the LOWEST N ordinals (#0..)
+    // are the durable ones (see its own doc comment) -- an assumption that only holds if
+    // ordinal #0 is always assigned to whichever occurrence is persisted FIRST. The input
+    // array is therefore fed in the SAME oldest-fetched-page-first order used for
+    // persistence below (see `orderedRawPages`), not the raw newest-page-first fetch
+    // order -- so ordinal #0 always means "oldest page's occurrence," matching whichever
+    // occurrence a partial persist would have committed first. `raw` is passed through by
+    // reference (shadow-core.ts's own `raw: r`), so page origin for grouping batches by
+    // page (below) is recovered via a reference-keyed Map, without touching the
+    // durably-stored raw evidence blob at all.
     const pageIndexByRawRow = new Map<RawTrade, number>();
     rawPages.forEach((page, pageIndex) => {
       for (const row of page) pageIndexByRawRow.set(row, pageIndex);
     });
-    const allEventsBySourceOrder: NormalizedEvent[] = normalizeSourceEvents(rawPages.flat(), normalizedWallet);
-    // rawPages[0] is the NEWEST page (offset 0) -- descending pageIndex is oldest-first.
+    // rawPages[0] is the NEWEST page (offset 0); reversing gives oldest-page-first, the
+    // single source of truth for BOTH ordinal assignment and persist order below.
+    const orderedRawPages = [...rawPages].reverse();
+    const allEventsBySourceOrder: NormalizedEvent[] = normalizeSourceEvents(orderedRawPages.flat(), normalizedWallet);
+    // normalizeSourceEvents' OWN return statement re-sorts its output by (sourceTs,
+    // eventKey) regardless of input order -- feeding it oldest-page-first content (above)
+    // fixes WHICH ordinal number each occurrence gets, but the returned array's element
+    // order still needs restoring to actual page order for persistence and batch-grouping
+    // below, via the same reference-keyed page-index map.
     const allEvents = [...allEventsBySourceOrder].sort((a, b) => (pageIndexByRawRow.get(b.raw) ?? 0) - (pageIndexByRawRow.get(a.raw) ?? 0));
     const reliableEvents = allEvents.filter((e) => !e.identityDegraded);
     const degradedEvents = allEvents.filter((e) => e.identityDegraded);
 
+    // Task 13G (Codex re-review round 3, P1): a confirmed-complete scan can still have
+    // exhausted (or nearly exhausted) the deadline during its OWN last fetch/lease-check
+    // iteration -- checked again here, immediately before starting the first of what may
+    // be several further sequential DB calls (findExistingEventKeys, degraded-event
+    // reconciliation, the first persist batch). If already past deadline, none of that
+    // work starts at all this poll: exactly as safe as any other unconfirmed-scan
+    // discard (see scanConfirmedComplete above) -- nothing here has been persisted yet,
+    // so nothing is stranded, only deferred to the wallet's next poll.
+    const readyToPersist = d.now() < deadlineAtMs;
+    if (!readyToPersist) {
+      result.backlogTruncated = true;
+    }
+
+    if (readyToPersist) {
     let existingReliableKeys: Set<string>;
     try {
       existingReliableKeys = await d.repo.findExistingEventKeys(normalizedWallet, reliableEvents.map((e) => e.eventKey));
@@ -1178,18 +1234,38 @@ export async function pollSportsShadowWallet(
     // concatenating the two "new" sub-lists.
     const genuinelyNew = allEvents.filter((e) => newReliableKeys.has(e.eventKey) || newDegradedKeys.has(e.eventKey));
 
-    /* -------------------- Phase 1 persist: batched, deadline-checked BETWEEN (never mid-) batch -------------------- */
-    for (let i = 0; i < genuinelyNew.length; i += PERSIST_BATCH_SIZE) {
-      // Task 13G / P1-R: checked before every batch except the first (a scan that just
-      // confirmed complete deserves to persist at least one batch). Safe to stop here --
-      // see the module doc comment's P1-R paragraph: any row not yet inserted this poll is
-      // still genuinely-new (never durably written) and is simply re-discovered and
-      // retried on the wallet's next poll, fully idempotently.
-      if (i > 0 && d.now() >= deadlineAtMs) {
+    // Task 13G (Codex re-review round 3, P1): batches are grouped by ACTUAL originating
+    // page, never a fixed-size slice that can straddle two pages. A fixed PERSIST_BATCH_SIZE
+    // window could combine the tail of an older page with the head of a newer one; if that
+    // combined batch commits but a later batch fails/is deferred, the newer page ends up
+    // PARTIALLY durable -- which breaks the invariant a later poll's per-page overlap check
+    // relies on (a page's reliable keys are either all durable or all absent). Grouping by
+    // page keeps every batch naturally <= PAGE_SIZE (a page can never hold more rows than
+    // one fetch), so this is a pure reorganization, not a larger unit of work.
+    const pageGroups: NormalizedEvent[][] = [];
+    for (const event of genuinelyNew) {
+      const pageIdx = pageIndexByRawRow.get(event.raw);
+      const last = pageGroups[pageGroups.length - 1];
+      if (last && last.length > 0 && pageIndexByRawRow.get(last[0]!.raw) === pageIdx) {
+        last.push(event);
+      } else {
+        pageGroups.push([event]);
+      }
+    }
+
+    /* -------------------- Phase 1 persist: one batch per page, deadline-checked BETWEEN (never mid-) batch -------------------- */
+    for (let i = 0; i < pageGroups.length; i += 1) {
+      // Task 13G / P1-R: checked before EVERY batch, including the first -- see the
+      // `readyToPersist` check above for why the first batch is not exempt. Safe to stop
+      // here -- see the module doc comment's P1-R paragraph: any row not yet inserted this
+      // poll is still genuinely-new (never durably written) and is simply re-discovered
+      // and retried on the wallet's next poll, fully idempotently.
+      if (d.now() >= deadlineAtMs) {
         result.backlogTruncated = true;
         break;
       }
-      const batch = genuinelyNew.slice(i, i + PERSIST_BATCH_SIZE).map((event) => toRawFillRow(event));
+      const pageGroup = pageGroups[i]!;
+      const batch = pageGroup.map((event) => toRawFillRow(event));
       try {
         const batchResults = await d.repo.insertRawFillsBatch(batch);
         for (const r of batchResults) {
@@ -1202,10 +1278,10 @@ export async function pollSportsShadowWallet(
         }
       } catch (err) {
         result.error = result.error ?? `insertRawFillsBatch failed: ${err instanceof Error ? err.message : "unknown error"}`;
-        result.invalidRows += genuinelyNew.length - i; // this batch AND every later (newer) batch never attempted
+        result.invalidRows += pageGroups.slice(i).reduce((sum, g) => sum + g.length, 0); // this batch AND every later (newer) batch never attempted
         result.backlogTruncated = true;
         // Task 13G / P1-Q (Codex re-review, P1): a failed batch must stop ALL further
-        // persistence this poll, not just skip to the next batch. genuinelyNew is ordered
+        // persistence this poll, not just skip to the next batch. Batches are ordered
         // oldest-page-first -- continuing past a failure would risk persisting NEWER pages
         // while this (older) batch's rows stay un-persisted, which a later poll's overlap
         // check could then mistake for full coverage, stranding the older, failed batch
@@ -1216,6 +1292,7 @@ export async function pollSportsShadowWallet(
         break;
       }
     }
+    } // end readyToPersist
   }
 
   /*

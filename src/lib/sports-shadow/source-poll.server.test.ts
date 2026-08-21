@@ -974,6 +974,41 @@ describe("pollSportsShadowWallet — STABLE EVENT-KEY window-shift audit (degrad
     return n;
   }
 
+  it("E. Task 13G (Codex re-review round 3, P1): ordinal assignment order matches persist order, so a batch failure never causes later reconciliation to skip the wrong occurrence", async () => {
+    const repo = new FakeRepo();
+    const rowX = collidingRow("X"); // will land on the OLDER page (offset=250)
+    const rowY = collidingRow("Y"); // will land on the NEWER page (offset=0)
+    const filler = (n: number, prefix: string) =>
+      Array.from({ length: n }, (_, i) => trade({ id: `filler-${prefix}-${i}`, transactionHash: `0xfiller-${prefix}-${i}`, conditionId: null }));
+    const page0 = [rowY, ...filler(249, "a")]; // full page -> pagination continues to page1
+    const page1 = [rowX]; // short page -> natural end
+    const network = makeNetworkDeps({ 0: page0, [PAGE_SIZE]: page1 });
+
+    // Ordinal assignment now follows oldest-page-first order (same as persist order): rowX
+    // (older page) gets "#0", rowY (newer page) gets "#1". Fail the NEWER page's batch
+    // specifically -- this exercises exactly the case Codex's finding described: an older
+    // batch (page1/rowX/"#0") persists successfully BEFORE a newer batch (page0/rowY/"#1")
+    // fails.
+    repo.throwOnInsertRawFillFor = `${COLLIDE_TUPLE_PREFIX}1`;
+    const { deps: depsA } = makeDeps({ repo, network });
+    const pollA = await pollSportsShadowWallet(WALLET, 0, depsA);
+    expect(pollA.error).toContain("insertRawFillsBatch failed");
+    expect(countDurableForTuple(repo, WALLET.toLowerCase())).toBe(1);
+    expect([...repo.fillsByEventKey.keys()]).toContain(`${COLLIDE_TUPLE_PREFIX}0`);
+
+    // Poll 2 (healthy repo): must correctly identify rowY -- still genuinely missing -- as
+    // the excess to insert. Before this fix, ordinal assignment (newest-page-first) and
+    // persist order (oldest-page-first) disagreed, so reconcileDegradedEvents's
+    // durable-count-implies-lowest-ordinals assumption would have wrongly treated "#0" as
+    // the missing one and kept re-conflicting on the already-durable "#0" while never
+    // inserting "#1".
+    repo.throwOnInsertRawFillFor = null;
+    const { deps: depsB } = makeDeps({ repo, network });
+    const pollB = await pollSportsShadowWallet(WALLET, 0, depsB);
+    expect(pollB.error).toBeNull();
+    expect(countDurableForTuple(repo, WALLET.toLowerCase())).toBe(2);
+  });
+
   it("A. same two physical fills reconcile identically even when a later poll observes them in reversed array order", async () => {
     const repo = new FakeRepo();
     const rowX = collidingRow("X");
@@ -1489,6 +1524,31 @@ describe("Task 13G / P1-Q: formal proof -- an incomplete scan can never create a
     const insertOrder = repo.insertRawFillsBatchCalls.map((batch) => batch[0]!.eventKey);
     const firstBatchIsPage1 = insertOrder[0]!.startsWith("sid:a-page1-");
     expect(firstBatchIsPage1).toBe(true);
+    // Task 13G (Codex re-review round 3, P1): batches are aligned to PAGE boundaries, not
+    // an arbitrary fixed-size window -- page 1 (50 rows) must land in its OWN batch, never
+    // combined with any of page 0's 250 rows into one straddling batch.
+    expect(repo.insertRawFillsBatchCalls).toHaveLength(2);
+    expect(repo.insertRawFillsBatchCalls[0]).toHaveLength(50);
+    expect(repo.insertRawFillsBatchCalls[1]).toHaveLength(PAGE_SIZE);
+    expect(repo.insertRawFillsBatchCalls[0]!.every((r) => r.eventKey.startsWith("sid:a-page1-"))).toBe(true);
+  });
+
+  it("Task 13G (Codex re-review round 3, P1): the deadline is re-checked immediately before persistence starts, even for a confirmed-complete scan -- nothing is persisted if it has already passed by then", async () => {
+    const repo = new FakeRepo();
+    repo.fillsByEventKey.set("sid:seed", { id: "fill-seed", row: { eventKey: "sid:seed", wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
+    // A short (naturally-completing) page, so the FETCH loop finishes via natural end --
+    // scanConfirmedComplete=true -- but `now()` reports the deadline as already exceeded
+    // by the time persistence itself is about to start. Calls: 1) detectedAtMs, 2) page 0's
+    // own deadline check (still within budget, so the fetch proceeds and naturally
+    // completes via the short page), 3) the readyToPersist check (now exceeded).
+    const network = makeNetworkDeps({ 0: [trade({ id: "native-late" })] });
+    const base = 1_700_000_500_000;
+    const { deps } = makeDeps({ repo, network, now: sequentialClock([base, base, base + 999_999]) });
+    const result = await pollSportsShadowWallet(WALLET, 0, deps, base + 500);
+    expect(result.newRows).toBe(0);
+    expect(repo.fillsByEventKey.size).toBe(1); // only the pre-seeded row
+    expect(repo.insertRawFillsBatchCalls).toHaveLength(0); // persistence never started at all
+    expect(result.backlogTruncated).toBe(true);
   });
 
   it("Task 13G / P1-Q (Codex re-review, P1): a persistence batch failure stops ALL further batches this poll, so only a contiguous run from the prior durable boundary can ever be committed", async () => {
