@@ -1214,3 +1214,41 @@ describe("pollSportsShadowWallet — Task 12F/P1-G: lease checkpoint stops non-i
     expect(repo.findLatestEpisodeCalls).toBe(0); // phase 2 never started
   });
 });
+
+describe("Task 13E, C: the default network path (no fetchImpl override) uses the Cloudflare-Workers-safe runtimeFetch adapter, not a bare detached `fetch` reference", () => {
+  function installThisSensitiveGlobalFetch(): () => void {
+    const original = globalThis.fetch;
+    function brandedFetch(this: unknown): ReturnType<typeof fetch> {
+      if (this !== globalThis) {
+        throw new TypeError("Illegal invocation: function called with incorrect `this` reference.");
+      }
+      return Promise.resolve(new Response("[]", { status: 200, headers: { "content-type": "application/json" } }));
+    }
+    globalThis.fetch = brandedFetch as typeof fetch;
+    return () => {
+      globalThis.fetch = original;
+    };
+  }
+
+  it("pollSportsShadowWallet completes without an Illegal-invocation failure when no network.fetchImpl override is supplied at all", async () => {
+    const restore = installThisSensitiveGlobalFetch();
+    try {
+      const repo = new FakeRepo();
+      const result = await pollSportsShadowWallet(WALLET, 0, {
+        repo,
+        now: () => 1_700_000_500_000,
+        network: {
+          // Deliberately no `fetchImpl` here -- must fall through to the module's own
+          // defaultNetworkDeps.fetchImpl, which Task 13E fixed to be runtimeFetch.
+          reserveRequestSlot: async () => 0,
+          getHostCooldown: async () => ({ blocked: false, reason: null }),
+          recordHostRateLimit: async () => {},
+        } as Partial<SourcePollNetworkDeps> as SourcePollNetworkDeps,
+      });
+      expect(result.pagesFetched).toBeGreaterThan(0); // the branded fetch really was called and returned successfully
+      expect(result.newRows).toBe(0); // empty page -- no fabricated evidence
+    } finally {
+      restore();
+    }
+  });
+});

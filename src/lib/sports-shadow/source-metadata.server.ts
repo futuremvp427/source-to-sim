@@ -1,4 +1,5 @@
 import { classifyGammaMarket, type GammaMarket } from "./eligibility";
+import { runtimeFetch } from "./runtime-fetch.server";
 import type { SourceMarketMetadata } from "./types";
 
 const GAMMA_API_BASE = "https://gamma-api.polymarket.com";
@@ -48,7 +49,7 @@ function unverifiedResult(conditionId: string, reasonCode: "UNVERIFIED_FETCH_FAI
  * lookup cannot abort a batch of fills for a wallet poll, and network uncertainty is never
  * silently converted into eligibility.
  */
-export async function fetchSourceMarketMetadata(conditionId: string, fetchImpl: typeof fetch = fetch): Promise<SourceMarketMetadata> {
+export async function fetchSourceMarketMetadata(conditionId: string, fetchImpl: typeof fetch = runtimeFetch): Promise<SourceMarketMetadata> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   let raw: unknown;

@@ -20,6 +20,7 @@
 
 import { getHostCooldown, parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "../http-rate-limit.server";
 import { classifyKalshiMarket, normalizeKalshiBook, PHASE1_KALSHI_SERIES, type KalshiBookSnapshot, type KalshiCandidate, type KalshiRawEvent, type KalshiRawMarket } from "./kalshi";
+import { runtimeFetch } from "./runtime-fetch.server";
 import { NO_OP_LEASE_CHECKPOINT, type LeaseCheckpoint } from "./sports-lease.server";
 
 export const KALSHI_HOST = "external-api.kalshi.com";
@@ -46,7 +47,9 @@ export type KalshiNetworkDeps = {
 };
 
 const defaultDeps: KalshiNetworkDeps = {
-  fetchImpl: fetch,
+  // Task 13E: never the bare `fetch` reference -- see runtime-fetch.server.ts's doc
+  // comment for why that breaks in Cloudflare Workers (confirmed live in production).
+  fetchImpl: runtimeFetch,
   reserveRequestSlot,
   getHostCooldown,
   recordHostRateLimit,

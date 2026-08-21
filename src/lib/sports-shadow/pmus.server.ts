@@ -13,6 +13,7 @@
 import { getHostCooldown, parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "../http-rate-limit.server";
 import { PMUS_PUBLIC_BASE } from "../pmus/us-markets.server";
 import { eventToCandidates, normalizePmusBook, type PmusCandidate, type PmusRawEvent } from "./pmus";
+import { runtimeFetch } from "./runtime-fetch.server";
 import { NO_OP_LEASE_CHECKPOINT, type LeaseCheckpoint } from "./sports-lease.server";
 import type { BookSnapshot } from "./types";
 
@@ -39,7 +40,9 @@ export type PmusNetworkDeps = {
 };
 
 const defaultDeps: PmusNetworkDeps = {
-  fetchImpl: fetch,
+  // Task 13E: never the bare `fetch` reference -- see runtime-fetch.server.ts's doc
+  // comment for why that breaks in Cloudflare Workers (confirmed live in production).
+  fetchImpl: runtimeFetch,
   reserveRequestSlot,
   getHostCooldown,
   recordHostRateLimit,

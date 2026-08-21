@@ -358,3 +358,36 @@ describe("auth/safety", () => {
     }
   });
 });
+
+describe("Task 13E, D: the default network path (no fetchImpl override) uses the Cloudflare-Workers-safe runtimeFetch adapter, not a bare detached `fetch` reference", () => {
+  function installThisSensitiveGlobalFetch(): () => void {
+    const original = globalThis.fetch;
+    function brandedFetch(this: unknown): ReturnType<typeof fetch> {
+      if (this !== globalThis) {
+        throw new TypeError("Illegal invocation: function called with incorrect `this` reference.");
+      }
+      return Promise.resolve(new Response(JSON.stringify({ events: [] }), { status: 200, headers: { "content-type": "application/json" } }));
+    }
+    globalThis.fetch = brandedFetch as typeof fetch;
+    return () => {
+      globalThis.fetch = original;
+    };
+  }
+
+  it("discoverPmusMlbMarkets completes without an Illegal-invocation failure when no fetchImpl override is supplied at all", async () => {
+    clearPmusDiscoveryCache();
+    const restore = installThisSensitiveGlobalFetch();
+    try {
+      const candidates = await discoverPmusMlbMarkets({
+        // Deliberately no `fetchImpl` here -- must fall through to the module's own
+        // defaultDeps.fetchImpl, which Task 13E fixed to be runtimeFetch.
+        reserveRequestSlot: async () => 0,
+        getHostCooldown: async () => ({ blocked: false, reason: null }),
+        recordHostRateLimit: async () => {},
+      });
+      expect(candidates).toEqual([]); // the branded fetch really was called and returned successfully
+    } finally {
+      restore();
+    }
+  });
+});
