@@ -138,14 +138,15 @@ export const MAX_PAGES_PER_WALLET = Math.floor(MAX_TRADES_OFFSET / PAGE_SIZE) + 
 export const MAX_PENDING_FILLS_PER_POLL = 500;
 
 /**
- * Task 13G (Codex re-review round 7, P1): bounds how many distinct degraded-tuple
- * prefixes `countDurableOrdinalFills` reconciles CONCURRENTLY in one call -- keeps the
- * number of simultaneous Supabase subrequests small and predictable (relevant on a
- * subrequest-limited runtime like Cloudflare Workers) regardless of how many distinct
- * prefixes a large catch-up scan's batch happens to contain. Any excess is deferred
- * (conservatively treated as already-durable this poll, never inserted) rather than
- * processed unbounded -- re-evaluated fresh, with no memory of this decision, on the
- * wallet's next poll.
+ * Task 13G (Codex re-review rounds 7-8, P1): the CHUNK size `countDurableOrdinalFills`
+ * reconciles CONCURRENTLY at a time -- keeps the number of simultaneous Supabase
+ * subrequests small and predictable (relevant on a subrequest-limited runtime like
+ * Cloudflare Workers) regardless of how many distinct prefixes a large catch-up scan's
+ * batch happens to contain. Every chunk is processed in sequence (not just the first) so
+ * which prefixes get reconciled depends only on how many chunks the shared deadline
+ * allows, never on a prefix's fixed position in the array -- round 7's first version of
+ * this fix took only the first CAP prefixes and permanently starved every later one,
+ * since the same oldest-first ordering reselects the identical leading slice every poll.
  */
 export const RECONCILE_PREFIX_CAP = 25;
 
@@ -486,37 +487,41 @@ export const supabasePollRepository: PollRepository = {
     // FIX: go back to (a)'s query shape -- per-prefix `count: "exact", head: true"` (no
     // rows returned, so NEVER subject to the row cap, and an EXACT number regardless of
     // how large the wallet's cumulative history has grown -- no pagination, no ambiguity)
-    // -- but issue them CONCURRENTLY, bounded to RECONCILE_PREFIX_CAP prefixes per call.
-    // Concurrency keeps real wall time close to one round trip regardless of prefix count;
-    // the cap keeps the number of simultaneous subrequests small and predictable (relevant
-    // on a subrequest-limited runtime like Cloudflare Workers). Any prefix beyond the cap
-    // is conservatively treated as already-durable THIS poll (skip, never insert) rather
-    // than guessed at -- a temporary deferral, not a permanent one: it is re-evaluated
-    // fresh, with no memory of this decision, on the wallet's very next poll, whenever this
-    // poll's batch of distinct prefixes is smaller (the overwhelmingly common case, since a
-    // batch this large only arises from an extreme trading burst or an extended outage).
-    const toReconcile = tuplePrefixes.slice(0, RECONCILE_PREFIX_CAP);
-    const deferred = tuplePrefixes.slice(RECONCILE_PREFIX_CAP);
-    for (const prefix of deferred) out.set(prefix, Number.POSITIVE_INFINITY);
-
-    // Task 13G (Codex re-review round 7, P1): checked before issuing the concurrent batch
-    // -- if already past deadline, none of these requests start at all this poll.
-    if (deadline && deadline.now() >= deadline.deadlineAtMs) {
-      for (const prefix of toReconcile) out.set(prefix, Number.POSITIVE_INFINITY);
-      return out;
+    // -- but issue them in CONCURRENT CHUNKS of RECONCILE_PREFIX_CAP, looping over every
+    // chunk (not just the first), with a deadline check BETWEEN chunks. Concurrency within
+    // a chunk keeps real wall time for that chunk close to one round trip; chunking (not a
+    // one-shot hard cap) keeps the number of SIMULTANEOUS subrequests small and predictable
+    // (relevant on a subrequest-limited runtime like Cloudflare Workers) while still
+    // covering every requested prefix within one poll whenever the deadline allows.
+    //
+    // Task 13G (Codex re-review round 8, P1): an earlier version of this fix took only the
+    // FIRST RECONCILE_PREFIX_CAP prefixes and permanently deferred the rest. Since
+    // `tuplePrefixes` is rebuilt in the SAME oldest-first order every poll from the SAME
+    // underlying (not-yet-durable) source data, that was not a "temporary" deferral at
+    // all -- it deterministically re-selected the identical leading slice every single
+    // time, starving any prefix beyond position RECONCILE_PREFIX_CAP forever. Looping over
+    // every chunk fixes this: which prefixes get reconciled no longer depends on their
+    // position in the array, only on how many chunks the deadline allows -- a genuinely
+    // temporary, poll-to-poll-varying limit tied to wall-clock budget, not a fixed slice.
+    for (let i = 0; i < tuplePrefixes.length; i += RECONCILE_PREFIX_CAP) {
+      if (deadline && deadline.now() >= deadline.deadlineAtMs) {
+        for (const prefix of tuplePrefixes.slice(i)) out.set(prefix, Number.POSITIVE_INFINITY);
+        break;
+      }
+      const chunk = tuplePrefixes.slice(i, i + RECONCILE_PREFIX_CAP);
+      const results = await Promise.all(
+        chunk.map(async (prefix) => {
+          const { count, error } = await supabaseAdmin
+            .from("sports_shadow_source_fills" as never)
+            .select("id", { count: "exact", head: true })
+            .eq("wallet", wallet)
+            .like("event_key", `${prefix}%`);
+          if (error) throw new Error(error.message);
+          return { prefix, count: count ?? 0 };
+        }),
+      );
+      for (const { prefix, count } of results) out.set(prefix, count);
     }
-    const results = await Promise.all(
-      toReconcile.map(async (prefix) => {
-        const { count, error } = await supabaseAdmin
-          .from("sports_shadow_source_fills" as never)
-          .select("id", { count: "exact", head: true })
-          .eq("wallet", wallet)
-          .like("event_key", `${prefix}%`);
-        if (error) throw new Error(error.message);
-        return { prefix, count: count ?? 0 };
-      }),
-    );
-    for (const { prefix, count } of results) out.set(prefix, count);
     return out;
   },
 
