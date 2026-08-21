@@ -1,17 +1,31 @@
 /**
  * Sports Forward Shadow worker orchestration — PURE logic only.
  *
- * Turns raw durable rows (already-fetched signals/matches) into the bounded set of
- * "still missing target-venue resolution" work items for this cycle, and builds the
- * Task 7 SourceSignal each one needs. No network, no Supabase, no timers.
+ * Builds the Task 7 SourceSignal a pending signal row needs, and small pure helpers used
+ * by the orchestrator. No network, no Supabase, no timers.
+ *
+ * ============================== TASK 11B: PENDING-SIGNAL STARVATION FIX ==============================
+ * This module used to also derive "which signals are pending" client-side, by filtering a
+ * fixed-size ORDER BY created_at ASC LIMIT <scanWindow> prefix of ALL signals down to the
+ * ones missing a match. That is a confirmed correctness bug, not a low-volume edge case:
+ * once cumulative signal count exceeds the scan window and the oldest rows in that window
+ * happen to all be fully resolved, the window is permanently saturated with resolved
+ * rows — any signal created after that point is never fetched at all, regardless of how
+ * much real pending work exists. The fix pushes "missing a venue match" into SQL itself
+ * (see supabase/migrations/20260820230000_sports_shadow_pending_signals_rpc.sql's
+ * find_pending_sports_shadow_signals, an explicit LEFT JOIN anti-join, ORDER BY
+ * created_at ASC, id ASC, LIMIT <batchSize>), so the returned rows are always the
+ * globally oldest genuinely-pending signals — boundedness now applies to pending rows,
+ * never to a fixed historical prefix. worker.server.ts's WorkerRepository maps the RPC
+ * result straight into PendingSignal; there is no client-side re-derivation of "missing"
+ * left to do or test here.
+ * ================================================================================
  */
 
 import type { SourceSignal } from "./resolver";
-import type { BetType, Venue } from "./types";
+import type { BetType } from "./types";
 
-/** Bounded scan window for the pending-signal recovery query (see worker.server.ts's findPendingSignals). Generous relative to Phase 1's expected low signal volume, but never unbounded. */
-export const PENDING_SCAN_WINDOW = 200;
-/** Bounded per-cycle processing batch — the actual cap on how much pending work one cycle attempts. */
+/** Bounded per-cycle processing batch — the actual cap on how much pending work one cycle attempts. Passed directly as the RPC's p_limit; the RPC itself additionally clamps to a sane ceiling. */
 export const PENDING_BATCH_SIZE = 20;
 
 export type SignalRow = {
@@ -31,40 +45,7 @@ export type SignalRow = {
   marketSlug: string | null;
 };
 
-export type ExistingMatchRow = { signalId: string; venue: Venue };
-
 export type PendingSignal = SignalRow & { missingPmus: boolean; missingKalshi: boolean };
-
-/**
- * Pure derivation of "which signals in this scan window still need at least one venue
- * resolved," oldest first, bounded to `batchSize`. Deterministic and restart-safe: given
- * the same durable `signals`/`matches` snapshot, always returns the identical batch — no
- * hidden state, no reliance on any prior cycle's in-memory result. This is what makes the
- * crash-recovery hard gate hold: a signal orphaned by a crash between persist and
- * resolution is found here on the NEXT cycle exactly the same way a same-cycle new signal
- * is, because both are read fresh from durable state every time.
- */
-export function derivePendingSignals(signals: SignalRow[], matches: ExistingMatchRow[], batchSize: number = PENDING_BATCH_SIZE): PendingSignal[] {
-  const venuesBySignal = new Map<string, Set<Venue>>();
-  for (const m of matches) {
-    const set = venuesBySignal.get(m.signalId) ?? new Set<Venue>();
-    set.add(m.venue);
-    venuesBySignal.set(m.signalId, set);
-  }
-
-  const sorted = [...signals].sort((a, b) => a.createdAtIso.localeCompare(b.createdAtIso) || a.id.localeCompare(b.id));
-
-  const pending: PendingSignal[] = [];
-  for (const s of sorted) {
-    const venues = venuesBySignal.get(s.id) ?? new Set<Venue>();
-    const missingPmus = !venues.has("PMUS");
-    const missingKalshi = !venues.has("KALSHI");
-    if (!missingPmus && !missingKalshi) continue;
-    pending.push({ ...s, missingPmus, missingKalshi });
-    if (pending.length >= batchSize) break;
-  }
-  return pending;
-}
 
 /**
  * Builds the Task 7 SourceSignal for one pending signal row. Returns null when a required

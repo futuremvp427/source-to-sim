@@ -8,7 +8,8 @@ import type { KalshiCandidate } from "./kalshi";
 import type { VenueMatchResult } from "./resolver";
 import type { SportsLease, SportsLeaseRepository } from "./sports-lease.server";
 import type { WalletPollResult } from "./source-poll.server";
-import type { ExistingMatchRow, SignalRow } from "./worker";
+import type { SignalRow } from "./worker";
+import type { Venue } from "./types";
 import {
   FINAL_OBSERVATION_STAGE_DEADLINE_MS_FOR_TEST,
   OBSERVATION_LEASE_TTL_SECONDS,
@@ -70,13 +71,36 @@ function signalRow(overrides: Partial<SignalRow> = {}): SignalRow {
   };
 }
 
+type ExistingMatchRow = { signalId: string; venue: Venue };
+
+/**
+ * Mirrors find_pending_sports_shadow_signals' EXACT SQL semantics (see
+ * supabase/migrations/20260820230000_sports_shadow_pending_signals_rpc.sql): a LEFT
+ * JOIN anti-join per venue (never a fixed-size historical-prefix scan), ORDER BY
+ * (created_at ASC, id ASC), LIMIT clamped to [0, 100] with a NULL-safe default of 20.
+ * This is the reference implementation the Task 11B regression suite (see the
+ * "find_pending_sports_shadow_signals RPC semantics" describe block) validates against,
+ * standing in for the real-Postgres validation this environment could not perform (no
+ * cached postgres:17 image, and pulling one was out of scope per the mission).
+ */
 function makeFakeWorkerRepo(signals: SignalRow[], matches: ExistingMatchRow[]): WorkerRepository {
   return {
-    async fetchRecentSignals() {
-      return signals;
-    },
-    async fetchExistingMatches(signalIds) {
-      return matches.filter((m) => signalIds.includes(m.signalId));
+    async findPendingSignals(limit: number) {
+      const matchedVenuesBySignal = new Map<string, Set<Venue>>();
+      for (const m of matches) {
+        const set = matchedVenuesBySignal.get(m.signalId) ?? new Set<Venue>();
+        set.add(m.venue);
+        matchedVenuesBySignal.set(m.signalId, set);
+      }
+      const clampedLimit = Math.min(Math.max(limit ?? 20, 0), 100);
+      const sorted = [...signals].sort((a, b) => a.createdAtIso.localeCompare(b.createdAtIso) || a.id.localeCompare(b.id));
+      const pending = sorted
+        .map((s) => {
+          const venues = matchedVenuesBySignal.get(s.id) ?? new Set<Venue>();
+          return { ...s, missingPmus: !venues.has("PMUS"), missingKalshi: !venues.has("KALSHI") };
+        })
+        .filter((s) => s.missingPmus || s.missingKalshi);
+      return pending.slice(0, clampedLimit);
     },
   };
 }
@@ -267,6 +291,129 @@ describe("runSportsShadowCycle — durable pending-signal recovery (crash-recove
     const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ workerRepo }));
     expect(summary.sourceLane?.pendingFound).toBeLessThan(25); // capped at PENDING_BATCH_SIZE (20)
     expect(summary.sourceLane?.pendingRemainingHint).toBe(true);
+  });
+});
+
+describe("find_pending_sports_shadow_signals RPC semantics (Task 11B starvation fix)", () => {
+  function idOf(i: number): string {
+    return `sig-${String(i).padStart(4, "0")}`;
+  }
+  function ts(minuteOffset: number): string {
+    const base = Date.parse("2026-08-01T00:00:00.000Z");
+    return new Date(base + minuteOffset * 60_000).toISOString();
+  }
+
+  it("1. 220 signals, 1-200 fully resolved, 201 unresolved => signal 201 is returned (the confirmed starvation scenario)", async () => {
+    const signals = Array.from({ length: 220 }, (_, i) => signalRow({ id: idOf(i), createdAtIso: ts(i) }));
+    const matches: ExistingMatchRow[] = [];
+    for (let i = 0; i < 200; i += 1) {
+      matches.push({ signalId: idOf(i), venue: "PMUS" }, { signalId: idOf(i), venue: "KALSHI" }); // fully resolved
+    }
+    // signal 200 (0-indexed) is left unresolved, matching "signal 201" in the mission's 1-indexed framing.
+    const workerRepo = makeFakeWorkerRepo(signals, matches);
+    const pending = await workerRepo.findPendingSignals(20);
+    expect(pending.map((p) => p.id)).toContain(idOf(200));
+    expect(pending[0]?.id).toBe(idOf(200)); // globally oldest pending, not silently absent
+  });
+
+  it("2. unresolved rows scattered above and below index 200 => the globally oldest unresolved one wins, regardless of position", async () => {
+    const signals = Array.from({ length: 300 }, (_, i) => signalRow({ id: idOf(i), createdAtIso: ts(i) }));
+    const matches: ExistingMatchRow[] = [];
+    for (let i = 0; i < 300; i += 1) {
+      if (i === 50 || i === 250) continue; // leave these two unresolved; everything else fully resolved
+      matches.push({ signalId: idOf(i), venue: "PMUS" }, { signalId: idOf(i), venue: "KALSHI" });
+    }
+    const workerRepo = makeFakeWorkerRepo(signals, matches);
+    const pending = await workerRepo.findPendingSignals(20);
+    expect(pending.map((p) => p.id)).toEqual([idOf(50), idOf(250)]);
+  });
+
+  it("3. a signal missing PMUS only is returned with missingPmus=true, missingKalshi=false", async () => {
+    const workerRepo = makeFakeWorkerRepo([signalRow()], [{ signalId: "sig-1", venue: "KALSHI" }]);
+    const pending = await workerRepo.findPendingSignals(20);
+    expect(pending).toEqual([expect.objectContaining({ id: "sig-1", missingPmus: true, missingKalshi: false })]);
+  });
+
+  it("4. a signal missing Kalshi only is returned with missingPmus=false, missingKalshi=true", async () => {
+    const workerRepo = makeFakeWorkerRepo([signalRow()], [{ signalId: "sig-1", venue: "PMUS" }]);
+    const pending = await workerRepo.findPendingSignals(20);
+    expect(pending).toEqual([expect.objectContaining({ id: "sig-1", missingPmus: false, missingKalshi: true })]);
+  });
+
+  it("5. a signal missing both venues is returned with missingPmus=true, missingKalshi=true", async () => {
+    const workerRepo = makeFakeWorkerRepo([signalRow()], []);
+    const pending = await workerRepo.findPendingSignals(20);
+    expect(pending).toEqual([expect.objectContaining({ id: "sig-1", missingPmus: true, missingKalshi: true })]);
+  });
+
+  it("6. a fully resolved signal (both venues matched) is excluded entirely", async () => {
+    const workerRepo = makeFakeWorkerRepo([signalRow()], [{ signalId: "sig-1", venue: "PMUS" }, { signalId: "sig-1", venue: "KALSHI" }]);
+    const pending = await workerRepo.findPendingSignals(20);
+    expect(pending).toHaveLength(0);
+  });
+
+  it("7. more pending signals than the batch size => exactly the bounded, deterministic, oldest batch", async () => {
+    const signals = Array.from({ length: 50 }, (_, i) => signalRow({ id: idOf(i), createdAtIso: ts(i) }));
+    const workerRepo = makeFakeWorkerRepo(signals, []); // none resolved -- all 50 pending
+    const pending = await workerRepo.findPendingSignals(20);
+    expect(pending).toHaveLength(20);
+    expect(pending.map((p) => p.id)).toEqual(Array.from({ length: 20 }, (_, i) => idOf(i)));
+  });
+
+  it("8. a repeated, unchanged call returns an identical batch in identical order", async () => {
+    const signals = Array.from({ length: 30 }, (_, i) => signalRow({ id: idOf(i), createdAtIso: ts(i) }));
+    const workerRepo = makeFakeWorkerRepo(signals, []);
+    const first = await workerRepo.findPendingSignals(20);
+    const second = await workerRepo.findPendingSignals(20);
+    expect(first).toEqual(second);
+  });
+
+  it("9. resolving the first pending signal advances the next call correctly", async () => {
+    const signals = Array.from({ length: 5 }, (_, i) => signalRow({ id: idOf(i), createdAtIso: ts(i) }));
+    const matches: ExistingMatchRow[] = [];
+    const workerRepo = makeFakeWorkerRepo(signals, matches);
+    const first = await workerRepo.findPendingSignals(20);
+    expect(first[0]?.id).toBe(idOf(0));
+
+    // Simulate resolving signal 0's both venues, then re-querying (a fresh call, not a cursor).
+    matches.push({ signalId: idOf(0), venue: "PMUS" }, { signalId: idOf(0), venue: "KALSHI" });
+    const second = await workerRepo.findPendingSignals(20);
+    expect(second[0]?.id).toBe(idOf(1));
+    expect(second.map((p) => p.id)).not.toContain(idOf(0));
+  });
+
+  it("ties on identical created_at break deterministically by id ascending", async () => {
+    const sameTs = ts(0);
+    const signals = [signalRow({ id: "sig-b", createdAtIso: sameTs }), signalRow({ id: "sig-a", createdAtIso: sameTs })];
+    const workerRepo = makeFakeWorkerRepo(signals, []);
+    const pending = await workerRepo.findPendingSignals(20);
+    expect(pending.map((p) => p.id)).toEqual(["sig-a", "sig-b"]);
+  });
+
+  it("a limit clamp never allows an unbounded result even if a caller passes an absurd value", async () => {
+    const signals = Array.from({ length: 150 }, (_, i) => signalRow({ id: idOf(i), createdAtIso: ts(i) }));
+    const workerRepo = makeFakeWorkerRepo(signals, []);
+    const pending = await workerRepo.findPendingSignals(10_000);
+    expect(pending.length).toBeLessThanOrEqual(100); // clamped ceiling
+  });
+
+  it("the actual migration SQL matches the required semantics and security posture", () => {
+    const sql = readFileSync(
+      new URL("../../../supabase/migrations/20260820230000_sports_shadow_pending_signals_rpc.sql", import.meta.url),
+      "utf8",
+    );
+    expect(sql).toContain("CREATE OR REPLACE FUNCTION public.find_pending_sports_shadow_signals");
+    expect(sql).toMatch(/LANGUAGE sql/i);
+    expect(sql).toMatch(/\bSTABLE\b/);
+    expect(sql).toMatch(/SECURITY INVOKER/);
+    expect(sql).toContain("SET search_path = public");
+    expect(sql).toMatch(/LEFT JOIN public\.sports_market_matches/);
+    expect(sql).toMatch(/WHERE\s+pmus_match\.id IS NULL OR kalshi_match\.id IS NULL/);
+    expect(sql).toMatch(/ORDER BY s\.created_at ASC,\s*s\.id ASC/);
+    expect(sql).toMatch(/LIMIT LEAST\(GREATEST\(COALESCE\(p_limit/);
+    expect(sql).toContain("REVOKE ALL ON FUNCTION public.find_pending_sports_shadow_signals(integer) FROM PUBLIC, anon, authenticated");
+    expect(sql).toContain("GRANT EXECUTE ON FUNCTION public.find_pending_sports_shadow_signals(integer) TO service_role");
+    expect(sql).not.toMatch(/CREATE TABLE/); // no new table
   });
 });
 

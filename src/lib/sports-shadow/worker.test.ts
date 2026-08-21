@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { budgetExceeded, derivePendingSignals, detectedAtMsFromSignal, toSourceSignal, type ExistingMatchRow, type SignalRow } from "./worker";
+import { budgetExceeded, detectedAtMsFromSignal, toSourceSignal, type SignalRow } from "./worker";
 
 function signal(overrides: Partial<SignalRow> = {}): SignalRow {
   return {
@@ -20,61 +20,6 @@ function signal(overrides: Partial<SignalRow> = {}): SignalRow {
     ...overrides,
   };
 }
-
-describe("derivePendingSignals", () => {
-  it("a signal with no match rows at all is pending for both venues", () => {
-    const pending = derivePendingSignals([signal()], []);
-    expect(pending).toHaveLength(1);
-    expect(pending[0]).toMatchObject({ missingPmus: true, missingKalshi: true });
-  });
-
-  it("a signal missing PMUS only does not redo an already-completed Kalshi result", () => {
-    const matches: ExistingMatchRow[] = [{ signalId: "sig-1", venue: "KALSHI" }];
-    const pending = derivePendingSignals([signal()], matches);
-    expect(pending[0]).toMatchObject({ missingPmus: true, missingKalshi: false });
-  });
-
-  it("a signal missing Kalshi only does not redo an already-completed PMUS result", () => {
-    const matches: ExistingMatchRow[] = [{ signalId: "sig-1", venue: "PMUS" }];
-    const pending = derivePendingSignals([signal()], matches);
-    expect(pending[0]).toMatchObject({ missingPmus: false, missingKalshi: true });
-  });
-
-  it("a signal with both venues already resolved is excluded entirely", () => {
-    const matches: ExistingMatchRow[] = [{ signalId: "sig-1", venue: "PMUS" }, { signalId: "sig-1", venue: "KALSHI" }];
-    const pending = derivePendingSignals([signal()], matches);
-    expect(pending).toHaveLength(0);
-  });
-
-  it("oldest first, by createdAtIso ascending", () => {
-    const s1 = signal({ id: "sig-old", createdAtIso: "2026-08-19T00:00:00.000Z" });
-    const s2 = signal({ id: "sig-new", createdAtIso: "2026-08-19T01:00:00.000Z" });
-    const pending = derivePendingSignals([s2, s1], []); // deliberately reversed input order
-    expect(pending.map((p) => p.id)).toEqual(["sig-old", "sig-new"]);
-  });
-
-  it("is bounded to batchSize, leaving remaining pending signals out of this cycle's batch", () => {
-    const signals = Array.from({ length: 5 }, (_, i) => signal({ id: `sig-${i}`, createdAtIso: `2026-08-19T00:0${i}:00.000Z` }));
-    const pending = derivePendingSignals(signals, [], 3);
-    expect(pending).toHaveLength(3);
-    expect(pending.map((p) => p.id)).toEqual(["sig-0", "sig-1", "sig-2"]);
-  });
-
-  it("deterministic: identical input always produces identical output regardless of call count", () => {
-    const signals = [signal({ id: "sig-a" }), signal({ id: "sig-b", createdAtIso: "2026-08-19T00:01:00.000Z" })];
-    const first = derivePendingSignals(signals, []);
-    const second = derivePendingSignals(signals, []);
-    expect(first).toEqual(second);
-  });
-
-  it("restart-safe: derivation depends only on the passed-in durable snapshot, never on any external/hidden state", () => {
-    // Calling twice with the SAME arguments (simulating two separate process instances
-    // reading the same durable DB state) yields the same result -- no module-level cache exists in worker.ts to diverge.
-    const signals = [signal()];
-    const matches: ExistingMatchRow[] = [{ signalId: "sig-1", venue: "PMUS" }];
-    expect(derivePendingSignals(signals, matches)).toEqual(derivePendingSignals(signals, matches));
-  });
-});
 
 describe("toSourceSignal", () => {
   it("maps a pending signal row into a resolver SourceSignal", () => {

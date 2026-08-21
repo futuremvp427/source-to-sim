@@ -32,18 +32,8 @@ import type { PmusCandidate } from "./pmus";
 import { resolveKalshiMatch, resolvePmusMatch, type MatchStatus } from "./resolver";
 import { acquireSportsLease, releaseSportsLease, supabaseSportsLeaseRepository, type SportsLeaseRepository } from "./sports-lease.server";
 import { pollSportsShadowWallet, supabasePollRepository, type WalletPollDeps, type WalletPollResult } from "./source-poll.server";
-import type { BetType, Venue } from "./types";
-import {
-  PENDING_BATCH_SIZE,
-  PENDING_SCAN_WINDOW,
-  budgetExceeded,
-  derivePendingSignals,
-  detectedAtMsFromSignal,
-  toSourceSignal,
-  type ExistingMatchRow,
-  type PendingSignal,
-  type SignalRow,
-} from "./worker";
+import type { BetType } from "./types";
+import { PENDING_BATCH_SIZE, budgetExceeded, detectedAtMsFromSignal, toSourceSignal, type PendingSignal } from "./worker";
 
 export const OBSERVATION_LOCK_ID = "sports_shadow_observations";
 export const SOURCE_LOCK_ID = "sports_shadow_source";
@@ -101,15 +91,14 @@ export const SOURCE_LANE_BUDGET_MS = 30_000;
 export const SOURCE_LEASE_TTL_SECONDS = 60;
 
 /* ------------------------------------------------------------------ */
-/* Pending-signal repository (raw durable reads, delegates derivation to worker.ts) */
+/* Pending-signal repository — Task 11B: backed by a single RPC          */
 /* ------------------------------------------------------------------ */
 
 export type WorkerRepository = {
-  fetchRecentSignals(scanWindow: number): Promise<SignalRow[]>;
-  fetchExistingMatches(signalIds: string[]): Promise<ExistingMatchRow[]>;
+  findPendingSignals(limit: number): Promise<PendingSignal[]>;
 };
 
-type RawSignalRow = {
+type RawPendingSignalRow = {
   id: string;
   created_at: string;
   source_first_fill_at: string;
@@ -124,26 +113,27 @@ type RawSignalRow = {
   selected_side: string;
   source_event_slug: string | null;
   source_market_slug: string | null;
+  missing_pmus: boolean;
+  missing_kalshi: boolean;
 };
 
 /**
- * Two flat, straightforward queries (never an embedded PostgREST join, per the mission's
- * explicit "given the existing standing integration risk around complex embedded joins,
- * use straightforward queries if possible"). No new table: durable pending work is fully
- * expressible as "a signal in sports_shadow_signals with no corresponding row in
- * sports_market_matches for a given venue."
+ * Backed by find_pending_sports_shadow_signals (see
+ * supabase/migrations/20260820230000_sports_shadow_pending_signals_rpc.sql): a single
+ * read-only SQL RPC that anti-joins sports_shadow_signals against
+ * sports_market_matches per venue, orders by (created_at ASC, id ASC), and clamps the
+ * caller-supplied limit — so the returned rows are always the globally oldest genuinely
+ * pending signals, never a fixed-size historical prefix (see worker.ts's Task 11B doc
+ * comment for the starvation bug this replaces). Cast `as never` on both the RPC name
+ * and params — same established pattern as reserve_http_request_slot/
+ * record_http_rate_limit/acquire_worker_lease: generated Supabase types lag this
+ * unapplied migration.
  */
 export const supabaseWorkerRepository: WorkerRepository = {
-  async fetchRecentSignals(scanWindow) {
-    const { data, error } = await supabaseAdmin
-      .from("sports_shadow_signals" as never)
-      .select(
-        "id, created_at, source_first_fill_at, source_wallet, source_condition_id, source_asset, bet_type, away_team, home_team, scheduled_start_at, line, selected_side, source_event_slug, source_market_slug",
-      )
-      .order("created_at", { ascending: true })
-      .limit(scanWindow);
+  async findPendingSignals(limit) {
+    const { data, error } = await supabaseAdmin.rpc("find_pending_sports_shadow_signals" as never, { p_limit: limit } as never);
     if (error) throw new Error(error.message);
-    return ((data ?? []) as unknown as RawSignalRow[]).map((r) => ({
+    return ((data ?? []) as unknown as RawPendingSignalRow[]).map((r) => ({
       id: r.id,
       createdAtIso: r.created_at,
       sourceFirstFillAtIso: r.source_first_fill_at,
@@ -158,28 +148,14 @@ export const supabaseWorkerRepository: WorkerRepository = {
       selectedOutcomeRaw: r.selected_side,
       eventSlug: r.source_event_slug,
       marketSlug: r.source_market_slug,
+      missingPmus: r.missing_pmus,
+      missingKalshi: r.missing_kalshi,
     }));
-  },
-
-  async fetchExistingMatches(signalIds) {
-    if (signalIds.length === 0) return [];
-    const { data, error } = await supabaseAdmin
-      .from("sports_market_matches" as never)
-      .select("signal_id, venue")
-      .in("signal_id", signalIds);
-    if (error) throw new Error(error.message);
-    return ((data ?? []) as unknown as { signal_id: string; venue: Venue }[]).map((r) => ({ signalId: r.signal_id, venue: r.venue }));
   },
 };
 
-export async function findPendingSignals(
-  repo: WorkerRepository,
-  scanWindow: number = PENDING_SCAN_WINDOW,
-  batchSize: number = PENDING_BATCH_SIZE,
-): Promise<PendingSignal[]> {
-  const signals = await repo.fetchRecentSignals(scanWindow);
-  const matches = await repo.fetchExistingMatches(signals.map((s) => s.id));
-  return derivePendingSignals(signals, matches, batchSize);
+export async function findPendingSignals(repo: WorkerRepository, batchSize: number = PENDING_BATCH_SIZE): Promise<PendingSignal[]> {
+  return repo.findPendingSignals(batchSize);
 }
 
 /* ------------------------------------------------------------------ */
@@ -335,10 +311,13 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
     }
   }
 
-  // Durable pending-signal recovery: re-derived fresh from the database every cycle, so
-  // a signal orphaned by a crash between persist and resolution (this cycle's OR any
-  // earlier cycle's) is found here exactly the same way a same-cycle new signal is.
-  const pending = await findPendingSignals(d.workerRepo, PENDING_SCAN_WINDOW, PENDING_BATCH_SIZE);
+  // Durable pending-signal recovery: re-queried fresh against the database every cycle
+  // via find_pending_sports_shadow_signals (Task 11B), so a signal orphaned by a crash
+  // between persist and resolution (this cycle's OR any earlier cycle's) is found here
+  // exactly the same way a same-cycle new signal is — and, critically, is the globally
+  // oldest genuinely-pending signal, never masked by a fixed-size historical prefix of
+  // already-resolved rows (see worker.ts's Task 11B doc comment).
+  const pending = await findPendingSignals(d.workerRepo, PENDING_BATCH_SIZE);
 
   const needsPmus = pending.some((p) => p.missingPmus);
   const needsKalshi = pending.some((p) => p.missingKalshi);
