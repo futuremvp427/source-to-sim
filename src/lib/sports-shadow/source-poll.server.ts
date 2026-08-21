@@ -138,15 +138,6 @@ export const MAX_PAGES_PER_WALLET = Math.floor(MAX_TRADES_OFFSET / PAGE_SIZE) + 
 /** Bounded per-poll cap on how many currently-PENDING fills are retried in phase 2 — generous relative to expected per-wallet volume, but never unbounded. Excess pending work simply stays durable for a later poll, exactly like Task 11B's pending-signal batch. */
 export const MAX_PENDING_FILLS_PER_POLL = 500;
 
-/**
- * Task 13G (Codex re-review round 5, P1): a generous ceiling on how many times one exact
- * (wallet, txHash, asset, side, sourceTs, shares, price) tuple could realistically collide
- * -- e.g. multiple legs of one on-chain transaction matching at an identical price/size in
- * the same block. Bounds `countDurableOrdinalFills`'s exact-key candidate set independent
- * of a wallet's total cumulative degraded-history size (see its own doc comment).
- */
-export const MAX_ORDINAL_COLLISIONS_PER_TUPLE = 50;
-
 
 const REQUEST_TIMEOUT_MS = 12_000;
 
@@ -476,40 +467,45 @@ export const supabasePollRepository: PollRepository = {
     // wallet whose degraded history exceeds that cap -- permanently misclassifying every
     // future degraded fill as already-durable once crossed, since the table only grows.
     //
-    // FIX: query only the EXACT candidate keys this poll could possibly need -- for each
-    // requested prefix, `prefix#0` through `prefix#(MAX_ORDINAL_COLLISIONS_PER_TUPLE-1)`
-    // -- via `.in()` (exact match, no LIKE/OR filter-string construction, no escaping
-    // risk). This is bounded by tuplePrefixes.length (itself bounded by PAGE_SIZE, since
-    // it comes from one poll's own fetched page) regardless of how large the WALLET's
-    // cumulative degraded history has grown, so the ambiguous-page-cap scenario above
-    // essentially cannot recur: MAX_ORDINAL_COLLISIONS_PER_TUPLE is a generous ceiling on
-    // how many times one exact (wallet, txHash, asset, side, sourceTs, shares, price)
-    // tuple could realistically collide (multiple legs of one on-chain transaction
-    // matching at an identical price/size in the same block) -- not a claim about total
-    // wallet history size.
-    const candidateKeys: string[] = [];
-    for (const prefix of tuplePrefixes) {
-      for (let n = 0; n < MAX_ORDINAL_COLLISIONS_PER_TUPLE; n += 1) candidateKeys.push(`${prefix}${n}`);
-    }
+    // Task 13G (Codex re-review round 6, P1): the round-5 "exact candidate keys via .in()"
+    // fix traded one bug for a worse one -- `degradedEvents` comes from the ENTIRE
+    // confirmed scan (up to MAX_PAGES_PER_WALLET pages), and per this file's own
+    // documented production reality, EVERY currently-observed /trades row lacks a native
+    // id/log index and therefore uses the degraded (tx_hash_ordinal) tier -- degraded
+    // events are the NORMAL case, not a rare edge case, so `tuplePrefixes.length` can
+    // genuinely reach the low thousands for a large catch-up scan. At
+    // MAX_ORDINAL_COLLISIONS_PER_TUPLE=50 candidates each, that produced a `.in()` filter
+    // with hundreds of thousands of values -- a request URI PostgREST/its proxy would
+    // reject outright, failing the WHOLE reconciliation (and, per the abort-on-error fix
+    // above, the whole scan's persistence) every time it recurred for that wallet.
+    //
+    // FIX: go back to reading the wallet's degraded history directly, but bounded by a
+    // PROVEN structural ceiling rather than an arbitrary page cap or a per-prefix
+    // candidate guess: MAX_TRADES_OFFSET (shadow.server.ts) is the hard limit the source
+    // /trades API itself enforces on how far ANY wallet can ever be paginated (HTTP 400
+    // beyond it) -- so no wallet's cumulative row count in this table can structurally
+    // exceed roughly that many, REGARDLESS of how many distinct prefixes any one poll asks
+    // about. Reading up to `ceil(MAX_TRADES_OFFSET / PAGE_ROWS) + 1` pages is therefore
+    // PROVABLY sufficient with margin to read a wallet's entire degraded history in the
+    // common case (a short/empty final page), independent of tuplePrefixes.length -- unlike
+    // the per-prefix-candidate-key approach, this does not grow with how many distinct
+    // tuples this poll happens to ask about.
+    const maxPages = Math.ceil(MAX_TRADES_OFFSET / PAGE_ROWS) + 1;
     const rows: { event_key: string }[] = [];
     let afterId: string | null = null;
     let pages = 0;
-    const maxPages = Math.ceil(candidateKeys.length / PAGE_ROWS) + 1;
+    let truncated = false;
     while (pages < maxPages) {
-      // Task 13G (Codex re-review round 5, P1): deadline-checked BETWEEN pages of this
-      // bounded read too -- even though the total candidate set is now naturally small
-      // (see above), a caller-supplied deadline still takes priority over finishing every
-      // page. Exceeding it here fails closed (see below), exactly like any other
-      // unverifiable-count case.
+      // Task 13G (Codex re-review round 5, P1): deadline-checked BETWEEN pages.
       if (deadline && deadline.now() >= deadline.deadlineAtMs) {
-        for (const prefix of tuplePrefixes) out.set(prefix, Number.POSITIVE_INFINITY);
-        return out;
+        truncated = true;
+        break;
       }
       let query = supabaseAdmin
         .from("sports_shadow_source_fills" as never)
         .select("event_key")
         .eq("wallet", wallet)
-        .in("event_key", candidateKeys)
+        .eq("identity_basis", "tx_hash_ordinal")
         .order("event_key", { ascending: true })
         .limit(PAGE_ROWS);
       if (afterId) query = query.gt("event_key", afterId);
@@ -518,8 +514,31 @@ export const supabasePollRepository: PollRepository = {
       const page = (data as unknown as { event_key: string }[] | null) ?? [];
       pages += 1;
       rows.push(...page);
-      if (page.length < PAGE_ROWS) break;
+      if (page.length < PAGE_ROWS) break; // genuinely complete: a short/empty final page
       afterId = page[page.length - 1]!.event_key;
+    }
+    if (!truncated && pages >= maxPages) {
+      // Hit the page cap without ever seeing a short final page -- ambiguous (this
+      // wallet's degraded history is at or beyond the structural ceiling above, an
+      // extreme case for any of the currently-approved wallets). Resolve with a single
+      // independent `count: "exact", head: true` aggregate (no rows returned, so never
+      // subject to the per-request row cap) -- only paid in this rare branch, not on
+      // every call.
+      const { count: totalCount, error: countError } = await supabaseAdmin
+        .from("sports_shadow_source_fills" as never)
+        .select("id", { count: "exact", head: true })
+        .eq("wallet", wallet)
+        .eq("identity_basis", "tx_hash_ordinal");
+      if (countError) throw new Error(countError.message);
+      if (rows.length !== (totalCount ?? 0)) truncated = true;
+    }
+    if (truncated) {
+      // Fail closed, matching reconcileDegradedEvents's own error-path convention: an
+      // unverifiable count must never be treated as "fewer durable rows than reality,"
+      // which would risk a duplicate insert. This poll's degraded rows are simply
+      // deferred to a later retry instead.
+      for (const prefix of tuplePrefixes) out.set(prefix, Number.POSITIVE_INFINITY);
+      return out;
     }
     for (const row of rows) {
       for (const prefix of tuplePrefixes) {
@@ -1382,10 +1401,25 @@ export async function pollSportsShadowWallet(
    * longer prove it still holds. Every fill that would have been processed simply stays
    * PENDING, safely retryable by whichever worker holds the lease next.
    */
+  // Task 13G (Codex re-review round 6, P1): checked before even ENTERING Phase 2 -- if
+  // Phase 1's final fetch or persist batch started within budget but returned after the
+  // deadline, this skips the lease-renewal RPC and the up-to-500-row pending-fill query
+  // entirely rather than starting them anyway. A pure deadline stop here is distinct from
+  // lease loss (leaseLost stays false) -- every fill that would have been processed simply
+  // stays PENDING, safely retried next poll, exactly like every other deadline stop.
+  if (d.now() >= deadlineAtMs) {
+    return result;
+  }
   if (!result.leaseLost && !(await d.checkpointLease())) {
     result.leaseLost = true;
   }
   if (result.leaseLost) {
+    return result;
+  }
+  // Task 13G (Codex re-review round 6, P1): re-checked immediately after checkpointLease
+  // succeeds, before the up-to-500-row pending-fill query -- mirrors the same
+  // renewal-latency fix already applied everywhere else this pattern appears.
+  if (d.now() >= deadlineAtMs) {
     return result;
   }
 
@@ -1444,6 +1478,11 @@ export async function pollSportsShadowWallet(
       metadataCache.set(fill.conditionId, metadata);
     }
 
+    // Task 13G (Codex re-review round 6, P1): checked immediately after the metadata
+    // fetch/cache-lookup above resolves, before ANY of the marker writes below it can
+    // start -- fetchSourceMarketMetadata's own await (up to 10s) can run past the deadline
+    // even though the check at the top of this iteration passed.
+    if (d.now() >= deadlineAtMs) break;
     if (metadata.status === "INELIGIBLE") {
       result.ineligibleRows += 1;
       try {
@@ -1520,6 +1559,11 @@ export async function pollSportsShadowWallet(
       positionCache.set(positionKey, cacheEntry);
     }
 
+    // Task 13G (Codex re-review round 6, P1): checked immediately after findLatestEpisode
+    // resolves (or the cache hit that skips it), before any of INVALID_FILL/DUPLICATE_FILL/
+    // SELL_RECORDED-with-no-position's marker writes below can start -- that await (when
+    // not cached) can run past the deadline even though earlier checks passed.
+    if (d.now() >= deadlineAtMs) break;
     const decision = decideFill(eligibleFill, cacheEntry ? cacheEntry.state : null);
 
     if (decision.kind === "INVALID_FILL") {

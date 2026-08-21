@@ -1857,6 +1857,76 @@ describe("Task 13F: Phase 2 (pending-fill/metadata resolution) deadline bound, a
     expect(seededFill.downstreamStatus).toBe("PENDING"); // safely retryable, never lost
   });
 
+  it("Task 13G (Codex re-review round 6, P1): Phase 2 is skipped ENTIRELY (no lease-renewal RPC, no pending-fill query) if the deadline has already passed by the time Phase 1 finishes", async () => {
+    const repo = new FakeRepo();
+    await repo.insertRawFill({
+      wallet: WALLET,
+      eventKey: "seeded",
+      conditionId: "0xcond",
+      asset: "0xasset",
+      side: "BUY",
+      sourceTs: 1_700_000_000,
+      shares: 1,
+      price: 0.5,
+      identityBasis: "source_id",
+      identityDegraded: false,
+      raw: {},
+    } as unknown as Parameters<FakeRepo["insertRawFill"]>[0]);
+    let checkpointCalls = 0;
+    const checkpointLease: LeaseCheckpoint = async () => {
+      checkpointCalls += 1;
+      return true;
+    };
+    const base = 1_700_000_500_000;
+    // Deadline already exceeded by the time Phase 1's own single (empty-page) fetch
+    // attempt finishes -- Phase 2 must never even call checkpointLease.
+    const now = () => base + 999_999;
+    const { deps } = makeDeps({ repo, now, checkpointLease, network: makeNetworkDeps({ 0: [] }) });
+    const result = await pollSportsShadowWallet(WALLET, 0, deps, base);
+    expect(result.leaseLost).toBe(false); // a pure deadline stop, not lease loss
+    expect(checkpointCalls).toBe(0); // Phase 2's own lease-renewal RPC never even started
+    expect(result.newSignals).toHaveLength(0);
+    const seededFill = repo.fillsByEventKey.get("seeded")!;
+    expect(seededFill.downstreamStatus).toBe("PENDING");
+  });
+
+  it("Task 13G (Codex re-review round 6, P1): the deadline is re-checked immediately after metadata resolution, before a terminal-marker write, even though the top-of-iteration check already passed", async () => {
+    const repo = new FakeRepo();
+    await repo.insertRawFill({
+      wallet: WALLET,
+      eventKey: "seeded-ineligible",
+      conditionId: "0xcond",
+      asset: "0xasset",
+      side: "BUY",
+      sourceTs: 1_700_000_000,
+      shares: 1,
+      price: 0.5,
+      identityBasis: "source_id",
+      identityDegraded: false,
+      raw: {},
+    } as unknown as Parameters<FakeRepo["insertRawFill"]>[0]);
+    const base = 1_700_000_500_000;
+    // Flips to "exceeded" only once fetchSourceMarketMetadata has actually been awaited,
+    // isolating the recheck immediately AFTER metadata resolution rather than any of the
+    // earlier (already-covered) checks.
+    let metadataResolved = false;
+    const fetchSourceMarketMetadata = vi.fn(async () => {
+      metadataResolved = true;
+      return { ...ELIGIBLE_METADATA, status: "INELIGIBLE" as const, ineligibleReason: "test" };
+    });
+    const now = () => (metadataResolved ? base + 999_999 : base);
+    const { deps } = makeDeps({
+      repo,
+      now,
+      fetchSourceMarketMetadata: fetchSourceMarketMetadata as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
+      network: makeNetworkDeps({ 0: [] }),
+    });
+    const result = await pollSportsShadowWallet(WALLET, 0, deps, base + 500);
+    expect(result.ineligibleRows).toBe(0); // markFillTerminal(INELIGIBLE) never happened
+    const seededFill = repo.fillsByEventKey.get("seeded-ineligible")!;
+    expect(seededFill.downstreamStatus).toBe("PENDING"); // safely retryable, never lost
+  });
+
   it("Phase 2: a deadline reached mid-pending-fill-processing stops resolving further fills, but unprocessed ones simply stay PENDING (Task 12D/P1-A's existing retry contract, zero new mechanism)", async () => {
     const repo = new FakeRepo();
     // Seed 5 already-raw-persisted PENDING fills directly (skip Phase 1 entirely).
