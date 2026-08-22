@@ -28,8 +28,11 @@ BEGIN
   -- 1. PRIVILEGE HARDENING: PUBLIC/anon/authenticated denied, service_role allowed,
   -- for BOTH RPCs -- real execution attempts, not just catalog checks.
   ------------------------------------------------------------------
-  v_oid_insert := 'public.insert_sports_shadow_episode(uuid, text, text, text, text, text, text, text, text, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, text, timestamptz, text, text, text, text, numeric)'::regprocedure;
-  v_oid_update := 'public.update_sports_shadow_episode(uuid, uuid, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean)'::regprocedure;
+  -- FINAL BUILD Part 16/1/5: signatures grew a trailing DEFAULT-valued parameter each
+  -- (p_cluster_key / sell-ledger params) -- see 20260823110000/20260823100000's own
+  -- doc comments for why the old signature was explicitly DROPped, not just replaced.
+  v_oid_insert := 'public.insert_sports_shadow_episode(uuid, text, text, text, text, text, text, text, text, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, text, timestamptz, text, text, text, text, numeric, text)'::regprocedure;
+  v_oid_update := 'public.update_sports_shadow_episode(uuid, uuid, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, numeric, numeric, numeric, numeric, numeric, bigint)'::regprocedure;
 
   SELECT EXISTS (
     SELECT 1 FROM pg_proc p, LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a

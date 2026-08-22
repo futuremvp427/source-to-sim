@@ -24,7 +24,8 @@ BEGIN
   -- 1. PRIVILEGE HARDENING unchanged from 20260821040000: PUBLIC/anon/authenticated
   -- denied, service_role allowed -- real execution attempt, not just catalog inspection.
   ------------------------------------------------------------------
-  v_oid := 'public.insert_sports_shadow_episode(uuid, text, text, text, text, text, text, text, text, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, text, timestamptz, text, text, text, text, numeric)'::regprocedure;
+  -- FINAL BUILD Part 16: signature grew a trailing DEFAULT-valued p_cluster_key param.
+  v_oid := 'public.insert_sports_shadow_episode(uuid, text, text, text, text, text, text, text, text, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, text, timestamptz, text, text, text, text, numeric, text)'::regprocedure;
 
   SELECT EXISTS (
     SELECT 1 FROM pg_proc p, LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
