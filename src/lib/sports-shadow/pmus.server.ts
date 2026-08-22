@@ -10,7 +10,7 @@
  * normalization/classification this module delegates to.
  */
 
-import { getHostCooldown, parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "../http-rate-limit.server";
+import { DeadlineExceededError, getHostCooldown, parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "../http-rate-limit.server";
 import { PMUS_PUBLIC_BASE } from "../pmus/us-markets.server";
 import { eventToCandidates, normalizePmusBook, type PmusCandidate, type PmusRawEvent } from "./pmus";
 import { runtimeFetch } from "./runtime-fetch.server";
@@ -31,7 +31,8 @@ function sleep(ms: number): Promise<void> {
 
 export type PmusNetworkDeps = {
   fetchImpl: typeof fetch;
-  reserveRequestSlot: (host: string) => Promise<number>;
+  /** Task 13I / P1-T: `deadlineAtMs` optional, forwarded from pacedGetJson -- see http-rate-limit.server.ts's own doc comment for exactly what it changes. */
+  reserveRequestSlot: (host: string, deadlineAtMs?: number) => Promise<number>;
   getHostCooldown: (host: string) => Promise<{ blocked: boolean; reason: string | null }>;
   recordHostRateLimit: (host: string, retryAfterMs: number | null) => Promise<void>;
   now: () => number;
@@ -58,12 +59,38 @@ const defaultDeps: PmusNetworkDeps = {
  * explicit per-observation BookSnapshot failure instead, since book capture is a
  * per-observation operation, not a bulk one.
  */
-async function pacedGetJson<T>(path: string, deps: PmusNetworkDeps): Promise<T> {
+/**
+ * Task 13I / P1-S, P1-T: `deadlineAtMs` (optional epoch ms; omitted preserves prior
+ * behavior exactly) threads a caller's absolute wall-clock budget through every stage
+ * that can consume material time BEFORE the bounded upstream fetch even starts --
+ * cooldown check, reservation RPC, and the pacing wait a granted reservation may require.
+ * Prior to this task, none of these three stages had any relationship to a caller's own
+ * deadline: reserveRequestSlot alone could take up to its own 5s RPC deadline or grant a
+ * wait of up to 8s (MAX_RESERVATION_LOOKAHEAD_MS), meaning "one paced request" could
+ * already consume ~13s before the ~12s upstream fetch timeout even began -- the ~12s
+ * figure this route's wall-clock contract assumed was never the true bound. Every check
+ * here throws DeadlineExceededError (never a plain Error) so callers (fetchPmusBook,
+ * discoverPmusMlbMarkets) can distinguish "my own scheduler budget ran out" from a genuine
+ * upstream/venue failure and must never persist the former as evidence about the market.
+ */
+async function pacedGetJson<T>(path: string, deps: PmusNetworkDeps, deadlineAtMs?: number): Promise<T> {
+  if (deadlineAtMs !== undefined && deps.now() >= deadlineAtMs) {
+    throw new DeadlineExceededError(`${PMUS_HOST} request skipped: caller deadline already reached`);
+  }
   const cooldown = await deps.getHostCooldown(PMUS_HOST);
   if (cooldown.blocked) throw new Error(`${PMUS_HOST} is in cooldown: ${cooldown.reason ?? "unknown reason"}`);
+  if (deadlineAtMs !== undefined && deps.now() >= deadlineAtMs) {
+    throw new DeadlineExceededError(`${PMUS_HOST} request skipped: caller deadline reached after cooldown check`);
+  }
 
-  const waitMs = await deps.reserveRequestSlot(PMUS_HOST);
+  // reserveRequestSlot itself throws DeadlineExceededError if the RPC would run past
+  // deadlineAtMs, or if a genuinely granted wait would land at/after it -- see its own doc
+  // comment in http-rate-limit.server.ts.
+  const waitMs = await deps.reserveRequestSlot(PMUS_HOST, deadlineAtMs);
   if (waitMs > 0) await sleep(waitMs);
+  if (deadlineAtMs !== undefined && deps.now() >= deadlineAtMs) {
+    throw new DeadlineExceededError(`${PMUS_HOST} request skipped: caller deadline reached after pacing wait`);
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -101,10 +128,17 @@ let discoveryCache: CacheEntry | null = null;
  * for live book/quote data, which fetchPmusBook always fetches fresh (see its own doc
  * comment for why the two caches are kept semantically separate).
  */
-export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}): Promise<PmusCandidate[]> {
+export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}, deadlineAtMs?: number): Promise<PmusCandidate[]> {
   const d: PmusNetworkDeps = { ...defaultDeps, ...deps };
   const now = d.now();
-  if (discoveryCache && discoveryCache.expiresAt > now) return discoveryCache.value;
+  // Task 13I / P1-S: a cache hit is allowed only if the caller is still within its own
+  // deadline -- if not, fall through into the discovery loop below rather than returning
+  // early, so the SAME deadline check at the top of that loop uniformly reports
+  // DeadlineExceededError instead of silently serving a "successful" cached result to a
+  // caller that could not actually prove it had time to ask.
+  if (discoveryCache && discoveryCache.expiresAt > now && (deadlineAtMs === undefined || now < deadlineAtMs)) {
+    return discoveryCache.value;
+  }
 
   const byMarketSlug = new Map<string, PmusCandidate>();
   // Task 12I / P2-P2: PM-US uses fixed offset/page-size pagination (no continuation
@@ -116,6 +150,14 @@ export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}
   // because the page budget ran out, never because pagination naturally proved complete.
   let pageBudgetExhausted = true;
   for (let page = 0; page < DISCOVERY_MAX_PAGES; page += 1) {
+    // Task 13I / P1-S: checked before EVERY page, including the first -- a deadline
+    // exhaustion here is NEITHER a malformed response NOR genuine backlog truncation
+    // (pageBudgetExhausted below); it must never be conflated with either, so it is a
+    // distinct thrown type the caller (resolveVenuePending) can recognize and treat as
+    // "defer, not evidence" rather than "this venue's discovery failed."
+    if (deadlineAtMs !== undefined && d.now() >= deadlineAtMs) {
+      throw new DeadlineExceededError(`PM-US discovery aborted: caller deadline reached before page ${page}`);
+    }
     // Task 12F / P1-G: a full discovery pass can take up to DISCOVERY_MAX_PAGES * 12s --
     // checked BEFORE each page fetch so a lease lost mid-pagination stops issuing further
     // requests immediately rather than completing an unbounded discovery pass under a
@@ -123,10 +165,17 @@ export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}
     if (!(await d.checkpointLease())) {
       throw new Error("PM-US discovery aborted: source lease lost mid-pagination");
     }
+    // Task 13I / P1-S: re-checked immediately after the lease checkpoint -- that call can
+    // itself perform a real renewal RPC, mirroring the identical renewal-latency fix
+    // already established throughout source-poll.server.ts and worker.server.ts.
+    if (deadlineAtMs !== undefined && d.now() >= deadlineAtMs) {
+      throw new DeadlineExceededError(`PM-US discovery aborted: caller deadline reached after lease checkpoint`);
+    }
     const offset = page * DISCOVERY_PAGE_SIZE;
     const json = await pacedGetJson<{ events?: unknown }>(
       `/v1/events?limit=${DISCOVERY_PAGE_SIZE}&offset=${offset}&active=true&closed=false&category=sports`,
       d,
+      deadlineAtMs,
     );
     // Task 12F / P1-I: a missing/non-array `events` field is a MALFORMED response, not a
     // legitimate empty page -- collapsing the two let a schema/proxy hiccup silently
@@ -173,7 +222,11 @@ export function clearPmusDiscoveryCache(): void {
  * staleReason and null bestBid/bestAsk — a terminal, recordable observation rather than an
  * exception a per-observation caller would need to wrap individually.
  */
-export async function fetchPmusBook(marketSlug: string, deps: Partial<PmusNetworkDeps> = {}): Promise<BookSnapshot> {
+export async function fetchPmusBook(
+  marketSlug: string,
+  deps: Partial<PmusNetworkDeps> = {},
+  deadlineAtMs?: number,
+): Promise<BookSnapshot> {
   const d: PmusNetworkDeps = { ...defaultDeps, ...deps };
   // Task 12E / P1-E: observedAt must reflect when THIS book became observable to the
   // collector, not when the request started. pacedGetJson may wait out a rate-limit
@@ -183,9 +236,13 @@ export async function fetchPmusBook(marketSlug: string, deps: Partial<PmusNetwor
   // timing measurements this whole subsystem exists to produce. d.now() is therefore
   // called again on EVERY exit path (success and failure), after the awaited work.
   try {
-    const json = await pacedGetJson<unknown>(`/v1/markets/${encodeURIComponent(marketSlug)}/book`, d);
+    const json = await pacedGetJson<unknown>(`/v1/markets/${encodeURIComponent(marketSlug)}/book`, d, deadlineAtMs);
     return normalizePmusBook(json, marketSlug, d.now());
   } catch (err) {
+    // Task 13I / P1-T, Section 7: a caller-deadline exhaustion is NOT evidence about the
+    // market -- it must never be captured as a stale/failed BookSnapshot. Re-throw so the
+    // caller (takeDueSportsShadowObservations) can leave the due observation row untouched.
+    if (err instanceof DeadlineExceededError) throw err;
     return {
       venue: "PMUS",
       marketId: marketSlug,

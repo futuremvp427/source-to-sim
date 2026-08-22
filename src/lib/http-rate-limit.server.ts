@@ -71,6 +71,23 @@ export type HostCooldown = {
 };
 
 /**
+ * Task 13I / P1-T: hard ceiling on the cooldown READ itself, via postgrest-js's
+ * .abortSignal() -- the same real-cancellation mechanism already used by
+ * COOLDOWN_WRITE_DEADLINE_MS/RESERVATION_RPC_DEADLINE_MS below. Prior to this task,
+ * getHostCooldown had NO internal bound at all: a hung DB read could stall its caller
+ * indefinitely. General Shadow's shadow.server.ts already wraps its own calls to this
+ * function in `boundedStage`/`withDeadline` (a Promise.race-style timeout), but that only
+ * bounds the CALLER's wait -- the underlying query keeps running, detached, in the
+ * background, since Promise.race never cancels the loser. Sports Shadow's callers
+ * (pmus.server.ts/kalshi.server.ts/source-poll.server.ts) call this function directly with
+ * no such wrapper at all, so a hang here would have blocked them completely. Adding a real
+ * internal bound fixes both: General Shadow's existing behavior is unchanged (still fails
+ * closed within its own external deadline, now via genuine cancellation instead of mere
+ * abandonment), and Sports Shadow gains a bound it never had.
+ */
+const COOLDOWN_READ_DEADLINE_MS = 5_000;
+
+/**
  * Reads the current cooldown for a host. Fails CLOSED: if the read itself
  * cannot be trusted (a query error, a thrown exception), the caller treats
  * the host as blocked rather than risk hammering an upstream that may
@@ -78,6 +95,8 @@ export type HostCooldown = {
  * scheduler cycle is far lower than the cost of amplifying a live 429 storm.
  */
 export async function getHostCooldown(host: string): Promise<HostCooldown> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COOLDOWN_READ_DEADLINE_MS);
   try {
     // Cast: http_rate_limits is defined in this session's migration;
     // generated Supabase types are refreshed only after the migration is
@@ -86,6 +105,7 @@ export async function getHostCooldown(host: string): Promise<HostCooldown> {
       .from("http_rate_limits" as never)
       .select("blocked_until, reason")
       .eq("host", host)
+      .abortSignal(controller.signal)
       .maybeSingle();
     if (error) {
       return { blocked: true, until: null, reason: `cooldown state unreadable: ${error.message}` };
@@ -104,6 +124,8 @@ export async function getHostCooldown(host: string): Promise<HostCooldown> {
       until: null,
       reason: `cooldown state unreadable: ${err instanceof Error ? err.message : "unknown error"}`,
     };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -216,6 +238,20 @@ const RESERVATION_RPC_DEADLINE_MS = 5_000;
 export class ReservationUnavailableError extends Error {}
 
 /**
+ * Task 13I / P1-S, P1-T: raised specifically when a CALLER-SUPPLIED deadline (not this
+ * module's own internal timeouts) is the reason a paced operation cannot proceed --
+ * either because the deadline had already passed before the operation could even start,
+ * or because a genuinely-granted reservation's wait would land at/after it. Deliberately a
+ * DIFFERENT type from ReservationUnavailableError: that type means "the shared
+ * coordination mechanism itself is unavailable" (an RPC failure, a queue that is
+ * genuinely full); this type means "coordination is working fine, but MY OWN caller has
+ * run out of time to use it," which downstream callers (Section 7's observation capture,
+ * Section 5's discovery) must treat differently -- a scheduler-budget expiry is never
+ * evidence about the venue/market and must never be persisted as one.
+ */
+export class DeadlineExceededError extends Error {}
+
+/**
  * Atomically claims the next pacing slot for a host and returns how long
  * the caller must wait before it may actually issue its upstream request.
  * Deliberately independent of getHostCooldown/blocked_until -- see the
@@ -237,10 +273,39 @@ export class ReservationUnavailableError extends Error {}
  * ingestGeneralActivity's per-page catch, candidate research's per-attempt
  * retry / per-candidate catch) rather than special-case it -- none of those
  * paths advance a checkpoint or touch paper accounting on a thrown error.
+ *
+ * Task 13I / P1-S, P1-T: `callerDeadlineAtMs` (optional epoch ms; omitted preserves the
+ * exact prior behavior for every existing caller -- General Shadow, candidate research,
+ * the health probe) lets a caller with its own absolute wall-clock budget (Sports Shadow's
+ * venue matching, discovery, and observation capture) avoid two specific escapes this
+ * function previously had no way to prevent: (1) if the deadline has ALREADY passed, the
+ * RPC is never even attempted; (2) the RPC's own internal AbortController timeout is
+ * shortened to whatever time remains, so it cannot itself run past the caller's deadline;
+ * (3) a GENUINELY granted reservation whose wait would land at or after the caller's
+ * deadline is rejected (DeadlineExceededError) rather than returned for the caller to
+ * sleep through and blow its own budget on. In every one of these three cases the thrown
+ * error is DeadlineExceededError, not ReservationUnavailableError -- the shared pacing
+ * mechanism itself remains perfectly healthy; only this one caller has run out of time.
  */
-export async function reserveRequestSlot(host: string): Promise<number> {
+export async function reserveRequestSlot(host: string, callerDeadlineAtMs?: number): Promise<number> {
+  if (callerDeadlineAtMs !== undefined && Date.now() >= callerDeadlineAtMs) {
+    throw new DeadlineExceededError(`${host} reservation skipped: caller deadline already reached`);
+  }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), RESERVATION_RPC_DEADLINE_MS);
+  let deadlineCausedAbort = false;
+  const rpcTimer = setTimeout(() => controller.abort(), RESERVATION_RPC_DEADLINE_MS);
+  // Task 13I / P1-T: a SECOND, independent timer racing on the same controller -- if the
+  // caller's own deadline would fire before the RPC's normal timeout, whichever fires
+  // first aborts the same in-flight request; `deadlineCausedAbort` records which one it
+  // was so the catch block below can throw the correct, distinguishable error type.
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  if (callerDeadlineAtMs !== undefined) {
+    const remainingMs = callerDeadlineAtMs - Date.now();
+    deadlineTimer = setTimeout(() => {
+      deadlineCausedAbort = true;
+      controller.abort();
+    }, remainingMs);
+  }
   try {
     // Cast: reserve_http_request_slot is defined in this session's
     // migration; generated Supabase types are refreshed only after the
@@ -267,15 +332,28 @@ export async function reserveRequestSlot(host: string): Promise<number> {
         `${host} reservation queue exceeds max lookahead (${waitMs}ms > ${MAX_RESERVATION_LOOKAHEAD_MS}ms)`,
       );
     }
+    // Task 13I / P1-T: a genuinely granted, in-budget-per-MAX_RESERVATION_LOOKAHEAD_MS
+    // reservation can STILL land at or after the caller's OWN deadline -- reject it rather
+    // than returning a wait the caller would sleep through and blow its own budget on.
+    if (callerDeadlineAtMs !== undefined && Date.now() + waitMs >= callerDeadlineAtMs) {
+      throw new DeadlineExceededError(
+        `${host} reservation granted (wait ${waitMs}ms) but would land at/after the caller's own deadline`,
+      );
+    }
     return waitMs;
   } catch (err) {
+    if (err instanceof DeadlineExceededError) throw err;
+    if (deadlineCausedAbort) {
+      throw new DeadlineExceededError(`${host} reservation RPC aborted: caller deadline reached mid-request`);
+    }
     if (err instanceof ReservationUnavailableError) throw err;
     // Covers both a rejected/thrown RPC call and the deadline-triggered abort.
     throw new ReservationUnavailableError(
       `${host} reservation unavailable: ${err instanceof Error ? err.message : "unknown error"}`,
     );
   } finally {
-    clearTimeout(timer);
+    clearTimeout(rpcTimer);
+    if (deadlineTimer) clearTimeout(deadlineTimer);
   }
 }
 
@@ -287,3 +365,4 @@ export const COOLDOWN_WRITE_DEADLINE_MS_FOR_TEST = COOLDOWN_WRITE_DEADLINE_MS;
 export const MIN_REQUEST_INTERVAL_MS_FOR_TEST = MIN_REQUEST_INTERVAL_MS;
 export const MAX_RESERVATION_LOOKAHEAD_MS_FOR_TEST = MAX_RESERVATION_LOOKAHEAD_MS;
 export const RESERVATION_RPC_DEADLINE_MS_FOR_TEST = RESERVATION_RPC_DEADLINE_MS;
+export const COOLDOWN_READ_DEADLINE_MS_FOR_TEST = COOLDOWN_READ_DEADLINE_MS;

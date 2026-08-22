@@ -110,6 +110,7 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 import {
   DATA_API_HOST,
+  DeadlineExceededError,
   getHostCooldown,
   parseRetryAfterMs,
   recordHostRateLimit,
@@ -163,7 +164,8 @@ function sleep(ms: number): Promise<void> {
 
 export type SourcePollNetworkDeps = {
   fetchImpl: typeof fetch;
-  reserveRequestSlot: (host: string) => Promise<number>;
+  /** Task 13I / P1-T: `deadlineAtMs` optional, forwarded from pacedFetchTradesPage -- see http-rate-limit.server.ts's own doc comment for exactly what it changes. */
+  reserveRequestSlot: (host: string, deadlineAtMs?: number) => Promise<number>;
   getHostCooldown: (host: string) => Promise<{ blocked: boolean; reason: string | null }>;
   recordHostRateLimit: (host: string, retryAfterMs: number | null) => Promise<void>;
 };
@@ -185,12 +187,29 @@ const defaultNetworkDeps: SourcePollNetworkDeps = {
  * the SAME shared host budget (`DATA_API_HOST`), reusing only `buildTradesUrl` — the URL
  * shape that is already the proven production contract for this endpoint.
  */
-async function pacedFetchTradesPage(wallet: string, offset: number, deps: SourcePollNetworkDeps): Promise<RawTrade[]> {
+async function pacedFetchTradesPage(
+  wallet: string,
+  offset: number,
+  deps: SourcePollNetworkDeps,
+  deadlineAtMs: number = Number.POSITIVE_INFINITY,
+  now: () => number = Date.now,
+): Promise<RawTrade[]> {
+  if (now() >= deadlineAtMs) {
+    throw new DeadlineExceededError(`${DATA_API_HOST} request skipped: caller deadline already reached`);
+  }
   const cooldown = await deps.getHostCooldown(DATA_API_HOST);
   if (cooldown.blocked) throw new Error(`${DATA_API_HOST} is in cooldown: ${cooldown.reason ?? "unknown reason"}`);
+  if (now() >= deadlineAtMs) {
+    throw new DeadlineExceededError(`${DATA_API_HOST} request skipped: caller deadline reached after cooldown check`);
+  }
 
-  const waitMs = await deps.reserveRequestSlot(DATA_API_HOST);
+  // reserveRequestSlot itself throws DeadlineExceededError if the RPC would run past
+  // deadlineAtMs, or if a genuinely granted wait would land at/after it.
+  const waitMs = await deps.reserveRequestSlot(DATA_API_HOST, deadlineAtMs === Number.POSITIVE_INFINITY ? undefined : deadlineAtMs);
   if (waitMs > 0) await sleep(waitMs);
+  if (now() >= deadlineAtMs) {
+    throw new DeadlineExceededError(`${DATA_API_HOST} request skipped: caller deadline reached after pacing wait`);
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -1107,7 +1126,23 @@ export async function pollSportsShadowWallet(
         deadlineExceeded = true;
         break;
       }
-      const rows = await pacedFetchTradesPage(normalizedWallet, offset, d.network);
+      // Task 13I / P1-T: deadlineAtMs threaded into the paced fetch itself so a cooldown
+      // wait, reservation RPC, or granted pacing wait cannot run past this poll's own
+      // budget before the (up to 12s) upstream request even starts. A DeadlineExceededError
+      // here is handled the SAME way as the deadline pre-checks above it (deadlineExceeded
+      // = true, then break) -- never folded into result.error, which would incorrectly
+      // suppress backlogTruncated (see its derivation below) and misreport a scheduler
+      // budget running out as a genuine upstream/network failure.
+      let rows: RawTrade[];
+      try {
+        rows = await pacedFetchTradesPage(normalizedWallet, offset, d.network, deadlineAtMs, d.now);
+      } catch (err) {
+        if (err instanceof DeadlineExceededError) {
+          deadlineExceeded = true;
+          break;
+        }
+        throw err;
+      }
       result.pagesFetched += 1;
       if (rows.length === 0) {
         naturalEnd = true;

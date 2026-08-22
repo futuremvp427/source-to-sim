@@ -18,7 +18,7 @@
  * =================================================================================
  */
 
-import { getHostCooldown, parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "../http-rate-limit.server";
+import { DeadlineExceededError, getHostCooldown, parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "../http-rate-limit.server";
 import { classifyKalshiMarket, normalizeKalshiBook, PHASE1_KALSHI_SERIES, type KalshiBookSnapshot, type KalshiCandidate, type KalshiRawEvent, type KalshiRawMarket } from "./kalshi";
 import { runtimeFetch } from "./runtime-fetch.server";
 import { NO_OP_LEASE_CHECKPOINT, type LeaseCheckpoint } from "./sports-lease.server";
@@ -38,7 +38,8 @@ function sleep(ms: number): Promise<void> {
 
 export type KalshiNetworkDeps = {
   fetchImpl: typeof fetch;
-  reserveRequestSlot: (host: string) => Promise<number>;
+  /** Task 13I / P1-T: `deadlineAtMs` optional, forwarded from pacedGetJson -- see http-rate-limit.server.ts's own doc comment for exactly what it changes. */
+  reserveRequestSlot: (host: string, deadlineAtMs?: number) => Promise<number>;
   getHostCooldown: (host: string) => Promise<{ blocked: boolean; reason: string | null }>;
   recordHostRateLimit: (host: string, retryAfterMs: number | null) => Promise<void>;
   now: () => number;
@@ -61,13 +62,28 @@ const defaultDeps: KalshiNetworkDeps = {
  * Fails CLOSED and EXPLICITLY (throws) on cooldown, reservation failure, timeout, non-2xx, or
  * malformed JSON — mirrors pmus.server.ts's pacedGetJson exactly, including the same
  * discovery-throws / book-catches split rationale (see fetchKalshiBook below).
+ *
+ * Task 13I / P1-S, P1-T: `deadlineAtMs` (optional epoch ms; omitted preserves prior behavior
+ * exactly) threads a caller's absolute wall-clock budget through cooldown check, reservation
+ * RPC, and pacing wait -- see pmus.server.ts's identical pacedGetJson for the full rationale.
  */
-async function pacedGetJson<T>(path: string, deps: KalshiNetworkDeps): Promise<T> {
+async function pacedGetJson<T>(path: string, deps: KalshiNetworkDeps, deadlineAtMs?: number): Promise<T> {
+  if (deadlineAtMs !== undefined && deps.now() >= deadlineAtMs) {
+    throw new DeadlineExceededError(`${KALSHI_HOST} request skipped: caller deadline already reached`);
+  }
   const cooldown = await deps.getHostCooldown(KALSHI_HOST);
   if (cooldown.blocked) throw new Error(`${KALSHI_HOST} is in cooldown: ${cooldown.reason ?? "unknown reason"}`);
+  if (deadlineAtMs !== undefined && deps.now() >= deadlineAtMs) {
+    throw new DeadlineExceededError(`${KALSHI_HOST} request skipped: caller deadline reached after cooldown check`);
+  }
 
-  const waitMs = await deps.reserveRequestSlot(KALSHI_HOST);
+  // reserveRequestSlot itself throws DeadlineExceededError if the RPC would run past
+  // deadlineAtMs, or if a genuinely granted wait would land at/after it.
+  const waitMs = await deps.reserveRequestSlot(KALSHI_HOST, deadlineAtMs);
   if (waitMs > 0) await sleep(waitMs);
+  if (deadlineAtMs !== undefined && deps.now() >= deadlineAtMs) {
+    throw new DeadlineExceededError(`${KALSHI_HOST} request skipped: caller deadline reached after pacing wait`);
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -117,18 +133,34 @@ type PaginatedKalshiResponse = { cursor?: string; markets?: unknown; events?: un
  * iterations ran without ever proving completeness, i.e. the loop ended purely because
  * the page budget ran out, not because pagination naturally finished.
  */
-async function paginate<T>(pathBuilder: (cursor: string | null) => string, itemsKey: "markets" | "events", deps: KalshiNetworkDeps): Promise<T[]> {
+async function paginate<T>(
+  pathBuilder: (cursor: string | null) => string,
+  itemsKey: "markets" | "events",
+  deps: KalshiNetworkDeps,
+  deadlineAtMs?: number,
+): Promise<T[]> {
   const out: T[] = [];
   let cursor: string | null = null;
   let pageBudgetExhausted = true;
   for (let page = 0; page < MAX_PAGES_PER_SERIES; page += 1) {
+    // Task 13I / P1-S: checked before EVERY page -- a deadline exhaustion here is neither
+    // a malformed response nor genuine backlog truncation (pageBudgetExhausted below); the
+    // caller must be able to recognize it as "defer, not evidence" via DeadlineExceededError.
+    if (deadlineAtMs !== undefined && deps.now() >= deadlineAtMs) {
+      throw new DeadlineExceededError(`Kalshi discovery aborted: caller deadline reached before page ${page}`);
+    }
     // Task 12F / P1-G: see pmus.server.ts's discoverPmusMlbMarkets for the identical
     // checkpoint rationale -- Kalshi discovery has a WORSE worst case (3 series x 2
     // endpoints x up to 10 pages x up to 12s each).
     if (!(await deps.checkpointLease())) {
       throw new Error("Kalshi discovery aborted: source lease lost mid-pagination");
     }
-    const json: unknown = await pacedGetJson<unknown>(pathBuilder(cursor), deps);
+    // Task 13I / P1-S: re-checked immediately after the lease checkpoint, which can itself
+    // perform a real renewal RPC.
+    if (deadlineAtMs !== undefined && deps.now() >= deadlineAtMs) {
+      throw new DeadlineExceededError(`Kalshi discovery aborted: caller deadline reached after lease checkpoint`);
+    }
+    const json: unknown = await pacedGetJson<unknown>(pathBuilder(cursor), deps, deadlineAtMs);
     if (json === null || typeof json !== "object") {
       throw new Error("Kalshi discovery returned a malformed response: not an object");
     }
@@ -167,10 +199,14 @@ let discoveryCache: CacheEntry | null = null;
  * classifies via the pure classifyKalshiMarket, and deduplicates by market ticker. Catalog
  * data ONLY — fetchKalshiBook never reads from or writes to this cache.
  */
-export async function discoverKalshiMlbMarkets(deps: Partial<KalshiNetworkDeps> = {}): Promise<KalshiCandidate[]> {
+export async function discoverKalshiMlbMarkets(deps: Partial<KalshiNetworkDeps> = {}, deadlineAtMs?: number): Promise<KalshiCandidate[]> {
   const d: KalshiNetworkDeps = { ...defaultDeps, ...deps };
   const now = d.now();
-  if (discoveryCache && discoveryCache.expiresAt > now) return discoveryCache.value;
+  // Task 13I / P1-S: a cache hit is allowed only if the caller is still within its own
+  // deadline -- see pmus.server.ts's discoverPmusMlbMarkets for the identical rationale.
+  if (discoveryCache && discoveryCache.expiresAt > now && (deadlineAtMs === undefined || now < deadlineAtMs)) {
+    return discoveryCache.value;
+  }
 
   const byTicker = new Map<string, KalshiCandidate>();
   for (const series of PHASE1_KALSHI_SERIES) {
@@ -178,11 +214,13 @@ export async function discoverKalshiMlbMarkets(deps: Partial<KalshiNetworkDeps> 
       (cursor) => `/markets?series_ticker=${series}&status=open&limit=${PAGE_LIMIT}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
       "markets",
       d,
+      deadlineAtMs,
     );
     const events = await paginate<KalshiRawEvent>(
       (cursor) => `/events?series_ticker=${series}&status=open&limit=${PAGE_LIMIT}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
       "events",
       d,
+      deadlineAtMs,
     );
     const eventsByTicker = new Map<string, KalshiRawEvent>();
     for (const event of events) if (event.event_ticker) eventsByTicker.set(event.event_ticker, event);
@@ -211,14 +249,21 @@ export function clearKalshiDiscoveryCache(): void {
  * failure is captured as an explicit KalshiBookSnapshot with a non-null staleReason and null
  * best prices on both sides, mirroring fetchPmusBook's per-observation failure contract.
  */
-export async function fetchKalshiBook(ticker: string, deps: Partial<KalshiNetworkDeps> = {}): Promise<KalshiBookSnapshot> {
+export async function fetchKalshiBook(
+  ticker: string,
+  deps: Partial<KalshiNetworkDeps> = {},
+  deadlineAtMs?: number,
+): Promise<KalshiBookSnapshot> {
   const d: KalshiNetworkDeps = { ...defaultDeps, ...deps };
   // Task 12E / P1-E: same fix, same rationale as fetchPmusBook above -- observedAt must
   // be captured AFTER the awaited network work completes or fails, never before.
   try {
-    const json = await pacedGetJson<unknown>(`/markets/${encodeURIComponent(ticker)}/orderbook`, d);
+    const json = await pacedGetJson<unknown>(`/markets/${encodeURIComponent(ticker)}/orderbook`, d, deadlineAtMs);
     return normalizeKalshiBook(json, ticker, d.now());
   } catch (err) {
+    // Task 13I / P1-T, Section 7: a caller-deadline exhaustion is NOT evidence about the
+    // market -- re-throw so the caller can leave the due observation row untouched.
+    if (err instanceof DeadlineExceededError) throw err;
     const emptySide = { bestBid: null, bestAsk: null, bestBidUnits: null, bestAskUnits: null, bidLevels: [], askLevels: [] };
     return {
       venue: "KALSHI",

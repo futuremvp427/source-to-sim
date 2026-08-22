@@ -28,6 +28,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { DeadlineExceededError } from "../http-rate-limit.server";
 import type { SportsShadowConfig } from "./config";
 import { discoverKalshiMlbMarkets } from "./kalshi.server";
 import type { KalshiCandidate } from "./kalshi";
@@ -55,34 +56,51 @@ export const SOURCE_LOCK_ID = "sports_shadow_source";
 /**
  * ============================== OBSERVATION-LANE LATENCY AUDIT ==============================
  * takeDueSportsShadowObservations processes its bounded row batch strictly SEQUENTIALLY
- * (Task 8's own explicit design — never Promise.all), and each row's fetchPmusBook/
- * fetchKalshiBook call owns a fixed internal ~12s AbortController this module cannot
- * reach in from outside. Row COUNT alone (maxRows) therefore cannot bound worst-case
- * lane-hold time: 5 rows x up to ~12s each is genuinely up to ~60-65s, which would let
- * one slow pass monopolize its venue's observation lease for roughly a minute against a
- * scheduler intended to call this route every ~5s — unacceptable (this was the
- * mission's own TIMING_GATE finding; the original 90s-TTL/5-row design FAILED it).
+ * (Task 8's own explicit design — never Promise.all). Row COUNT alone (maxRows) therefore
+ * cannot bound worst-case lane-hold time on its own — see the FIX below for what actually
+ * bounds it.
  *
- * FIX: takeDueSportsShadowObservations was given an additive `deadlineAtMs` parameter
- * (checked ONLY between rows, never mid-fetch, so it cannot preempt a row already in
- * flight — see its own doc comment in observation.server.ts). What it bounds is the
- * NUMBER of further rows a pass STARTS once wall time is exhausted; anything not yet
- * reached is left completely untouched (observed_at stays null — the same
- * already-established "safe to retry" contract as a lost-CAS `skipped` row, never a
- * fabricated terminal failure). This turns the worst-case lane-hold time into
- * `OBSERVATION_STAGE_DEADLINE_MS + (one row's own worst-case ~12s)`, independent of
- * maxRows, instead of `maxRows * ~12s`.
+ * FIX: takeDueSportsShadowObservations was given an additive `deadlineAtMs` parameter,
+ * checked BETWEEN rows (bounding the NUMBER of further rows a pass STARTS once wall time
+ * is exhausted; anything not yet reached is left completely untouched — observed_at stays
+ * null, the same already-established "safe to retry" contract as a lost-CAS `skipped`
+ * row, never a fabricated terminal failure).
+ *
+ * Task 13I / P1-T (CORRECTED): the ORIGINAL version of this audit assumed each row's
+ * fetchPmusBook/fetchKalshiBook call owned only a fixed ~12s AbortController, giving a
+ * worst case of `OBSERVATION_STAGE_DEADLINE_MS + ~12s ~= ~16s`. That was INCOMPLETE, not
+ * merely approximate: Section 1's reproduction found the real pre-fetch path also
+ * includes getHostCooldown (now bounded at COOLDOWN_READ_DEADLINE_MS=5s, but previously
+ * had NO bound at all), reserveRequestSlot's own reservation RPC (RESERVATION_RPC_DEADLINE_MS
+ * =5s) and the pacing wait a granted reservation may require (up to
+ * MAX_RESERVATION_LOOKAHEAD_MS=8s), plus recordHostRateLimit on a 429
+ * (COOLDOWN_WRITE_DEADLINE_MS=5s) — a single ALREADY-STARTED row's true pre-fix worst
+ * case was closer to 5s+5s+8s+12s = ~30s (success path) or ~35s (429 path), roughly
+ * DOUBLE the previously-assumed ~16s.
+ *
+ * REAL FIX (not a comment edit): `deadlineAtMs` is now ALSO threaded into the
+ * already-starting row's own fetchPmusBook/fetchKalshiBook call (see
+ * observation.server.ts's takeDueSportsShadowObservations doc comment), so the
+ * cooldown/reservation/pacing stages ahead of the upstream fetch are themselves cut short
+ * by DeadlineExceededError rather than left free to consume up to ~21s combined before
+ * the fetch even starts. The only stage that remains genuinely un-preemptible once
+ * started is the upstream fetch's own fixed REQUEST_TIMEOUT_MS AbortController (~12s) —
+ * this module still cannot reach into that from outside.
  *
  * OBSERVATION_STAGE_DEADLINE_MS = 4s: real per-row latency is milliseconds (Task 8's own
  * measured ~350ms for dozens of concurrent books), so a normal fast pass still comfortably
  * processes all OBSERVATION_STAGE_MAX_ROWS rows inside 4s — this changes nothing about the
  * common case. It only caps the PATHOLOGICAL slow-network case: worst-case total hold
- * time is now ~4s + ~12s = ~16s, not ~60s.
- * OBSERVATION_LEASE_TTL_SECONDS = 25s: ~56% margin over that ~16s worst case (down from
- * the prior 90s, which was sized for the now-eliminated ~60s worst case).
+ * time is now ~4s (stage deadline, bounds cooldown/reservation/pacing on the last row
+ * started too) + ~12s (that row's own already-started upstream fetch) = ~16s.
+ * OBSERVATION_LEASE_TTL_SECONDS = 30s: restores a safe (~88%) margin over that ~16s worst
+ * case. (Increased from the prior 25s, which was sized under the mistaken ~16s-without-
+ * cooldown/reservation-bound assumption and would otherwise have been dangerously close
+ * to — or, before Section 6's getHostCooldown/reserveRequestSlot fix, actually BELOW — a
+ * pathological single-row worst case.)
  * ================================================================================
  */
-export const OBSERVATION_LEASE_TTL_SECONDS = 25;
+export const OBSERVATION_LEASE_TTL_SECONDS = 30;
 export const OBSERVATION_STAGE_MAX_ROWS = 5;
 export const OBSERVATION_STAGE_DEADLINE_MS = 4_000;
 /** Smaller cap and tighter deadline for the end-of-cycle "+0 catch" pass — a genuinely fresh +0 row is rare in any single invocation at sub-minute cadence, and this pass must not itself become a second ~16s worst-case hold. */
@@ -141,21 +159,38 @@ export const FINAL_OBSERVATION_STAGE_DEADLINE_MS_FOR_TEST = FINAL_OBSERVATION_ST
  * shared deadline fires" reasoning applies unchanged regardless of which of the two a
  * given wallet's poll happens to be.
  *
- * CONFIRMED, CREDIBLE, NOT YET FIXED (Codex re-review round 7) -- OUT OF TASK 13G's SCOPE:
- * `runSourceLane` does not end when the wallet-polling loop above does -- it goes on to
- * call `resolveVenuePending` for BOTH PMUS and KALSHI (see below), and NEITHER of those
- * calls receives `laneDeadlineAtMs` at all. `resolveVenuePending`'s own PM-US/Kalshi
- * discovery passes (pmus.server.ts/kalshi.server.ts, established in Task 12F/P1-G/P1-I)
- * can each walk multiple pages at up to ~12s per page, bounded only by LEASE ownership,
- * never by wall-clock deadline. This means the ~42s figure above is NOT the true worst
- * case for the full `runSourceLane` invocation -- venue matching afterward is a real,
- * currently-unbounded-by-deadline contributor that can add substantially more wall time.
- * Task 13G's own mission scope is specifically the SOURCE lane's completeness/timing
- * (source-poll.server.ts's P1-Q/P1-R) -- threading a deadline through `resolveVenuePending`
- * and the PM-US/Kalshi discovery functions in their own separate, already-tested files is a
- * distinct, differently-scoped change (analogous to Task 13F's original problem, but in a
- * different subsystem) deliberately left for a dedicated follow-up task rather than
- * expanded into here without the same care this task gave the source lane itself.
+ * TASK 13I / P1-S (FIXED -- this was the CONFIRMED, CREDIBLE, NOT-YET-FIXED residual Task
+ * 13G's Codex re-review round 7 explicitly deferred, out of that task's scope):
+ * `runSourceLane` used to call `resolveVenuePending` for PMUS then KALSHI SEQUENTIALLY,
+ * and NEITHER call received `laneDeadlineAtMs` at all -- PM-US/Kalshi discovery
+ * (pmus.server.ts/kalshi.server.ts) could each walk multiple pages at up to ~12s per
+ * page, bounded only by LEASE ownership, never by wall-clock deadline, meaning the ~42s
+ * figure above was NOT the true worst case for the full `runSourceLane` invocation.
+ *
+ * FIX (Task 13I): `resolveVenuePending` now takes the SAME `laneDeadlineAtMs` this
+ * constant already computes for wallet polling (Section 2: one absolute deadline for the
+ * WHOLE source/matching lane, never a fresh budget carved out per venue), checked before
+ * every meaningful new operation inside it (pending query, discovery, each signal's
+ * resolve/persist) and threaded further into PM-US/Kalshi discovery's own per-page/paced-
+ * request checks. PM-US and Kalshi are resolved via exactly-two-way `Promise.all`
+ * concurrency (Section 4's hard design gate) so neither venue can monopolize the lane's
+ * remaining budget and starve the other -- see resolveVenuePending's own doc comment for
+ * the concurrency-safety proof, and this function's own PM-US/Kalshi resolution call site
+ * below for where the two calls are actually issued.
+ *
+ * DEFENSIBLE WORST CASE for the FULL source/matching lane (wallet polling + venue
+ * matching combined): `SOURCE_LANE_BUDGET_MS` (30s) + one already-started operation's own
+ * un-preemptible ceiling. Since every stage ahead of an upstream fetch (lease checkpoint,
+ * pending query, discovery's cooldown/reservation/pacing) is now itself deadline-checked
+ * and throws/returns cleanly once the deadline is reached, the only genuinely
+ * un-preemptible remainder is ONE already-in-flight upstream HTTP request's own fixed
+ * AbortController ceiling (~12s for PM-US/Kalshi/source-trades, ~10s for Gamma metadata)
+ * -- so ~42s remains the correct, now MISSION-COMPLETE (not merely assumed) worst case for
+ * the entire lane, wallet polling and venue matching alike. Two concurrent venues sharing
+ * one deadline do not each add their own ~12s -- both are bounded by the SAME absolute
+ * `laneDeadlineAtMs`, so their overruns do not stack (each venue can overrun by at most
+ * one already-started request of its own, and both venues' overruns happen in parallel,
+ * not in series).
  */
 export const SOURCE_LANE_BUDGET_MS = 30_000;
 export const SOURCE_LEASE_TTL_SECONDS = 60;
@@ -318,6 +353,15 @@ export type VenueResolutionSummary = {
   errors: number;
   /** Task 12F / P1-G: true when the source lease checkpoint reported the lease lost partway through this venue's resolution — remaining pending signals for this venue were left untouched this cycle, safely retryable. */
   leaseLost: boolean;
+  /**
+   * Task 13I / P1-S: true when the SHARED source-lane deadline (laneDeadlineAtMs) was
+   * reached partway through this venue's resolution -- distinct from BOTH discoveryFailed
+   * (a genuine venue/network failure) and leaseLost (ownership actually taken by another
+   * worker). A scheduler running out of its own time budget is not evidence about the
+   * venue: whatever pending signals were not yet reached this cycle are left completely
+   * untouched, safely retryable on a later invocation, exactly like leaseLost's contract.
+   */
+  deadlineReached: boolean;
 };
 
 export type SourceLaneResult = {
@@ -354,7 +398,20 @@ function emptyPerVenueObservationResult(): PerVenueObservationResult {
 }
 
 function emptyVenueSummary(): VenueResolutionSummary {
-  return { pendingFound: 0, pendingProcessed: 0, pendingRemainingHint: false, attempted: 0, exact: 0, near: 0, none: 0, unverified: 0, discoveryFailed: false, errors: 0, leaseLost: false };
+  return {
+    pendingFound: 0,
+    pendingProcessed: 0,
+    pendingRemainingHint: false,
+    attempted: 0,
+    exact: 0,
+    near: 0,
+    none: 0,
+    unverified: 0,
+    discoveryFailed: false,
+    errors: 0,
+    leaseLost: false,
+    deadlineReached: false,
+  };
 }
 
 function emptySourceLaneResult(acquired: boolean): SourceLaneResult {
@@ -449,18 +506,44 @@ async function runObservationLanesForBothVenues(d: SportsShadowWorkerDeps, maxRo
  * `findPendingSignalsForVenue` call and its own independent discovery/resolve/persist
  * pass. A PMUS discovery failure returns early for PMUS ONLY (nothing for PMUS is
  * resolved or persisted this cycle, left retryable) and never touches Kalshi's
- * processing at all — the two are fully separate, sequential calls with no shared
- * short-circuit between them.
+ * processing at all — the two are fully separate calls with no shared short-circuit
+ * between them.
+ *
+ * Task 13I / P1-S: `deadlineAtMs` is the SAME absolute `laneDeadlineAtMs` runSourceLane
+ * already computes for wallet polling (Section 2's requirement: one absolute source-lane
+ * deadline for the WHOLE lane, never a fresh 30s budget carved out just for matching).
+ * Checked before every meaningful new operation below (pending query, discovery, each
+ * signal's resolve/persist) and re-checked immediately after every await that can itself
+ * consume material wall time (checkpoint(), the pending query, discovery). A deadline hit
+ * stops this venue cleanly: `deadlineReached=true`, remaining pending signals left
+ * completely untouched (no NONE/UNVERIFIED fabricated, no discoveryFailed, no partial
+ * persistence) -- exactly the same "safe to retry later" contract leaseLost already has.
+ * Both venues are called via `Promise.all` sharing this identical deadline (Section 4) --
+ * see runSourceLane's own doc comment for the concurrency-safety proof (distinct
+ * (signal_id, venue) persistence rows, checkpoint()'s CAS-based renewal being safe under
+ * concurrent callers, resolveVenuePending never throwing so Promise.all cannot lose one
+ * venue's result to the other's rejection).
  * ================================================================================
  */
-async function resolveVenuePending(venue: Venue, d: SportsShadowWorkerDeps, errors: string[], checkpoint: LeaseCheckpoint): Promise<VenueResolutionSummary> {
+async function resolveVenuePending(venue: Venue, d: SportsShadowWorkerDeps, errors: string[], checkpoint: LeaseCheckpoint, deadlineAtMs: number): Promise<VenueResolutionSummary> {
   const summary = emptyVenueSummary();
+
+  if (d.now() >= deadlineAtMs) {
+    summary.deadlineReached = true;
+    return summary;
+  }
 
   // Task 12F / P1-G: do not even query pending work once the lease is already known lost
   // — "stop starting new source/matching work immediately" applies to PM-US/Kalshi
   // resolution exactly as it does to wallet polling.
   if (!(await checkpoint())) {
     summary.leaseLost = true;
+    return summary;
+  }
+  // Task 13I / P1-S: checkpoint() can itself perform a real renewal RPC -- re-checked
+  // immediately after it returns, before the pending query.
+  if (d.now() >= deadlineAtMs) {
+    summary.deadlineReached = true;
     return summary;
   }
 
@@ -474,6 +557,12 @@ async function resolveVenuePending(venue: Venue, d: SportsShadowWorkerDeps, erro
   summary.pendingFound = pending.length;
   summary.pendingRemainingHint = pending.length >= PENDING_BATCH_SIZE;
   if (pending.length === 0) return summary;
+  // Task 13I / P1-S: the pending query itself is an awaited DB round trip -- re-checked
+  // before discovery, the next (potentially multi-page, up to 12s/page) operation.
+  if (d.now() >= deadlineAtMs) {
+    summary.deadlineReached = true;
+    return summary;
+  }
 
   let pmusCandidates: PmusCandidate[] = [];
   let kalshiCandidates: KalshiCandidate[] = [];
@@ -484,12 +573,28 @@ async function resolveVenuePending(venue: Venue, d: SportsShadowWorkerDeps, erro
     // (see pmus.server.ts/kalshi.server.ts) rather than silently degrading to an empty
     // catalog, which this existing catch already correctly treats as discoveryFailed --
     // the entire venue left retryable, never converted into a semantic NONE.
-    if (venue === "PMUS") pmusCandidates = await d.discoverPmus({ checkpointLease: checkpoint });
-    else kalshiCandidates = await d.discoverKalshi({ checkpointLease: checkpoint });
+    // Task 13I / P1-S/P1-T: `deadlineAtMs` is now ALSO threaded into discovery itself
+    // (cache-hit gate, per-page checks, paced-request cooldown/reservation/pacing) -- a
+    // deadline exhaustion there throws DeadlineExceededError, caught distinctly below.
+    if (venue === "PMUS") pmusCandidates = await d.discoverPmus({ checkpointLease: checkpoint }, deadlineAtMs);
+    else kalshiCandidates = await d.discoverKalshi({ checkpointLease: checkpoint }, deadlineAtMs);
   } catch (err) {
+    if (err instanceof DeadlineExceededError) {
+      // Task 13I / P1-S: NOT a discovery failure -- our own scheduler budget ran out.
+      // Never persist a partial catalog, never mark discoveryFailed, never fabricate a
+      // semantic NONE for signals still pending. Left fully retryable next cycle.
+      summary.deadlineReached = true;
+      return summary;
+    }
     summary.discoveryFailed = true;
     errors.push(`${venue} discovery failed: ${err instanceof Error ? err.message : "unknown error"}`);
     return summary; // entire venue left retryable this cycle -- never converted into a semantic NONE
+  }
+  // Task 13I / P1-S: discovery just completed a (possibly long) awaited pass -- re-checked
+  // before the per-signal resolve/persist loop below.
+  if (d.now() >= deadlineAtMs) {
+    summary.deadlineReached = true;
+    return summary;
   }
 
   for (const signal of pending) {
@@ -498,6 +603,14 @@ async function resolveVenuePending(venue: Venue, d: SportsShadowWorkerDeps, erro
     // source-poll.server.ts's phase-2 loop.
     if (!(await checkpoint())) {
       summary.leaseLost = true;
+      break;
+    }
+    // Task 13I / P1-S: re-checked immediately after checkpoint() and before this signal's
+    // OWN persistVenueMatch (an async DB write) -- if the deadline is already gone, this
+    // signal (and every signal after it) is left completely untouched, not persisted with
+    // a rushed/partial result.
+    if (d.now() >= deadlineAtMs) {
+      summary.deadlineReached = true;
       break;
     }
     const source = toSourceSignal(signal);
@@ -591,10 +704,44 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
   // Task 12F / P1-G: "do not continue PM-US/Kalshi resolution" once the lease is lost --
   // resolveVenuePending's own leading checkpoint would catch this too, but skipping the
   // calls entirely avoids two pointless DB round trips when the outcome is already known.
-  const pmus = leaseLost ? emptyVenueSummary() : await resolveVenuePending("PMUS", d, errors, checkpoint);
-  if (pmus.leaseLost) leaseLost = true;
-  const kalshi = leaseLost ? emptyVenueSummary() : await resolveVenuePending("KALSHI", d, errors, checkpoint);
-  if (kalshi.leaseLost) leaseLost = true;
+  //
+  // Task 13I / P1-S, Section 4 (hard design gate): PM-US and Kalshi are resolved via
+  // EXACTLY two-way bounded Promise.all concurrency, both sharing the SAME
+  // laneDeadlineAtMs already computed above for wallet polling (Section 2: one absolute
+  // source-lane deadline for the whole lane, never a fresh 30s budget carved out per
+  // venue). This is fixed two-way concurrency, not unbounded fan-out, and structurally
+  // prevents PM-US from monopolizing the lane's remaining budget before Kalshi ever gets
+  // to start (the prior sequential PM-US-then-Kalshi order would have let a naive shared
+  // deadline do exactly that -- the starvation this design gate exists to forbid).
+  // Concurrency safety:
+  //   - resolveVenuePending NEVER throws (every internal failure path is caught and
+  //     folded into its own returned VenueResolutionSummary) -- Promise.all cannot lose
+  //     one venue's result to the other's rejection.
+  //   - PM-US and Kalshi persist to structurally distinct rows: the match table's unique
+  //     constraint is (signal_id, venue), and the observation-schedule table's is
+  //     (signal_id, venue, requested_delay_ms) -- two concurrent persistVenueMatch calls
+  //     for the same signal_id can never collide or interleave into each other's row.
+  //   - `checkpoint()` (createLeaseCheckpoint's closure) is safe under concurrent callers:
+  //     each call independently re-verifies DB-side CAS ownership of the SAME lease/fence
+  //     regardless of call-ordering races -- a concurrent renewal from one venue's call can
+  //     only ever confirm or lose the SAME fence the other venue's call is also checking,
+  //     never a divergent one.
+  //   - This is not a novel concurrency pattern in this module: runObservationLanesForBothVenues
+  //     above already runs PM-US/Kalshi observation lanes via the identical Promise.all
+  //     shape (Task 12H/P1-N), including its own already-proven independent-lease-per-venue
+  //     safety.
+  let pmus: VenueResolutionSummary;
+  let kalshi: VenueResolutionSummary;
+  if (leaseLost) {
+    pmus = emptyVenueSummary();
+    kalshi = emptyVenueSummary();
+  } else {
+    [pmus, kalshi] = await Promise.all([
+      resolveVenuePending("PMUS", d, errors, checkpoint, laneDeadlineAtMs),
+      resolveVenuePending("KALSHI", d, errors, checkpoint, laneDeadlineAtMs),
+    ]);
+  }
+  if (pmus.leaseLost || kalshi.leaseLost) leaseLost = true;
 
   return {
     acquired: true,

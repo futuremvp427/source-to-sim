@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { DeadlineExceededError } from "../http-rate-limit.server";
 import type { UnverifiedReasonCode } from "./eligibility";
 import type { OpenEpisodeState } from "./episode";
 import {
@@ -1362,9 +1363,12 @@ describe("Task 13F: a per-wallet deadline bounds Phase 1 (pagination) and Phase 
     const repo = new FakeRepo();
     repo.fillsByEventKey.set("sid:seed", { id: "fill-seed", row: { eventKey: "sid:seed", wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
     const base = 1_700_000_500_000;
-    // Called once for detectedAtMs, then once per page-loop iteration before each fetch.
-    // Exceeded exactly after the 2nd page's check.
-    const now = sequentialClock([base, base, base, base + 999_999]);
+    // Called once for detectedAtMs, then per page-loop iteration: a deadline check before
+    // checkpointLease, one after it, then (Task 13I / P1-T) pacedFetchTradesPage's own THREE
+    // internal deadline checks (before cooldown, after cooldown, after pacing wait) for
+    // page 0's fetch to actually complete -- 6 calls total before page 1's top-of-loop
+    // check finally sees the exceeded deadline.
+    const now = sequentialClock([base, base, base, base, base, base, base + 999_999]);
     const deadlineAtMs = base + 500;
     const result = await pollSportsShadowWallet(
       WALLET,
@@ -1421,10 +1425,12 @@ describe("Task 13F: a per-wallet deadline bounds Phase 1 (pagination) and Phase 
     const base = 1_700_000_500_000;
 
     // Calls: 1) detectedAtMs, 2) page=0's top-of-loop deadline check (within budget), 3)
-    // the post-checkpointLease deadline recheck (still within budget, page0 fetched), 4)
-    // page=1's top-of-loop deadline check (now exceeded) -- interrupted after exactly one
-    // full page, before ever reaching page 1's short-page natural end.
-    const firstNow = sequentialClock([base, base, base, base + 999_999]);
+    // the post-checkpointLease deadline recheck (still within budget), 4-6) (Task 13I /
+    // P1-T) pacedFetchTradesPage's own three internal deadline checks (before cooldown,
+    // after cooldown, after pacing wait) so page 0 actually completes, 7) page=1's
+    // top-of-loop deadline check (now exceeded) -- interrupted after exactly one full
+    // page, before ever reaching page 1's short-page natural end.
+    const firstNow = sequentialClock([base, base, base, base, base, base, base + 999_999]);
     const first = await pollSportsShadowWallet(
       WALLET,
       0,
@@ -1461,6 +1467,64 @@ describe("Task 13F: a per-wallet deadline bounds Phase 1 (pagination) and Phase 
     expect(repo.fillsByEventKey.size).toBe(persistedAfterSecond); // no duplicate insert
   });
 
+});
+
+describe("Task 13I / P1-T: pacedFetchTradesPage threads the caller's deadline into cooldown/reservation/pacing, not just the outer per-page pre-check", () => {
+  it("a reservation whose granted wait would land at/after the caller's deadline is deferred (no fetch attempted), even though the outer per-page pre-check alone would have allowed the call to start", async () => {
+    const repo = new FakeRepo();
+    const base = 1_700_000_500_000;
+    let fetchCalls = 0;
+    let capturedDeadline: number | undefined;
+    const network: SourcePollNetworkDeps = {
+      fetchImpl: (async () => {
+        fetchCalls += 1;
+        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+      }) as unknown as typeof fetch,
+      // Simulates reserveRequestSlot's OWN real behavior (http-rate-limit.server.ts): a
+      // granted wait that would land at/after the caller's deadline must be reported as
+      // exhausted, never slept through into a request the caller no longer has budget for.
+      reserveRequestSlot: async (_host: string, deadlineAtMs?: number) => {
+        capturedDeadline = deadlineAtMs;
+        const grantedWaitMs = 10_000; // would land far past this test's small deadline window
+        if (deadlineAtMs !== undefined && base + grantedWaitMs >= deadlineAtMs) {
+          throw new DeadlineExceededError("reservation granted but would land at/after the caller's own deadline");
+        }
+        return grantedWaitMs;
+      },
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      recordHostRateLimit: async () => {},
+    };
+    const deadlineAtMs = base + 500; // far tighter than the 10s granted reservation wait
+    const result = await pollSportsShadowWallet(WALLET, 0, { repo, now: () => base, network }, deadlineAtMs);
+    expect(capturedDeadline).toBe(deadlineAtMs); // the real caller deadline was actually forwarded
+    expect(fetchCalls).toBe(0); // never reached the upstream fetch
+    expect(result.pagesFetched).toBe(0);
+    expect(result.backlogTruncated).toBe(true); // a deferral, not a silent "done"
+    expect(result.error).toBeNull(); // never misreported as a genuine upstream/network failure
+  });
+
+  it("reserveRequestSlot receives NO deadline (undefined) when pollSportsShadowWallet is called with no deadlineAtMs argument at all -- exact prior call shape preserved", async () => {
+    const repo = new FakeRepo();
+    let capturedDeadline: number | undefined = 0;
+    let sawCall = false;
+    const network: SourcePollNetworkDeps = {
+      fetchImpl: (async () => new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch,
+      reserveRequestSlot: async (_host: string, deadlineAtMs?: number) => {
+        sawCall = true;
+        capturedDeadline = deadlineAtMs;
+        return 0;
+      },
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      recordHostRateLimit: async () => {},
+    };
+    await pollSportsShadowWallet(WALLET, 0, { repo, network }); // no deadlineAtMs argument
+    expect(sawCall).toBe(true);
+    // Internally Number.POSITIVE_INFINITY, but pacedFetchTradesPage must translate that
+    // back to `undefined` before calling reserveRequestSlot -- the shared rate-limiter's
+    // own backward-compatibility contract (T6) is keyed on an OMITTED argument, not a
+    // finite-but-huge one.
+    expect(capturedDeadline).toBeUndefined();
+  });
 });
 
 /* ======================================================================
