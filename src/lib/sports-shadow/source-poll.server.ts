@@ -1737,7 +1737,13 @@ export async function pollSportsShadowWallet(
     let metadata = metadataCache.get(fill.conditionId);
     if (!metadata) {
       try {
-        metadata = await d.fetchSourceMarketMetadata(fill.conditionId);
+        // CODEX P2-2: deadlineAtMs threaded through so Gamma's own cooldown-check/
+        // reservation-wait cannot silently consume this loop's remaining Phase 2 budget --
+        // a genuine budget exhaustion there throws DeadlineExceededError (caught by this
+        // try/catch, stays PENDING); a cooldown-blocked host or a real 429 instead resolves
+        // to an explicit, cacheable UNVERIFIED_FETCH_FAILED result (see
+        // fetchSourceMarketMetadata's own doc comment).
+        metadata = await d.fetchSourceMarketMetadata(fill.conditionId, {}, deadlineAtMs);
       } catch (err) {
         result.error = result.error ?? `fetchSourceMarketMetadata failed: ${err instanceof Error ? err.message : "unknown error"}`;
         result.metadataFetchFailures += 1;
