@@ -1455,6 +1455,8 @@ export type Database = {
           reason: string | null
           recheck_count: number
           resolved_at: string
+          rule_fingerprint: Json | null
+          rule_fingerprint_version: string | null
           selected_side: string | null
           settlement_compatibility: string
           signal_id: string
@@ -1474,6 +1476,8 @@ export type Database = {
           reason?: string | null
           recheck_count?: number
           resolved_at?: string
+          rule_fingerprint?: Json | null
+          rule_fingerprint_version?: string | null
           selected_side?: string | null
           settlement_compatibility?: string
           signal_id: string
@@ -1493,6 +1497,8 @@ export type Database = {
           reason?: string | null
           recheck_count?: number
           resolved_at?: string
+          rule_fingerprint?: Json | null
+          rule_fingerprint_version?: string | null
           selected_side?: string | null
           settlement_compatibility?: string
           signal_id?: string
@@ -1601,12 +1607,385 @@ export type Database = {
           },
         ]
       }
+      sports_shadow_alerts: {
+        Row: {
+          alert_key: string
+          created_at: string
+          id: string
+          message: string
+          resolved_at: string | null
+          severity: string
+        }
+        Insert: {
+          alert_key: string
+          created_at?: string
+          id?: string
+          message: string
+          resolved_at?: string | null
+          severity: string
+        }
+        Update: {
+          alert_key?: string
+          created_at?: string
+          id?: string
+          message?: string
+          resolved_at?: string | null
+          severity?: string
+        }
+        Relationships: []
+      }
+      sports_shadow_experiment_epochs: {
+        Row: {
+          calibration_started_at: string | null
+          classifier_version: string
+          config_hash: string
+          created_at: string
+          episode_version: string
+          execution_simulator_version: string
+          frozen_at: string | null
+          frozen_config: Json | null
+          git_sha: string
+          go_live_at: string
+          id: string
+          is_current: boolean
+          kalshi_fee_model_version: string
+          notes: string | null
+          oos_started_at: string | null
+          pmus_fee_model_version: string
+          resolver_version: string
+          router_version: string
+          settlement_version: string
+          soak_started_at: string | null
+          stage: string
+          stage_entered_at: string
+          wallet_cohort: string[]
+        }
+        Insert: {
+          calibration_started_at?: string | null
+          classifier_version: string
+          config_hash: string
+          created_at?: string
+          episode_version: string
+          execution_simulator_version: string
+          frozen_at?: string | null
+          frozen_config?: Json | null
+          git_sha: string
+          go_live_at: string
+          id?: string
+          is_current?: boolean
+          kalshi_fee_model_version: string
+          notes?: string | null
+          oos_started_at?: string | null
+          pmus_fee_model_version: string
+          resolver_version: string
+          router_version: string
+          settlement_version: string
+          soak_started_at?: string | null
+          stage?: string
+          stage_entered_at?: string
+          wallet_cohort: string[]
+        }
+        Update: {
+          calibration_started_at?: string | null
+          classifier_version?: string
+          config_hash?: string
+          created_at?: string
+          episode_version?: string
+          execution_simulator_version?: string
+          frozen_at?: string | null
+          frozen_config?: Json | null
+          git_sha?: string
+          go_live_at?: string
+          id?: string
+          is_current?: boolean
+          kalshi_fee_model_version?: string
+          notes?: string | null
+          oos_started_at?: string | null
+          pmus_fee_model_version?: string
+          resolver_version?: string
+          router_version?: string
+          settlement_version?: string
+          soak_started_at?: string | null
+          stage?: string
+          stage_entered_at?: string
+          wallet_cohort?: string[]
+        }
+        Relationships: []
+      }
+      sports_shadow_integrity_audits: {
+        Row: {
+          checks_failed: number
+          checks_run: number
+          findings: Json
+          id: string
+          passed: boolean
+          run_at: string
+        }
+        Insert: {
+          checks_failed: number
+          checks_run: number
+          findings?: Json
+          id?: string
+          passed: boolean
+          run_at?: string
+        }
+        Update: {
+          checks_failed?: number
+          checks_run?: number
+          findings?: Json
+          id?: string
+          passed?: boolean
+          run_at?: string
+        }
+        Relationships: []
+      }
+      sports_shadow_milestone_snapshots: {
+        Row: {
+          classification: string
+          created_at: string
+          experiment_epoch_id: string
+          frozen_config: Json
+          id: string
+          milestone_kind: string
+          report: Json
+          snapshot_version: string
+        }
+        Insert: {
+          classification: string
+          created_at?: string
+          experiment_epoch_id: string
+          frozen_config: Json
+          id?: string
+          milestone_kind: string
+          report: Json
+          snapshot_version: string
+        }
+        Update: {
+          classification?: string
+          created_at?: string
+          experiment_epoch_id?: string
+          frozen_config?: Json
+          id?: string
+          milestone_kind?: string
+          report?: Json
+          snapshot_version?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sports_shadow_milestone_snapshots_experiment_epoch_id_fkey"
+            columns: ["experiment_epoch_id"]
+            isOneToOne: false
+            referencedRelation: "sports_shadow_experiment_epochs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sports_shadow_paper_fills: {
+        Row: {
+          all_in_cost_usd: number | null
+          chosen_venue: string | null
+          contracts: number
+          created_at: string
+          experiment_epoch_id: string | null
+          fee_model_version: string | null
+          fee_usd: number | null
+          fee_valid: boolean
+          fill_status: string
+          id: string
+          kalshi_result: Json | null
+          notional_tier_usd: number
+          observation_id: string | null
+          pmus_result: Json | null
+          reject_reason: string | null
+          routing_timestamp: string
+          side: string
+          signal_id: string
+          source_fill_id: string | null
+          vwap: number | null
+        }
+        Insert: {
+          all_in_cost_usd?: number | null
+          chosen_venue?: string | null
+          contracts?: number
+          created_at?: string
+          experiment_epoch_id?: string | null
+          fee_model_version?: string | null
+          fee_usd?: number | null
+          fee_valid?: boolean
+          fill_status: string
+          id?: string
+          kalshi_result?: Json | null
+          notional_tier_usd: number
+          observation_id?: string | null
+          pmus_result?: Json | null
+          reject_reason?: string | null
+          routing_timestamp: string
+          side: string
+          signal_id: string
+          source_fill_id?: string | null
+          vwap?: number | null
+        }
+        Update: {
+          all_in_cost_usd?: number | null
+          chosen_venue?: string | null
+          contracts?: number
+          created_at?: string
+          experiment_epoch_id?: string | null
+          fee_model_version?: string | null
+          fee_usd?: number | null
+          fee_valid?: boolean
+          fill_status?: string
+          id?: string
+          kalshi_result?: Json | null
+          notional_tier_usd?: number
+          observation_id?: string | null
+          pmus_result?: Json | null
+          reject_reason?: string | null
+          routing_timestamp?: string
+          side?: string
+          signal_id?: string
+          source_fill_id?: string | null
+          vwap?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sports_shadow_paper_fills_experiment_epoch_id_fkey"
+            columns: ["experiment_epoch_id"]
+            isOneToOne: false
+            referencedRelation: "sports_shadow_experiment_epochs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sports_shadow_paper_fills_observation_id_fkey"
+            columns: ["observation_id"]
+            isOneToOne: false
+            referencedRelation: "sports_quote_observations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sports_shadow_paper_fills_signal_id_fkey"
+            columns: ["signal_id"]
+            isOneToOne: false
+            referencedRelation: "sports_shadow_signals"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sports_shadow_paper_fills_source_fill_id_fkey"
+            columns: ["source_fill_id"]
+            isOneToOne: false
+            referencedRelation: "sports_shadow_source_fills"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sports_shadow_paper_positions: {
+        Row: {
+          avg_entry_price: number | null
+          contracts_open: number
+          id: string
+          notional_tier_usd: number
+          realized_pnl_usd: number
+          signal_id: string
+          status: string
+          updated_at: string
+          venue: string
+        }
+        Insert: {
+          avg_entry_price?: number | null
+          contracts_open?: number
+          id?: string
+          notional_tier_usd: number
+          realized_pnl_usd?: number
+          signal_id: string
+          status?: string
+          updated_at?: string
+          venue: string
+        }
+        Update: {
+          avg_entry_price?: number | null
+          contracts_open?: number
+          id?: string
+          notional_tier_usd?: number
+          realized_pnl_usd?: number
+          signal_id?: string
+          status?: string
+          updated_at?: string
+          venue?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sports_shadow_paper_positions_signal_id_fkey"
+            columns: ["signal_id"]
+            isOneToOne: false
+            referencedRelation: "sports_shadow_signals"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sports_shadow_settlements: {
+        Row: {
+          created_at: string
+          gross_pnl_usd: number | null
+          id: string
+          net_pnl_usd: number | null
+          notional_tier_usd: number
+          settlement_source: string | null
+          settlement_status: string
+          settlement_timestamp: string | null
+          settlement_value: number | null
+          signal_id: string
+          total_fees_usd: number | null
+          updated_at: string
+          venue: string
+        }
+        Insert: {
+          created_at?: string
+          gross_pnl_usd?: number | null
+          id?: string
+          net_pnl_usd?: number | null
+          notional_tier_usd: number
+          settlement_source?: string | null
+          settlement_status?: string
+          settlement_timestamp?: string | null
+          settlement_value?: number | null
+          signal_id: string
+          total_fees_usd?: number | null
+          updated_at?: string
+          venue: string
+        }
+        Update: {
+          created_at?: string
+          gross_pnl_usd?: number | null
+          id?: string
+          net_pnl_usd?: number | null
+          notional_tier_usd?: number
+          settlement_source?: string | null
+          settlement_status?: string
+          settlement_timestamp?: string | null
+          settlement_value?: number | null
+          signal_id?: string
+          total_fees_usd?: number | null
+          updated_at?: string
+          venue?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sports_shadow_settlements_signal_id_fkey"
+            columns: ["signal_id"]
+            isOneToOne: false
+            referencedRelation: "sports_shadow_signals"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       sports_shadow_signals: {
         Row: {
           away_team: string | null
           bet_type: string
+          cluster_key: string | null
           created_at: string
           episode_key: string
+          experiment_epoch_id: string | null
           first_fill_id: string
           home_team: string | null
           id: string
@@ -1624,7 +2003,10 @@ export type Database = {
           source_market_slug: string | null
           source_notional: number
           source_outcome: string | null
+          source_sell_notional: number
           source_sell_seen: boolean
+          source_sell_shares: number
+          source_sell_vwap: number | null
           source_shares: number
           source_vwap: number
           source_wallet: string
@@ -1634,8 +2016,10 @@ export type Database = {
         Insert: {
           away_team?: string | null
           bet_type: string
+          cluster_key?: string | null
           created_at?: string
           episode_key: string
+          experiment_epoch_id?: string | null
           first_fill_id: string
           home_team?: string | null
           id?: string
@@ -1653,7 +2037,10 @@ export type Database = {
           source_market_slug?: string | null
           source_notional?: number
           source_outcome?: string | null
+          source_sell_notional?: number
           source_sell_seen?: boolean
+          source_sell_shares?: number
+          source_sell_vwap?: number | null
           source_shares?: number
           source_vwap?: number
           source_wallet: string
@@ -1663,8 +2050,10 @@ export type Database = {
         Update: {
           away_team?: string | null
           bet_type?: string
+          cluster_key?: string | null
           created_at?: string
           episode_key?: string
+          experiment_epoch_id?: string | null
           first_fill_id?: string
           home_team?: string | null
           id?: string
@@ -1682,7 +2071,10 @@ export type Database = {
           source_market_slug?: string | null
           source_notional?: number
           source_outcome?: string | null
+          source_sell_notional?: number
           source_sell_seen?: boolean
+          source_sell_shares?: number
+          source_sell_vwap?: number | null
           source_shares?: number
           source_vwap?: number
           source_wallet?: string
@@ -1690,6 +2082,13 @@ export type Database = {
           updated_at?: string
         }
         Relationships: [
+          {
+            foreignKeyName: "sports_shadow_signals_experiment_epoch_id_fkey"
+            columns: ["experiment_epoch_id"]
+            isOneToOne: false
+            referencedRelation: "sports_shadow_experiment_epochs"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "sports_shadow_signals_first_fill_id_fkey"
             columns: ["first_fill_id"]
@@ -1719,6 +2118,7 @@ export type Database = {
           shares: number
           side: string
           source_ts: number
+          tuple_prefix: string | null
           wallet: string
           wallet_handle: string | null
         }
@@ -1741,6 +2141,7 @@ export type Database = {
           shares?: number
           side: string
           source_ts?: number
+          tuple_prefix?: string | null
           wallet: string
           wallet_handle?: string | null
         }
@@ -1763,8 +2164,122 @@ export type Database = {
           shares?: number
           side?: string
           source_ts?: number
+          tuple_prefix?: string | null
           wallet?: string
           wallet_handle?: string | null
+        }
+        Relationships: []
+      }
+      sports_shadow_source_sell_events: {
+        Row: {
+          created_at: string
+          id: string
+          is_pre_epoch: boolean
+          notional: number
+          price: number
+          shares: number
+          signal_id: string | null
+          source_fill_id: string
+          source_ts: number
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          is_pre_epoch?: boolean
+          notional: number
+          price: number
+          shares: number
+          signal_id?: string | null
+          source_fill_id: string
+          source_ts: number
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          is_pre_epoch?: boolean
+          notional?: number
+          price?: number
+          shares?: number
+          signal_id?: string | null
+          source_fill_id?: string
+          source_ts?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sports_shadow_source_sell_events_signal_id_fkey"
+            columns: ["signal_id"]
+            isOneToOne: false
+            referencedRelation: "sports_shadow_signals"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sports_shadow_source_sell_events_source_fill_id_fkey"
+            columns: ["source_fill_id"]
+            isOneToOne: true
+            referencedRelation: "sports_shadow_source_fills"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sports_shadow_telemetry_events: {
+        Row: {
+          category: string
+          created_at: string
+          experiment_epoch_id: string | null
+          id: string
+          labels: Json
+          metric: string
+          value: number | null
+        }
+        Insert: {
+          category: string
+          created_at?: string
+          experiment_epoch_id?: string | null
+          id?: string
+          labels?: Json
+          metric: string
+          value?: number | null
+        }
+        Update: {
+          category?: string
+          created_at?: string
+          experiment_epoch_id?: string | null
+          id?: string
+          labels?: Json
+          metric?: string
+          value?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sports_shadow_telemetry_events_experiment_epoch_id_fkey"
+            columns: ["experiment_epoch_id"]
+            isOneToOne: false
+            referencedRelation: "sports_shadow_experiment_epochs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sports_shadow_venue_capability: {
+        Row: {
+          checked_at: string
+          detail: string | null
+          discovery_available: boolean
+          orderbook_available: boolean
+          venue: string
+        }
+        Insert: {
+          checked_at?: string
+          detail?: string | null
+          discovery_available?: boolean
+          orderbook_available?: boolean
+          venue: string
+        }
+        Update: {
+          checked_at?: string
+          detail?: string | null
+          discovery_available?: boolean
+          orderbook_available?: boolean
+          venue?: string
         }
         Relationships: []
       }
@@ -2000,6 +2515,13 @@ export type Database = {
           realized_pnl: number
         }[]
       }
+      count_durable_ordinal_fills: {
+        Args: { p_tuple_prefixes: string[]; p_wallet: string }
+        Returns: {
+          fill_count: number
+          tuple_prefix: string
+        }[]
+      }
       create_or_get_live_pilot_intent_atomic: {
         Args: {
           p_payload: Json
@@ -2070,6 +2592,65 @@ export type Database = {
           trade_id: string
         }[]
       }
+      get_sports_shadow_episode_outcomes: {
+        Args: { p_epoch_id: string }
+        Returns: {
+          all_in_cost_usd: number
+          bet_type: string
+          chosen_venue: string
+          cluster_key: string
+          contracts: number
+          detection_latency_ms: number
+          fee_usd: number
+          fill_status: string
+          fire_at: string
+          gross_pnl_usd: number
+          kalshi_result: Json
+          net_pnl_usd: number
+          notional_tier_usd: number
+          observed_at: string
+          pmus_result: Json
+          reject_reason: string
+          routing_timestamp: string
+          scheduled_start_at: string
+          settlement_status: string
+          signal_created_at: string
+          signal_id: string
+          source_wallet: string
+          spread: number
+          total_fees_usd: number
+          vwap: number
+        }[]
+      }
+      get_sports_shadow_epoch_counters: {
+        Args: { p_epoch_id: string }
+        Returns: {
+          calibration_independent_settled_count: number
+          independent_episode_count: number
+          oos_independent_settled_count: number
+          raw_episode_count: number
+          rejected_count: number
+          settled_count: number
+          settled_independent_count: number
+        }[]
+      }
+      get_sports_shadow_soak_telemetry_rollup: {
+        Args: { p_epoch_id: string; p_since: string }
+        Returns: {
+          actual_cycle_count: number
+          kalshi_discovery_attempted_cycles: number
+          kalshi_discovery_failed_count: number
+          lease_lost_count: number
+          observation_backlog_total: number
+          observation_captured_total: number
+          observation_failed_total: number
+          pmus_discovery_attempted_cycles: number
+          pmus_discovery_failed_count: number
+          source_lane_acquired_cycles: number
+          source_starved_cycles: number
+          total_cycle_errors: number
+        }[]
+      }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
@@ -2081,7 +2662,9 @@ export type Database = {
         Args: {
           p_away_team: string
           p_bet_type: string
+          p_cluster_key?: string
           p_episode_key: string
+          p_experiment_epoch_id?: string
           p_fill_id: string
           p_home_team: string
           p_league: string
@@ -2123,6 +2706,16 @@ export type Database = {
         Args: { p_blocked_until: string; p_host: string; p_reason: string }
         Returns: undefined
       }
+      record_pre_epoch_sell: {
+        Args: {
+          p_fill_id: string
+          p_notional: number
+          p_price: number
+          p_shares: number
+          p_source_ts: number
+        }
+        Returns: undefined
+      }
       release_reconcile_lease: {
         Args: { p_holder: string; p_wallet: string }
         Returns: undefined
@@ -2151,12 +2744,18 @@ export type Database = {
       update_sports_shadow_episode: {
         Args: {
           p_fill_id: string
+          p_sell_event_notional?: number
+          p_sell_event_price?: number
+          p_sell_event_shares?: number
+          p_sell_event_source_ts?: number
           p_signal_id: string
           p_source_fill_count: number
           p_source_first_fill_at: string
           p_source_last_fill_at: string
           p_source_notional: number
+          p_source_sell_notional?: number
           p_source_sell_seen: boolean
+          p_source_sell_shares?: number
           p_source_shares: number
           p_source_vwap: number
         }
