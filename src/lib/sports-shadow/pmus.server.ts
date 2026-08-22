@@ -12,6 +12,7 @@
 
 import { DeadlineExceededError, getHostCooldown, parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "../http-rate-limit.server";
 import { PMUS_PUBLIC_BASE } from "../pmus/us-markets.server";
+import { wrapRecordHostRateLimitWithTelemetry } from "./telemetry.server";
 import { eventToCandidates, normalizePmusBook, type PmusCandidate, type PmusRawEvent } from "./pmus";
 import { runtimeFetch } from "./runtime-fetch.server";
 import { NO_OP_LEASE_CHECKPOINT, type LeaseCheckpoint } from "./sports-lease.server";
@@ -46,7 +47,7 @@ const defaultDeps: PmusNetworkDeps = {
   fetchImpl: runtimeFetch,
   reserveRequestSlot,
   getHostCooldown,
-  recordHostRateLimit,
+  recordHostRateLimit: wrapRecordHostRateLimitWithTelemetry(recordHostRateLimit),
   now: () => Date.now(),
   checkpointLease: NO_OP_LEASE_CHECKPOINT,
 };

@@ -52,6 +52,109 @@ export async function recordTelemetry(events: TelemetryEvent[], repo: TelemetryR
 }
 
 /**
+ * ============ CODEX P2-5: REAL RATE-LIMIT TELEMETRY, NOT A HARDCODED CONSTANT ============
+ * PROVEN root cause: worker.server.ts's per-cycle alert evaluation and
+ * soak.server.ts's multi-cycle health rollup both fed a hardcoded `false`/`0` for
+ * rate-limit-storm detection -- http_rate_limits (shared with General Shadow) is a
+ * single-row-per-host CURRENT-cooldown snapshot, never a durable history of 429 events,
+ * so there was no signal available to compute a real rate over time from at all. A
+ * sustained 429 problem across any Sports Shadow upstream host could never be detected,
+ * regardless of how severe.
+ *
+ * FIX: every Sports Shadow network module's `recordHostRateLimit` default dependency
+ * wraps the shared cooldown write (unchanged, still General Shadow's own mechanism) with
+ * a durable Sports-Shadow-owned NETWORK telemetry event per 429 -- see
+ * wrapRecordHostRateLimitWithTelemetry below, used as the DEFAULT dependency in
+ * pmus.server.ts/kalshi.server.ts/source-poll.server.ts/source-metadata.server.ts (never
+ * touches their own call sites, so existing tests injecting their own
+ * recordHostRateLimit mock are completely unaffected). countRecentRateLimitEvents then
+ * gives both the per-cycle alert check and the soak rollup a genuine, queryable rate.
+ * ================================================================================
+ */
+export function wrapRecordHostRateLimitWithTelemetry(inner: (host: string, retryAfterMs: number | null) => Promise<void>): (host: string, retryAfterMs: number | null) => Promise<void> {
+  return async (host, retryAfterMs) => {
+    await inner(host, retryAfterMs);
+    // Fire-and-forget, deliberately NOT awaited on the caller's own critical path beyond
+    // this point -- recordTelemetry is already internally best-effort/non-throwing, but
+    // this still lets the paced-fetch caller's own already-bounded deadline continue
+    // without waiting on a second network round trip for a diagnostic write.
+    void recordTelemetry([{ category: "NETWORK", metric: "rate_limited_429", value: 1, labels: { host, retryAfterMs } }]);
+  };
+}
+
+/** A window with at least this many 429s (any host, any Sports Shadow upstream) counts as a storm -- see RATE_LIMIT_STORM_WINDOW_MS for the window this is measured over. */
+export const RATE_LIMIT_STORM_THRESHOLD = 5;
+/** Matches the scheduler's own justified cadence (~30s) at roughly one full lane's worth of cycles -- a burst within one or two cycles, not a slow trickle across hours. */
+export const RATE_LIMIT_STORM_WINDOW_MS = 5 * 60 * 1000;
+
+export type RateLimitTelemetryRepository = { countSince(sinceIso: string): Promise<number> };
+
+export const supabaseRateLimitTelemetryRepository: RateLimitTelemetryRepository = {
+  async countSince(sinceIso) {
+    const { count, error } = await supabaseAdmin
+      .from("sports_shadow_telemetry_events" as never)
+      .select("id", { count: "exact", head: true })
+      .eq("category", "NETWORK")
+      .eq("metric", "rate_limited_429")
+      .gte("created_at", sinceIso);
+    if (error) throw new Error(error.message);
+    return count ?? 0;
+  },
+};
+
+/** Best-effort: a failure to READ the rate-limit history must never itself look like a storm (fails to `0`, never fabricates a positive count). */
+export async function countRecentRateLimitEvents(nowMs: number = Date.now(), windowMs: number = RATE_LIMIT_STORM_WINDOW_MS, repo: RateLimitTelemetryRepository = supabaseRateLimitTelemetryRepository): Promise<number> {
+  try {
+    return await repo.countSince(new Date(nowMs - windowMs).toISOString());
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * ============ CODEX P2-6 / P2-5: SCHEDULER HEARTBEAT ============
+ * PROVEN root cause: worker.server.ts's per-cycle alert evaluation hardcoded
+ * `schedulerLastRunAgeMs: null` with the reasoning "this IS the scheduler's own current
+ * run -- nothing to measure staleness against here." True for THIS cycle's own existence,
+ * but blind to a real, useful signal: how long ago the PREVIOUS cycle's own telemetry was
+ * recorded. A scheduler that stalled for an extended period and has now resumed is
+ * exactly the condition this should surface -- the alert fires on the FIRST cycle back,
+ * not retroactively.
+ *
+ * FIX: reads the most recent SYSTEM/cycle_duration_ms telemetry row's timestamp BEFORE
+ * this cycle's own telemetry is recorded (worker.server.ts's own call ordering) -- null
+ * only when no prior cycle telemetry exists at all (a genuinely fresh epoch, not a stall).
+ * ================================================================================
+ */
+export type SchedulerHeartbeatRepository = { latestCycleTelemetryAtIso(): Promise<string | null> };
+
+export const supabaseSchedulerHeartbeatRepository: SchedulerHeartbeatRepository = {
+  async latestCycleTelemetryAtIso() {
+    const { data, error } = await supabaseAdmin
+      .from("sports_shadow_telemetry_events" as never)
+      .select("created_at")
+      .eq("category", "SYSTEM")
+      .eq("metric", "cycle_duration_ms")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data as unknown as { created_at: string } | null)?.created_at ?? null;
+  },
+};
+
+/** Best-effort: a failure to READ the heartbeat must never itself look like a stall (fails to `null`, i.e. "cannot determine," never fabricates a large staleness value). */
+export async function computeSchedulerLastRunAgeMs(nowMs: number = Date.now(), repo: SchedulerHeartbeatRepository = supabaseSchedulerHeartbeatRepository): Promise<number | null> {
+  try {
+    const lastRunAtIso = await repo.latestCycleTelemetryAtIso();
+    if (lastRunAtIso === null) return null;
+    return Math.max(0, nowMs - Date.parse(lastRunAtIso));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Flattens a SportsShadowCycleSummary (worker.server.ts) into the SYSTEM/SOURCE/VENUE/
  * OBSERVATION telemetry events Part 25 asks for, without worker.server.ts needing to
  * know anything about the telemetry schema itself.

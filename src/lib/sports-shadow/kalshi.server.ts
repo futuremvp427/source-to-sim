@@ -20,6 +20,7 @@
 
 import { DeadlineExceededError, getHostCooldown, parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "../http-rate-limit.server";
 import { classifyKalshiMarket, normalizeKalshiBook, PHASE1_KALSHI_SERIES, type KalshiBookSnapshot, type KalshiCandidate, type KalshiRawEvent, type KalshiRawMarket } from "./kalshi";
+import { wrapRecordHostRateLimitWithTelemetry } from "./telemetry.server";
 import { runtimeFetch } from "./runtime-fetch.server";
 import { NO_OP_LEASE_CHECKPOINT, type LeaseCheckpoint } from "./sports-lease.server";
 
@@ -53,7 +54,7 @@ const defaultDeps: KalshiNetworkDeps = {
   fetchImpl: runtimeFetch,
   reserveRequestSlot,
   getHostCooldown,
-  recordHostRateLimit,
+  recordHostRateLimit: wrapRecordHostRateLimitWithTelemetry(recordHostRateLimit),
   now: () => Date.now(),
   checkpointLease: NO_OP_LEASE_CHECKPOINT,
 };

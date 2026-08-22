@@ -364,7 +364,13 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
     } catch {
       // Best-effort by design -- see maybeDecideExpiredRoutingCutoffs's own doc comment.
     }
-    const { cycleSummaryToTelemetryEvents, recordTelemetry } = await import("./telemetry.server");
+    const { cycleSummaryToTelemetryEvents, recordTelemetry, computeSchedulerLastRunAgeMs, countRecentRateLimitEvents, RATE_LIMIT_STORM_THRESHOLD } = await import("./telemetry.server");
+    // CODEX P2-5/P2-6: read the PREVIOUS cycle's own heartbeat BEFORE this cycle's own
+    // telemetry is recorded below -- otherwise this would always see its own just-written
+    // row and report ~0ms staleness, defeating the entire point. null only when no prior
+    // cycle telemetry exists at all (a genuinely fresh epoch, not a stall).
+    const schedulerLastRunAgeMs = await computeSchedulerLastRunAgeMs();
+    const recentRateLimitEvents = await countRecentRateLimitEvents();
     await recordTelemetry(cycleSummaryToTelemetryEvents(summary));
     const { evaluateAlertConditions, raiseAlert, resolveAlert } = await import("./alerts.server");
     const alerts = evaluateAlertConditions({
@@ -375,10 +381,10 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
       observationBacklogCount: summary.observationLane.pmus.skipped + summary.observationLane.kalshi.skipped,
       observationBacklogThreshold: 50,
       integrityAuditPassed: null, // integrity.server.ts runs on its own (daily) cadence, not every cycle
-      schedulerLastRunAgeMs: null, // this IS the scheduler's own current run -- nothing to measure staleness against here
+      schedulerLastRunAgeMs,
       schedulerStalledThresholdMs: 300_000,
       sourcePollFailed: summary.sourceLane?.walletSummaries.some((w) => w.error !== null) ?? false,
-      rateLimitStormDetected: false, // no per-cycle 429 counter is threaded through this summary yet
+      rateLimitStormDetected: recentRateLimitEvents >= RATE_LIMIT_STORM_THRESHOLD,
       // FINAL BUILD Part 10: a single cheap indexed COUNT, shared with soak.server.ts's
       // own multi-cycle rollup rather than a duplicated query -- best-effort, so a
       // failure here must never break telemetry/alert evaluation for the rest of the cycle.

@@ -1,5 +1,6 @@
 import { DeadlineExceededError, getHostCooldown, parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "../http-rate-limit.server";
 import { classifyGammaMarket, type GammaMarket } from "./eligibility";
+import { wrapRecordHostRateLimitWithTelemetry } from "./telemetry.server";
 import { runtimeFetch } from "./runtime-fetch.server";
 import type { SourceMarketMetadata } from "./types";
 
@@ -37,7 +38,7 @@ const defaultDeps: GammaNetworkDeps = {
   fetchImpl: runtimeFetch,
   reserveRequestSlot,
   getHostCooldown,
-  recordHostRateLimit,
+  recordHostRateLimit: wrapRecordHostRateLimitWithTelemetry(recordHostRateLimit),
   now: () => Date.now(),
 };
 

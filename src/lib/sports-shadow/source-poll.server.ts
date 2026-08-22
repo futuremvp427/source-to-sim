@@ -121,6 +121,7 @@ import { normalizeSourceEvents, type NormalizedEvent, type RawTrade } from "../s
 import { classifyUnverifiedDisposition, type UnverifiedReasonCode } from "./eligibility";
 import { decideFill, type EligibleFill, type OpenEpisodeState } from "./episode";
 import { computeClusterKey } from "./independence";
+import { wrapRecordHostRateLimitWithTelemetry } from "./telemetry.server";
 import { runtimeFetch } from "./runtime-fetch.server";
 import { fetchSourceMarketMetadata } from "./source-metadata.server";
 import { isEligibleForEpisodeTrigger } from "./source-poll";
@@ -218,7 +219,7 @@ const defaultNetworkDeps: SourcePollNetworkDeps = {
   fetchImpl: runtimeFetch,
   reserveRequestSlot,
   getHostCooldown,
-  recordHostRateLimit,
+  recordHostRateLimit: wrapRecordHostRateLimitWithTelemetry(recordHostRateLimit),
 };
 
 /**

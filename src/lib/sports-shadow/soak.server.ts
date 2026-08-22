@@ -13,6 +13,7 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 import { evaluateSoakHealth, type SoakHealthInput, type SoakHealthResult } from "./soak";
+import { countRecentRateLimitEvents } from "./telemetry.server";
 
 /**
  * The external scheduler's actual cadence is not configured anywhere in this repo (the
@@ -80,10 +81,15 @@ export async function countStuckSettlements(now: number): Promise<number> {
 }
 
 export async function computeSoakHealthRollup(epochId: string, soakStartedAtIso: string, now: number = Date.now()): Promise<SoakHealthResult & { input: SoakHealthInput }> {
-  const [telemetry, integrity, stuckSettlements] = await Promise.all([
+  // CODEX P2-5: total 429s recorded across the WHOLE soak window (not just a recent
+  // slice) -- see telemetry.server.ts's own doc comment for why this table (unlike the
+  // shared http_rate_limits current-cooldown snapshot) is the durable, queryable history
+  // this rollup needs.
+  const [telemetry, integrity, stuckSettlements, rateLimitStormCount] = await Promise.all([
     fetchTelemetryRollup(epochId, soakStartedAtIso),
     countIntegrityAudits(soakStartedAtIso),
     countStuckSettlements(now),
+    countRecentRateLimitEvents(now, Math.max(0, now - Date.parse(soakStartedAtIso))),
   ]);
 
   const expectedCycleCount = Math.max(0, Math.floor((now - Date.parse(soakStartedAtIso)) / EXPECTED_CYCLE_INTERVAL_MS));
@@ -104,8 +110,7 @@ export async function computeSoakHealthRollup(epochId: string, soakStartedAtIso:
     integrityAuditFailures: integrity.failed,
     integrityAuditsRun: integrity.run,
     settlementStuckCount: stuckSettlements,
-    // Not instrumented -- see SoakHealthInput's own doc comment.
-    rateLimitStormCount: 0,
+    rateLimitStormCount,
   };
 
   return { ...evaluateSoakHealth(input), input };
