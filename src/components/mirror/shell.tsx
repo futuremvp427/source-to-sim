@@ -80,6 +80,12 @@ export function Shell({
               {t.label}
             </button>
           ))}
+          <Link
+            to="/sports-shadow"
+            className="rounded border border-[var(--paper)]/40 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--paper)] transition-colors hover:bg-[var(--paper-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            Sports Shadow
+          </Link>
         </nav>
       </header>
 
