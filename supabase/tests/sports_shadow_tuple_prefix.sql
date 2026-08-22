@@ -53,8 +53,10 @@ BEGIN
     RAISE EXCEPTION 'expected a GENERATED ALWAYS column to reject a direct INSERT value, but it succeeded';
   EXCEPTION
     WHEN OTHERS THEN
-      IF SQLERRM NOT LIKE '%generated column%' THEN
-        RAISE EXCEPTION 'expected a generated-column-specific error, got: %', SQLERRM;
+      -- SQLSTATE 428C9 (generated_always) is Postgres's own dedicated error class for
+      -- exactly this case -- robust across wording/version, unlike matching SQLERRM text.
+      IF SQLSTATE <> '428C9' THEN
+        RAISE EXCEPTION 'expected SQLSTATE 428C9 (generated_always), got % (%)', SQLSTATE, SQLERRM;
       END IF;
   END;
 
