@@ -120,6 +120,7 @@ import { buildTradesUrl, MAX_TRADES_OFFSET, PAGE_SIZE } from "../shadow.server";
 import { normalizeSourceEvents, type NormalizedEvent, type RawTrade } from "../shadow-core";
 import { classifyUnverifiedDisposition, type UnverifiedReasonCode } from "./eligibility";
 import { decideFill, type EligibleFill, type OpenEpisodeState } from "./episode";
+import { computeClusterKey } from "./independence";
 import { runtimeFetch } from "./runtime-fetch.server";
 import { fetchSourceMarketMetadata } from "./source-metadata.server";
 import { isEligibleForEpisodeTrigger } from "./source-poll";
@@ -615,6 +616,10 @@ export const supabasePollRepository: PollRepository = {
   },
 
   async insertEpisodeAtomic(fillId, row) {
+    // FINAL BUILD Part 16: computed here (not stored on NewSignalRow) since it is
+    // purely derivable from fields the row already carries -- see independence.ts's
+    // computeClusterKey for the exact game-level clustering rule and rationale.
+    const clusterKey = computeClusterKey({ signalId: row.episodeKey, awayTeam: row.awayTeam, homeTeam: row.homeTeam, scheduledStartAt: row.scheduledStartAt });
     const { data, error } = await supabaseAdmin.rpc("insert_sports_shadow_episode" as never, {
       p_fill_id: fillId,
       p_episode_key: row.episodeKey,
@@ -639,6 +644,7 @@ export const supabasePollRepository: PollRepository = {
       p_bet_type: row.betType,
       p_selected_side: row.selectedSide,
       p_line: row.line,
+      p_cluster_key: clusterKey,
     } as never);
     if (error) throw new Error(error.message);
     return { id: data as unknown as string };

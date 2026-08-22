@@ -12,6 +12,16 @@
 -- event row is inserted with this signal_id -- the pre-epoch/unknown-position case
 -- (no matching episode at all) never reaches this RPC; it is recorded separately by
 -- record_pre_epoch_sell below with signal_id NULL.
+--
+-- Adding new trailing parameters changes the function's identity (Postgres resolves
+-- overloads by parameter list) -- CREATE OR REPLACE alone would create a SECOND,
+-- overloaded 15-arg function rather than replacing the existing 9-arg one. The old
+-- 9-arg signature is dropped explicitly first, matching the established convention
+-- (see 20260820230000's find_pending_sports_shadow_signals signature change).
+DROP FUNCTION IF EXISTS public.update_sports_shadow_episode(
+  uuid, uuid, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean
+);
+
 CREATE OR REPLACE FUNCTION public.update_sports_shadow_episode(
   p_fill_id uuid,
   p_signal_id uuid,
