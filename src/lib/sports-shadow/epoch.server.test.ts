@@ -6,6 +6,8 @@ import { KALSHI_FEE_MODEL_VERSION, PMUS_FEE_MODEL_VERSION } from "./fees";
 import type { EpochRepository } from "./epoch.server";
 import type { ExperimentEpoch } from "./epoch";
 
+const STAGE_TIMING_DEFAULTS = { stageEnteredAtIso: new Date().toISOString(), soakStartedAtIso: null, calibrationStartedAtIso: null, oosStartedAtIso: null };
+
 function makeFakeRepo(initial: ExperimentEpoch | null = null): EpochRepository & { epochs: ExperimentEpoch[] } {
   const epochs: ExperimentEpoch[] = initial ? [initial] : [];
   let seq = 0;
@@ -16,7 +18,7 @@ function makeFakeRepo(initial: ExperimentEpoch | null = null): EpochRepository &
     },
     async createEpoch(epoch) {
       seq += 1;
-      const created: ExperimentEpoch = { ...epoch, id: `epoch-${seq}`, createdAtIso: new Date().toISOString() };
+      const created: ExperimentEpoch = { ...epoch, id: `epoch-${seq}`, createdAtIso: new Date().toISOString(), ...STAGE_TIMING_DEFAULTS };
       epochs.push(created);
       return created;
     },
@@ -25,7 +27,7 @@ function makeFakeRepo(initial: ExperimentEpoch | null = null): EpochRepository &
       // Simulate the real repo's flip-then-insert.
       for (const e of epochs) (e as { stage: string }).stage = e.stage; // no-op, is_current not modeled here
       epochs.length = 0;
-      const created: ExperimentEpoch = { ...epoch, id: `epoch-${seq}`, createdAtIso: new Date().toISOString(), stage: "PRE_SOAK", frozenAtIso: null };
+      const created: ExperimentEpoch = { ...epoch, id: `epoch-${seq}`, createdAtIso: new Date().toISOString(), stage: "PRE_SOAK", frozenAtIso: null, ...STAGE_TIMING_DEFAULTS };
       epochs.push(created);
       return created;
     },
@@ -88,6 +90,7 @@ describe("FINAL BUILD Part 17: ensureCurrentEpoch", () => {
       versions,
       stage: "CALIBRATION",
       frozenAtIso: null,
+      ...STAGE_TIMING_DEFAULTS,
     };
     const repo = makeFakeRepo(existing);
     const result = await ensureCurrentEpoch(["0xnew"], GO_LIVE_MS, "sha-new", repo);
@@ -110,6 +113,7 @@ describe("FINAL BUILD Part 17: ensureCurrentEpoch", () => {
       versions: staleVersions,
       stage: "CALIBRATION",
       frozenAtIso: null,
+      ...STAGE_TIMING_DEFAULTS,
     };
     const repo = makeFakeRepo(existing);
     const result = await ensureCurrentEpoch(["0xa"], GO_LIVE_MS, "sha-new", repo);

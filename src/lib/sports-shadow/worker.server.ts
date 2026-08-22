@@ -333,6 +333,15 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
     for (const key of ["venue_discovery_failed:PMUS", "venue_discovery_failed:KALSHI", "lease_lost:PMUS", "lease_lost:KALSHI", "observation_backlog"]) {
       if (!activeKeys.has(key)) await resolveAlert(key);
     }
+
+    // FINAL BUILD Parts 18-21: re-evaluated every cycle -- cheap in the common case
+    // (one SELECT for the current epoch, no further query unless a stage boundary is
+    // actually being approached). soakHealthPassed is a first-pass heuristic (zero
+    // cycle-level errors this cycle) -- Part 18's full health gate (coverage gaps,
+    // corruption, sustained backlog, venue/scheduler starvation) is not yet composed
+    // from a dedicated multi-cycle rollup; documented here, not silently assumed complete.
+    const { evaluateAndApplyStageTransition } = await import("./stage.server");
+    await evaluateAndApplyStageTransition(summary.errors.length === 0);
   } catch {
     // Best-effort by design -- see this field's own doc comment.
   }

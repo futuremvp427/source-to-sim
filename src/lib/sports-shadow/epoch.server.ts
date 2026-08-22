@@ -10,11 +10,14 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { computeConfigHash, currentEpochVersions, requiresNewEpoch, type ExperimentEpoch, type ExperimentEpochVersions, type ExperimentStage } from "./epoch";
 import { KALSHI_FEE_MODEL_VERSION, PMUS_FEE_MODEL_VERSION } from "./fees";
 
+/** Fields a caller never supplies directly -- always server-defaulted at creation (stage_entered_at = now(), the per-stage started_at columns stay null until transitionStage actually sets them). */
+type EpochServerDefaultedFields = "id" | "createdAtIso" | "stageEnteredAtIso" | "soakStartedAtIso" | "calibrationStartedAtIso" | "oosStartedAtIso";
+
 export type EpochRepository = {
   getCurrentEpoch(): Promise<ExperimentEpoch | null>;
-  createEpoch(epoch: Omit<ExperimentEpoch, "id" | "createdAtIso">): Promise<ExperimentEpoch>;
+  createEpoch(epoch: Omit<ExperimentEpoch, EpochServerDefaultedFields>): Promise<ExperimentEpoch>;
   /** Atomically flips the current epoch (if any) to is_current=false and inserts the new one as current -- never two is_current rows at once (DB-enforced, see the partial unique index). */
-  startNewEpoch(epoch: Omit<ExperimentEpoch, "id" | "createdAtIso" | "stage" | "frozenAtIso">): Promise<ExperimentEpoch>;
+  startNewEpoch(epoch: Omit<ExperimentEpoch, EpochServerDefaultedFields | "stage" | "frozenAtIso">): Promise<ExperimentEpoch>;
   transitionStage(epochId: string, stage: ExperimentStage): Promise<void>;
   freezeEpoch(epochId: string, frozenConfig: Record<string, unknown>): Promise<void>;
 };
@@ -35,6 +38,10 @@ type RawEpochRow = {
   execution_simulator_version: string;
   settlement_version: string;
   stage: ExperimentStage;
+  stage_entered_at: string;
+  soak_started_at: string | null;
+  calibration_started_at: string | null;
+  oos_started_at: string | null;
   frozen_at: string | null;
 };
 
@@ -57,6 +64,10 @@ function fromRow(row: RawEpochRow): ExperimentEpoch {
       settlementVersion: row.settlement_version,
     },
     stage: row.stage,
+    stageEnteredAtIso: row.stage_entered_at,
+    soakStartedAtIso: row.soak_started_at,
+    calibrationStartedAtIso: row.calibration_started_at,
+    oosStartedAtIso: row.oos_started_at,
     frozenAtIso: row.frozen_at,
   };
 }

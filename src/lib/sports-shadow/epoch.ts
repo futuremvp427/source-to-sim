@@ -91,6 +91,10 @@ export type ExperimentEpoch = {
   configHash: string;
   versions: ExperimentEpochVersions;
   stage: ExperimentStage;
+  stageEnteredAtIso: string;
+  soakStartedAtIso: string | null;
+  calibrationStartedAtIso: string | null;
+  oosStartedAtIso: string | null;
   frozenAtIso: string | null;
 };
 
