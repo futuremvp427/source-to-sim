@@ -235,6 +235,14 @@ async function pacedFetchTradesPage(
   deps: SourcePollNetworkDeps,
   deadlineAtMs: number = Number.POSITIVE_INFINITY,
   now: () => number = Date.now,
+  /**
+   * CODEX P1-1: the SAME `end` timestamp parameter shadow.server.ts's own
+   * fetchUntilCheckpointCovered already uses in production to walk successive time
+   * windows once the /trades offset ceiling is reached within one window -- never an
+   * invented/unsupported parameter. Undefined (default) preserves the exact prior
+   * behavior (paginate "now" backward with no window boundary).
+   */
+  endTs?: number,
 ): Promise<RawTrade[]> {
   if (now() >= deadlineAtMs) {
     throw new DeadlineExceededError(`${DATA_API_HOST} request skipped: caller deadline already reached`);
@@ -256,7 +264,7 @@ async function pacedFetchTradesPage(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const url = buildTradesUrl(PAGE_SIZE, offset, wallet);
+    const url = buildTradesUrl(PAGE_SIZE, offset, wallet, endTs);
     const response = await deps.fetchImpl(url, { headers: { Accept: "application/json" }, signal: controller.signal });
     if (response.status === 429) {
       // Task 13I / P1-T (Codex re-review): see pmus.server.ts's pacedGetJson for the full
@@ -449,6 +457,15 @@ export type PollRepository = {
   markFillTerminal(fillId: string, status: "TERMINAL_INELIGIBLE" | "TERMINAL_INVALID"): Promise<void>;
   /** Task 12F / P1-H: marks a fill TERMINAL_UNVERIFIED, durably retaining the exact classifier reason code for later audit/accounting -- distinct from TERMINAL_INELIGIBLE (a positive ineligibility determination) since "could not verify" and "determined ineligible" remain different outcomes. */
   markFillTerminalUnverified(fillId: string, reasonCode: UnverifiedReasonCode): Promise<void>;
+  /**
+   * CODEX P1-1: durable per-wallet source-coverage watermark. `null` means no row exists
+   * yet -- the real (supabasePollRepository) implementation's caller treats that as "not
+   * yet proven," forcing one genuine verification pass. See the migration's own doc
+   * comment (20260825010000_sports_shadow_wallet_source_coverage.sql) for the full model.
+   */
+  getWalletCoverage(wallet: string): Promise<{ coveredThroughTs: number | null; coverageComplete: boolean } | null>;
+  /** Best-effort durable upsert of the coverage watermark -- a failure here must never fail the poll (see its call site's own try/catch); at worst, the next poll re-verifies a range it did not strictly need to. */
+  upsertWalletCoverage(wallet: string, coveredThroughTs: number | null, coverageComplete: boolean): Promise<void>;
 };
 
 type RawPendingFillRow = {
@@ -801,6 +818,25 @@ export const supabasePollRepository: PollRepository = {
       .eq("id", fillId);
     if (error) throw new Error(error.message);
   },
+
+  async getWalletCoverage(wallet) {
+    const { data, error } = await supabaseAdmin
+      .from("sports_shadow_wallet_coverage" as never)
+      .select("covered_through_ts, coverage_complete")
+      .eq("wallet", wallet)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return null;
+    const row = data as unknown as { covered_through_ts: number | null; coverage_complete: boolean };
+    return { coveredThroughTs: row.covered_through_ts, coverageComplete: row.coverage_complete };
+  },
+
+  async upsertWalletCoverage(wallet, coveredThroughTs, coverageComplete) {
+    const { error } = await supabaseAdmin
+      .from("sports_shadow_wallet_coverage" as never)
+      .upsert({ wallet, covered_through_ts: coveredThroughTs, coverage_complete: coverageComplete, updated_at: new Date().toISOString() } as never, { onConflict: "wallet" });
+    if (error) throw new Error(error.message);
+  },
 };
 
 /* ------------------------------------------------------------------ */
@@ -873,6 +909,8 @@ export type WalletPollResult = {
   leaseLost: boolean;
   /** First error encountered, if any. Partial progress made before the error is still reflected in the other fields above — one bad page/row does not discard already-persisted evidence. */
   error: string | null;
+  /** CODEX P1-1: durably known/proven coverage state as of the END of this poll -- true only once a scan has actually crossed goLiveAtMs or reached genuine history-start, never merely because the offset ceiling was hit. See sports_shadow_wallet_coverage. */
+  sourceCoverageComplete: boolean;
 };
 
 function emptyResult(wallet: string): WalletPollResult {
@@ -897,6 +935,7 @@ function emptyResult(wallet: string): WalletPollResult {
     orphanedFillsRecovered: 0,
     leaseLost: false,
     error: null,
+    sourceCoverageComplete: false,
   };
 }
 
@@ -1198,6 +1237,32 @@ export async function pollSportsShadowWallet(
   }
   result.isBootstrap = !hasHistory;
 
+  /**
+   * CODEX P1-1: `hasHistory` alone is NOT proof this wallet's history has ever been
+   * durably captured back to goLiveAtMs -- a wallet whose lifetime trade count (or whose
+   * gap since a prior poll) exceeds MAX_TRADES_OFFSET (10,000) could previously have its
+   * bootstrap/resumption scan hit that ceiling and get treated as complete regardless
+   * (see the "ranOutOfPages" handling below, pre-fix). `coverage` is the durable
+   * per-wallet watermark that makes this provable instead of assumed. `coverage === null`
+   * (no row yet -- true for every wallet before this fix's migration) is treated as "not
+   * yet proven," forcing one genuine verification pass -- never an implicit pass.
+   */
+  let coverage: { coveredThroughTs: number | null; coverageComplete: boolean } | null = null;
+  try {
+    coverage = await d.repo.getWalletCoverage(normalizedWallet);
+  } catch (err) {
+    // Best-effort read: a failure here must not fail the whole poll -- fail toward
+    // "not yet proven" (provingCoverage=true), the safe direction, rather than silently
+    // trusting an unreadable coverage state as complete.
+    void err;
+  }
+  const provingCoverage = !(coverage?.coverageComplete ?? false);
+  const windowEndTs: number | undefined = provingCoverage ? (coverage?.coveredThroughTs ?? undefined) : undefined;
+  let coverageProvenCompleteThisScan = false;
+  // Default reflects whatever was already durably known; overridden below only once this
+  // scan's own fetch+persist work is confirmed (scanConfirmedComplete).
+  result.sourceCoverageComplete = coverage?.coverageComplete ?? false;
+
   // Task 13G / P1-Q (Codex re-review): bootstrap and steady-state share the SAME page
   // ceiling. Bootstrap typically stops after just one page in the common case (see the
   // go-live-boundary-crossing check below), but must be allowed to walk as far as
@@ -1252,7 +1317,7 @@ export async function pollSportsShadowWallet(
       // budget running out as a genuine upstream/network failure.
       let rows: RawTrade[];
       try {
-        rows = await pacedFetchTradesPage(normalizedWallet, offset, d.network, ingestDeadlineAtMs, d.now);
+        rows = await pacedFetchTradesPage(normalizedWallet, offset, d.network, ingestDeadlineAtMs, d.now, windowEndTs);
       } catch (err) {
         if (err instanceof DeadlineExceededError) {
           deadlineExceeded = true;
@@ -1263,12 +1328,17 @@ export async function pollSportsShadowWallet(
       result.pagesFetched += 1;
       if (rows.length === 0) {
         naturalEnd = true;
+        // CODEX P1-1: an empty page within a coverage-proving window (windowEndTs set, or
+        // windowEndTs undefined but this IS page 0) proves genuine history-start -- there
+        // is nothing older left to cover, so coverage is complete by construction, not
+        // merely "this window's ceiling wasn't hit."
+        if (provingCoverage) coverageProvenCompleteThisScan = true;
         break;
       }
       rawPages.push(rows);
       result.rowsFetched += rows.length;
 
-      if (!hasHistory) {
+      if (provingCoverage) {
         // Task 13G / P1-Q (Codex re-review, P1): a FIXED one-page bootstrap is unsound in
         // general -- if more than PAGE_SIZE post-go-live trades already exist by the time
         // a wallet's first-ever poll runs, page 0 alone would not reach back to
@@ -1290,10 +1360,12 @@ export async function pollSportsShadowWallet(
         const crossedGoLive = normalizeSourceEvents(rows, normalizedWallet).some((e) => e.sourceTs * 1000 < goLiveAtMs);
         if (crossedGoLive) {
           naturalEnd = true;
+          coverageProvenCompleteThisScan = true; // proof this scan has walked continuously across the go-live boundary
           break;
         }
         if (rows.length < PAGE_SIZE) {
           naturalEnd = true;
+          coverageProvenCompleteThisScan = true; // genuine history-start reached -- nothing older exists to cover
           break;
         }
         continue; // keep paging further back -- go-live boundary not yet reached
@@ -1448,14 +1520,21 @@ export async function pollSportsShadowWallet(
     // as any other unconfirmed-scan discard (see scanConfirmedComplete above) -- nothing
     // here has been persisted yet, so nothing is stranded, only deferred to the wallet's
     // next poll.
+    // CODEX P1-1: tracks whether EVERY page of THIS window was durably persisted before
+    // this poll's deadline -- gates coverage-watermark advancement below. Advancing the
+    // watermark past rows this poll only OBSERVED but never actually finished persisting
+    // would let a later poll believe a range is durable when part of it is not.
+    let allPagesPersistedThisWindow = true;
     if (d.now() >= ingestDeadlineAtMs) {
       result.backlogTruncated = true;
+      allPagesPersistedThisWindow = false;
     } else {
       for (const pageIdx of pageIndicesOldestFirst) {
         // Task 13G (Codex re-review round 9, P1): checked before EVERY page's
         // reconcile+persist unit, including the first.
         if (d.now() >= ingestDeadlineAtMs) {
           result.backlogTruncated = true;
+          allPagesPersistedThisWindow = false;
           break;
         }
         const pageEvents = eventsByPageIndex.get(pageIdx)!;
@@ -1483,6 +1562,7 @@ export async function pollSportsShadowWallet(
         // await can run past the deadline.
         if (d.now() >= ingestDeadlineAtMs) {
           result.backlogTruncated = true;
+          allPagesPersistedThisWindow = false;
           break;
         }
         const { newDegraded: pageNewDegraded, duplicateCount: pageDegradedDuplicates, error: reconcileError } = await reconcileDegradedEvents(
@@ -1498,6 +1578,7 @@ export async function pollSportsShadowWallet(
           // the exact same partial-page stranding risk as any other partial-page commit.
           result.error = result.error ?? reconcileError;
           result.backlogTruncated = true;
+          allPagesPersistedThisWindow = false;
           break;
         }
         result.duplicateRows += pageReliableDuplicates + pageDegradedDuplicates;
@@ -1510,6 +1591,7 @@ export async function pollSportsShadowWallet(
         // reconciliation itself can consume real time.
         if (d.now() >= ingestDeadlineAtMs) {
           result.backlogTruncated = true;
+          allPagesPersistedThisWindow = false;
           break;
         }
         const batch = pageGenuinelyNew.map((event) => toRawFillRow(event));
@@ -1534,10 +1616,37 @@ export async function pollSportsShadowWallet(
           result.error = result.error ?? `insertRawFillsBatch failed: ${err instanceof Error ? err.message : "unknown error"}`;
           result.invalidRows += pageGenuinelyNew.length;
           result.backlogTruncated = true;
+          allPagesPersistedThisWindow = false;
           break;
         }
       }
     }
+
+    // CODEX P1-1: durable coverage-watermark advancement. Only when EVERY fetched page of
+    // this window is confirmed both FETCHED (scanConfirmedComplete, already required to
+    // reach this block) and durably PERSISTED (allPagesPersistedThisWindow) is it safe to
+    // advance covered_through_ts -- otherwise a not-yet-durable row could be silently
+    // skipped by a later poll that trusts the watermark. Best-effort: a failure to WRITE
+    // the watermark must never fail the poll -- the next poll simply re-verifies the same
+    // (already-durable, idempotent-safe) range instead of a strictly new one.
+    if (provingCoverage && allPagesPersistedThisWindow) {
+      try {
+        if (coverageProvenCompleteThisScan) {
+          await d.repo.upsertWalletCoverage(normalizedWallet, windowEndTs ?? null, true);
+        } else if (ranOutOfPages && allEventsBySourceOrder.length > 0) {
+          // Offset ceiling reached within this window without proving completion --
+          // allEventsBySourceOrder is sorted ascending by sourceTs (normalizeSourceEvents'
+          // own return statement), so its first element is the OLDEST timestamp actually
+          // observed. Inclusive boundary, matching shadow.server.ts's own established
+          // fetchUntilCheckpointCovered convention: events sharing that exact second are
+          // re-fetched (idempotent no-op) rather than risk skipping one on the next window.
+          await d.repo.upsertWalletCoverage(normalizedWallet, allEventsBySourceOrder[0]!.sourceTs, false);
+        }
+      } catch (err) {
+        void err;
+      }
+    }
+    result.sourceCoverageComplete = coverageProvenCompleteThisScan || (coverage?.coverageComplete ?? false);
   }
 
   /*

@@ -180,6 +180,7 @@ function emptyWalletResult(wallet: string, overrides: Partial<WalletPollResult> 
     orphanedFillsRecovered: 0,
     leaseLost: false,
     error: null,
+    sourceCoverageComplete: true,
     ...overrides,
   };
 }

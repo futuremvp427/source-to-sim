@@ -52,6 +52,21 @@ class FakeRepo implements PollRepository {
   throwOnUpdateEpisodeAtomic: Error | null = null;
   throwOnCountDurableOrdinal: Error | null = null;
   throwOnFindPendingDownstreamFills: Error | null = null;
+  /**
+   * CODEX P1-1: explicit per-wallet override so tests can exercise "coverage not yet
+   * proven" against a wallet that already has history (the exact recovery scenario), or
+   * "a watermark exists from a previous ranOutOfPages poll." When unset for a wallet,
+   * getWalletCoverage defaults to mirroring hasAnyFillsForWallet -- i.e. `coverageComplete
+   * = hasHistory` -- so every PRE-EXISTING test in this file (written before this field
+   * existed, all of which implicitly relied on `!hasHistory` alone gating bootstrap vs.
+   * steady-state pagination) continues to see byte-identical behavior without being
+   * touched. Real production defaults differently (missing row = NOT yet proven) -- see
+   * supabasePollRepository.getWalletCoverage's own doc comment for why that asymmetry is
+   * deliberate.
+   */
+  coverageOverride = new Map<string, { coveredThroughTs: number | null; coverageComplete: boolean }>();
+  upsertWalletCoverageCalls: Array<{ wallet: string; coveredThroughTs: number | null; coverageComplete: boolean }> = [];
+  throwOnUpsertWalletCoverage: Error | null = null;
 
   async hasAnyFillsForWallet(wallet: string): Promise<boolean> {
     if (this.throwOnHasAny) throw this.throwOnHasAny;
@@ -59,6 +74,19 @@ class FakeRepo implements PollRepository {
       if (row.wallet === wallet) return true;
     }
     return false;
+  }
+
+  async getWalletCoverage(wallet: string): Promise<{ coveredThroughTs: number | null; coverageComplete: boolean } | null> {
+    const override = this.coverageOverride.get(wallet);
+    if (override) return override;
+    const hasHistory = await this.hasAnyFillsForWallet(wallet);
+    return { coveredThroughTs: null, coverageComplete: hasHistory };
+  }
+
+  async upsertWalletCoverage(wallet: string, coveredThroughTs: number | null, coverageComplete: boolean): Promise<void> {
+    this.upsertWalletCoverageCalls.push({ wallet, coveredThroughTs, coverageComplete });
+    if (this.throwOnUpsertWalletCoverage) throw this.throwOnUpsertWalletCoverage;
+    this.coverageOverride.set(wallet, { coveredThroughTs, coverageComplete });
   }
 
   async findExistingEventKeys(wallet: string, eventKeys: string[]): Promise<Set<string>> {
@@ -416,6 +444,122 @@ describe("pollSportsShadowWallet — pagination", () => {
     // gapless range in one pass.
     expect(result.newRows).toBe(0);
     expect(repo.fillsByEventKey.size).toBe(1); // only the pre-seeded row, nothing new
+  });
+});
+
+describe("CODEX P1-1: durable source-coverage watermark -- the /trades offset ceiling can no longer be silently treated as verified-complete", () => {
+  const SHARED_FULL_PAGE = Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `cov-window1-${i}`, transactionHash: `0xtx-cov-w1-${i}`, timestamp: 1_700_000_000 }));
+
+  /** Keys responses by BOTH the `end` window boundary and `offset`, so window-1 vs. window-2+ content can differ -- makeNetworkDeps only keys by offset, which cannot express this. */
+  function makeWindowedNetworkDeps(byWindow: Record<string, Record<number, unknown> | ((offset: number) => unknown)>): SourcePollNetworkDeps {
+    return {
+      fetchImpl: (async (url: string | URL) => {
+        const u = new URL(String(url));
+        const offset = Number(u.searchParams.get("offset"));
+        const end = u.searchParams.get("end") ?? "none";
+        const pages = byWindow[end];
+        if (!pages) throw new Error(`unexpected window end=${end} (offset=${offset})`);
+        const body = typeof pages === "function" ? pages(offset) : pages[offset];
+        if (body instanceof Error) throw body;
+        return new Response(JSON.stringify(body ?? []), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch,
+      reserveRequestSlot: async () => 0,
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      recordHostRateLimit: async () => {},
+    };
+  }
+
+  it("a bootstrap scan that exhausts MAX_PAGES_PER_WALLET without crossing go-live advances the watermark instead of persisting a false completeness boundary", async () => {
+    const repo = new FakeRepo();
+    const goLiveAtMs = 1_699_999_000_000; // well before every mocked row -- nothing here is pre-go-live
+    const { deps } = makeDeps({ repo, network: makeWindowedNetworkDeps({ none: () => SHARED_FULL_PAGE }) });
+    const result = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps);
+
+    expect(result.pagesFetched).toBe(MAX_PAGES_PER_WALLET);
+    expect(result.backlogTruncated).toBe(true);
+    // The central fix: this scan is NOT treated as coverage-complete merely because it
+    // hit the offset ceiling -- a later poll must keep trying, not stop here forever.
+    expect(result.sourceCoverageComplete).toBe(false);
+    expect(repo.upsertWalletCoverageCalls).toHaveLength(1);
+    expect(repo.upsertWalletCoverageCalls[0]?.coverageComplete).toBe(false);
+    expect(repo.upsertWalletCoverageCalls[0]?.coveredThroughTs).toBe(1_700_000_000); // oldest ts actually observed this window
+  });
+
+  it("a SECOND poll resumes from the durable watermark (via the Data API's own `end` parameter) and eventually proves coverage complete once it crosses go-live -- no data loss, no permanent false boundary", async () => {
+    const repo = new FakeRepo();
+    const goLiveAtMs = 1_699_999_000_000;
+    const network = makeWindowedNetworkDeps({
+      none: () => SHARED_FULL_PAGE,
+      // Window 2 opens with end=1700000000 (the watermark poll 1 persisted) and
+      // immediately finds a fill strictly before goLiveAtMs -- proving the boundary crossed.
+      "1700000000": { 0: [trade({ id: "pre-go-live", transactionHash: "0xtx-pre-go-live", timestamp: 1_699_998_000 })] },
+    });
+    const { deps } = makeDeps({ repo, network });
+
+    const first = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps);
+    expect(first.sourceCoverageComplete).toBe(false);
+    expect(repo.coverageOverride.get(WALLET.toLowerCase())?.coveredThroughTs).toBe(1_700_000_000);
+
+    const second = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps);
+    expect(second.pagesFetched).toBe(1); // window 2's very first page already crosses go-live
+    expect(second.sourceCoverageComplete).toBe(true);
+    expect(repo.coverageOverride.get(WALLET.toLowerCase())?.coverageComplete).toBe(true);
+
+    // Once complete, a THIRD poll must never re-walk the windowed recovery path again --
+    // steady-state's plain overlap-based polling takes over permanently.
+    const overlapTrade = trade({ id: "steady-state-new", transactionHash: "0xtx-steady-state-new" });
+    const { deps: thirdDeps } = makeDeps({
+      repo,
+      network: {
+        fetchImpl: (async (url: string | URL) => {
+          const u = new URL(String(url));
+          expect(u.searchParams.has("end")).toBe(false); // no window boundary once coverage is complete
+          const offset = Number(u.searchParams.get("offset"));
+          return new Response(JSON.stringify(offset === 0 ? [overlapTrade] : []), { status: 200, headers: { "content-type": "application/json" } });
+        }) as typeof fetch,
+        reserveRequestSlot: async () => 0,
+        getHostCooldown: async () => ({ blocked: false, reason: null }),
+        recordHostRateLimit: async () => {},
+      },
+    });
+    const third = await pollSportsShadowWallet(WALLET, goLiveAtMs, thirdDeps);
+    expect(third.sourceCoverageComplete).toBe(true);
+  });
+
+  it("a deadline-interrupted window does NOT advance the watermark -- only a fully fetched AND fully persisted window ever does", async () => {
+    const repo = new FakeRepo();
+    const goLiveAtMs = 1_699_999_000_000;
+    let now = 1_700_000_500_000;
+    const { deps } = makeDeps({
+      repo,
+      now: () => now,
+      network: makeWindowedNetworkDeps({
+        none: () => {
+          now += 1_000; // each page consumes real time -- always a FULL page, so only the deadline (never a natural end) can stop this scan
+          return SHARED_FULL_PAGE;
+        },
+      }),
+    });
+    // A tight deadline that allows only a couple of pages before tripping -- well short of
+    // ever reaching a natural end or crossing go-live.
+    const result = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps, 1_700_000_501_500);
+    expect(result.backlogTruncated).toBe(true);
+    expect(result.sourceCoverageComplete).toBe(false);
+    expect(repo.upsertWalletCoverageCalls).toHaveLength(0); // never advanced -- this scan was never confirmed complete
+  });
+
+  it("an already-durable wallet with an explicitly PRE-EXISTING coverage gap (coverageComplete=false despite having history) resumes recovery via the watermark exactly like a first-ever bootstrap would", async () => {
+    const repo = new FakeRepo();
+    repo.fillsByEventKey.set("sid:preexisting", { id: "fill-pre", row: { eventKey: "sid:preexisting", wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
+    repo.coverageOverride.set(WALLET.toLowerCase(), { coveredThroughTs: 1_700_000_000, coverageComplete: false });
+    const goLiveAtMs = 1_699_999_000_000;
+    const network = makeWindowedNetworkDeps({
+      "1700000000": { 0: [trade({ id: "pre-go-live-2", transactionHash: "0xtx-pre-go-live-2", timestamp: 1_699_998_000 })] },
+    });
+    const { deps } = makeDeps({ repo, network });
+    const result = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps);
+    expect(result.isBootstrap).toBe(false); // hasHistory=true -- this is resumption, not bootstrap
+    expect(result.sourceCoverageComplete).toBe(true); // recovery completes via the SAME windowed mechanism
   });
 });
 
