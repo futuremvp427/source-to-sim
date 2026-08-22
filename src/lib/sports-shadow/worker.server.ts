@@ -450,6 +450,17 @@ export type SportsShadowCycleSummary = {
   sourceLane: SourceLaneResult | null;
   finalObservationPass: PerVenueObservationResult;
   errors: string[];
+  /**
+   * FINAL BUILD Part 6/repository-completion pass (Codex-caught P1): resolved ONCE per
+   * cycle, regardless of whether the source lane itself ran this cycle -- every
+   * telemetry event this cycle records must carry this so soak.server.ts's rollup RPC
+   * (which filters strictly by experiment_epoch_id) can ever see a non-zero cycle
+   * count. Previously this was resolved INSIDE runSourceLane and never propagated to the
+   * summary at all, so every telemetry_events row was written with experiment_epoch_id
+   * NULL and the soak health gate could never pass (0 actual cycles against any nonzero
+   * expected count, forever).
+   */
+  epochId: string | null;
 };
 
 function emptyObservationResult(): ObservationLaneResult {
@@ -694,7 +705,7 @@ async function resolveVenuePending(venue: Venue, d: SportsShadowWorkerDeps, erro
   return summary;
 }
 
-async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDeps, errors: string[], checkpoint: LeaseCheckpoint): Promise<SourceLaneResult> {
+async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDeps, errors: string[], checkpoint: LeaseCheckpoint, epochId: string | null): Promise<SourceLaneResult> {
   let startIndex = 0;
   try {
     startIndex = await d.workerRepo.getWalletCursor();
@@ -702,19 +713,6 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
     errors.push(`wallet cursor read failed: ${err instanceof Error ? err.message : "unknown error"}`); // falls back to 0 -- safe, just temporarily less fair
   }
   const orderedWallets = rotateWallets(config.wallets, startIndex);
-
-  // FINAL BUILD Part 17/analytics: resolved ONCE per cycle (not per wallet) -- cheap in
-  // the common case (one SELECT, no write unless config/versions actually drifted) and
-  // every episode created THIS cycle shares the identical epoch attribution. A failure
-  // here is best-effort: episodes still get created (untagged, epochId null) rather than
-  // blocking source-signal collection on epoch bookkeeping.
-  let epochId: string | null = null;
-  try {
-    const epoch = await d.ensureCurrentEpoch(config.wallets, config.goLiveAtMs ?? d.now(), config.gitSha);
-    epochId = epoch.id;
-  } catch (err) {
-    errors.push(`ensureCurrentEpoch failed: ${err instanceof Error ? err.message : "unknown error"}`);
-  }
 
   const walletSummaries: WalletSummary[] = [];
   let newSignalsCreated = 0;
@@ -858,7 +856,21 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
       sourceLane: null,
       finalObservationPass: emptyPerVenueObservationResult(),
       errors,
+      epochId: null,
     };
+  }
+
+  // FINAL BUILD Part 6/repository-completion pass (Codex-caught P1): resolved ONCE per
+  // cycle, BEFORE either lane runs, so every telemetry event this cycle records (not
+  // just newly-created episodes) carries the current epoch -- regardless of whether the
+  // source lease is even acquired this cycle. A failure here is best-effort: the cycle
+  // still proceeds (epochId null) rather than blocking collection on epoch bookkeeping.
+  let epochId: string | null = null;
+  try {
+    const epoch = await d.ensureCurrentEpoch(config.wallets, config.goLiveAtMs ?? d.now(), config.gitSha);
+    epochId = epoch.id;
+  } catch (err) {
+    errors.push(`ensureCurrentEpoch failed: ${err instanceof Error ? err.message : "unknown error"}`);
   }
 
   // LANE A: observation, highest priority, always attempted first. Task 12H/P1-N: both
@@ -877,7 +889,7 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
     // reset per wallet.
     const checkpoint = createLeaseCheckpoint(sourceLease, SOURCE_LEASE_TTL_SECONDS, d.leaseRepo, d.now);
     try {
-      sourceLane = await runSourceLane(config, d, errors, checkpoint);
+      sourceLane = await runSourceLane(config, d, errors, checkpoint, epochId);
       await releaseSportsLease(sourceLease, { state: "idle", lastError: null }, d.leaseRepo);
     } catch (err) {
       const message = err instanceof Error ? err.message : "unknown error";
@@ -902,6 +914,7 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
     sourceLane,
     finalObservationPass,
     errors,
+    epochId,
   };
   try {
     await d.onCycleComplete(summary);

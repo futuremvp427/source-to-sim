@@ -405,6 +405,16 @@ describe("runSportsShadowCycle — epoch attribution (repository-completion pass
     expect(pollSportsShadowWallet).toHaveBeenCalledTimes(1);
     expect(pollSportsShadowWallet.mock.calls[0]?.[2].epochId).toBeNull();
   });
+
+  it("Codex-caught P1 regression: summary.epochId is populated even when the source lease is NOT acquired this cycle -- epoch resolution must not live inside runSourceLane, or every telemetry event this cycle would be written with experiment_epoch_id NULL", async () => {
+    const { repo: leaseRepo } = makeFakeLeaseRepo();
+    await leaseRepo.acquire(SOURCE_LOCK_ID, "other-invocation", 60); // source lease held elsewhere -- runSourceLane never runs this cycle
+    const ensureCurrentEpoch = vi.fn(async (_wallets: readonly string[], goLiveAtMs: number) => fakeEpoch(goLiveAtMs));
+    const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ leaseRepo, ensureCurrentEpoch: ensureCurrentEpoch as never }));
+    expect(summary.sourceLane?.acquired).toBe(false);
+    expect(ensureCurrentEpoch).toHaveBeenCalledTimes(1);
+    expect(summary.epochId).toBe("epoch-fake");
+  });
 });
 
 describe("runSportsShadowCycle — Task 12D/P1-B wallet fairness", () => {

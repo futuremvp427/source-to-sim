@@ -18,7 +18,17 @@
  */
 
 export type Venue = "PMUS" | "KALSHI";
-export type FillStatus = "FULL" | "PARTIAL" | "NONE" | "INVALID" | "REJECTED";
+/**
+ * UNROUTED is synthetic -- produced by get_sports_shadow_episode_outcomes' RPC for a
+ * signal that never even reached paper.server.ts's routing decision at all (no venue
+ * match, or no live observation was ever captured for it). It is NOT the same as
+ * REJECTED (routing was attempted and explicitly declined after evaluating executable
+ * depth) -- collapsing the two would hide a coverage/matching problem behind an
+ * execution-quality one. Codex (commit fa34d0f) caught that omitting these rows
+ * entirely from the RPC inflated match rate and deflated liquidity-failure rate, since
+ * both were computed only over signals that happened to get routed.
+ */
+export type FillStatus = "FULL" | "PARTIAL" | "NONE" | "INVALID" | "REJECTED" | "UNROUTED";
 export type SettlementStatus = "PENDING" | "SETTLED_WIN" | "SETTLED_LOSS" | "SETTLED_PUSH" | "VOID" | "CANCELED";
 export type BetType = "MONEYLINE" | "SPREAD" | "TOTAL";
 
@@ -202,7 +212,10 @@ export function computeExecutionMetrics(rows: readonly EpisodeOutcomeRow[]): Exe
   const total = rows.length;
   const full = rows.filter((r) => r.fillStatus === "FULL" || r.fillStatus === "PARTIAL").length;
   const rejected = rows.filter((r) => r.fillStatus === "REJECTED").length;
-  const liquidityFailed = rows.filter((r) => r.fillStatus === "NONE" || r.fillStatus === "INVALID").length;
+  // UNROUTED folded in here: a signal that never even reached a routing decision is, from
+  // the strategy's perspective, exactly as much a liquidity/coverage failure as one that
+  // was routed but found no executable depth -- see FillStatus's own doc comment.
+  const liquidityFailed = rows.filter((r) => r.fillStatus === "NONE" || r.fillStatus === "INVALID" || r.fillStatus === "UNROUTED").length;
   const spreads = rows.map((r) => r.spread).filter((v): v is number => v !== null);
   const slippages = rows.map(chosenVenueSlippageCents).filter((v): v is number => v !== null);
   const detectionLatencies = rows.map((r) => r.detectionLatencyMs).filter((v): v is number => v !== null);

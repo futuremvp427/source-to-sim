@@ -70,6 +70,9 @@ export async function evaluateCalibrationClassification(epochId: string, calibra
 
 export type OosEvaluation = { classification: OosClassification; gate: LivePilotGateResult; report: EpisodeAnalysisReport };
 
+/** Rolling window soak.server.ts's rollup is evaluated over during OOS -- long enough to smooth over a single bad cycle, short enough to reflect CURRENT health rather than the whole OOS-to-date history. */
+const OOS_OPERATIONAL_HEALTH_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 /**
  * `oosSampleAndDurationMet` is passed in by the caller (stage.server.ts already knows
  * this cheaply from the same counter it uses for the stage transition itself) so this
@@ -79,16 +82,27 @@ export type OosEvaluation = { classification: OosClassification; gate: LivePilot
  * already starts a BRAND NEW epoch the instant any version/config drift is detected
  * (requiresNewEpoch), so a single epoch's own lifetime cannot mix incompatible versions
  * by construction -- there is nothing for this function to detect that isn't already
- * prevented upstream. `operationalHealthAcceptable` reflects the LATEST integrity audit
- * only during OOS (the dedicated multi-cycle rollup in soak.server.ts governs entry into
- * CALIBRATION specifically, not ongoing OOS-stage health -- a separate rollup for the
- * OOS window is not yet built in this pass).
+ * prevented upstream.
+ *
+ * Codex review (commit fa34d0f) caught a real P1: `operationalHealthAcceptable` was
+ * simply aliased to the LATEST integrity audit boolean, which says nothing about
+ * scheduler freshness, backlog, venue starvation, lease loss, or settlement health --
+ * a single old clean audit could let LIVE_PILOT_REVIEW_READY pass while the platform is
+ * currently unhealthy. Fixed by reusing soak.server.ts's own rollup (identical
+ * thresholds/logic already used to gate OPERATIONAL_SOAK -> CALIBRATION) over a
+ * trailing 24h window, rather than aliasing an unrelated boolean.
  */
 export async function evaluateOosClassification(epochId: string, oosStartedAtIso: string, oosSampleAndDurationMet: boolean): Promise<OosEvaluation> {
   const allRows = await fetchAllEpisodeOutcomes(epochId);
   const report = computeEpisodeAnalysisReport(allRows, { sinceIso: oosStartedAtIso, untilIso: null }, DECLARED_STRATEGY_NOTIONAL_USD);
 
-  const [integrityAuditPassed, unresolvedMatchingIssues] = await Promise.all([latestIntegrityAuditPassed(), hasUnresolvedMatchingIssues(epochId)]);
+  const { computeSoakHealthRollup } = await import("./soak.server");
+  const recentHealthSinceIso = new Date(Date.now() - OOS_OPERATIONAL_HEALTH_WINDOW_MS).toISOString();
+  const [integrityAuditPassed, unresolvedMatchingIssues, recentHealth] = await Promise.all([
+    latestIntegrityAuditPassed(),
+    hasUnresolvedMatchingIssues(epochId),
+    computeSoakHealthRollup(epochId, recentHealthSinceIso),
+  ]);
 
   const gateInput: LivePilotGateInput = {
     oosSampleAndDurationMet,
@@ -102,7 +116,7 @@ export async function evaluateOosClassification(epochId: string, oosStartedAtIso
     integrityAuditPassed,
     epochContaminationDetected: false,
     unresolvedMatchingIssues,
-    operationalHealthAcceptable: integrityAuditPassed,
+    operationalHealthAcceptable: recentHealth.passed,
     bootstrapProbabilityPositive: report.bootstrap.probabilityPositive,
   };
 

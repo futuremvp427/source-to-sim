@@ -90,7 +90,13 @@ BEGIN
     RAISE EXCEPTION 'expected insert_sports_shadow_episode to persist p_experiment_epoch_id onto sports_shadow_signals.experiment_epoch_id';
   END IF;
 
-  UPDATE public.sports_shadow_signals SET status = 'SETTLED_WIN', created_at = v_cal_start + interval '1 day' WHERE id = v_signal_a;
+  UPDATE public.sports_shadow_signals SET created_at = v_cal_start + interval '1 day' WHERE id = v_signal_a;
+  -- Codex-caught P1: "settled" must come from sports_shadow_settlements, NEVER from
+  -- sports_shadow_signals.status (which the real settlement pipeline never writes) --
+  -- inserted at tier=5 specifically so it does not collide with section D's own
+  -- tier=25 settlement inserts for signal_a below.
+  INSERT INTO public.sports_shadow_settlements (signal_id, venue, notional_tier_usd, settlement_status, net_pnl_usd)
+  VALUES (v_signal_a, 'PMUS', 5, 'SETTLED_WIN', 10);
 
   INSERT INTO public.sports_shadow_source_fills (event_key, wallet, asset, side, source_ts, identity_basis)
   VALUES ('ab-fill-b', v_wallet, '0xasset2', 'BUY', 2, 'source_id') RETURNING id INTO v_fill_b;
@@ -99,7 +105,9 @@ BEGIN
     v_cal_start + interval '2 days', v_cal_start + interval '2 days', 0.5, 10, 5, 1, false,
     'MLB', NULL, 'AwayTeam', 'HomeTeam', 'MONEYLINE', 'HOM', NULL, 'game-1', v_epoch_id
   );
-  UPDATE public.sports_shadow_signals SET status = 'SETTLED_LOSS', created_at = v_cal_start + interval '2 days' WHERE id = v_signal_b;
+  UPDATE public.sports_shadow_signals SET created_at = v_cal_start + interval '2 days' WHERE id = v_signal_b;
+  INSERT INTO public.sports_shadow_settlements (signal_id, venue, notional_tier_usd, settlement_status, net_pnl_usd)
+  VALUES (v_signal_b, 'PMUS', 5, 'SETTLED_LOSS', -5);
 
   INSERT INTO public.sports_shadow_source_fills (event_key, wallet, asset, side, source_ts, identity_basis)
   VALUES ('ab-fill-c', v_wallet, '0xasset3', 'BUY', 3, 'source_id') RETURNING id INTO v_fill_c;
@@ -107,7 +115,7 @@ BEGIN
     v_fill_c, 'ab-episode-c', v_wallet, NULL, '0xcondition3', '0xasset3', 'AWY', NULL, NULL,
     v_cal_start + interval '1 day', v_cal_start + interval '1 day', 0.5, 10, 5, 1, false,
     'MLB', NULL, 'OtherAway', 'OtherHome', 'MONEYLINE', 'AWY', NULL, NULL, v_epoch_id
-  ); -- cluster_key NULL -- its own singleton cluster, status stays 'OPEN' (not settled)
+  ); -- cluster_key NULL -- its own singleton cluster; no settlement row at all -- stays unsettled
 
   ------------------------------------------------------------------
   -- C. get_sports_shadow_epoch_counters: raw/independent/settled counts, and the
@@ -180,7 +188,7 @@ BEGIN
   INSERT INTO public.sports_shadow_settlements (signal_id, venue, notional_tier_usd, settlement_status, net_pnl_usd)
   VALUES (v_signal_a, 'PMUS', 25, 'SETTLED_WIN', 12.34);
 
-  SELECT * INTO v_row FROM public.get_sports_shadow_episode_outcomes(v_epoch_id) WHERE signal_id = v_signal_a;
+  SELECT * INTO v_row FROM public.get_sports_shadow_episode_outcomes(v_epoch_id) WHERE signal_id = v_signal_a AND notional_tier_usd = 25;
   IF v_row.contracts <> 7 THEN
     RAISE EXCEPTION 'expected DISTINCT ON to pick the EARLIEST paper fill (contracts=7), got %', v_row.contracts;
   END IF;
@@ -189,6 +197,24 @@ BEGIN
   END IF;
   IF v_row.spread <> 0.03 THEN
     RAISE EXCEPTION 'expected the observation join to follow the EARLIEST paper fill''s own observation_id (spread=0.03), got %', v_row.spread;
+  END IF;
+
+  ------------------------------------------------------------------
+  -- D2. Codex-caught P1 regression: signal_c has NO paper_fills row at all (never
+  -- matched/routed) -- it must still appear, as a synthetic 'UNROUTED' row, once per
+  -- canonical notional tier, so match-rate/liquidity-failure-rate denominators see the
+  -- FULL set of detected signals, not only the ones that happened to get routed.
+  ------------------------------------------------------------------
+  IF (SELECT count(*) FROM public.get_sports_shadow_episode_outcomes(v_epoch_id) WHERE signal_id = v_signal_c) <> 5 THEN
+    RAISE EXCEPTION 'expected signal_c (never routed) to appear exactly 5 times (once per canonical tier), got %',
+      (SELECT count(*) FROM public.get_sports_shadow_episode_outcomes(v_epoch_id) WHERE signal_id = v_signal_c);
+  END IF;
+  IF (SELECT count(*) FROM public.get_sports_shadow_episode_outcomes(v_epoch_id) WHERE signal_id = v_signal_c AND fill_status = 'UNROUTED') <> 5 THEN
+    RAISE EXCEPTION 'expected all 5 of signal_c''s synthetic rows to have fill_status = UNROUTED';
+  END IF;
+  SELECT * INTO v_row FROM public.get_sports_shadow_episode_outcomes(v_epoch_id) WHERE signal_id = v_signal_c AND notional_tier_usd = 25;
+  IF v_row.settlement_status IS NOT NULL OR v_row.chosen_venue IS NOT NULL OR v_row.contracts <> 0 THEN
+    RAISE EXCEPTION 'expected an UNROUTED row to have no settlement/venue and zero contracts, got venue=% contracts=% settlement=%', v_row.chosen_venue, v_row.contracts, v_row.settlement_status;
   END IF;
 
   ------------------------------------------------------------------

@@ -106,8 +106,15 @@ export async function fetchAllEpisodeOutcomes(epochId: string): Promise<EpisodeO
   const all: EpisodeOutcomeRow[] = [];
   let offset = 0;
   for (;;) {
+    // Codex review (commit fa34d0f) caught a real P2: offset pagination with NO stable
+    // ordering is undefined in Postgres -- a concurrent insert while paging could shift
+    // rows across the offset boundary, duplicating or dropping rows and silently
+    // corrupting P&L/bootstrap/classification. Order by the same (signal_id,
+    // notional_tier_usd) pair the RPC's own DISTINCT ON is unique over.
     const { data, error } = await supabaseAdmin
       .rpc("get_sports_shadow_episode_outcomes" as never, { p_epoch_id: epochId } as never)
+      .order("signal_id", { ascending: true })
+      .order("notional_tier_usd", { ascending: true })
       .range(offset, offset + PAGE_SIZE - 1);
     if (error) throw new Error(error.message);
     const rows = (data ?? []) as unknown as RawOutcomeRow[];

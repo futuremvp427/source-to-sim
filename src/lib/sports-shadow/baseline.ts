@@ -66,9 +66,15 @@ export type BaselineComparison = {
  * is simply "whatever the strategy's own already-computed episode set is".
  */
 export function computeMarketImpliedBaseline(rows: readonly EpisodeOutcomeRow[], strategyExpectancyPerEpisodeUsd: number): BaselineComparison {
-  const settledWithFee = rows.filter((r) => isSettled(r) && r.totalFeesUsd !== null);
+  // Codex review (commit fa34d0f) caught a real P2: settlement.orchestrator.server.ts
+  // ALWAYS writes totalFeesUsd (the settlement row's own fee field) as 0 -- the entry
+  // fee is already netted into all_in_cost_usd/net P&L, "no double-charging" by design
+  // -- so reading it here made the baseline's fee estimate zero for every real
+  // production episode. The entry fee actually charged lives on the paper fill itself
+  // (feeUsd), never on the settlement row -- use that instead.
+  const settledWithFee = rows.filter((r) => isSettled(r) && r.feeUsd !== null);
   const sampleSize = settledWithFee.length;
-  const averageFee = sampleSize > 0 ? settledWithFee.reduce((acc, r) => acc + (r.totalFeesUsd ?? 0), 0) / sampleSize : 0;
+  const averageFee = sampleSize > 0 ? settledWithFee.reduce((acc, r) => acc + (r.feeUsd ?? 0), 0) / sampleSize : 0;
   const baselineExpectancyPerEpisodeUsd = sampleSize > 0 ? -averageFee : 0;
   return {
     version: BASELINE_VERSION,

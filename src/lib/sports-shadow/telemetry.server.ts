@@ -61,6 +61,14 @@ export function cycleSummaryToTelemetryEvents(summary: {
   observationLane: { pmus: { attempted: number; captured: number; failed: number; skipped: number }; kalshi: { attempted: number; captured: number; failed: number; skipped: number } };
   sourceLane: { walletsAttempted: number; newSignalsCreated: number; leaseLost: boolean; pmus: { attempted: number; exact: number; discoveryFailed: boolean; deadlineReached: boolean }; kalshi: { attempted: number; exact: number; discoveryFailed: boolean; deadlineReached: boolean } } | null;
   errors: string[];
+  /**
+   * FINAL BUILD Part 6/repository-completion pass (Codex-caught P1): every event this
+   * cycle records MUST carry this, or soak.server.ts's rollup RPC (which filters
+   * strictly by experiment_epoch_id) sees zero cycles forever and the soak health gate
+   * can never pass. null is a legitimate value (epoch resolution failed this cycle,
+   * best-effort) -- events are still recorded, just unattributed to any epoch.
+   */
+  epochId: string | null;
 }): TelemetryEvent[] {
   const events: TelemetryEvent[] = [
     { category: "SYSTEM", metric: "cycle_duration_ms", value: summary.durationMs },
@@ -88,5 +96,5 @@ export function cycleSummaryToTelemetryEvents(summary: {
       { category: "VENUE", metric: "deadline_reached", value: summary.sourceLane.kalshi.deadlineReached ? 1 : 0, labels: { venue: "KALSHI" } },
     );
   }
-  return events;
+  return events.map((e) => ({ ...e, experimentEpochId: summary.epochId }));
 }

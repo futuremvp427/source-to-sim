@@ -36,21 +36,21 @@ function row(overrides: Partial<EpisodeOutcomeRow> = {}): EpisodeOutcomeRow {
 
 describe("computeMarketImpliedBaseline", () => {
   it("baseline expectancy is exactly -average(fee), independent of win/loss outcome", () => {
-    const rows = [row({ signalId: "a", totalFeesUsd: 1, settlementStatus: "SETTLED_WIN" }), row({ signalId: "b", totalFeesUsd: 3, settlementStatus: "SETTLED_LOSS" })];
+    const rows = [row({ signalId: "a", feeUsd: 1, settlementStatus: "SETTLED_WIN" }), row({ signalId: "b", feeUsd: 3, settlementStatus: "SETTLED_LOSS" })];
     const baseline = computeMarketImpliedBaseline(rows, 10);
     expect(baseline.baselineExpectancyPerEpisodeUsd).toBe(-2); // -(1+3)/2
     expect(baseline.sampleSize).toBe(2);
   });
 
   it("edge is strategy expectancy minus baseline expectancy", () => {
-    const rows = [row({ totalFeesUsd: 1 })];
+    const rows = [row({ feeUsd: 1 })];
     const baseline = computeMarketImpliedBaseline(rows, 5);
     expect(baseline.baselineExpectancyPerEpisodeUsd).toBe(-1);
     expect(baseline.edgeUsd).toBe(5 - -1);
   });
 
   it("ignores unsettled episodes and episodes missing a known fee", () => {
-    const rows = [row({ settlementStatus: "PENDING", totalFeesUsd: null }), row({ totalFeesUsd: 2 })];
+    const rows = [row({ settlementStatus: "PENDING", feeUsd: null }), row({ feeUsd: 2 })];
     const baseline = computeMarketImpliedBaseline(rows, 0);
     expect(baseline.sampleSize).toBe(1);
     expect(baseline.baselineExpectancyPerEpisodeUsd).toBe(-2);

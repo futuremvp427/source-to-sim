@@ -145,6 +145,13 @@ describe("computeExecutionMetrics", () => {
     expect(exec.liquidityFailureRate).toBe(0.25);
   });
 
+  it("Codex-caught P1 regression: UNROUTED signals (never even reached a routing decision) count in the denominator and as a liquidity failure -- match rate must reflect ALL detected signals, not only routed ones", () => {
+    const rows = [row({ fillStatus: "FULL" }), row({ fillStatus: "UNROUTED" }), row({ fillStatus: "UNROUTED" }), row({ fillStatus: "UNROUTED" })];
+    const exec = computeExecutionMetrics(rows);
+    expect(exec.matchRate).toBe(0.25); // 1 filled out of 4 total, not 100% of routed-only
+    expect(exec.liquidityFailureRate).toBe(0.75);
+  });
+
   it("pulls slippage from the CHOSEN venue's own depthWalk result, not the other venue's counterfactual", () => {
     const rows = [
       row({ chosenVenue: "PMUS", pmusResult: { depthWalk: { priceImpactCents: 2 } }, kalshiResult: { depthWalk: { priceImpactCents: 99 } } }),
