@@ -448,7 +448,7 @@ export type PollRepository = {
    * -- omitted entirely for a plain BUY aggregation update (AGGREGATED_BUY/
    * LATE_RECONCILIATION), which never touches the sell ledger.
    */
-  updateEpisodeAtomic(fillId: string, signalId: string, state: OpenEpisodeState, sellEvent?: { shares: number; price: number; notional: number; sourceTs: number }): Promise<void>;
+  updateEpisodeAtomic(fillId: string, signalId: string, state: OpenEpisodeState, sellEvent?: { shares: number; price: number; notional: number; sourceTs: number; untrackedShares: number }): Promise<void>;
   /** FINAL BUILD Part 5: records a sell fill with NO known forward open position (pre-epoch/untracked -- Part 5's explicit case) and marks the fill COMPLETE, atomically. Never fabricates a signal_id. */
   recordPreEpochSell(fillId: string, shares: number, price: number, notional: number, sourceTs: number): Promise<void>;
   /** Marks a fill COMPLETE with no paired episode mutation — safe as a lone single-table write (see this module's terminal-classification doc comment). */
@@ -639,7 +639,7 @@ export const supabasePollRepository: PollRepository = {
     const { data, error } = await supabaseAdmin
       .from("sports_shadow_signals" as never)
       .select(
-        "id, episode_key, source_first_fill_at, source_last_fill_at, source_vwap, source_shares, source_notional, source_fill_count, source_sell_seen, source_sell_shares, source_sell_notional, sports_shadow_source_fills!first_fill_id(event_key)",
+        "id, episode_key, source_first_fill_at, source_last_fill_at, source_vwap, source_shares, source_notional, source_fill_count, source_sell_seen, source_sell_shares, source_sell_notional, untracked_sell_shares, untracked_sell_notional, sports_shadow_source_fills!first_fill_id(event_key)",
       )
       .eq("source_wallet", wallet)
       .eq("source_condition_id", conditionId)
@@ -661,6 +661,8 @@ export const supabasePollRepository: PollRepository = {
       source_sell_seen: boolean;
       source_sell_shares: number;
       source_sell_notional: number;
+      untracked_sell_shares: number;
+      untracked_sell_notional: number;
       sports_shadow_source_fills: { event_key: string } | null;
     };
     const row = data as unknown as Row;
@@ -685,6 +687,8 @@ export const supabasePollRepository: PollRepository = {
         sellCount: 0,
         sellShares: row.source_sell_shares,
         sellNotional: row.source_sell_notional,
+        untrackedSellShares: row.untracked_sell_shares,
+        untrackedSellNotional: row.untracked_sell_notional,
         triggered: true,
         processedEventKeys: new Set(anchorEventKey ? [anchorEventKey] : []),
       },
@@ -788,6 +792,9 @@ export const supabasePollRepository: PollRepository = {
       p_sell_event_price: sellEvent?.price ?? null,
       p_sell_event_notional: sellEvent?.notional ?? null,
       p_sell_event_source_ts: sellEvent?.sourceTs ?? null,
+      p_untracked_sell_shares: state.untrackedSellShares,
+      p_untracked_sell_notional: state.untrackedSellNotional,
+      p_sell_event_untracked_shares: sellEvent?.untrackedShares ?? 0,
     } as never);
     if (error) throw new Error(error.message);
   },
@@ -1886,6 +1893,7 @@ export async function pollSportsShadowWallet(
             price: fill.price,
             notional: fill.price * fill.shares,
             sourceTs: fill.sourceTs,
+            untrackedShares: decision.untrackedShares,
           });
           positionCache.set(positionKey, { id: cacheEntry.id, state: decision.nextState });
         } catch (err) {

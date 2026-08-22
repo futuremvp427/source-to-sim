@@ -196,6 +196,8 @@ class FakeRepo implements PollRepository {
       sellCount: 0,
       sellShares: 0,
       sellNotional: 0,
+      untrackedSellShares: 0,
+      untrackedSellNotional: 0,
       triggered: true,
       processedEventKeys: new Set([row.episodeKey]),
     };

@@ -56,9 +56,27 @@ export type OpenEpisodeState = {
   firstSellAt: number | null;
   lastSellAt: number | null;
   sellCount: number;
-  /** FINAL BUILD Part 5/14: real sell quantity/notional aggregates -- source_sell_seen alone was insufficient for genuine copy-follower exit simulation. Remaining forward position at any point is totalShares - sellShares (derived at read time, never stored separately -- see the schema migration's own doc comment for why). */
+  /**
+   * FINAL BUILD Part 5/14: real sell quantity/notional aggregates -- source_sell_seen
+   * alone was insufficient for genuine copy-follower exit simulation. Remaining forward
+   * TRACKED position at any point is totalShares - sellShares (derived at read time,
+   * never stored separately -- see the schema migration's own doc comment for why) --
+   * see `remainingShares`/`isEpisodeOpen` below. CODEX P1-3: `sellShares` is now a hard
+   * invariant, never allowed to exceed `totalShares` -- decideFill caps how much of any
+   * one SELL fill is applied here (see `untrackedSellShares` below for the excess).
+   */
   sellShares: number;
   sellNotional: number;
+  /**
+   * CODEX P1-3: the cumulative portion of SELL fills that could NOT be attributed to this
+   * episode's own remaining tracked inventory at the moment each was applied -- i.e. an
+   * oversell against ALREADY-fully-sold tracked shares within a single fill. Distinct
+   * audit evidence from a genuine pre-epoch sell (isPreEpoch=true, no episode at all):
+   * this is excess WITHIN an otherwise-real, still-open-at-the-time episode. Never
+   * subtracted from `sellShares`/never makes `remainingShares` negative.
+   */
+  untrackedSellShares: number;
+  untrackedSellNotional: number;
 
   /** True once this episode has emitted its one NEW_EPISODE/NEW_EPISODE_AFTER_30M trigger. */
   triggered: boolean;
@@ -66,11 +84,31 @@ export type OpenEpisodeState = {
   processedEventKeys: ReadonlySet<string>;
 };
 
+/** CODEX P1-3: remaining TRACKED forward position -- never negative by construction (sellShares is always capped at totalShares by decideFill). */
+export function remainingShares(state: Pick<OpenEpisodeState, "totalShares" | "sellShares">): number {
+  return Math.max(0, state.totalShares - state.sellShares);
+}
+
+/** CODEX P1-3: an episode is OPEN while it still has remaining tracked inventory. A BUY against a same-position episode that is NOT open must start a genuinely new episode, never reopen the closed one -- see decideFill's `episodeOpen` gate. */
+export function isEpisodeOpen(state: Pick<OpenEpisodeState, "totalShares" | "sellShares">): boolean {
+  return remainingShares(state) > 0;
+}
+
 export type EpisodeDecision =
   | { kind: "NEW_EPISODE"; episodeKey: string; anchorEventKey: string; fill: EligibleFill; shouldTriggerBurst: true; nextState: OpenEpisodeState }
   | { kind: "NEW_EPISODE_AFTER_30M"; episodeKey: string; anchorEventKey: string; fill: EligibleFill; shouldTriggerBurst: true; nextState: OpenEpisodeState }
   | { kind: "AGGREGATED_BUY"; episodeKey: string; fill: EligibleFill; shouldTriggerBurst: false; nextState: OpenEpisodeState }
-  | { kind: "SELL_RECORDED"; episodeKey: string | null; fill: EligibleFill; shouldTriggerBurst: false; nextState: OpenEpisodeState | null; isPreEpoch: boolean }
+  | {
+      kind: "SELL_RECORDED";
+      episodeKey: string | null;
+      fill: EligibleFill;
+      shouldTriggerBurst: false;
+      nextState: OpenEpisodeState | null;
+      isPreEpoch: boolean;
+      /** CODEX P1-3: THIS fill's own split -- how many of its shares were applied to remaining tracked inventory vs. recorded as untracked/oversold. trackedShares=0/untrackedShares=fill.shares when isPreEpoch=true (no tracked episode at all -- the entire fill is untracked by definition). */
+      trackedShares: number;
+      untrackedShares: number;
+    }
   | { kind: "DUPLICATE_FILL"; episodeKey: string | null; fill: EligibleFill; shouldTriggerBurst: false }
   | { kind: "LATE_RECONCILIATION"; episodeKey: string; fill: EligibleFill; shouldTriggerBurst: false; nextState: OpenEpisodeState }
   | { kind: "INVALID_FILL"; fill: EligibleFill; reason: string; shouldTriggerBurst: false };
@@ -122,6 +160,8 @@ function newEpisodeState(fill: EligibleFill, episodeKey: string): OpenEpisodeSta
     sellCount: 0,
     sellShares: 0,
     sellNotional: 0,
+    untrackedSellShares: 0,
+    untrackedSellNotional: 0,
     triggered: true,
     processedEventKeys: new Set([fill.eventKey]),
   };
@@ -150,35 +190,58 @@ export function decideFill(fill: EligibleFill, existingOpenEpisode: OpenEpisodeS
   const invalidReason = validateFill(fill);
   if (invalidReason) return { kind: "INVALID_FILL", fill, reason: invalidReason, shouldTriggerBurst: false };
 
-  const matchesPosition = existingOpenEpisode !== null && samePosition(existingOpenEpisode, fill);
+  // CODEX P1-3: position IDENTITY (same wallet+conditionId+asset) is checked separately
+  // from whether that position's tracked episode is still OPEN. Duplicate detection uses
+  // identity alone -- a retried fill that already closed the episode must still be
+  // recognized as a duplicate, never mistaken for fresh activity against a "new" episode.
+  const samePositionMatch = existingOpenEpisode !== null && samePosition(existingOpenEpisode, fill);
 
-  if (matchesPosition && existingOpenEpisode!.processedEventKeys.has(fill.eventKey)) {
+  if (samePositionMatch && existingOpenEpisode!.processedEventKeys.has(fill.eventKey)) {
     return { kind: "DUPLICATE_FILL", episodeKey: existingOpenEpisode!.episodeKey, fill, shouldTriggerBurst: false };
   }
 
+  // CODEX P1-3: NEW activity (a BUY that would aggregate, or a SELL that would reduce
+  // tracked inventory) only ever folds into an episode that is still OPEN. A same-position
+  // episode whose tracked inventory has already been fully sold is treated exactly like "no
+  // known position" for BOTH sides -- a BUY starts a genuinely new episode (even inside the
+  // 30-minute DCA window); a SELL has no open tracked inventory to reduce, so it is recorded
+  // via the SAME pre-epoch/untracked path a truly-unknown-position sell already used.
+  const episodeOpen = samePositionMatch && isEpisodeOpen(existingOpenEpisode!);
+
   if (fill.side === "SELL") {
-    if (!matchesPosition) {
-      // No known forward (post-go-live) open position to reduce -- Part 5's explicit
-      // "pre-epoch/untracked sell" case. Never fabricates a position; the caller
-      // persists this with is_pre_epoch=true rather than silently dropping it.
-      return { kind: "SELL_RECORDED", episodeKey: null, fill, shouldTriggerBurst: false, nextState: null, isPreEpoch: true };
+    if (!episodeOpen) {
+      // No known OPEN forward position to reduce -- Part 5's explicit
+      // "pre-epoch/untracked sell" case, now also covering a same-position episode that
+      // has already been fully closed. Never fabricates a position; the caller persists
+      // this with is_pre_epoch=true rather than silently dropping it.
+      return { kind: "SELL_RECORDED", episodeKey: null, fill, shouldTriggerBurst: false, nextState: null, isPreEpoch: true, trackedShares: 0, untrackedShares: fill.shares };
     }
     const open = existingOpenEpisode!;
+    // CODEX P1-3: cap this fill's contribution to REMAINING tracked inventory --
+    // sellShares can never exceed totalShares. The excess (if any) is real evidence
+    // (this wallet sold MORE than this episode's own tracked BUYs), recorded separately
+    // as untracked rather than either silently dropped or allowed to imply negative
+    // remaining tracked inventory.
+    const remaining = remainingShares(open);
+    const trackedPortion = Math.min(fill.shares, remaining);
+    const untrackedPortion = fill.shares - trackedPortion;
     const nextState: OpenEpisodeState = {
       ...open,
       sellSeen: true,
       firstSellAt: open.firstSellAt === null ? fill.sourceTs : Math.min(open.firstSellAt, fill.sourceTs),
       lastSellAt: open.lastSellAt === null ? fill.sourceTs : Math.max(open.lastSellAt, fill.sourceTs),
       sellCount: open.sellCount + 1,
-      sellShares: open.sellShares + fill.shares,
-      sellNotional: open.sellNotional + fill.price * fill.shares,
+      sellShares: open.sellShares + trackedPortion,
+      sellNotional: open.sellNotional + fill.price * trackedPortion,
+      untrackedSellShares: open.untrackedSellShares + untrackedPortion,
+      untrackedSellNotional: open.untrackedSellNotional + fill.price * untrackedPortion,
       processedEventKeys: new Set(open.processedEventKeys).add(fill.eventKey),
     };
-    return { kind: "SELL_RECORDED", episodeKey: open.episodeKey, fill, shouldTriggerBurst: false, nextState, isPreEpoch: false };
+    return { kind: "SELL_RECORDED", episodeKey: open.episodeKey, fill, shouldTriggerBurst: false, nextState, isPreEpoch: false, trackedShares: trackedPortion, untrackedShares: untrackedPortion };
   }
 
   // BUY.
-  if (!matchesPosition) {
+  if (!episodeOpen) {
     const episodeKey = deriveEpisodeKey(fill.wallet, fill.conditionId, fill.asset, fill.eventKey);
     return { kind: "NEW_EPISODE", episodeKey, anchorEventKey: fill.eventKey, fill, shouldTriggerBurst: true, nextState: newEpisodeState(fill, episodeKey) };
   }
