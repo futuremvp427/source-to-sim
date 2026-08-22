@@ -92,7 +92,7 @@ export function Shell({
       <main className="mx-auto w-full max-w-7xl px-3 py-3 pb-24 sm:px-6 sm:pb-8">{children}</main>
 
       <nav
-        className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-5 border-t border-border/70 bg-background/95 backdrop-blur sm:hidden"
+        className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-6 border-t border-border/70 bg-background/95 backdrop-blur sm:hidden"
         aria-label="Sections"
       >
         {TABS.map((t) => {
@@ -113,6 +113,13 @@ export function Shell({
             </button>
           );
         })}
+        <Link
+          to="/sports-shadow"
+          className="flex min-h-14 flex-col items-center justify-center gap-1 text-[10px] font-medium text-[var(--paper)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        >
+          <Trophy className="size-4" aria-hidden />
+          Sports Shadow
+        </Link>
       </nav>
     </div>
   );
