@@ -7,7 +7,7 @@ const WALLET_B = "0x32ed517a571c01b6e9adecf61ba81ca48ff2f960";
 describe("parseSportsShadowConfig — disabled", () => {
   it("absent SPORTS_SHADOW_ENABLED disables everything", () => {
     const result = parseSportsShadowConfig({});
-    expect(result).toEqual({ ok: true, config: { enabled: false, wallets: [], goLiveAtMs: null } });
+    expect(result).toEqual({ ok: true, config: { enabled: false, wallets: [], goLiveAtMs: null, gitSha: "unknown" } });
   });
 
   it("SPORTS_SHADOW_ENABLED=false disables everything", () => {
@@ -19,6 +19,25 @@ describe("parseSportsShadowConfig — disabled", () => {
   it("disabled config never validates wallets/goLiveAt, even if malformed", () => {
     const result = parseSportsShadowConfig({ SPORTS_SHADOW_ENABLED: "false", SPORTS_SHADOW_WALLETS: "not-an-address", SPORTS_SHADOW_GO_LIVE_AT: "garbage" });
     expect(result.ok).toBe(true);
+  });
+});
+
+describe("parseSportsShadowConfig — gitSha", () => {
+  it("defaults to 'unknown' when absent, and never fails validation over it", () => {
+    const result = parseSportsShadowConfig({ SPORTS_SHADOW_ENABLED: "true", SPORTS_SHADOW_WALLETS: WALLET_A, SPORTS_SHADOW_GO_LIVE_AT: "2026-08-19T00:00:00Z" });
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.config.gitSha).toBe("unknown");
+  });
+
+  it("passes through SPORTS_SHADOW_GIT_SHA when set", () => {
+    const result = parseSportsShadowConfig({
+      SPORTS_SHADOW_ENABLED: "true",
+      SPORTS_SHADOW_WALLETS: WALLET_A,
+      SPORTS_SHADOW_GO_LIVE_AT: "2026-08-19T00:00:00Z",
+      SPORTS_SHADOW_GIT_SHA: "abc123",
+    });
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.config.gitSha).toBe("abc123");
   });
 });
 

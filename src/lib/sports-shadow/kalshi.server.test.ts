@@ -320,6 +320,29 @@ describe("fetchKalshiBook", () => {
     expect(recordHostRateLimit).toHaveBeenCalled();
   });
 
+  it("Codex re-review: a 429 whose cooldown recording would start AFTER the caller's deadline skips recordHostRateLimit entirely, but still captures the genuine 429 failure (never silently dropped)", async () => {
+    let now = 1_700_000_000_000;
+    const deadlineAtMs = now + 100;
+    const recordHostRateLimit = vi.fn(async () => {});
+    const fetchImpl = vi.fn(async () => {
+      now += 200; // the already-in-flight fetch itself is what crosses the deadline
+      return new Response("{}", { status: 429, headers: { "retry-after": "30" } });
+    });
+    const snap = await fetchKalshiBook("t", okDeps({ fetchImpl, recordHostRateLimit, now: () => now }), deadlineAtMs);
+    expect(snap.staleReason).toMatch(/429/);
+    expect(recordHostRateLimit).not.toHaveBeenCalled();
+  });
+
+  it("a 429 that returns comfortably within the caller's deadline still records the cooldown normally -- bounded recording is preserved when time remains", async () => {
+    let now = 1_700_000_000_000;
+    const deadlineAtMs = now + 100_000;
+    const recordHostRateLimit = vi.fn(async () => {});
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 429, headers: { "retry-after": "30" } }));
+    const snap = await fetchKalshiBook("t", okDeps({ fetchImpl, recordHostRateLimit, now: () => now }), deadlineAtMs);
+    expect(snap.staleReason).toMatch(/429/);
+    expect(recordHostRateLimit).toHaveBeenCalledWith(KALSHI_HOST, 30_000);
+  });
+
   it("a 5xx returns an explicit failure snapshot", async () => {
     const fetchImpl = vi.fn(async () => new Response("{}", { status: 500 }));
     const snap = await fetchKalshiBook("t", okDeps({ fetchImpl }));
@@ -439,6 +462,40 @@ describe("Task 13E, E: the default network path (no fetchImpl override) uses the
       expect(candidates).toEqual([]); // the branded fetch really was called and returned successfully
     } finally {
       restore();
+    }
+  });
+
+  // Task 13H: fetchKalshiBook shares pacedGetJson and defaultDeps with
+  // discoverKalshiMlbMarkets above, so it is structurally guaranteed to be equally
+  // receiver-safe -- but that guarantee had no dedicated proof of its own (F8). Book
+  // capture is the +0/+5/+10/+30/+60 observation burst's actual per-observation network
+  // call, so it deserves the identical explicit regression coverage as discovery.
+  it("fetchKalshiBook completes without an Illegal-invocation failure when no fetchImpl override is supplied at all", async () => {
+    const original = globalThis.fetch;
+    function brandedFetch(this: unknown): ReturnType<typeof fetch> {
+      if (this !== globalThis) {
+        throw new TypeError("Illegal invocation: function called with incorrect `this` reference.");
+      }
+      return Promise.resolve(new Response(JSON.stringify({ orderbook_fp: { yes_dollars: [], no_dollars: [] } }), { status: 200, headers: { "content-type": "application/json" } }));
+    }
+    globalThis.fetch = brandedFetch as typeof fetch;
+    try {
+      const snap = await fetchKalshiBook("t", {
+        // Deliberately no `fetchImpl` here -- must fall through to the module's own
+        // defaultDeps.fetchImpl, which Task 13E fixed to be runtimeFetch.
+        reserveRequestSlot: async () => 0,
+        getHostCooldown: async () => ({ blocked: false, reason: null }),
+        recordHostRateLimit: async () => {},
+      });
+      // A null staleReason is only reachable if the branded fetch call succeeded (this
+      // === globalThis) AND the response was parsed as a genuine, non-malformed empty
+      // book -- an Illegal-invocation failure would instead be caught and surfaced as a
+      // non-null staleReason (fetchKalshiBook never throws, per its own doc comment).
+      expect(snap.staleReason).toBeNull();
+      expect(snap.yes.bestBid).toBeNull();
+      expect(snap.no.bestBid).toBeNull();
+    } finally {
+      globalThis.fetch = original;
     }
   });
 });

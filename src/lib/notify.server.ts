@@ -29,6 +29,23 @@ const IMPORTANT_KINDS = new Set([
   "poll_failure",
   "pmus_exact_match",
   "us_exact_match",
+  // Sports Forward Shadow -- actionable-only (never per-trade fills). See
+  // sports-shadow/alerts.server.ts's raiseAlert/raiseMilestoneAlert for the two call
+  // sites that emit these: a fresh (not-already-active) operational condition, and a
+  // one-time-per-epoch milestone.
+  "sports_shadow_source_unhealthy",
+  "sports_shadow_source_coverage_gap",
+  "sports_shadow_venue_starved",
+  "sports_shadow_rate_limit_storm",
+  "sports_shadow_observation_backlog",
+  "sports_shadow_integrity_failed",
+  "sports_shadow_settlement_stuck",
+  "sports_shadow_scheduler_stopped",
+  "sports_shadow_soak_passed",
+  "sports_shadow_soak_failed",
+  "sports_shadow_calibration_100",
+  "sports_shadow_oos_300",
+  "sports_shadow_live_pilot_review_ready",
 ]);
 const IMPORTANT_KIND_LIST = [...IMPORTANT_KINDS];
 
@@ -62,6 +79,22 @@ const DURABLE_KINDS = new Set([
   "CASH_RESERVE_REACHED",
   "pmus_exact_match",
   "us_exact_match",
+  // Sports Forward Shadow: all low-volume by construction (operational conditions are
+  // raised only on a fresh activation, never repeated while sustained; milestones fire
+  // at most once ever per epoch) -- durable, indefinite retry is safe and desired.
+  "sports_shadow_source_unhealthy",
+  "sports_shadow_source_coverage_gap",
+  "sports_shadow_venue_starved",
+  "sports_shadow_rate_limit_storm",
+  "sports_shadow_observation_backlog",
+  "sports_shadow_integrity_failed",
+  "sports_shadow_settlement_stuck",
+  "sports_shadow_scheduler_stopped",
+  "sports_shadow_soak_passed",
+  "sports_shadow_soak_failed",
+  "sports_shadow_calibration_100",
+  "sports_shadow_oos_300",
+  "sports_shadow_live_pilot_review_ready",
 ]);
 
 /** Tier 2a: durable kinds other than the tier-1 priority kind. */

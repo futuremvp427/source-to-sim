@@ -286,6 +286,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
         sourceEventSlug: null,
         sourceMarketSlug: null,
         sourceOutcome: "AWY",
+        experimentEpochId: null,
       });
 
       const latest = await supabasePollRepository.findLatestEpisode(wallet, "0xcondition", "0xasset");
@@ -306,6 +307,14 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       // insertEpisodeAtomic must have atomically marked the anchor fill COMPLETE (Task 12D/P1-A).
       const { data: anchorFillRow } = await supabaseAdmin.from("sports_shadow_source_fills" as never).select("downstream_status").eq("id", insertResult.id).single();
       expect((anchorFillRow as unknown as { downstream_status: string }).downstream_status).toBe("COMPLETE");
+
+      // FINAL BUILD Part 16: this fixture has scheduledStartAt:null, so
+      // computeClusterKey correctly returns null (never fabricates a cluster key from
+      // incomplete identity) -- real independence.test.ts covers the positive case at
+      // the pure-function level; this just proves the real RPC round-trips whatever
+      // value insertEpisodeAtomic computed, including null.
+      const { data: signalRow } = await supabaseAdmin.from("sports_shadow_signals" as never).select("cluster_key").eq("id", newEpisode.id).single();
+      expect((signalRow as unknown as { cluster_key: string | null }).cluster_key).toBeNull();
 
       await supabasePollRepository.updateEpisodeAtomic(insertResult.id, newEpisode.id, { ...latest!.state, totalShares: 20, vwap: 0.6, buyFillCount: 2, sellSeen: true });
       const afterUpdate = await supabasePollRepository.findLatestEpisode(wallet, "0xcondition", "0xasset");
@@ -372,6 +381,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
           sourceEventSlug: null,
           sourceMarketSlug: null,
           sourceOutcome: "AWY",
+          experimentEpochId: null,
         }),
       ).rejects.toThrow();
 

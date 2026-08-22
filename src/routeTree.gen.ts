@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthRouteImport } from './routes/auth'
+import { Route as SportsShadowRouteImport } from './routes/sports-shadow'
 import { Route as ApiPublicHooksIngestRouteImport } from './routes/api/public/hooks/ingest'
 import { Route as ApiPublicHooksSportsShadowRouteImport } from './routes/api/public/hooks/sports-shadow'
 
@@ -22,6 +23,11 @@ const IndexRoute = IndexRouteImport.update({
 const AuthRoute = AuthRouteImport.update({
   id: '/auth',
   path: '/auth',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SportsShadowRoute = SportsShadowRouteImport.update({
+  id: '/sports-shadow',
+  path: '/sports-shadow',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiPublicHooksIngestRoute = ApiPublicHooksIngestRouteImport.update({
@@ -39,12 +45,14 @@ const ApiPublicHooksSportsShadowRoute =
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
+  '/sports-shadow': typeof SportsShadowRoute
   '/api/public/hooks/ingest': typeof ApiPublicHooksIngestRoute
   '/api/public/hooks/sports-shadow': typeof ApiPublicHooksSportsShadowRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
+  '/sports-shadow': typeof SportsShadowRoute
   '/api/public/hooks/ingest': typeof ApiPublicHooksIngestRoute
   '/api/public/hooks/sports-shadow': typeof ApiPublicHooksSportsShadowRoute
 }
@@ -52,6 +60,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
+  '/sports-shadow': typeof SportsShadowRoute
   '/api/public/hooks/ingest': typeof ApiPublicHooksIngestRoute
   '/api/public/hooks/sports-shadow': typeof ApiPublicHooksSportsShadowRoute
 }
@@ -60,18 +69,21 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/auth'
+    | '/sports-shadow'
     | '/api/public/hooks/ingest'
     | '/api/public/hooks/sports-shadow'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/auth'
+    | '/sports-shadow'
     | '/api/public/hooks/ingest'
     | '/api/public/hooks/sports-shadow'
   id:
     | '__root__'
     | '/'
     | '/auth'
+    | '/sports-shadow'
     | '/api/public/hooks/ingest'
     | '/api/public/hooks/sports-shadow'
   fileRoutesById: FileRoutesById
@@ -79,6 +91,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AuthRoute: typeof AuthRoute
+  SportsShadowRoute: typeof SportsShadowRoute
   ApiPublicHooksIngestRoute: typeof ApiPublicHooksIngestRoute
   ApiPublicHooksSportsShadowRoute: typeof ApiPublicHooksSportsShadowRoute
 }
@@ -97,6 +110,13 @@ declare module '@tanstack/react-router' {
       path: '/auth'
       fullPath: '/auth'
       preLoaderRoute: typeof AuthRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sports-shadow': {
+      id: '/sports-shadow'
+      path: '/sports-shadow'
+      fullPath: '/sports-shadow'
+      preLoaderRoute: typeof SportsShadowRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/hooks/ingest': {
@@ -119,6 +139,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AuthRoute: AuthRoute,
+  SportsShadowRoute: SportsShadowRoute,
   ApiPublicHooksIngestRoute: ApiPublicHooksIngestRoute,
   ApiPublicHooksSportsShadowRoute: ApiPublicHooksSportsShadowRoute,
 }

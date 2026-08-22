@@ -85,6 +85,8 @@ describe("decideFill — 30-minute aggregation window", () => {
     firstSellAt: null,
     lastSellAt: null,
     sellCount: 0,
+    sellShares: 0,
+    sellNotional: 0,
     triggered: true,
     processedEventKeys: new Set(["tx:0xabc:0"]),
   };
@@ -179,6 +181,8 @@ describe("decideFill — SELL semantics", () => {
     firstSellAt: null,
     lastSellAt: null,
     sellCount: 0,
+    sellShares: 0,
+    sellNotional: 0,
     triggered: true,
     processedEventKeys: new Set(["tx:0xabc:0"]),
   };
@@ -303,6 +307,8 @@ describe("decideFill — out-of-order fills", () => {
     firstSellAt: null,
     lastSellAt: null,
     sellCount: 0,
+    sellShares: 0,
+    sellNotional: 0,
     triggered: true,
     processedEventKeys: new Set(["e1", "e2"]),
   };

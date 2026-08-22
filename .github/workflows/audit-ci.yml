@@ -78,6 +78,18 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_phase1.sql
+      - name: Verify tuple_prefix generated column and count_durable_ordinal_fills RPC (FINAL BUILD Part 2)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_tuple_prefix.sql
+      - name: Verify FINAL BUILD schema (epochs, sell ledger, rule fingerprint, capability, paper execution, settlement, telemetry, integrity, alerts)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_final_build_schema.sql
+      - name: Verify Sports Shadow pg_cron scheduler artifact (FINAL BUILD Part 21 -- not applied to production)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_scheduler_artifact.sql
       - name: Verify find_pending_sports_shadow_signals RPC semantics and privileges (Task 12B/12D-P1-C)
         env:
           PGPASSWORD: postgres
@@ -98,6 +110,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_signal_detection_time.sql
+      - name: Verify final-build analytics schema/RPCs -- epoch attribution, epoch counters, episode outcomes, soak telemetry rollup, milestone snapshots (repository-completion pass)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_final_build_analytics.sql
       - name: Export local Supabase connection env for the PostgREST integration harness
         run: |
           eval "$(supabase status -o env)"

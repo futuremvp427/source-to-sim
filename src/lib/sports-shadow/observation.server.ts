@@ -15,6 +15,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { DeadlineExceededError } from "../http-rate-limit.server";
 import { fetchKalshiBook } from "./kalshi.server";
 import { fetchPmusBook } from "./pmus.server";
 import {
@@ -121,6 +122,8 @@ export const supabaseObservationRepository: ObservationRepository = {
           settlement_compatibility: row.settlementCompatibility,
           reason: row.reason,
           metadata: row.metadata,
+          rule_fingerprint: row.ruleFingerprint,
+          rule_fingerprint_version: row.ruleFingerprintVersion,
           first_match_status: row.firstMatchStatus,
           recheck_count: row.recheckCount,
           next_recheck_at: row.nextRecheckAt,
@@ -201,6 +204,18 @@ export type ObservationDeps = {
   fetchPmusBook: typeof fetchPmusBook;
   fetchKalshiBook: typeof fetchKalshiBook;
   now: () => number;
+  /**
+   * FINAL BUILD Part 9/10/12: fired once a due row's CAS claim WINS (this call
+   * durably owns the terminal write for that observation) -- regardless of whether the
+   * capture was a genuine success or a real failure, since computePaperFillsForObservation
+   * itself is what decides whether a stale/errored observation produces any paper fill
+   * (Section 13's stale-book gate lives there, not here). Never awaited by the CAS-loss
+   * `skipped` path -- only the worker that actually won the claim triggers downstream
+   * paper-execution work for it. Best-effort: a failure here must never turn an
+   * otherwise-successful book capture into a reported failure for THIS function's own
+   * captured/failed/skipped accounting.
+   */
+  onObservationClaimed: (observationId: string) => Promise<void>;
 };
 
 const defaultDeps: ObservationDeps = {
@@ -208,6 +223,10 @@ const defaultDeps: ObservationDeps = {
   fetchPmusBook,
   fetchKalshiBook,
   now: () => Date.now(),
+  onObservationClaimed: async (observationId) => {
+    const { computePaperFillsForObservation } = await import("./paper.server");
+    await computePaperFillsForObservation(observationId);
+  },
 };
 
 export type PersistMatchResult = { matchId: string; scheduled: number; downgradeSkipped: boolean };
@@ -297,17 +316,28 @@ export type DueCollectionResult = { captured: number; failed: number; skipped: n
  * a smaller maxRows never changes anything else about this function's behavior.
  *
  * `deadlineAtMs` (epoch ms, default null = no deadline, identical to prior behavior) is
- * checked ONLY between rows, never mid-fetch: fetchPmusBook/fetchKalshiBook each own a
- * fixed internal ~12s AbortController this function cannot reach in from outside, so a
- * single already-started row can still legitimately run up to its own ~12s ceiling
- * regardless of the deadline. What the deadline bounds is the NUMBER of further rows
- * this pass starts once elapsed wall time is exhausted — any row not yet reached when
- * the deadline is crossed is left completely untouched (`observed_at` stays null,
- * exactly the same safe-to-retry state the existing CAS-loss `skipped` path already
- * relies on), never marked a terminal failure. This is what lets a caller with a strict
- * lane-hold budget (Task 11) bound worst-case wall time to roughly
- * `deadlineAtMs budget + one row's own worst-case fetch time`, instead of
- * `maxRows * one row's own worst-case fetch time`.
+ * checked BETWEEN rows (bounding how many further rows this pass STARTS), and (Task 13I /
+ * P1-T) is now ALSO threaded into the row already being started: fetchPmusBook/
+ * fetchKalshiBook accept an optional `deadlineAtMs` and re-check it before their own
+ * cooldown/reservation/pacing stages (see pmus.server.ts/kalshi.server.ts's pacedGetJson).
+ * Before this task those stages had NO bound of their own, so a single row could
+ * genuinely consume up to ~30-35s (5s cooldown read + up to 5s reservation RPC + up to 8s
+ * granted pacing wait + the ~12s upstream fetch + up to 5s on a 429's rate-limit-recording
+ * write) even though only the LAST of those stages (the upstream fetch itself) had any
+ * timeout at all — the previously-assumed "~12s per row" was never the true worst case.
+ * Threading the deadline in caps everything EXCEPT the upstream fetch already in flight:
+ * once a row's fetch passes its last internal deadline check and the real HTTP request
+ * starts, that request is a genuine already-started operation with its own fixed
+ * REQUEST_TIMEOUT_MS AbortController this function still cannot reach in from outside, so
+ * it can still legitimately run up to its own ~12s ceiling regardless of the deadline.
+ * `DeadlineExceededError` thrown from either fetcher is caught explicitly and treated
+ * exactly like "no more rows started" — the row is left completely untouched
+ * (`observed_at` stays null, no `claimObservationTerminal` call at all), never converted
+ * into a TRANSPORT_TIMEOUT/MALFORMED/any other persisted venue-failure patch, because a
+ * scheduler deadline is not evidence about the market (Section 7). This is what lets a
+ * caller with a strict lane-hold budget (Task 11) bound worst-case wall time to roughly
+ * `deadlineAtMs budget + one already-started row's own worst-case UPSTREAM-FETCH time
+ * (~12s)`, instead of `deadlineAtMs budget + one row's full ~30-35s uninterruptible stack`.
  *
  * Task 12H / P1-N: `venue` scopes the due-row query itself, so a PM-US backlog can never
  * consume Kalshi's batch slots (or vice versa) — see worker.server.ts's per-venue
@@ -329,6 +359,7 @@ export async function takeDueSportsShadowObservations(
   let captured = 0;
   let failed = 0;
   let skipped = 0;
+  const fetchDeadline = deadlineAtMs ?? undefined;
 
   for (const row of due) {
     if (deadlineAtMs !== null && d.now() >= deadlineAtMs) break;
@@ -358,11 +389,25 @@ export async function takeDueSportsShadowObservations(
         else skipped += 1;
         continue;
       }
-      const book = await d.fetchPmusBook(row.targetFetchKey);
-      const patch = buildPmusObservationPatch(book, pmusOrientation, row.fireAt, row.requestedDelayMs);
+      let pmusBook;
+      try {
+        pmusBook = await d.fetchPmusBook(row.targetFetchKey, {}, fetchDeadline);
+      } catch (err) {
+        // Task 13I / P1-T: our own scheduler budget ran out mid-fetch -- not evidence
+        // about the market. Leave THIS row (and every row after it) completely untouched.
+        if (err instanceof DeadlineExceededError) break;
+        throw err;
+      }
+      const patch = buildPmusObservationPatch(pmusBook, pmusOrientation, row.fireAt, row.requestedDelayMs);
       if (await d.repo.claimObservationTerminal(row.id, patch)) {
         if (patch.errorCode) failed += 1;
         else captured += 1;
+        try {
+          await d.onObservationClaimed(row.id);
+        } catch {
+          // Best-effort: a paper-execution trigger failure must never turn an
+          // otherwise-successful book capture into a reported failure here.
+        }
       } else {
         skipped += 1;
       }
@@ -383,11 +428,23 @@ export async function takeDueSportsShadowObservations(
       else skipped += 1;
       continue;
     }
-    const book = await d.fetchKalshiBook(row.targetFetchKey);
-    const patch = buildKalshiObservationPatch(book, side, row.fireAt, row.requestedDelayMs);
+    let kalshiBook;
+    try {
+      kalshiBook = await d.fetchKalshiBook(row.targetFetchKey, {}, fetchDeadline);
+    } catch (err) {
+      // Task 13I / P1-T: same rationale as the PM-US branch above.
+      if (err instanceof DeadlineExceededError) break;
+      throw err;
+    }
+    const patch = buildKalshiObservationPatch(kalshiBook, side, row.fireAt, row.requestedDelayMs);
     if (await d.repo.claimObservationTerminal(row.id, patch)) {
       if (patch.errorCode) failed += 1;
       else captured += 1;
+      try {
+        await d.onObservationClaimed(row.id);
+      } catch {
+        // Best-effort -- see the identical PM-US branch above for the full rationale.
+      }
     } else {
       skipped += 1;
     }

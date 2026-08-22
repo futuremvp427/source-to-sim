@@ -591,7 +591,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
       staleReason: null,
     }));
     await takeDueSportsShadowObservations("PMUS", baseDeps(repo, { fetchPmusBook }));
-    expect(fetchPmusBook).toHaveBeenCalledWith("aec-mlb-nyy-bal-2026-08-19");
+    expect(fetchPmusBook).toHaveBeenCalledWith("aec-mlb-nyy-bal-2026-08-19", {}, undefined);
     const zeroRow = [...observations.values()].find((o) => o.requestedDelayMs === 0)!;
     expect(zeroRow.patch?.bestBid).toBe(0.58);
     expect(zeroRow.patch?.bidDepth).toHaveLength(2);
@@ -639,7 +639,7 @@ describe("takeDueSportsShadowObservations — due queue", () => {
       staleReason: null,
     }));
     await takeDueSportsShadowObservations("KALSHI", baseDeps(repo, { fetchKalshiBook }));
-    expect(fetchKalshiBook).toHaveBeenCalledWith("KXMLBGAME-1-NYY");
+    expect(fetchKalshiBook).toHaveBeenCalledWith("KXMLBGAME-1-NYY", {}, undefined);
     const zeroRow = [...observations.values()].find((o) => o.requestedDelayMs === 0)!;
     expect(zeroRow.patch?.bestBid).toBe(0.4); // NO side, not YES
     expect(zeroRow.patch?.bestAsk).toBe(0.42);

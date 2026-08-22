@@ -56,6 +56,9 @@ export type OpenEpisodeState = {
   firstSellAt: number | null;
   lastSellAt: number | null;
   sellCount: number;
+  /** FINAL BUILD Part 5/14: real sell quantity/notional aggregates -- source_sell_seen alone was insufficient for genuine copy-follower exit simulation. Remaining forward position at any point is totalShares - sellShares (derived at read time, never stored separately -- see the schema migration's own doc comment for why). */
+  sellShares: number;
+  sellNotional: number;
 
   /** True once this episode has emitted its one NEW_EPISODE/NEW_EPISODE_AFTER_30M trigger. */
   triggered: boolean;
@@ -67,7 +70,7 @@ export type EpisodeDecision =
   | { kind: "NEW_EPISODE"; episodeKey: string; anchorEventKey: string; fill: EligibleFill; shouldTriggerBurst: true; nextState: OpenEpisodeState }
   | { kind: "NEW_EPISODE_AFTER_30M"; episodeKey: string; anchorEventKey: string; fill: EligibleFill; shouldTriggerBurst: true; nextState: OpenEpisodeState }
   | { kind: "AGGREGATED_BUY"; episodeKey: string; fill: EligibleFill; shouldTriggerBurst: false; nextState: OpenEpisodeState }
-  | { kind: "SELL_RECORDED"; episodeKey: string | null; fill: EligibleFill; shouldTriggerBurst: false; nextState: OpenEpisodeState | null }
+  | { kind: "SELL_RECORDED"; episodeKey: string | null; fill: EligibleFill; shouldTriggerBurst: false; nextState: OpenEpisodeState | null; isPreEpoch: boolean }
   | { kind: "DUPLICATE_FILL"; episodeKey: string | null; fill: EligibleFill; shouldTriggerBurst: false }
   | { kind: "LATE_RECONCILIATION"; episodeKey: string; fill: EligibleFill; shouldTriggerBurst: false; nextState: OpenEpisodeState }
   | { kind: "INVALID_FILL"; fill: EligibleFill; reason: string; shouldTriggerBurst: false };
@@ -117,6 +120,8 @@ function newEpisodeState(fill: EligibleFill, episodeKey: string): OpenEpisodeSta
     firstSellAt: null,
     lastSellAt: null,
     sellCount: 0,
+    sellShares: 0,
+    sellNotional: 0,
     triggered: true,
     processedEventKeys: new Set([fill.eventKey]),
   };
@@ -153,7 +158,10 @@ export function decideFill(fill: EligibleFill, existingOpenEpisode: OpenEpisodeS
 
   if (fill.side === "SELL") {
     if (!matchesPosition) {
-      return { kind: "SELL_RECORDED", episodeKey: null, fill, shouldTriggerBurst: false, nextState: null };
+      // No known forward (post-go-live) open position to reduce -- Part 5's explicit
+      // "pre-epoch/untracked sell" case. Never fabricates a position; the caller
+      // persists this with is_pre_epoch=true rather than silently dropping it.
+      return { kind: "SELL_RECORDED", episodeKey: null, fill, shouldTriggerBurst: false, nextState: null, isPreEpoch: true };
     }
     const open = existingOpenEpisode!;
     const nextState: OpenEpisodeState = {
@@ -162,9 +170,11 @@ export function decideFill(fill: EligibleFill, existingOpenEpisode: OpenEpisodeS
       firstSellAt: open.firstSellAt === null ? fill.sourceTs : Math.min(open.firstSellAt, fill.sourceTs),
       lastSellAt: open.lastSellAt === null ? fill.sourceTs : Math.max(open.lastSellAt, fill.sourceTs),
       sellCount: open.sellCount + 1,
+      sellShares: open.sellShares + fill.shares,
+      sellNotional: open.sellNotional + fill.price * fill.shares,
       processedEventKeys: new Set(open.processedEventKeys).add(fill.eventKey),
     };
-    return { kind: "SELL_RECORDED", episodeKey: open.episodeKey, fill, shouldTriggerBurst: false, nextState };
+    return { kind: "SELL_RECORDED", episodeKey: open.episodeKey, fill, shouldTriggerBurst: false, nextState, isPreEpoch: false };
   }
 
   // BUY.

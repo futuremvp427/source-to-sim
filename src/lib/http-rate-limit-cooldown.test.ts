@@ -12,12 +12,14 @@ function chainable(result: { data: unknown; error: unknown }) {
     select: () => typeof builder;
     update: (patch: unknown) => typeof builder;
     eq: () => typeof builder;
+    abortSignal: () => typeof builder;
     maybeSingle: () => Promise<typeof result>;
     then: (resolve: (v: typeof result) => void) => void;
   } = {
     select: () => builder,
     update: () => builder,
     eq: () => builder,
+    abortSignal: () => builder,
     maybeSingle: async () => result,
     then: (resolve) => resolve(result),
   };
@@ -26,16 +28,34 @@ function chainable(result: { data: unknown; error: unknown }) {
 
 type CooldownRow = { blocked_until: string; reason: string } | null;
 
-/** A chainable whose terminal await never settles -- simulates a stalled query. */
+/**
+ * A chainable whose terminal await never settles on its own -- simulates a stalled query.
+ * Task 13I: getHostCooldown now attaches a real AbortSignal via .abortSignal() before the
+ * terminal .maybeSingle() call, so this fake must react to that signal exactly like
+ * chainableRpc's "hang" behavior does -- proving REAL cancellation, not mere abandonment.
+ */
 function hangingChainable() {
+  let capturedSignal: AbortSignal | undefined;
   const builder: {
     select: () => typeof builder;
     eq: () => typeof builder;
+    abortSignal: (signal: AbortSignal) => typeof builder;
     maybeSingle: () => Promise<never>;
   } = {
     select: () => builder,
     eq: () => builder,
-    maybeSingle: () => new Promise<never>(() => {}),
+    abortSignal: (signal: AbortSignal) => {
+      capturedSignal = signal;
+      return builder;
+    },
+    maybeSingle: () =>
+      new Promise<never>((_resolve, reject) => {
+        if (capturedSignal?.aborted) {
+          reject(new DOMException("Aborted", "AbortError"));
+          return;
+        }
+        capturedSignal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      }),
   };
   return builder;
 }
@@ -117,6 +137,8 @@ function makeFakeSupabase(opts: {
   reservationHangs?: boolean;
   reservationThrows?: boolean;
   onReservationAbortSignal?: (signal: AbortSignal) => void;
+  /** Task 13I: controls the granted reservation's offset from "now" -- lets a test construct a specific non-zero wait to exercise the caller-deadline-vs-granted-wait comparison. Defaults to 0 (immediate), matching prior behavior. */
+  reservationGrantedInMs?: number;
 }) {
   const rpcCalls: { name: string; args: unknown }[] = [];
   const fromCalls: string[] = [];
@@ -137,7 +159,7 @@ function makeFakeSupabase(opts: {
         }
         return chainableRpc({
           kind: "resolve",
-          result: { data: new Date().toISOString(), error: null },
+          result: { data: new Date(Date.now() + (opts.reservationGrantedInMs ?? 0)).toISOString(), error: null },
         });
       }
       if (opts.rpcHangs && name === "record_http_rate_limit") {
@@ -214,12 +236,16 @@ const {
   clampCooldownMs,
   getHostCooldown,
   recordHostRateLimit,
+  reserveRequestSlot,
+  DeadlineExceededError,
+  ReservationUnavailableError,
   DATA_API_HOST,
   MIN_COOLDOWN_MS_FOR_TEST,
   DEFAULT_COOLDOWN_MS_FOR_TEST,
   MAX_COOLDOWN_MS_FOR_TEST,
   COOLDOWN_WRITE_DEADLINE_MS_FOR_TEST,
   RESERVATION_RPC_DEADLINE_MS_FOR_TEST,
+  MAX_RESERVATION_LOOKAHEAD_MS_FOR_TEST,
 } = await import("./http-rate-limit.server");
 const {
   runExperimentCycle,
@@ -803,5 +829,108 @@ describe("reservation fail-closed propagation into the full ingestion cycle", ()
     await vi.advanceTimersByTimeAsync(5_000);
     const result = await second;
     expect(result.skipped).toBeNull();
+  });
+});
+
+describe("Task 13I / P1-S, P1-T: reserveRequestSlot's optional caller deadline", () => {
+  it("T6: omitting callerDeadlineAtMs preserves the exact prior behavior -- an immediate reservation still resolves normally", async () => {
+    currentFake = makeFakeSupabase({ cooldownRow: null }).supabaseAdmin;
+    await expect(reserveRequestSlot(DATA_API_HOST)).resolves.toBe(0);
+  });
+
+  it("throws DeadlineExceededError immediately, without even attempting the RPC, when the caller deadline has already passed", async () => {
+    const { supabaseAdmin, rpcCalls } = makeFakeSupabase({ cooldownRow: null });
+    currentFake = supabaseAdmin;
+    const past = Date.now() - 1;
+    await expect(reserveRequestSlot(DATA_API_HOST, past)).rejects.toBeInstanceOf(DeadlineExceededError);
+    expect(rpcCalls.some((c) => c.name === "reserve_http_request_slot")).toBe(false);
+  });
+
+  it("T2: a genuinely granted reservation whose wait would land at/after the caller's deadline is rejected as DeadlineExceededError, not returned for the caller to sleep through", async () => {
+    // Grants a real, in-budget (well under MAX_RESERVATION_LOOKAHEAD_MS) wait of 3s, but
+    // the caller's own deadline is only 1s away -- the reservation is genuinely available,
+    // just not usable within this caller's remaining time.
+    currentFake = makeFakeSupabase({ cooldownRow: null, reservationGrantedInMs: 3_000 }).supabaseAdmin;
+    const deadline = Date.now() + 1_000;
+    await expect(reserveRequestSlot(DATA_API_HOST, deadline)).rejects.toBeInstanceOf(DeadlineExceededError);
+  });
+
+  it("a granted reservation that fits comfortably within the caller's deadline still resolves normally with the real wait", async () => {
+    currentFake = makeFakeSupabase({ cooldownRow: null, reservationGrantedInMs: 500 }).supabaseAdmin;
+    const deadline = Date.now() + 60_000;
+    const wait = await reserveRequestSlot(DATA_API_HOST, deadline);
+    expect(wait).toBeGreaterThanOrEqual(400); // real wall-clock slack in the test itself
+    expect(wait).toBeLessThanOrEqual(600);
+  });
+
+  it("T1: the reservation RPC's own timeout is shortened to the caller's remaining time, aborting early as DeadlineExceededError rather than waiting out the full RPC deadline", async () => {
+    vi.useFakeTimers();
+    let capturedSignal: AbortSignal | undefined;
+    currentFake = makeFakeSupabase({
+      cooldownRow: null,
+      reservationHangs: true,
+      onReservationAbortSignal: (signal) => {
+        capturedSignal = signal;
+      },
+    }).supabaseAdmin;
+
+    const deadline = Date.now() + 1_000; // far shorter than RESERVATION_RPC_DEADLINE_MS_FOR_TEST
+    let settled = false;
+    let rejected: unknown;
+    reserveRequestSlot(DATA_API_HOST, deadline).then(
+      () => {
+        settled = true;
+      },
+      (err) => {
+        settled = true;
+        rejected = err;
+      },
+    );
+
+    // Not yet at the (shorter) caller deadline.
+    await vi.advanceTimersByTimeAsync(500);
+    expect(settled).toBe(false);
+
+    // Past the caller's own deadline -- must abort now, well before
+    // RESERVATION_RPC_DEADLINE_MS_FOR_TEST would have fired on its own.
+    await vi.advanceTimersByTimeAsync(600);
+    expect(settled).toBe(true);
+    expect(rejected).toBeInstanceOf(DeadlineExceededError);
+    expect(capturedSignal?.aborted).toBe(true); // real cancellation, not mere abandonment
+  });
+
+  it("a hung RPC with NO caller deadline still falls back to ReservationUnavailableError at the normal RPC deadline (unchanged prior behavior)", async () => {
+    vi.useFakeTimers();
+    currentFake = makeFakeSupabase({ cooldownRow: null, reservationHangs: true }).supabaseAdmin;
+
+    let settled = false;
+    let rejected: unknown;
+    reserveRequestSlot(DATA_API_HOST).then(
+      () => {
+        settled = true;
+      },
+      (err) => {
+        settled = true;
+        rejected = err;
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(RESERVATION_RPC_DEADLINE_MS_FOR_TEST - 500);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled).toBe(true);
+    expect(rejected).toBeInstanceOf(ReservationUnavailableError);
+    expect(rejected).not.toBeInstanceOf(DeadlineExceededError);
+  });
+
+  it("Codex re-review: a reservation exceeding MAX_RESERVATION_LOOKAHEAD_MS that would ALSO reject on the caller's deadline is reported as DeadlineExceededError -- the caller-deadline classification is checked BEFORE the lookahead-exceeded classification, since callers must never treat their own scheduler budget as a genuine venue/queue failure", async () => {
+    currentFake = makeFakeSupabase({ cooldownRow: null, reservationGrantedInMs: MAX_RESERVATION_LOOKAHEAD_MS_FOR_TEST + 1_000 }).supabaseAdmin;
+    const deadline = Date.now() + 500; // would independently reject on lookahead too, but the deadline check now runs first
+    await expect(reserveRequestSlot(DATA_API_HOST, deadline)).rejects.toBeInstanceOf(DeadlineExceededError);
+  });
+
+  it("a reservation exceeding MAX_RESERVATION_LOOKAHEAD_MS with NO caller deadline supplied at all remains ReservationUnavailableError -- exact prior behavior preserved when the deadline argument is omitted", async () => {
+    currentFake = makeFakeSupabase({ cooldownRow: null, reservationGrantedInMs: MAX_RESERVATION_LOOKAHEAD_MS_FOR_TEST + 1_000 }).supabaseAdmin;
+    await expect(reserveRequestSlot(DATA_API_HOST)).rejects.toBeInstanceOf(ReservationUnavailableError);
   });
 });

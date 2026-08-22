@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
 import type { SportsShadowConfig } from "./config";
+import type { ExperimentEpoch } from "./epoch";
 import type { PmusCandidate } from "./pmus";
 import type { KalshiCandidate } from "./kalshi";
 import type { VenueMatchResult } from "./resolver";
@@ -16,6 +17,7 @@ import {
   OBSERVATION_LOCK_ID_KALSHI,
   OBSERVATION_LOCK_ID_PMUS,
   OBSERVATION_STAGE_DEADLINE_MS,
+  SOURCE_LANE_BUDGET_MS,
   SOURCE_LOCK_ID,
   runSportsShadowCycle,
   type SportsShadowWorkerDeps,
@@ -27,7 +29,34 @@ const WALLET_B = "0x32ed517a571c01b6e9adecf61ba81ca48ff2f960";
 const WALLET_C = "0x5268527977f700f9bf9b6d5cd843859e4e70135d";
 
 function enabledConfig(overrides: Partial<SportsShadowConfig> = {}): SportsShadowConfig {
-  return { enabled: true, wallets: [WALLET_A], goLiveAtMs: 1_700_000_000_000, ...overrides };
+  return { enabled: true, wallets: [WALLET_A], goLiveAtMs: 1_700_000_000_000, gitSha: "test-sha", ...overrides };
+}
+
+function fakeEpoch(goLiveAtMs: number): ExperimentEpoch {
+  return {
+    id: "epoch-fake",
+    createdAtIso: new Date(goLiveAtMs).toISOString(),
+    goLiveAtIso: new Date(goLiveAtMs).toISOString(),
+    walletCohort: [WALLET_A],
+    gitSha: "test-sha",
+    configHash: "test-hash",
+    versions: {
+      classifierVersion: "c1",
+      episodeVersion: "e1",
+      resolverVersion: "r1",
+      routerVersion: "rt1",
+      pmusFeeModelVersion: "pf1",
+      kalshiFeeModelVersion: "kf1",
+      executionSimulatorVersion: "x1",
+      settlementVersion: "s1",
+    },
+    stage: "OPERATIONAL_SOAK",
+    stageEnteredAtIso: new Date(goLiveAtMs).toISOString(),
+    soakStartedAtIso: new Date(goLiveAtMs).toISOString(),
+    calibrationStartedAtIso: null,
+    oosStartedAtIso: null,
+    frozenAtIso: null,
+  };
 }
 
 /** In-memory lease repo mirroring the real RPC's CAS semantics (shared shape with sports-lease.server.test.ts's fake). */
@@ -168,6 +197,7 @@ function baseDeps(overrides: Partial<SportsShadowWorkerDeps> = {}): Partial<Spor
     discoverPmus: vi.fn(async () => [] as PmusCandidate[]),
     discoverKalshi: vi.fn(async () => [] as KalshiCandidate[]),
     persistVenueMatch: vi.fn(async () => ({ matchId: "match-1", scheduled: 0, downgradeSkipped: false })) as unknown as SportsShadowWorkerDeps["persistVenueMatch"],
+    ensureCurrentEpoch: vi.fn(async (_wallets: readonly string[], goLiveAtMs: number) => fakeEpoch(goLiveAtMs)) as unknown as SportsShadowWorkerDeps["ensureCurrentEpoch"],
     now: () => 1_700_000_100_000,
     ...overrides,
   };
@@ -178,7 +208,7 @@ describe("runSportsShadowCycle — disabled config", () => {
     const pollSportsShadowWallet = vi.fn();
     const takeDueSportsShadowObservations = vi.fn();
     const summary = await runSportsShadowCycle(
-      { enabled: false, wallets: [], goLiveAtMs: null },
+      { enabled: false, wallets: [], goLiveAtMs: null, gitSha: "test-sha" },
       baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never, takeDueSportsShadowObservations: takeDueSportsShadowObservations as never }),
     );
     expect(summary.configEnabled).toBe(false);
@@ -302,6 +332,29 @@ describe("runSportsShadowCycle — wallet polling (fixed order)", () => {
     expect(calls).toEqual([WALLET_A, WALLET_B]);
   });
 
+  it("Task 13F: every wallet call receives an explicit deadlineAtMs (4th argument) -- not merely 'no deadline at all' as before", async () => {
+    const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, _deps: unknown, _deadlineAtMs: number) => emptyWalletResult(wallet));
+    await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A, WALLET_B, WALLET_C] }), baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never }));
+    for (const call of pollSportsShadowWallet.mock.calls) {
+      expect(typeof call[3]).toBe("number");
+      expect(Number.isFinite(call[3])).toBe(true);
+    }
+  });
+
+  it("Task 13F: all wallets in ONE lane share the SAME lane-wide deadline (laneStartMs + SOURCE_LANE_BUDGET_MS) -- not a fresh per-wallet budget that would let N wallets each independently consume up to 30s", async () => {
+    const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, _deps: unknown, _deadlineAtMs: number) => emptyWalletResult(wallet));
+    await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A, WALLET_B, WALLET_C] }), baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never }));
+    const deadlines = pollSportsShadowWallet.mock.calls.map((call) => call[3]);
+    expect(new Set(deadlines).size).toBe(1); // identical deadline value passed to every wallet this lane
+  });
+
+  it("Task 13F: the lane deadline equals now() + SOURCE_LANE_BUDGET_MS at lane start, proving the SAME existing 30s constant now bounds a wallet's OWN in-flight work too, not just whether to start the next wallet", async () => {
+    const fixedNow = 1_700_000_000_000;
+    const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, _deps: unknown, _deadlineAtMs: number) => emptyWalletResult(wallet));
+    await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A] }), baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never, now: () => fixedNow }));
+    expect(pollSportsShadowWallet.mock.calls[0]?.[3]).toBe(fixedNow + SOURCE_LANE_BUDGET_MS);
+  });
+
   it("one bad wallet does not prevent the next wallet from being attempted", async () => {
     const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
       if (wallet === WALLET_A) throw new Error("network exploded");
@@ -322,6 +375,45 @@ describe("runSportsShadowCycle — wallet polling (fixed order)", () => {
     const pollSportsShadowWallet = vi.fn(async (wallet: string) => emptyWalletResult(wallet, { orphanedFillsRecovered: 3 }));
     const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never }));
     expect(summary.sourceLane?.walletSummaries[0]?.orphanedFillsRecovered).toBe(3);
+  });
+});
+
+describe("runSportsShadowCycle — epoch attribution (repository-completion pass)", () => {
+  it("resolves the current epoch once per cycle and threads its id into every wallet's poll deps so new episodes are attributed to it", async () => {
+    const ensureCurrentEpoch = vi.fn(async (_wallets: readonly string[], goLiveAtMs: number) => fakeEpoch(goLiveAtMs));
+    const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, deps: { epochId: string | null }) => emptyWalletResult(wallet));
+    await runSportsShadowCycle(
+      enabledConfig({ wallets: [WALLET_A, WALLET_B] }),
+      baseDeps({ ensureCurrentEpoch: ensureCurrentEpoch as never, pollSportsShadowWallet: pollSportsShadowWallet as never }),
+    );
+    expect(ensureCurrentEpoch).toHaveBeenCalledTimes(1);
+    for (const call of pollSportsShadowWallet.mock.calls) {
+      expect(call[2].epochId).toBe("epoch-fake");
+    }
+  });
+
+  it("a failed ensureCurrentEpoch is recorded as a cycle error but never blocks wallet polling -- episodes still get created (epochId null) rather than data collection stalling on epoch bookkeeping", async () => {
+    const ensureCurrentEpoch = vi.fn(async () => {
+      throw new Error("epoch table unreachable");
+    });
+    const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, deps: { epochId: string | null }) => emptyWalletResult(wallet));
+    const summary = await runSportsShadowCycle(
+      enabledConfig({ wallets: [WALLET_A] }),
+      baseDeps({ ensureCurrentEpoch: ensureCurrentEpoch as never, pollSportsShadowWallet: pollSportsShadowWallet as never }),
+    );
+    expect(summary.errors.some((e) => e.includes("ensureCurrentEpoch failed"))).toBe(true);
+    expect(pollSportsShadowWallet).toHaveBeenCalledTimes(1);
+    expect(pollSportsShadowWallet.mock.calls[0]?.[2].epochId).toBeNull();
+  });
+
+  it("Codex-caught P1 regression: summary.epochId is populated even when the source lease is NOT acquired this cycle -- epoch resolution must not live inside runSourceLane, or every telemetry event this cycle would be written with experiment_epoch_id NULL", async () => {
+    const { repo: leaseRepo } = makeFakeLeaseRepo();
+    await leaseRepo.acquire(SOURCE_LOCK_ID, "other-invocation", 60); // source lease held elsewhere -- runSourceLane never runs this cycle
+    const ensureCurrentEpoch = vi.fn(async (_wallets: readonly string[], goLiveAtMs: number) => fakeEpoch(goLiveAtMs));
+    const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ leaseRepo, ensureCurrentEpoch: ensureCurrentEpoch as never }));
+    expect(summary.sourceLane?.acquired).toBe(false);
+    expect(ensureCurrentEpoch).toHaveBeenCalledTimes(1);
+    expect(summary.epochId).toBe("epoch-fake");
   });
 });
 
@@ -969,5 +1061,397 @@ describe("runSportsShadowCycle — observation-lane latency (TIMING_GATE remedia
     const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never }));
     expect(summary.sourceLane?.acquired).toBe(true);
     expect(pollSportsShadowWallet).toHaveBeenCalledTimes(1);
+  });
+});
+
+/* ======================================================================
+ * TASK 13I / P1-S, P1-T: one absolute source-lane deadline bounds venue
+ * matching too (not just wallet polling), and PM-US/Kalshi are resolved via
+ * fixed two-way Promise.all concurrency so neither can starve the other.
+ * ====================================================================== */
+
+async function flushMicrotasks(times = 30): Promise<void> {
+  for (let i = 0; i < times; i += 1) await Promise.resolve();
+}
+
+describe("Task 13I / P1-S: resolveVenuePending deadline semantics", () => {
+  it("S1: wallet-polling work that consumes the ENTIRE lane budget leaves PM-US/Kalshi unable to start any new discovery/persistence work this cycle", async () => {
+    const workerRepo = makeFakeWorkerRepo([signalRow()], []);
+    let now = 1_700_000_100_000;
+    const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
+      now += 31_000; // consumes the whole SOURCE_LANE_BUDGET_MS
+      return emptyWalletResult(wallet);
+    });
+    const discoverPmus = vi.fn(async () => [] as PmusCandidate[]);
+    const discoverKalshi = vi.fn(async () => [] as KalshiCandidate[]);
+    const persistVenueMatch = vi.fn(async () => ({ matchId: "m", scheduled: 0, downgradeSkipped: false }));
+    const summary = await runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({
+        workerRepo,
+        pollSportsShadowWallet: pollSportsShadowWallet as never,
+        discoverPmus: discoverPmus as never,
+        discoverKalshi: discoverKalshi as never,
+        persistVenueMatch: persistVenueMatch as never,
+        now: () => now,
+      }),
+    );
+    expect(discoverPmus).not.toHaveBeenCalled();
+    expect(discoverKalshi).not.toHaveBeenCalled();
+    expect(persistVenueMatch).not.toHaveBeenCalled();
+    expect(summary.sourceLane?.pmus.deadlineReached).toBe(true);
+    expect(summary.sourceLane?.kalshi.deadlineReached).toBe(true);
+    expect(summary.sourceLane?.pmus.discoveryFailed).toBe(false); // S9: never fabricated as a real failure
+    expect(summary.sourceLane?.kalshi.discoveryFailed).toBe(false);
+  });
+
+  it("S2: when the deadline is already reached before resolveVenuePending's own pending query, zero query/discovery/persistence occurs for either venue", async () => {
+    const findPendingSignalsForVenue = vi.fn(async () => []);
+    const workerRepo: WorkerRepository = {
+      findPendingSignalsForVenue: findPendingSignalsForVenue as never,
+      getWalletCursor: async () => 0,
+      setWalletCursor: async () => {},
+    };
+    let now = 1_700_000_100_000;
+    const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
+      now += 31_000; // deadline already gone before venue resolution even starts
+      return emptyWalletResult(wallet);
+    });
+    const discoverPmus = vi.fn(async () => [] as PmusCandidate[]);
+    const discoverKalshi = vi.fn(async () => [] as KalshiCandidate[]);
+    await runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({
+        workerRepo,
+        pollSportsShadowWallet: pollSportsShadowWallet as never,
+        discoverPmus: discoverPmus as never,
+        discoverKalshi: discoverKalshi as never,
+        now: () => now,
+      }),
+    );
+    expect(findPendingSignalsForVenue).not.toHaveBeenCalled();
+    expect(discoverPmus).not.toHaveBeenCalled();
+    expect(discoverKalshi).not.toHaveBeenCalled();
+  });
+
+  it("S3: a deadline reached DURING resolveVenuePending's own pending query (query itself completes and reports what it found) still stops before discovery for either venue", async () => {
+    let now = 1_700_000_100_000;
+    const baseRepo = makeFakeWorkerRepo([signalRow()], []);
+    const workerRepo: WorkerRepository = {
+      ...baseRepo,
+      async findPendingSignalsForVenue(venue, limit) {
+        const result = await baseRepo.findPendingSignalsForVenue(venue, limit);
+        now += 31_000; // the query's own round trip is what crosses the shared deadline
+        return result;
+      },
+    };
+    const discoverPmus = vi.fn(async () => [] as PmusCandidate[]);
+    const discoverKalshi = vi.fn(async () => [] as KalshiCandidate[]);
+    const summary = await runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({ workerRepo, discoverPmus: discoverPmus as never, discoverKalshi: discoverKalshi as never, now: () => now }),
+    );
+    expect(discoverPmus).not.toHaveBeenCalled();
+    expect(discoverKalshi).not.toHaveBeenCalled();
+    expect(summary.sourceLane?.pmus.deadlineReached).toBe(true);
+    expect(summary.sourceLane?.kalshi.deadlineReached).toBe(true);
+    expect(summary.sourceLane?.pmus.pendingFound).toBe(1); // the query itself DID complete and report what it found
+  });
+
+  it("S4/S6: a deadline reached during (or immediately after) PM-US discovery discards the partial catalog -- ZERO PM-US persistence across BOTH pending signals, PM-US left retryable, never marked discoveryFailed", async () => {
+    const sigA = signalRow({ id: "sig-a" });
+    const sigB = signalRow({ id: "sig-b", createdAtIso: "2026-08-19T00:00:01.000Z" });
+    const workerRepo = makeFakeWorkerRepo([sigA, sigB], []);
+    let now = 1_700_000_100_000;
+    const discoverPmus = vi.fn(async () => {
+      now += 31_000; // discovery itself consumes the remaining budget
+      return [{ marketSlug: "whatever" } as PmusCandidate];
+    });
+    const discoverKalshi = vi.fn(async () => [] as KalshiCandidate[]);
+    const persistVenueMatch = vi.fn(async (signalId: string) => ({ matchId: `m-${signalId}`, scheduled: 0, downgradeSkipped: false }));
+    const summary = await runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({
+        workerRepo,
+        discoverPmus: discoverPmus as never,
+        discoverKalshi: discoverKalshi as never,
+        persistVenueMatch: persistVenueMatch as never,
+        now: () => now,
+      }),
+    );
+    expect(persistVenueMatch).not.toHaveBeenCalled();
+    expect(summary.sourceLane?.pmus.deadlineReached).toBe(true);
+    expect(summary.sourceLane?.pmus.discoveryFailed).toBe(false);
+    expect(summary.sourceLane?.pmus.attempted).toBe(0);
+    expect(summary.sourceLane?.pmus.pendingProcessed).toBe(0);
+  });
+
+  it("S5: a deadline reached during Kalshi discovery discards the partial catalog -- zero Kalshi persistence, Kalshi left retryable, never marked discoveryFailed (mirror of S4 for the other venue)", async () => {
+    const workerRepo = makeFakeWorkerRepo([signalRow()], []);
+    let now = 1_700_000_100_000;
+    const discoverPmus = vi.fn(async () => [] as PmusCandidate[]);
+    const discoverKalshi = vi.fn(async () => {
+      now += 31_000;
+      return [{ marketTicker: "whatever" } as KalshiCandidate];
+    });
+    const persistVenueMatch = vi.fn(async (signalId: string) => ({ matchId: `m-${signalId}`, scheduled: 0, downgradeSkipped: false }));
+    const summary = await runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({
+        workerRepo,
+        discoverPmus: discoverPmus as never,
+        discoverKalshi: discoverKalshi as never,
+        persistVenueMatch: persistVenueMatch as never,
+        now: () => now,
+      }),
+    );
+    expect(summary.sourceLane?.kalshi.deadlineReached).toBe(true);
+    expect(summary.sourceLane?.kalshi.discoveryFailed).toBe(false);
+    expect(summary.sourceLane?.kalshi.attempted).toBe(0);
+  });
+
+  it("S7/S8: a deadline reached BETWEEN two pending signals leaves the already-persisted signal's REAL result valid and the remaining signal completely untouched -- never a fabricated second NONE", async () => {
+    const sigA = signalRow({ id: "sig-a" });
+    const sigB = signalRow({ id: "sig-b", createdAtIso: "2026-08-19T00:00:01.000Z" });
+    // Kalshi already has both signals matched -- isolates this test's per-signal-loop
+    // timing assertion to PM-US alone, avoiding any cross-venue Promise.all interleaving
+    // ambiguity in a shared persistVenueMatch mock.
+    const workerRepo = makeFakeWorkerRepo(
+      [sigA, sigB],
+      [
+        { signalId: sigA.id, venue: "KALSHI" },
+        { signalId: sigB.id, venue: "KALSHI" },
+      ],
+    );
+    let now = 1_700_000_100_000;
+    const persistVenueMatch = vi.fn(async (signalId: string) => {
+      if (signalId === sigA.id) now += 31_000; // sig-a's OWN persistence is what crosses the shared deadline
+      return { matchId: `m-${signalId}`, scheduled: 0, downgradeSkipped: false };
+    });
+    const discoverPmus = vi.fn(async () => [] as PmusCandidate[]); // no candidates -> resolvePmusMatch's real result is NONE
+    const discoverKalshi = vi.fn(async () => [] as KalshiCandidate[]);
+    const summary = await runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({
+        workerRepo,
+        discoverPmus: discoverPmus as never,
+        discoverKalshi: discoverKalshi as never,
+        persistVenueMatch: persistVenueMatch as never,
+        now: () => now,
+      }),
+    );
+    expect(summary.sourceLane?.pmus.pendingFound).toBe(2);
+    expect(summary.sourceLane?.pmus.pendingProcessed).toBe(1); // only sig-a
+    expect(summary.sourceLane?.pmus.attempted).toBe(1);
+    expect(summary.sourceLane?.pmus.deadlineReached).toBe(true);
+    expect(persistVenueMatch).toHaveBeenCalledTimes(1); // sig-b never reached persistence
+    // S8: sig-a's REAL resolver result (no discovered candidates -> NONE) is the only NONE
+    // tallied -- sig-b is never evaluated and never fabricated as a second NONE merely
+    // because the scheduler's own deadline expired.
+    expect(summary.sourceLane?.pmus.none).toBe(1);
+    expect(summary.sourceLane?.kalshi.pendingFound).toBe(0);
+  });
+
+  it("S10 / V5 / V7: a lease steal detected mid-cycle sets leaseLost (never deadlineReached) consistently for BOTH venues sharing the SAME checkpoint/fence -- lease loss and deadline exhaustion are never conflated, and neither venue's detection corrupts the other's", async () => {
+    const { repo: leaseRepo, rows } = makeFakeLeaseRepo();
+    const workerRepo = makeFakeWorkerRepo([signalRow()], []);
+    let now = 1_700_000_100_000;
+    let stolen = false;
+    const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
+      // Exceeds LEASE_RENEWAL_MARGIN_MS (20s) so the NEXT checkpoint() call performs a
+      // real renew RPC, but stays under SOURCE_LANE_BUDGET_MS (30s) so the shared
+      // deadline itself is not yet reached.
+      now += 21_000;
+      if (!stolen) {
+        const existing = rows.get(SOURCE_LOCK_ID)!;
+        rows.set(SOURCE_LOCK_ID, { ...existing, workerId: "attacker", fence: existing.fence + 1 });
+        stolen = true;
+      }
+      return emptyWalletResult(wallet);
+    });
+    const discoverPmus = vi.fn(async () => [] as PmusCandidate[]);
+    const discoverKalshi = vi.fn(async () => [] as KalshiCandidate[]);
+    const summary = await runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({
+        leaseRepo,
+        workerRepo,
+        pollSportsShadowWallet: pollSportsShadowWallet as never,
+        discoverPmus: discoverPmus as never,
+        discoverKalshi: discoverKalshi as never,
+        now: () => now,
+      }),
+    );
+    expect(summary.sourceLane?.pmus.leaseLost).toBe(true);
+    expect(summary.sourceLane?.kalshi.leaseLost).toBe(true);
+    expect(summary.sourceLane?.pmus.deadlineReached).toBe(false);
+    expect(summary.sourceLane?.kalshi.deadlineReached).toBe(false);
+    expect(discoverPmus).not.toHaveBeenCalled();
+    expect(discoverKalshi).not.toHaveBeenCalled();
+  });
+
+  it("Task 13I / P1-S: discoverPmus/discoverKalshi both receive the SAME laneDeadlineAtMs (Section 2 -- one absolute lane deadline, never a fresh per-venue budget)", async () => {
+    const workerRepo = makeFakeWorkerRepo([signalRow()], []);
+    const fixedNow = 1_700_000_000_000;
+    const discoverPmus = vi.fn(async (_deps: unknown, _deadlineAtMs?: number) => [] as PmusCandidate[]);
+    const discoverKalshi = vi.fn(async (_deps: unknown, _deadlineAtMs?: number) => [] as KalshiCandidate[]);
+    await runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({ workerRepo, discoverPmus: discoverPmus as never, discoverKalshi: discoverKalshi as never, now: () => fixedNow }),
+    );
+    expect(discoverPmus.mock.calls[0]?.[1]).toBe(fixedNow + SOURCE_LANE_BUDGET_MS);
+    expect(discoverKalshi.mock.calls[0]?.[1]).toBe(fixedNow + SOURCE_LANE_BUDGET_MS);
+  });
+});
+
+describe("Task 13I / Section 4: PM-US/Kalshi venue independence under exactly-two-way concurrency", () => {
+  it("V1: a PM-US discovery call that has not yet resolved does not prevent Kalshi's OWN discovery from starting", async () => {
+    const workerRepo = makeFakeWorkerRepo([signalRow()], []);
+    let pmusStarted = false;
+    let kalshiStarted = false;
+    let resolvePmusDiscovery!: (v: PmusCandidate[]) => void;
+    const discoverPmus = vi.fn(() => {
+      pmusStarted = true;
+      return new Promise<PmusCandidate[]>((resolve) => {
+        resolvePmusDiscovery = resolve;
+      });
+    });
+    const discoverKalshi = vi.fn(async () => {
+      kalshiStarted = true;
+      return [] as KalshiCandidate[];
+    });
+    const cyclePromise = runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({ workerRepo, discoverPmus: discoverPmus as never, discoverKalshi: discoverKalshi as never }),
+    );
+    await flushMicrotasks();
+    expect(pmusStarted).toBe(true);
+    expect(kalshiStarted).toBe(true); // started WITHOUT waiting for PM-US's still-unresolved discovery
+    resolvePmusDiscovery([]);
+    await cyclePromise;
+  });
+
+  it("V2: a Kalshi discovery call that has not yet resolved does not prevent PM-US's OWN discovery from starting (mirror of V1)", async () => {
+    const workerRepo = makeFakeWorkerRepo([signalRow()], []);
+    let pmusStarted = false;
+    let kalshiStarted = false;
+    let resolveKalshiDiscovery!: (v: KalshiCandidate[]) => void;
+    const discoverPmus = vi.fn(async () => {
+      pmusStarted = true;
+      return [] as PmusCandidate[];
+    });
+    const discoverKalshi = vi.fn(() => {
+      kalshiStarted = true;
+      return new Promise<KalshiCandidate[]>((resolve) => {
+        resolveKalshiDiscovery = resolve;
+      });
+    });
+    const cyclePromise = runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({ workerRepo, discoverPmus: discoverPmus as never, discoverKalshi: discoverKalshi as never }),
+    );
+    await flushMicrotasks();
+    expect(kalshiStarted).toBe(true);
+    expect(pmusStarted).toBe(true);
+    resolveKalshiDiscovery([]);
+    await cyclePromise;
+  });
+
+  it("V3: PM-US completing normally (persisting a match) does not require Kalshi to also complete -- Kalshi can independently hit the shared deadline in the SAME cycle", async () => {
+    const workerRepo = makeFakeWorkerRepo([signalRow()], []);
+    let now = 1_700_000_100_000;
+    const discoverPmus = vi.fn(async () => [] as PmusCandidate[]);
+    let resolveKalshiDiscovery!: (v: KalshiCandidate[]) => void;
+    const discoverKalshi = vi.fn(
+      () =>
+        new Promise<KalshiCandidate[]>((resolve) => {
+          resolveKalshiDiscovery = resolve;
+        }),
+    );
+    const persistVenueMatch = vi.fn(async (signalId: string) => ({ matchId: `m-${signalId}`, scheduled: 0, downgradeSkipped: false }));
+    const cyclePromise = runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({
+        workerRepo,
+        discoverPmus: discoverPmus as never,
+        discoverKalshi: discoverKalshi as never,
+        persistVenueMatch: persistVenueMatch as never,
+        now: () => now,
+      }),
+    );
+    await flushMicrotasks(); // let PM-US's entire (fast, no real delay) chain fully settle
+    expect(persistVenueMatch).toHaveBeenCalled(); // PM-US already persisted while Kalshi's discovery is still pending
+    now += 31_000; // NOW push the shared clock past the lane deadline
+    resolveKalshiDiscovery([]);
+    const summary = await cyclePromise;
+    expect(summary.sourceLane?.kalshi.deadlineReached).toBe(true);
+    expect(summary.sourceLane?.pmus.attempted ?? 0).toBeGreaterThan(0);
+  });
+
+  it("V4: a PM-US discovery failure (throws) leaves Kalshi's OWN resolution completely independent -- Kalshi still discovers and persists normally", async () => {
+    const workerRepo = makeFakeWorkerRepo([signalRow()], []);
+    const discoverPmus = vi.fn(async () => {
+      throw new Error("PM-US exploded");
+    });
+    const discoverKalshi = vi.fn(async () => [] as KalshiCandidate[]);
+    const persistVenueMatch = vi.fn(async (signalId: string) => ({ matchId: `m-${signalId}`, scheduled: 0, downgradeSkipped: false }));
+    const summary = await runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({
+        workerRepo,
+        discoverPmus: discoverPmus as never,
+        discoverKalshi: discoverKalshi as never,
+        persistVenueMatch: persistVenueMatch as never,
+      }),
+    );
+    expect(summary.sourceLane?.pmus.discoveryFailed).toBe(true);
+    expect(summary.sourceLane?.pmus.deadlineReached).toBe(false);
+    expect(summary.sourceLane?.kalshi.discoveryFailed).toBe(false);
+    expect(summary.sourceLane?.kalshi.attempted).toBeGreaterThan(0);
+  });
+
+  it("V6: PM-US and Kalshi resolution run with EXACTLY two-way concurrency -- both discovery calls are genuinely in flight at the same time, never sequential (PM-US-then-Kalshi)", async () => {
+    const workerRepo = makeFakeWorkerRepo([signalRow()], []);
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    function makeDiscover<T>(): () => Promise<T[]> {
+      return async () => {
+        concurrent += 1;
+        maxConcurrent = Math.max(maxConcurrent, concurrent);
+        await Promise.resolve();
+        concurrent -= 1;
+        return [] as T[];
+      };
+    }
+    const discoverPmus = vi.fn(makeDiscover<PmusCandidate>());
+    const discoverKalshi = vi.fn(makeDiscover<KalshiCandidate>());
+    await runSportsShadowCycle(enabledConfig(), baseDeps({ workerRepo, discoverPmus: discoverPmus as never, discoverKalshi: discoverKalshi as never }));
+    expect(discoverPmus).toHaveBeenCalledTimes(1);
+    expect(discoverKalshi).toHaveBeenCalledTimes(1);
+    expect(maxConcurrent).toBe(2); // both were genuinely in flight at the same time -- true concurrency, not sequential
+  });
+});
+
+describe("FINAL BUILD Parts 25/27: onCycleComplete telemetry/alert hook", () => {
+  it("is called exactly once per ENABLED cycle with the completed summary", async () => {
+    const onCycleComplete = vi.fn(async () => {});
+    const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ onCycleComplete }));
+    expect(onCycleComplete).toHaveBeenCalledTimes(1);
+    expect(onCycleComplete).toHaveBeenCalledWith(summary);
+  });
+
+  it("is NEVER called when the config is disabled -- no telemetry/alert side effects from a disabled cycle", async () => {
+    const onCycleComplete = vi.fn(async () => {});
+    await runSportsShadowCycle({ enabled: false, wallets: [], goLiveAtMs: null, gitSha: "test-sha" }, baseDeps({ onCycleComplete }));
+    expect(onCycleComplete).not.toHaveBeenCalled();
+  });
+
+  it("a throwing onCycleComplete never propagates -- the cycle's own summary is still returned normally", async () => {
+    const onCycleComplete = vi.fn(async () => {
+      throw new Error("telemetry backend down");
+    });
+    const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ onCycleComplete }));
+    expect(summary.configEnabled).toBe(true);
+    expect(summary.errors).toEqual([]); // the hook's own failure never leaks into the cycle's reported errors
   });
 });
