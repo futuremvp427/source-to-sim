@@ -1,5 +1,6 @@
 /** Overview screen: master paper portfolio, sleeves, contributions, recent feed. */
-import { ArrowUpRight, LineChart } from "lucide-react";
+import { ArrowUpRight, LineChart, Trophy } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 
 import { formatTime, formatUsd } from "@/lib/mirror-trader";
 import {
@@ -13,7 +14,7 @@ import {
   shortWallet,
   walletBadge,
 } from "@/lib/ui/portfolio-view";
-import { useMasterPortfolio, useShadowDashboard } from "@/lib/ui/use-dashboard-queries";
+import { useMasterPortfolio, useShadowDashboard, useSportsShadowDashboard } from "@/lib/ui/use-dashboard-queries";
 
 import {
   Chip,
@@ -51,7 +52,10 @@ export function OverviewView({
         </TerminalCard>
       ) : null}
 
+      <SportsShadowCard />
+
       <TerminalCard
+
         title="Master paper portfolio"
         subtitle={
           portfolio
