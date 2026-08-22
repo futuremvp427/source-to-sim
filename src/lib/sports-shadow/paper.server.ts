@@ -331,8 +331,20 @@ async function buildDecisionRow(
  * otherwise returns immediately, leaving the row pending for the sibling or the periodic
  * cutoff sweep. Never decided twice: finalizeRoutingDecision's own DB-level guard makes a
  * second/concurrent attempt a safe no-op.
+ *
+ * CODEX P2-6: `deadlineAtMs` (optional; observation.server.ts threads through the SAME
+ * absolute deadline its own due-observation loop was given) is checked between each of
+ * the five canonical tiers -- confirmed during the full-route timing analysis that this
+ * function's per-tier RPC round trips (recordRoutingProvenance + finalizeRoutingDecision)
+ * had no deadline of their own, so a slow/backed-up Postgres could extend ONE row's
+ * already-awaited onObservationClaimed call well beyond what
+ * OBSERVATION_STAGE_DEADLINE_MS's own worst-case bound assumed, uncounted by the calling
+ * loop's own between-ROW deadline check. Stopping early here is always safe: an
+ * un-attempted tier's decision is simply left pending for the sibling's own eventual
+ * call or the periodic cutoff sweep (maybeDecideExpiredRoutingCutoffs) -- never a lost
+ * or corrupted decision, exactly like every other deadline-truncation in this codebase.
  */
-export async function computePaperFillsForObservation(observationId: string, deps: Partial<PaperDeps> = {}): Promise<PaperFillRow[]> {
+export async function computePaperFillsForObservation(observationId: string, deps: Partial<PaperDeps> = {}, deadlineAtMs?: number): Promise<PaperFillRow[]> {
   const d: PaperDeps = { ...defaultDeps, ...deps };
   const obs = await d.repo.getObservation(observationId);
   if (!obs) return [];
@@ -356,6 +368,10 @@ export async function computePaperFillsForObservation(observationId: string, dep
   // venue's own eventual call needs to see via the SAME (signal, delay, tier) row.
   const decided: PaperFillRow[] = [];
   for (const tier of SPORTS_SHADOW_NOTIONALS_USD) {
+    // CODEX P2-6: checked BEFORE each tier's own RPC round trips -- an already-exhausted
+    // deadline stops here, leaving this and every remaining tier's decision untouched
+    // this call (safe -- see this function's own doc comment).
+    if (deadlineAtMs !== undefined && d.now() >= deadlineAtMs) break;
     let provenance = await d.repo.recordRoutingProvenance(obs.signalId, obs.requestedDelayMs, tier, obs.venue, observationId, obs.fireAtMs);
     if (siblingObs?.observed) {
       provenance = await d.repo.recordRoutingProvenance(obs.signalId, obs.requestedDelayMs, tier, otherVenue, siblingObs.id, obs.fireAtMs);

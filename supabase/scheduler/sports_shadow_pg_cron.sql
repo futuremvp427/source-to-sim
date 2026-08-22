@@ -48,6 +48,34 @@
 -- way General Shadow's own overlapping-invocation tolerance already works. This SQL
 -- file does not need pg_cron's own run-history/skip-if-running features.
 --
+-- CODEX P2-6 RE-VERIFICATION (2026-08-25, full-route timing analysis after the complete
+-- remediation pass): 30s cadence / 45000ms timeout REMAIN CORRECT -- neither changes.
+-- Reviewed every fix in this pass for a NEW worst-case timing contribution:
+--   - Source/matching lane (P1-1 coverage windowing, P1-3 episode lifecycle): windows
+--     WHAT Phase 1 fetches within its EXISTING sub-budget, adds no new network calls
+--     beyond what was already bounded -- the 30s+12s~=42s worst case this file's own
+--     TIMEOUT section already accounts for is unchanged.
+--   - Observation lane (P1-2 routing-decision provenance/finalize RPCs): a REAL new risk
+--     was found and fixed here, not merely assumed safe -- computePaperFillsForObservation
+--     runs synchronously inside takeDueSportsShadowObservations's own per-row loop via
+--     onObservationClaimed, and its per-tier RPC round trips originally had NO deadline of
+--     their own, which could have extended one row's hold time past
+--     OBSERVATION_STAGE_DEADLINE_MS's own ~16s worst-case bound (Task 13I), uncounted by
+--     the loop's between-ROW deadline check. FIXED (observation.server.ts,
+--     paper.server.ts): the SAME absolute lane deadline now threads through, checked
+--     before each of the five tiers -- restores the original ~16s bound rather than
+--     requiring a larger one; an interrupted tier's decision is always safe to leave
+--     pending for the sibling's own call or the periodic cutoff sweep.
+--   - New periodic maintenance tasks added this pass (maybeDecideExpiredRoutingCutoffs)
+--     run in worker.server.ts's already-best-effort onCycleComplete hook, the SAME place
+--     capability probes and the integrity audit already run -- bounded by their own
+--     internal LIMIT (100 rows), not by this file's own timeout, consistent with the
+--     existing maintenance-task pattern's own (undocumented-here, pre-existing) timing
+--     characteristics.
+-- Conclusion: total worst-case cycle time is unchanged from before this remediation pass
+-- (~42s source/matching lane + ~16s observation lane, well inside both the 30s cadence's
+-- own overlap-safety margin and this file's 45000ms per-invocation pg_net timeout).
+--
 -- IDEMPOTENT INSTALL/REMOVAL: cron.unschedule is called first so re-running this script
 -- (e.g. to change the cadence) never creates a second, duplicate job under the same name.
 

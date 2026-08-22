@@ -215,7 +215,16 @@ export type ObservationDeps = {
    * otherwise-successful book capture into a reported failure for THIS function's own
    * captured/failed/skipped accounting.
    */
-  onObservationClaimed: (observationId: string) => Promise<void>;
+  /**
+   * CODEX P2-6: `deadlineAtMs` (optional; the SAME absolute deadline this observation
+   * lane call itself was given) threads through to paper.server.ts's
+   * computePaperFillsForObservation -- confirmed during the P2-6 full-route timing
+   * analysis that its per-tier routing-decision RPC round trips had NO deadline of their
+   * own, so a slow/backed-up Postgres could extend ONE row's already-awaited
+   * onObservationClaimed call well beyond what OBSERVATION_STAGE_DEADLINE_MS's own
+   * worst-case bound assumed, uncounted by the loop's own between-row deadline check.
+   */
+  onObservationClaimed: (observationId: string, deadlineAtMs?: number) => Promise<void>;
 };
 
 const defaultDeps: ObservationDeps = {
@@ -223,9 +232,9 @@ const defaultDeps: ObservationDeps = {
   fetchPmusBook,
   fetchKalshiBook,
   now: () => Date.now(),
-  onObservationClaimed: async (observationId) => {
+  onObservationClaimed: async (observationId, deadlineAtMs) => {
     const { computePaperFillsForObservation } = await import("./paper.server");
-    await computePaperFillsForObservation(observationId);
+    await computePaperFillsForObservation(observationId, {}, deadlineAtMs);
   },
 };
 
@@ -403,7 +412,7 @@ export async function takeDueSportsShadowObservations(
         if (patch.errorCode) failed += 1;
         else captured += 1;
         try {
-          await d.onObservationClaimed(row.id);
+          await d.onObservationClaimed(row.id, deadlineAtMs ?? undefined);
         } catch {
           // Best-effort: a paper-execution trigger failure must never turn an
           // otherwise-successful book capture into a reported failure here.
@@ -441,7 +450,7 @@ export async function takeDueSportsShadowObservations(
       if (patch.errorCode) failed += 1;
       else captured += 1;
       try {
-        await d.onObservationClaimed(row.id);
+        await d.onObservationClaimed(row.id, deadlineAtMs ?? undefined);
       } catch {
         // Best-effort -- see the identical PM-US branch above for the full rationale.
       }

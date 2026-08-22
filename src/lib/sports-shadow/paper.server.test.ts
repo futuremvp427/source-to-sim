@@ -284,3 +284,36 @@ describe("CODEX P1-2: maybeDecideExpiredRoutingCutoffs -- closes the 'sibling ne
     expect(repo.decisions.size).toBe(5);
   });
 });
+
+describe("CODEX P2-6: computePaperFillsForObservation respects an external deadline -- full-route timing analysis proof", () => {
+  it("a deadline already exceeded before the first tier decides ZERO tiers, leaving all five pending for a later trigger (the sibling's own call or the periodic cutoff sweep) -- never a lost or corrupted decision", async () => {
+    const pmus = obs({ id: "obs-pmus", venue: "PMUS" });
+    const kalshi = obs({ id: "obs-kalshi", venue: "KALSHI" });
+    const repo = fakeRepo({ observations: seedObservations(pmus, kalshi) });
+    const fixedNow = pmus.fireAtMs + 500;
+    const rows = await computePaperFillsForObservation("obs-pmus", { repo, now: () => fixedNow }, fixedNow - 1); // deadline already in the past
+    expect(rows).toHaveLength(0);
+    expect(repo.decisions.size).toBe(0);
+    // Not lost -- a later call (no deadline, or a fresh one) still reaches all 5 tiers.
+    const later = await computePaperFillsForObservation("obs-pmus", { repo, now: () => fixedNow + 1 });
+    expect(later).toHaveLength(5);
+  });
+
+  it("a slow dependency (simulated by a repo call that advances the clock) is interrupted mid-way through the five tiers rather than running unbounded -- proves the P2-6 fix: a backed-up Postgres can no longer extend one observation's onObservationClaimed call past its own deadline uncounted", async () => {
+    const pmus = obs({ id: "obs-pmus", venue: "PMUS" });
+    const kalshi = obs({ id: "obs-kalshi", venue: "KALSHI" });
+    let now = pmus.fireAtMs;
+    const deadline = pmus.fireAtMs + 250; // tight -- allows roughly one tier's worth of "slow" round trips
+    const repo = fakeRepo({ observations: seedObservations(pmus, kalshi) });
+    const originalRecord = repo.recordRoutingProvenance.bind(repo);
+    let callCount = 0;
+    repo.recordRoutingProvenance = async (...args) => {
+      callCount += 1;
+      now += 200; // simulates a slow/backed-up Postgres round trip
+      return originalRecord(...args);
+    };
+    const rows = await computePaperFillsForObservation("obs-pmus", { repo, now: () => now }, deadline);
+    expect(rows.length).toBeLessThan(5); // interrupted -- did NOT run all 5 tiers unbounded
+    expect(callCount).toBeLessThan(10); // bounded, not an unbounded/runaway loop
+  });
+});

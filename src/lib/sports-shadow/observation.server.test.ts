@@ -563,6 +563,20 @@ describe("takeDueSportsShadowObservations — due queue", () => {
     expect([...observations.values()].every((o) => o.observedAt === null)).toBe(true);
   });
 
+  it("CODEX P2-6: the lane's own deadlineAtMs is threaded into onObservationClaimed -- a slow paper-routing dependency can no longer extend one row's hold time uncounted against the observation lane's own worst-case bound", async () => {
+    const { repo } = makeFakeRepo();
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
+    const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
+    const claimedDeadlines: (number | undefined)[] = [];
+    const onObservationClaimed = vi.fn(async (_id: string, deadlineAtMs?: number) => {
+      claimedDeadlines.push(deadlineAtMs);
+    });
+    const laneDeadline = DETECTED_AT_MS + 20_000;
+    await takeDueSportsShadowObservations("PMUS", { repo, fetchPmusBook, onObservationClaimed, now: () => DETECTED_AT_MS }, 5, laneDeadline);
+    expect(claimedDeadlines.length).toBeGreaterThan(0);
+    expect(claimedDeadlines.every((d) => d === laneDeadline)).toBe(true); // the SAME absolute deadline the lane itself was given, not an unbounded/omitted one
+  });
+
   it("25. oldest fire_at is handled first", async () => {
     const { repo } = makeFakeRepo();
     await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
