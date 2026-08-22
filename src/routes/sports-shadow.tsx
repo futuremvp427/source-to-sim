@@ -33,11 +33,22 @@ function StageBadge({ stage }: { stage: string }) {
   return <Badge variant={tone}>{stage}</Badge>;
 }
 
-function CapabilityRow({ label, capability }: { label: string; capability: { discoveryAvailable: boolean; orderbookAvailable: boolean; checkedAtIso: string } | null }) {
+/**
+ * CODEX P2-4: a query FAILURE must never render identically to a genuine "nothing here
+ * yet" empty state -- see dashboard.server.ts's DashboardDegradedFlags. This badge is the
+ * one place that distinction is surfaced to an operator.
+ */
+function DegradedBadge() {
+  return <Badge variant="destructive">data unavailable</Badge>;
+}
+
+function CapabilityRow({ label, capability, degraded }: { label: string; capability: { discoveryAvailable: boolean; orderbookAvailable: boolean; checkedAtIso: string } | null; degraded: boolean }) {
   return (
     <div className="flex items-center justify-between border-b border-border/50 py-2 text-sm last:border-0">
       <span className="font-medium">{label}</span>
-      {capability ? (
+      {degraded ? (
+        <DegradedBadge />
+      ) : capability ? (
         <span className="flex items-center gap-2">
           <Badge variant={capability.discoveryAvailable ? "secondary" : "destructive"}>discovery {capability.discoveryAvailable ? "OK" : "DOWN"}</Badge>
           <Badge variant={capability.orderbookAvailable ? "secondary" : "destructive"}>orderbook {capability.orderbookAvailable ? "OK" : "DOWN"}</Badge>
@@ -197,12 +208,14 @@ function SportsShadowDashboard() {
             <CardHeader>
               <CardTitle className="flex items-center justify-between text-base">
                 Experiment
-                {data.epoch ? <StageBadge stage={data.epoch.stage} /> : <Badge variant="outline">no epoch yet</Badge>}
+                {data.degraded.epoch ? <DegradedBadge /> : data.epoch ? <StageBadge stage={data.epoch.stage} /> : <Badge variant="outline">no epoch yet</Badge>}
               </CardTitle>
               <CardDescription>Current stage, epoch, and versioning.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-1 text-sm">
-              {data.epoch ? (
+              {data.degraded.epoch ? (
+                <div className="text-destructive">Epoch lookup failed -- this is NOT "no epoch yet," the query itself did not succeed.</div>
+              ) : data.epoch ? (
                 <>
                   <div>Go-live: {new Date(data.epoch.goLiveAtIso).toLocaleString()}</div>
                   <div>Wallet cohort: {data.epoch.walletCohort.length} wallet(s)</div>
@@ -217,16 +230,25 @@ function SportsShadowDashboard() {
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Milestone Progress</CardTitle>
+              <CardTitle className="flex items-center justify-between text-base">
+                Milestone Progress
+                {data.degraded.milestones ? <DegradedBadge /> : null}
+              </CardTitle>
               <CardDescription>Independent (clustered) settled episodes — never raw fill count.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-1 text-sm">
-              <div>Raw episodes (full epoch): {data.milestones.rawEpisodeCount}</div>
-              <div>Independent clusters: {data.milestones.independentEpisodeCount}</div>
-              <div className="font-medium">Independent settled: {data.milestones.settledIndependentCount}</div>
-              <div className="text-muted-foreground">
-                Next milestone: {data.milestones.nextMilestone === "100_INDEPENDENT_SETTLED" ? "100 independent settled" : data.milestones.nextMilestone === "300_INDEPENDENT_SETTLED" ? "300 independent settled" : "none — review-ready"}
-              </div>
+              {data.degraded.milestones ? (
+                <div className="text-destructive">Milestone counts unavailable -- do not read the values below as zero/current.</div>
+              ) : (
+                <>
+                  <div>Raw episodes (full epoch): {data.milestones.rawEpisodeCount}</div>
+                  <div>Independent clusters: {data.milestones.independentEpisodeCount}</div>
+                  <div className="font-medium">Independent settled: {data.milestones.settledIndependentCount}</div>
+                  <div className="text-muted-foreground">
+                    Next milestone: {data.milestones.nextMilestone === "100_INDEPENDENT_SETTLED" ? "100 independent settled" : data.milestones.nextMilestone === "300_INDEPENDENT_SETTLED" ? "300 independent settled" : "none — review-ready"}
+                  </div>
+                </>
+              )}
             </CardContent>
           </Card>
 
@@ -236,8 +258,8 @@ function SportsShadowDashboard() {
               <CardDescription>Live-probed, credential-free discovery/orderbook access.</CardDescription>
             </CardHeader>
             <CardContent>
-              <CapabilityRow label="Polymarket US" capability={data.pmusCapability} />
-              <CapabilityRow label="Kalshi" capability={data.kalshiCapability} />
+              <CapabilityRow label="Polymarket US" capability={data.pmusCapability} degraded={data.degraded.capability} />
+              <CapabilityRow label="Kalshi" capability={data.kalshiCapability} degraded={data.degraded.capability} />
             </CardContent>
           </Card>
 
@@ -249,24 +271,33 @@ function SportsShadowDashboard() {
             <CardContent className="space-y-1 text-sm">
               <div>
                 Last integrity audit:{" "}
-                {data.integrity.lastRunIso ? (
+                {data.degraded.integrity ? (
+                  <DegradedBadge />
+                ) : data.integrity.lastRunIso ? (
                   <Badge variant={data.integrity.passed ? "secondary" : "destructive"}>{data.integrity.passed ? "PASSED" : "FAILED"}</Badge>
                 ) : (
                   <span className="text-muted-foreground">never run</span>
                 )}
               </div>
               {data.integrity.checksFailed > 0 ? <div className="text-destructive">{data.integrity.checksFailed} check(s) failing</div> : null}
-              <div>Unresolved alerts: {data.unresolvedAlertCount}</div>
+              <div className="flex items-center gap-2">
+                Unresolved alerts: {data.degraded.alerts ? <DegradedBadge /> : data.unresolvedAlertCount}
+              </div>
             </CardContent>
           </Card>
 
           <Card className="sm:col-span-2">
             <CardHeader>
-              <CardTitle className="text-base">Wallets</CardTitle>
+              <CardTitle className="flex items-center justify-between text-base">
+                Wallets
+                {data.degraded.signals ? <DegradedBadge /> : null}
+              </CardTitle>
               <CardDescription>Most recently active tracked wallets (bounded to last 500 signals).</CardDescription>
             </CardHeader>
             <CardContent className="space-y-1 text-sm">
-              {data.wallets.length === 0 ? (
+              {data.degraded.signals ? (
+                <div className="text-destructive">Wallet activity unavailable -- this is NOT "no source activity," the query itself did not succeed.</div>
+              ) : data.wallets.length === 0 ? (
                 <div className="text-muted-foreground">No source activity recorded yet.</div>
               ) : (
                 data.wallets.map((w) => (
@@ -281,7 +312,21 @@ function SportsShadowDashboard() {
             </CardContent>
           </Card>
 
-          {data.results ? <ResultsSection results={data.results} /> : null}
+          {data.degraded.results ? (
+            <Card className="sm:col-span-2">
+              <CardHeader>
+                <CardTitle className="flex items-center justify-between text-base">
+                  Results
+                  <DegradedBadge />
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-sm text-destructive">Results computation failed -- not "no results yet."</div>
+              </CardContent>
+            </Card>
+          ) : data.results ? (
+            <ResultsSection results={data.results} />
+          ) : null}
         </div>
       ) : null}
 

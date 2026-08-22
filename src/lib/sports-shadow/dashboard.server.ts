@@ -47,6 +47,27 @@ export type DashboardResults = {
   oos: { classification: OosClassification; gate: LivePilotGateResult; report: EpisodeAnalysisReport } | null;
 } | null;
 
+/**
+ * CODEX P2-4: a Supabase query error previously went unchecked -- `.data` (null on
+ * error, identical to a genuine empty result) and `alertsRes.count ?? 0` (null on error,
+ * identical to a genuine zero) were used directly, so an inaccessible/unhealthy backend
+ * silently rendered as "merely inactive" (no epoch yet, capability not yet checked, zero
+ * alerts) rather than a visibly degraded state. Every section below now has its OWN
+ * degraded flag, true only when THAT section's own query/computation actually failed --
+ * the returned value alongside a `true` flag is a last-resort fallback, not a claim about
+ * reality, and callers (the dashboard route) MUST render an explicit unavailable
+ * indicator rather than trusting the bare value whenever its flag is true.
+ */
+export type DashboardDegradedFlags = {
+  epoch: boolean;
+  capability: boolean;
+  signals: boolean;
+  integrity: boolean;
+  alerts: boolean;
+  milestones: boolean;
+  results: boolean;
+};
+
 export type SportsShadowDashboardData = {
   epoch: DashboardEpochSummary;
   pmusCapability: DashboardVenueCapability;
@@ -56,6 +77,7 @@ export type SportsShadowDashboardData = {
   integrity: DashboardIntegrityStatus;
   unresolvedAlertCount: number;
   results: DashboardResults;
+  degraded: DashboardDegradedFlags;
 };
 
 const WALLET_SUMMARY_LIMIT = 10;
@@ -103,17 +125,34 @@ export async function loadSportsShadowDashboard(): Promise<SportsShadowDashboard
     supabaseAdmin.from("sports_shadow_alerts" as never).select("id", { count: "exact", head: true }).is("resolved_at", null),
   ]);
 
-  const epochRow = epochRes.data as unknown as {
-    id: string;
-    go_live_at: string;
-    wallet_cohort: string[];
-    stage: ExperimentStage;
-    stage_entered_at: string;
-    git_sha: string;
-    config_hash: string;
-    calibration_started_at: string | null;
-    oos_started_at: string | null;
-  } | null;
+  // CODEX P2-4: every query's `.error` is now checked explicitly BEFORE its `.data`/
+  // `.count` is used -- a query failure sets that section's own `degraded` flag and falls
+  // back to a safe placeholder value, rather than silently reusing the SAME `null`/`0`
+  // Supabase already returns on error, which is otherwise indistinguishable from a
+  // genuine "nothing here yet" state.
+  const degraded: DashboardDegradedFlags = {
+    epoch: epochRes.error !== null,
+    capability: pmusCapRes.error !== null || kalshiCapRes.error !== null,
+    signals: signalsRes.error !== null,
+    integrity: integrityRes.error !== null,
+    alerts: alertsRes.error !== null,
+    milestones: false,
+    results: false,
+  };
+
+  const epochRow = degraded.epoch
+    ? null
+    : (epochRes.data as unknown as {
+        id: string;
+        go_live_at: string;
+        wallet_cohort: string[];
+        stage: ExperimentStage;
+        stage_entered_at: string;
+        git_sha: string;
+        config_hash: string;
+        calibration_started_at: string | null;
+        oos_started_at: string | null;
+      } | null);
 
   const epoch: DashboardEpochSummary = epochRow
     ? {
@@ -129,12 +168,13 @@ export async function loadSportsShadowDashboard(): Promise<SportsShadowDashboard
       }
     : null;
 
-  function toCapability(row: unknown): DashboardVenueCapability {
-    const r = row as { venue: Venue; discovery_available: boolean; orderbook_available: boolean; checked_at: string } | null;
+  function toCapability(res: { data: unknown; error: unknown }): DashboardVenueCapability {
+    if (res.error) return null;
+    const r = res.data as { venue: Venue; discovery_available: boolean; orderbook_available: boolean; checked_at: string } | null;
     return r ? { venue: r.venue, discoveryAvailable: r.discovery_available, orderbookAvailable: r.orderbook_available, checkedAtIso: r.checked_at } : null;
   }
 
-  const signalRows = (signalsRes.data ?? []) as unknown as DashboardSignalRow[];
+  const signalRows = degraded.signals ? [] : ((signalsRes.data ?? []) as unknown as DashboardSignalRow[]);
   // Recent-activity view only (bounded to 500) -- NOT the authoritative milestone
   // counter, which would silently under-count once the epoch exceeds this window. See
   // milestones below.
@@ -143,21 +183,29 @@ export async function loadSportsShadowDashboard(): Promise<SportsShadowDashboard
   // FINAL BUILD Part 7: authoritative, unbounded-by-volume milestone counts via an
   // indexed SQL aggregate (get_sports_shadow_epoch_counters) -- correct at any epoch
   // size, while this dashboard read itself stays a single bounded RPC call. Falls back
-  // to the bounded-signal-rows computation only when there is no current epoch at all
-  // (nothing to count either way).
-  const milestones: DashboardMilestoneProgress = epoch
-    ? await (async () => {
-        const counters = await getEpochCounters(epoch.id);
-        return {
-          rawEpisodeCount: counters.rawEpisodeCount,
-          independentEpisodeCount: counters.independentEpisodeCount,
-          settledIndependentCount: counters.settledIndependentCount,
-          nextMilestone: nextMilestoneFor(counters),
-        };
-      })()
-    : computeMilestoneProgress(signalRows);
+  // to the bounded-signal-rows computation only when there is genuinely no current epoch
+  // (never when the epoch query itself failed -- degraded.epoch is checked first below,
+  // since a failed epoch lookup means "unknown," not "confirmed none").
+  let milestones: DashboardMilestoneProgress = { rawEpisodeCount: 0, independentEpisodeCount: 0, settledIndependentCount: 0, nextMilestone: null };
+  if (degraded.epoch || degraded.signals) {
+    degraded.milestones = true;
+  } else if (epoch) {
+    try {
+      const counters = await getEpochCounters(epoch.id);
+      milestones = {
+        rawEpisodeCount: counters.rawEpisodeCount,
+        independentEpisodeCount: counters.independentEpisodeCount,
+        settledIndependentCount: counters.settledIndependentCount,
+        nextMilestone: nextMilestoneFor(counters),
+      };
+    } catch {
+      degraded.milestones = true;
+    }
+  } else {
+    milestones = computeMilestoneProgress(signalRows);
+  }
 
-  const integrityRow = integrityRes.data as unknown as { run_at: string; passed: boolean; checks_failed: number } | null;
+  const integrityRow = degraded.integrity ? null : (integrityRes.data as unknown as { run_at: string; passed: boolean; checks_failed: number } | null);
   const integrity: DashboardIntegrityStatus = integrityRow
     ? { lastRunIso: integrityRow.run_at, passed: integrityRow.passed, checksFailed: integrityRow.checks_failed }
     : { lastRunIso: null, passed: null, checksFailed: 0 };
@@ -166,34 +214,43 @@ export async function loadSportsShadowDashboard(): Promise<SportsShadowDashboard
   // episode-outcome fetch (never the 500-row-bounded signalRows above). This is a
   // research dashboard read, not a hot path (30s client poll interval) -- recomputing on
   // every load keeps it always current rather than depending on a milestone snapshot
-  // that may not exist yet for this epoch.
-  const results: DashboardResults = epoch
-    ? await (async () => {
-        const allRows = await fetchAllEpisodeOutcomes(epoch.id);
-        const fullEpoch = computeEpisodeAnalysisReport(allRows, { sinceIso: null, untilIso: null });
+  // that may not exist yet for this epoch. CODEX P2-4: getEpochCounters/
+  // fetchAllEpisodeOutcomes/evaluate*Classification already throw (never silently zero)
+  // on their own query failures -- wrapped here so ONE failed sub-computation degrades
+  // just this section rather than crashing the entire dashboard load.
+  let results: DashboardResults = null;
+  if (degraded.epoch) {
+    degraded.results = true;
+  } else if (epoch) {
+    try {
+      const allRows = await fetchAllEpisodeOutcomes(epoch.id);
+      const fullEpoch = computeEpisodeAnalysisReport(allRows, { sinceIso: null, untilIso: null });
 
-        const calibration = epoch.calibrationStartedAtIso ? await evaluateCalibrationClassification(epoch.id, epoch.calibrationStartedAtIso) : null;
+      const calibration = epoch.calibrationStartedAtIso ? await evaluateCalibrationClassification(epoch.id, epoch.calibrationStartedAtIso) : null;
 
-        let oos: { classification: OosClassification; gate: LivePilotGateResult; report: EpisodeAnalysisReport } | null = null;
-        if (epoch.oosStartedAtIso) {
-          const counters = await getEpochCounters(epoch.id);
-          const durationOk = Date.now() - Date.parse(epoch.oosStartedAtIso) >= OOS_MIN_DURATION_MS;
-          const countOk = counters.oosIndependentSettledCount >= OOS_MIN_INDEPENDENT_EPISODES;
-          oos = await evaluateOosClassification(epoch.id, epoch.oosStartedAtIso, durationOk && countOk);
-        }
+      let oos: { classification: OosClassification; gate: LivePilotGateResult; report: EpisodeAnalysisReport } | null = null;
+      if (epoch.oosStartedAtIso) {
+        const counters = await getEpochCounters(epoch.id);
+        const durationOk = Date.now() - Date.parse(epoch.oosStartedAtIso) >= OOS_MIN_DURATION_MS;
+        const countOk = counters.oosIndependentSettledCount >= OOS_MIN_INDEPENDENT_EPISODES;
+        oos = await evaluateOosClassification(epoch.id, epoch.oosStartedAtIso, durationOk && countOk);
+      }
 
-        return { fullEpoch, calibration, oos };
-      })()
-    : null;
+      results = { fullEpoch, calibration, oos };
+    } catch {
+      degraded.results = true;
+    }
+  }
 
   return {
     epoch,
-    pmusCapability: toCapability(pmusCapRes.data),
-    kalshiCapability: toCapability(kalshiCapRes.data),
+    pmusCapability: toCapability(pmusCapRes),
+    kalshiCapability: toCapability(kalshiCapRes),
     wallets,
     milestones,
     integrity,
-    unresolvedAlertCount: alertsRes.count ?? 0,
+    unresolvedAlertCount: degraded.alerts ? 0 : (alertsRes.count ?? 0),
     results,
+    degraded,
   };
 }
