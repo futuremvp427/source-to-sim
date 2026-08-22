@@ -16,7 +16,7 @@
  *
  *   (B) predeclared time-shift/randomized eligible-event sampling -- NOT implemented in
  *       this pass. It is plausible future work (the system already captures the SAME
- *       signal's price at +0/+5/+10/+30/+60 minute offsets, so an "enter at a
+ *       signal's price at +0/+5/+10/+30/+60 second offsets, so an "enter at a
  *       predeclared alternate offset instead of the source's own detected moment"
  *       baseline is buildable from data already collected) -- but it needs its offset
  *       rule fixed and versioned in code BEFORE any epoch's results are inspected, to

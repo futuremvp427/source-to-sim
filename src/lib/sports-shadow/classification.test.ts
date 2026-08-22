@@ -68,6 +68,12 @@ describe("evaluateLivePilotGate", () => {
     expect(result.blockedReasons.some((r) => r.includes("liquidity"))).toBe(true);
   });
 
+  it("epoch drift/contamination blocks the gate directly (not only via classifyOos's short-circuit) -- a contaminated epoch can never show ready:true", () => {
+    const result = evaluateLivePilotGate(gateInput({ epochContaminationDetected: true }));
+    expect(result.ready).toBe(false);
+    expect(result.blockedReasons.some((r) => r.includes("contamination"))).toBe(true);
+  });
+
   it("blocks on statistical confidence below threshold even when everything else passes", () => {
     const result = evaluateLivePilotGate(gateInput({ bootstrapProbabilityPositive: 0.6 }));
     expect(result.ready).toBe(false);

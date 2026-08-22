@@ -56,6 +56,7 @@ export type LivePilotGateResult = { ready: boolean; blockedReasons: string[] };
 /** Every reason LIVE_PILOT_REVIEW_READY is currently blocked -- Part 9's dashboard requirement to show this explicitly, not just a boolean. Order is deterministic (declaration order below), not severity-sorted -- callers wanting a specific display order should sort themselves. */
 export function evaluateLivePilotGate(input: LivePilotGateInput): LivePilotGateResult {
   const reasons: string[] = [];
+  if (input.epochContaminationDetected) reasons.push("epoch version/config contamination detected -- a new epoch is required, this one can never reach LIVE_PILOT_REVIEW_READY");
   if (!input.oosSampleAndDurationMet) reasons.push(`OOS minimum sample/duration not yet reached (needs >= ${OOS_MIN_INDEPENDENT_EPISODES} additional independent settled episodes and the minimum OOS duration)`);
   if (input.oosExpectancyPerIndependentEpisodeUsd <= 0) reasons.push("OOS net expectancy per independent episode is not positive");
   if (input.oneCentStressExpectancyPerIndependentEpisodeUsd <= 0) reasons.push("does not survive a +1 cent adverse execution stress");
@@ -64,7 +65,6 @@ export function evaluateLivePilotGate(input: LivePilotGateInput): LivePilotGateR
   if (drawdownFraction > LIVE_PILOT_MAX_DRAWDOWN_FRACTION) reasons.push(`max drawdown (${(drawdownFraction * 100).toFixed(1)}% of capital deployed) exceeds the ${(LIVE_PILOT_MAX_DRAWDOWN_FRACTION * 100).toFixed(0)}% acceptable threshold`);
   if (input.matchRateAtDeclaredTier < LIVE_PILOT_MIN_MATCH_RATE) reasons.push(`match rate at the declared strategy tier (${(input.matchRateAtDeclaredTier * 100).toFixed(1)}%) is below the ${(LIVE_PILOT_MIN_MATCH_RATE * 100).toFixed(0)}% liquidity-sufficiency threshold`);
   if (!input.integrityAuditPassed) reasons.push("integrity audit is not currently clean");
-  if (input.epochContaminationDetected) reasons.push("epoch version/config contamination detected");
   if (input.unresolvedMatchingIssues) reasons.push("unresolved venue-matching issues remain outstanding");
   if (!input.operationalHealthAcceptable) reasons.push("operational health is not currently acceptable");
   if (input.bootstrapProbabilityPositive < LIVE_PILOT_CONFIDENCE_THRESHOLD) {

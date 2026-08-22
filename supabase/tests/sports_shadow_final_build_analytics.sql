@@ -163,7 +163,7 @@ BEGIN
   VALUES (v_signal_a, v_match_id, 'PMUS', 0, v_cal_start, v_cal_start, v_cal_start, 0.03)
   RETURNING id INTO v_obs_early;
   INSERT INTO public.sports_quote_observations (signal_id, match_id, venue, requested_delay_ms, source_timestamp, fire_at, observed_at, spread)
-  VALUES (v_signal_a, v_match_id, 'PMUS', 300000, v_cal_start, v_cal_start, v_cal_start, 0.05)
+  VALUES (v_signal_a, v_match_id, 'PMUS', 60000, v_cal_start, v_cal_start, v_cal_start, 0.05)
   RETURNING id INTO v_obs_late;
 
   -- Earlier routing_timestamp, contracts = 7 -- this is the one that must win.
