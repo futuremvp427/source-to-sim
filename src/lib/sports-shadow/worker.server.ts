@@ -337,17 +337,20 @@ export type SportsShadowWorkerDeps = {
    * Overridable so worker.server.test.ts's existing 76 tests never touch real Supabase.
    */
   onCycleComplete: (summary: SportsShadowCycleSummary) => Promise<void>;
-  /**
-   * Soak-incident fix: bounded, cached venue-capability refresh (see
-   * capability.server.ts's own doc comment -- the probes previously had NO call site, so
-   * the durable capability table stayed permanently empty). Runs independently of the
-   * source lease and of whether any signal exists yet; never throws.
-   */
-  refreshVenueCapability: (now: number) => Promise<unknown>;
 };
 
 async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promise<void> {
   try {
+    // Soak-incident fix: bounded, cached venue-capability refresh. The probes previously
+    // had NO call site anywhere, so the durable capability table stayed permanently empty
+    // (see capability.server.ts). Runs here -- outside the source lease and independent of
+    // whether any signal exists yet -- inside this already-best-effort hook.
+    try {
+      const { refreshVenueCapabilityIfStale } = await import("./capability.server");
+      await refreshVenueCapabilityIfStale(Date.now());
+    } catch {
+      // Per-venue failures are already swallowed internally; this guards the import itself.
+    }
     const { cycleSummaryToTelemetryEvents, recordTelemetry } = await import("./telemetry.server");
     await recordTelemetry(cycleSummaryToTelemetryEvents(summary));
     const { evaluateAlertConditions, raiseAlert, resolveAlert } = await import("./alerts.server");
@@ -410,10 +413,6 @@ const defaultDeps: SportsShadowWorkerDeps = {
   ensureCurrentEpoch,
   now: () => Date.now(),
   onCycleComplete: defaultOnCycleComplete,
-  refreshVenueCapability: async (now: number) => {
-    const { refreshVenueCapabilityIfStale } = await import("./capability.server");
-    return refreshVenueCapabilityIfStale(now);
-  },
 };
 
 /* ------------------------------------------------------------------ */
@@ -912,15 +911,6 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
     epochId = epoch.id;
   } catch (err) {
     errors.push(`ensureCurrentEpoch failed: ${err instanceof Error ? err.message : "unknown error"}`);
-  }
-
-  // Soak-incident fix: bounded, cached capability refresh -- runs before either lane and
-  // outside the source lease, so an empty/stale capability table is repaired even while
-  // source ingestion is still catching up. Best-effort by contract (never throws).
-  try {
-    await d.refreshVenueCapability(d.now());
-  } catch (err) {
-    errors.push(`venue capability refresh failed: ${err instanceof Error ? err.message : "unknown error"}`);
   }
 
   // LANE A: observation, highest priority, always attempted first. Task 12H/P1-N: both
