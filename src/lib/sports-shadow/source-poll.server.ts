@@ -217,7 +217,15 @@ async function pacedFetchTradesPage(
     const url = buildTradesUrl(PAGE_SIZE, offset, wallet);
     const response = await deps.fetchImpl(url, { headers: { Accept: "application/json" }, signal: controller.signal });
     if (response.status === 429) {
-      await deps.recordHostRateLimit(DATA_API_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
+      // Task 13I / P1-T (Codex re-review): see pmus.server.ts's pacedGetJson for the full
+      // rationale -- recordHostRateLimit is a NEW post-fetch operation with its own
+      // up-to-5s bound; skip it once the deadline is already gone rather than silently
+      // stacking it on top of the already-accepted fetch overrun. `deadlineAtMs` defaults
+      // to Number.POSITIVE_INFINITY here, so this is always true for callers with no
+      // deadline at all -- exact prior behavior preserved.
+      if (now() < deadlineAtMs) {
+        await deps.recordHostRateLimit(DATA_API_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
+      }
       throw new Error(`${DATA_API_HOST} rate limited (429) on /trades offset=${offset}`);
     }
     if (!response.ok) {

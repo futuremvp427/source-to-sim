@@ -93,7 +93,13 @@ async function pacedGetJson<T>(path: string, deps: KalshiNetworkDeps, deadlineAt
       signal: controller.signal,
     });
     if (response.status === 429) {
-      await deps.recordHostRateLimit(KALSHI_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
+      // Task 13I / P1-T (Codex re-review): see pmus.server.ts's identical pacedGetJson
+      // for the full rationale -- recordHostRateLimit is a NEW post-fetch operation with
+      // its own up-to-5s bound; skip it once the deadline is already gone rather than
+      // silently stacking it on top of the already-accepted fetch overrun.
+      if (deadlineAtMs === undefined || deps.now() < deadlineAtMs) {
+        await deps.recordHostRateLimit(KALSHI_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
+      }
       throw new Error(`${KALSHI_HOST} rate limited (429) on ${path}`);
     }
     if (!response.ok) {

@@ -320,6 +320,29 @@ describe("fetchKalshiBook", () => {
     expect(recordHostRateLimit).toHaveBeenCalled();
   });
 
+  it("Codex re-review: a 429 whose cooldown recording would start AFTER the caller's deadline skips recordHostRateLimit entirely, but still captures the genuine 429 failure (never silently dropped)", async () => {
+    let now = 1_700_000_000_000;
+    const deadlineAtMs = now + 100;
+    const recordHostRateLimit = vi.fn(async () => {});
+    const fetchImpl = vi.fn(async () => {
+      now += 200; // the already-in-flight fetch itself is what crosses the deadline
+      return new Response("{}", { status: 429, headers: { "retry-after": "30" } });
+    });
+    const snap = await fetchKalshiBook("t", okDeps({ fetchImpl, recordHostRateLimit, now: () => now }), deadlineAtMs);
+    expect(snap.staleReason).toMatch(/429/);
+    expect(recordHostRateLimit).not.toHaveBeenCalled();
+  });
+
+  it("a 429 that returns comfortably within the caller's deadline still records the cooldown normally -- bounded recording is preserved when time remains", async () => {
+    let now = 1_700_000_000_000;
+    const deadlineAtMs = now + 100_000;
+    const recordHostRateLimit = vi.fn(async () => {});
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 429, headers: { "retry-after": "30" } }));
+    const snap = await fetchKalshiBook("t", okDeps({ fetchImpl, recordHostRateLimit, now: () => now }), deadlineAtMs);
+    expect(snap.staleReason).toMatch(/429/);
+    expect(recordHostRateLimit).toHaveBeenCalledWith(KALSHI_HOST, 30_000);
+  });
+
   it("a 5xx returns an explicit failure snapshot", async () => {
     const fetchImpl = vi.fn(async () => new Response("{}", { status: 500 }));
     const snap = await fetchKalshiBook("t", okDeps({ fetchImpl }));

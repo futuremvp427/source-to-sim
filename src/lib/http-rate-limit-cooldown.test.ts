@@ -923,9 +923,14 @@ describe("Task 13I / P1-S, P1-T: reserveRequestSlot's optional caller deadline",
     expect(rejected).not.toBeInstanceOf(DeadlineExceededError);
   });
 
-  it("a reservation exceeding MAX_RESERVATION_LOOKAHEAD_MS remains ReservationUnavailableError even when a caller deadline is also supplied and would independently reject it -- the queue-full reason is reported, since it is checked first", async () => {
+  it("Codex re-review: a reservation exceeding MAX_RESERVATION_LOOKAHEAD_MS that would ALSO reject on the caller's deadline is reported as DeadlineExceededError -- the caller-deadline classification is checked BEFORE the lookahead-exceeded classification, since callers must never treat their own scheduler budget as a genuine venue/queue failure", async () => {
     currentFake = makeFakeSupabase({ cooldownRow: null, reservationGrantedInMs: MAX_RESERVATION_LOOKAHEAD_MS_FOR_TEST + 1_000 }).supabaseAdmin;
-    const deadline = Date.now() + 500; // would also reject the wait, but the lookahead check runs first
-    await expect(reserveRequestSlot(DATA_API_HOST, deadline)).rejects.toBeInstanceOf(ReservationUnavailableError);
+    const deadline = Date.now() + 500; // would independently reject on lookahead too, but the deadline check now runs first
+    await expect(reserveRequestSlot(DATA_API_HOST, deadline)).rejects.toBeInstanceOf(DeadlineExceededError);
+  });
+
+  it("a reservation exceeding MAX_RESERVATION_LOOKAHEAD_MS with NO caller deadline supplied at all remains ReservationUnavailableError -- exact prior behavior preserved when the deadline argument is omitted", async () => {
+    currentFake = makeFakeSupabase({ cooldownRow: null, reservationGrantedInMs: MAX_RESERVATION_LOOKAHEAD_MS_FOR_TEST + 1_000 }).supabaseAdmin;
+    await expect(reserveRequestSlot(DATA_API_HOST)).rejects.toBeInstanceOf(ReservationUnavailableError);
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { DeadlineExceededError } from "../http-rate-limit.server";
+import { DATA_API_HOST, DeadlineExceededError } from "../http-rate-limit.server";
 import type { UnverifiedReasonCode } from "./eligibility";
 import type { OpenEpisodeState } from "./episode";
 import {
@@ -1524,6 +1524,42 @@ describe("Task 13I / P1-T: pacedFetchTradesPage threads the caller's deadline in
     // own backward-compatibility contract (T6) is keyed on an OMITTED argument, not a
     // finite-but-huge one.
     expect(capturedDeadline).toBeUndefined();
+  });
+
+  it("Codex re-review: a 429 whose cooldown recording would start AFTER the caller's deadline skips recordHostRateLimit entirely, but still surfaces the genuine 429 failure as result.error", async () => {
+    const repo = new FakeRepo();
+    const base = 1_700_000_500_000;
+    let now = base;
+    const deadlineAtMs = base + 100;
+    const recordHostRateLimit = vi.fn(async () => {});
+    const network: SourcePollNetworkDeps = {
+      fetchImpl: (async () => {
+        now += 200; // the already-in-flight fetch itself is what crosses the deadline
+        return new Response("{}", { status: 429, headers: { "retry-after": "30" } });
+      }) as unknown as typeof fetch,
+      reserveRequestSlot: async () => 0,
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      recordHostRateLimit,
+    };
+    const result = await pollSportsShadowWallet(WALLET, 0, { repo, now: () => now, network }, deadlineAtMs);
+    expect(result.error).toMatch(/429/);
+    expect(recordHostRateLimit).not.toHaveBeenCalled();
+  });
+
+  it("a 429 that returns comfortably within the caller's deadline still records the cooldown normally -- bounded recording is preserved when time remains", async () => {
+    const repo = new FakeRepo();
+    const base = 1_700_000_500_000;
+    const deadlineAtMs = base + 100_000;
+    const recordHostRateLimit = vi.fn(async () => {});
+    const network: SourcePollNetworkDeps = {
+      fetchImpl: (async () => new Response("{}", { status: 429, headers: { "retry-after": "30" } })) as unknown as typeof fetch,
+      reserveRequestSlot: async () => 0,
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      recordHostRateLimit,
+    };
+    const result = await pollSportsShadowWallet(WALLET, 0, { repo, now: () => base, network }, deadlineAtMs);
+    expect(result.error).toMatch(/429/);
+    expect(recordHostRateLimit).toHaveBeenCalledWith(DATA_API_HOST, 30_000);
   });
 });
 

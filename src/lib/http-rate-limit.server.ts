@@ -327,17 +327,27 @@ export async function reserveRequestSlot(host: string, callerDeadlineAtMs?: numb
       throw new ReservationUnavailableError(`${host} reservation RPC returned an invalid timestamp`);
     }
     const waitMs = Math.max(0, reservedAtMs - Date.now());
-    if (waitMs > MAX_RESERVATION_LOOKAHEAD_MS) {
-      throw new ReservationUnavailableError(
-        `${host} reservation queue exceeds max lookahead (${waitMs}ms > ${MAX_RESERVATION_LOOKAHEAD_MS}ms)`,
-      );
-    }
-    // Task 13I / P1-T: a genuinely granted, in-budget-per-MAX_RESERVATION_LOOKAHEAD_MS
-    // reservation can STILL land at or after the caller's OWN deadline -- reject it rather
-    // than returning a wait the caller would sleep through and blow its own budget on.
+    // Task 13I / P1-T (Codex re-review): the caller-deadline check MUST be classified
+    // BEFORE the lookahead-exceeded check, not after. If BOTH conditions are true at
+    // once (the shared queue is genuinely backed up past MAX_RESERVATION_LOOKAHEAD_MS,
+    // AND that same wait would also land at/after this caller's own deadline), checking
+    // lookahead first would report ReservationUnavailableError -- which every downstream
+    // caller (pmus.server.ts/kalshi.server.ts's pacedGetJson, source-poll.server.ts's
+    // pacedFetchTradesPage) treats as a GENUINE venue/system failure (discoveryFailed=true
+    // in resolveVenuePending, a real wallet-poll error), never as "our own scheduler
+    // budget was the reason." A slot unusable because of the CALLER's deadline must always
+    // surface as DeadlineExceededError/retryable, regardless of whether the shared queue
+    // also happens to be overloaded at the same moment -- Section 3's rule that a
+    // scheduler deadline must never be persisted as a venue failure applies even when a
+    // second, independent condition would ALSO have failed the call.
     if (callerDeadlineAtMs !== undefined && Date.now() + waitMs >= callerDeadlineAtMs) {
       throw new DeadlineExceededError(
         `${host} reservation granted (wait ${waitMs}ms) but would land at/after the caller's own deadline`,
+      );
+    }
+    if (waitMs > MAX_RESERVATION_LOOKAHEAD_MS) {
+      throw new ReservationUnavailableError(
+        `${host} reservation queue exceeds max lookahead (${waitMs}ms > ${MAX_RESERVATION_LOOKAHEAD_MS}ms)`,
       );
     }
     return waitMs;

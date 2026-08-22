@@ -100,7 +100,17 @@ async function pacedGetJson<T>(path: string, deps: PmusNetworkDeps, deadlineAtMs
       signal: controller.signal,
     });
     if (response.status === 429) {
-      await deps.recordHostRateLimit(PMUS_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
+      // Task 13I / P1-T (Codex re-review): the fetch that just returned 429 was already
+      // in flight (an accepted overrun -- see this module's own worst-case contract), but
+      // recordHostRateLimit is a NEW operation starting AFTER it, with its own up-to-5s
+      // internal bound. Starting it unconditionally could silently add a second
+      // uncapped-by-deadline stage on top of the already-accepted fetch overrun. Skipped
+      // entirely once the deadline is already gone -- this is best-effort cooldown
+      // bookkeeping, not evidence about the market, so losing it costs nothing beyond a
+      // missed cooldown write; the genuine 429 fact below is still always thrown either way.
+      if (deadlineAtMs === undefined || deps.now() < deadlineAtMs) {
+        await deps.recordHostRateLimit(PMUS_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
+      }
       throw new Error(`${PMUS_HOST} rate limited (429) on ${path}`);
     }
     if (!response.ok) {
