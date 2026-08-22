@@ -300,7 +300,43 @@ export type SportsShadowWorkerDeps = {
   takeDueSportsShadowObservations: typeof takeDueSportsShadowObservations;
   pollSportsShadowWallet: typeof pollSportsShadowWallet;
   now: () => number;
+  /**
+   * FINAL BUILD Parts 25/27: fired once at the end of every cycle (enabled or not) with
+   * the completed summary -- best-effort by design (see the default implementation's
+   * own try/catch): a telemetry/alerting failure must never surface as a cycle error.
+   * Overridable so worker.server.test.ts's existing 76 tests never touch real Supabase.
+   */
+  onCycleComplete: (summary: SportsShadowCycleSummary) => Promise<void>;
 };
+
+async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promise<void> {
+  try {
+    const { cycleSummaryToTelemetryEvents, recordTelemetry } = await import("./telemetry.server");
+    await recordTelemetry(cycleSummaryToTelemetryEvents(summary));
+    const { evaluateAlertConditions, raiseAlert, resolveAlert } = await import("./alerts.server");
+    const alerts = evaluateAlertConditions({
+      pmusDiscoveryFailed: summary.sourceLane?.pmus.discoveryFailed ?? false,
+      kalshiDiscoveryFailed: summary.sourceLane?.kalshi.discoveryFailed ?? false,
+      pmusLeaseLost: summary.sourceLane?.pmus.leaseLost ?? false,
+      kalshiLeaseLost: summary.sourceLane?.kalshi.leaseLost ?? false,
+      observationBacklogCount: summary.observationLane.pmus.skipped + summary.observationLane.kalshi.skipped,
+      observationBacklogThreshold: 50,
+      integrityAuditPassed: null, // integrity.server.ts runs on its own (daily) cadence, not every cycle
+      schedulerLastRunAgeMs: null, // this IS the scheduler's own current run -- nothing to measure staleness against here
+      schedulerStalledThresholdMs: 300_000,
+    });
+    const activeKeys = new Set(alerts.map((a) => a.alertKey));
+    for (const a of alerts) await raiseAlert(a.alertKey, a.severity, a.message);
+    // Resolve any of THIS cycle's monitored conditions that are no longer active --
+    // keeps the dashboard's "currently unresolved" view accurate without a separate
+    // sweep job.
+    for (const key of ["venue_discovery_failed:PMUS", "venue_discovery_failed:KALSHI", "lease_lost:PMUS", "lease_lost:KALSHI", "observation_backlog"]) {
+      if (!activeKeys.has(key)) await resolveAlert(key);
+    }
+  } catch {
+    // Best-effort by design -- see this field's own doc comment.
+  }
+}
 
 const defaultDeps: SportsShadowWorkerDeps = {
   leaseRepo: supabaseSportsLeaseRepository,
@@ -313,6 +349,7 @@ const defaultDeps: SportsShadowWorkerDeps = {
   takeDueSportsShadowObservations,
   pollSportsShadowWallet,
   now: () => Date.now(),
+  onCycleComplete: defaultOnCycleComplete,
 };
 
 /* ------------------------------------------------------------------ */
@@ -816,7 +853,7 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
   const finalObservationPass = await runObservationLanesForBothVenues(d, FINAL_OBSERVATION_STAGE_MAX_ROWS, FINAL_OBSERVATION_STAGE_DEADLINE_MS, errors);
 
   const completedAtMs = d.now();
-  return {
+  const summary: SportsShadowCycleSummary = {
     startedAt: new Date(startedAtMs).toISOString(),
     completedAt: new Date(completedAtMs).toISOString(),
     durationMs: completedAtMs - startedAtMs,
@@ -827,4 +864,10 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
     finalObservationPass,
     errors,
   };
+  try {
+    await d.onCycleComplete(summary);
+  } catch {
+    // Best-effort -- see SportsShadowWorkerDeps.onCycleComplete's own doc comment.
+  }
+  return summary;
 }

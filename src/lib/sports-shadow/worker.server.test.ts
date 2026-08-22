@@ -1363,3 +1363,27 @@ describe("Task 13I / Section 4: PM-US/Kalshi venue independence under exactly-tw
     expect(maxConcurrent).toBe(2); // both were genuinely in flight at the same time -- true concurrency, not sequential
   });
 });
+
+describe("FINAL BUILD Parts 25/27: onCycleComplete telemetry/alert hook", () => {
+  it("is called exactly once per ENABLED cycle with the completed summary", async () => {
+    const onCycleComplete = vi.fn(async () => {});
+    const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ onCycleComplete }));
+    expect(onCycleComplete).toHaveBeenCalledTimes(1);
+    expect(onCycleComplete).toHaveBeenCalledWith(summary);
+  });
+
+  it("is NEVER called when the config is disabled -- no telemetry/alert side effects from a disabled cycle", async () => {
+    const onCycleComplete = vi.fn(async () => {});
+    await runSportsShadowCycle({ enabled: false, wallets: [], goLiveAtMs: null }, baseDeps({ onCycleComplete }));
+    expect(onCycleComplete).not.toHaveBeenCalled();
+  });
+
+  it("a throwing onCycleComplete never propagates -- the cycle's own summary is still returned normally", async () => {
+    const onCycleComplete = vi.fn(async () => {
+      throw new Error("telemetry backend down");
+    });
+    const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ onCycleComplete }));
+    expect(summary.configEnabled).toBe(true);
+    expect(summary.errors).toEqual([]); // the hook's own failure never leaks into the cycle's reported errors
+  });
+});
