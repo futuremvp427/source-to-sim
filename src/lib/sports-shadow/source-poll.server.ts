@@ -156,9 +156,28 @@ export const MAX_PENDING_FILLS_PER_POLL = 500;
  */
 export const PHASE2_DOWNSTREAM_RESERVE_MS = 8_000;
 
-/** Absolute cutoff after which Phase 1 ingestion stops starting new work so Phase 2 always gets real time. Infinite (no deadline) callers are unaffected. */
-export function phase1IngestDeadline(deadlineAtMs: number): number {
-  return Number.isFinite(deadlineAtMs) ? deadlineAtMs - PHASE2_DOWNSTREAM_RESERVE_MS : deadlineAtMs;
+/**
+ * RECONCILIATION FIX (2026-08-22): the original version of this function subtracted
+ * PHASE2_DOWNSTREAM_RESERVE_MS from `deadlineAtMs` UNCONDITIONALLY, with no floor. When a
+ * caller's remaining window (`deadlineAtMs - nowMs`) is already smaller than the reserve
+ * itself -- a real case, not just a test artifact: a LATER wallet in runSourceLane's
+ * rotation can reach `pollSportsShadowWallet` with only a few seconds left before the
+ * shared worker-level ingest deadline -- the unconditional subtraction pushed the ingest
+ * cutoff BEFORE `nowMs`, giving Phase 1 zero opportunity even though real time remained.
+ * Confirmed via 5 failing tests in this file that all passed a short (~500ms) deadline
+ * window and got `pagesFetched: 0` / episode-mutation timing changes they did not expect.
+ *
+ * FIX: only reserve the fixed floor when the window is large enough to have that much
+ * slack to spare. When the window is already at or below the reserve, ingestion gets the
+ * WHOLE remaining window (identical to this file's pre-reserve behavior) rather than a
+ * negative one -- Phase 2 then gets whatever (possibly zero) time is left after Phase 1's
+ * natural stop, exactly like every deadline-exhaustion case already handled elsewhere in
+ * this file (left PENDING, safely retryable, never fabricated).
+ */
+export function phase1IngestDeadline(deadlineAtMs: number, nowMs: number): number {
+  if (!Number.isFinite(deadlineAtMs)) return deadlineAtMs;
+  if (deadlineAtMs - nowMs <= PHASE2_DOWNSTREAM_RESERVE_MS) return deadlineAtMs;
+  return deadlineAtMs - PHASE2_DOWNSTREAM_RESERVE_MS;
 }
 
 /**
@@ -339,6 +358,47 @@ export type PendingDownstreamFillRow = {
   price: number;
   sourceTs: number;
 };
+
+/**
+ * ============ RECONCILIATION FIX (2026-08-22): PENDING-FILL HEAD-OF-LINE BLOCKING ============
+ * findPendingDownstreamFills was a strict `ORDER BY source_ts ASC LIMIT
+ * MAX_PENDING_FILLS_PER_POLL` query. Production accumulated 31,000+ historical PENDING
+ * rows well before go-live; a large old backlog dominated by non-MLB/unverified rows can
+ * occupy every one of the bounded batch's 500 slots on every single poll, indefinitely
+ * hiding freshly-arrived, genuinely eligible (e.g. MLB) fills that happened to be
+ * inserted AFTER that backlog -- oldest-first fairness for the historical backlog, but
+ * zero forward liveness for new work, forever, as long as the backlog stays large.
+ *
+ * FIX: split the bounded batch into two independently-queried, deterministic slices --
+ * PENDING_FILLS_OLDEST_SHARE rows oldest-first (preserves forward progress on the
+ * historical backlog, unchanged from before) and the remainder newest-first (guarantees
+ * freshly-arrived work is ALWAYS represented in the batch regardless of backlog size) --
+ * then merge them back into a single oldest-to-newest, de-duplicated list. This is a
+ * pure, deterministic function of the two already-bounded query results: no in-memory
+ * toggle/alternation state (which would reset on restart and be unfair across
+ * concurrent/restarted workers), no profitability- or sport-based prioritization, and no
+ * change to HOW any individual fill is classified -- only WHICH rows this poll's Phase 2
+ * looks at. A duplicate wallet cursor scenario simply means the merge's own dedupe (by
+ * `id`) drops the repeat; a small total backlog (smaller than the combined slice size)
+ * degenerates to plain oldest-first behavior, unchanged from before this fix.
+ * ================================================================================
+ */
+export const PENDING_FILLS_OLDEST_SHARE = 350;
+export const PENDING_FILLS_NEWEST_SHARE = MAX_PENDING_FILLS_PER_POLL - PENDING_FILLS_OLDEST_SHARE;
+
+/**
+ * Pure merge so the fairness property is directly unit-testable without a real Supabase
+ * round trip. `oldestRows` must already be oldest-first; `newestRows` must already be
+ * newest-first (i.e. exactly the shape each of the two underlying queries returns) --
+ * reversed back to chronological order here, with any row already present in
+ * `oldestRows` dropped so a small total backlog (full overlap between the two slices)
+ * never processes the same fill twice in one poll.
+ */
+export function mergePendingFillSlices<T extends { id: string }>(oldestRows: readonly T[], newestRows: readonly T[]): T[] {
+  const seen = new Set(oldestRows.map((r) => r.id));
+  const dedupedNewest = [...newestRows].reverse().filter((r) => !seen.has(r.id));
+  return [...oldestRows, ...dedupedNewest];
+}
 
 export type PollRepository = {
   hasAnyFillsForWallet(wallet: string): Promise<boolean>;
@@ -615,15 +675,23 @@ export const supabasePollRepository: PollRepository = {
   },
 
   async findPendingDownstreamFills(wallet, limit) {
-    const { data, error } = await supabaseAdmin
-      .from("sports_shadow_source_fills" as never)
-      .select("id, event_key, wallet_handle, condition_id, asset, outcome, event_slug, market_slug, side, shares, price, source_ts")
-      .eq("wallet", wallet)
-      .eq("downstream_status", "PENDING")
-      .order("source_ts", { ascending: true })
-      .limit(limit);
-    if (error) throw new Error(error.message);
-    return ((data ?? []) as unknown as RawPendingFillRow[]).map((r) => ({
+    const oldestShare = Math.min(PENDING_FILLS_OLDEST_SHARE, limit);
+    const newestShare = Math.max(0, limit - oldestShare);
+    const baseQuery = () =>
+      supabaseAdmin
+        .from("sports_shadow_source_fills" as never)
+        .select("id, event_key, wallet_handle, condition_id, asset, outcome, event_slug, market_slug, side, shares, price, source_ts")
+        .eq("wallet", wallet)
+        .eq("downstream_status", "PENDING");
+
+    const [oldest, newest] = await Promise.all([
+      baseQuery().order("source_ts", { ascending: true }).limit(oldestShare),
+      newestShare > 0 ? baseQuery().order("source_ts", { ascending: false }).limit(newestShare) : Promise.resolve({ data: [] as unknown[], error: null }),
+    ]);
+    if (oldest.error) throw new Error(oldest.error.message);
+    if (newest.error) throw new Error(newest.error.message);
+
+    const toRow = (r: RawPendingFillRow): PendingDownstreamFillRow => ({
       id: r.id,
       eventKey: r.event_key,
       walletHandle: r.wallet_handle,
@@ -636,7 +704,10 @@ export const supabasePollRepository: PollRepository = {
       shares: r.shares,
       price: r.price,
       sourceTs: r.source_ts,
-    }));
+    });
+    const oldestRows = ((oldest.data ?? []) as unknown as RawPendingFillRow[]).map(toRow);
+    const newestRows = ((newest.data ?? []) as unknown as RawPendingFillRow[]).map(toRow);
+    return mergePendingFillSlices(oldestRows, newestRows);
   },
 
   async insertEpisodeAtomic(fillId, row) {
@@ -1116,7 +1187,7 @@ export async function pollSportsShadowWallet(
   const detectedAtMs = d.now();
   const result = emptyResult(normalizedWallet);
   // Soak-incident fix: Phase 1 stops early so Phase 2 (durable pending-fill drain) is never starved.
-  const ingestDeadlineAtMs = phase1IngestDeadline(deadlineAtMs);
+  const ingestDeadlineAtMs = phase1IngestDeadline(deadlineAtMs, detectedAtMs);
 
   let hasHistory: boolean;
   try {

@@ -36,13 +36,15 @@ describe("source ingestion can no longer consume the whole lane budget", () => {
 describe("phase 2 downstream drain can no longer be starved by phase 1 ingestion", () => {
   it("phase 1 stops before the poll deadline, leaving the reserve for pending-fill processing", () => {
     const pollDeadline = 500_000;
-    expect(phase1IngestDeadline(pollDeadline)).toBe(pollDeadline - PHASE2_DOWNSTREAM_RESERVE_MS);
+    // now=0: a comfortably large remaining window, so the fixed reserve applies normally
+    // (see phase1IngestDeadline's own doc comment for the small-window clamp case).
+    expect(phase1IngestDeadline(pollDeadline, 0)).toBe(pollDeadline - PHASE2_DOWNSTREAM_RESERVE_MS);
     expect(PHASE2_DOWNSTREAM_RESERVE_MS).toBeGreaterThan(0);
   });
 
   it("an old durable pending fill still has budget after heavy ingestion consumed phase 1's entire sub-budget", () => {
     const pollDeadline = 18_000;
-    const phase1Cutoff = phase1IngestDeadline(pollDeadline);
+    const phase1Cutoff = phase1IngestDeadline(pollDeadline, 0);
     // Heavy backlog: ingestion runs until its cutoff, then overruns by one in-flight page.
     const nowAfterPhase1 = phase1Cutoff + 300;
     expect(nowAfterPhase1).toBeLessThan(pollDeadline); // phase 2 entry guard does NOT trip
@@ -50,6 +52,12 @@ describe("phase 2 downstream drain can no longer be starved by phase 1 ingestion
   });
 
   it("callers with no deadline are unaffected", () => {
-    expect(phase1IngestDeadline(Number.POSITIVE_INFINITY)).toBe(Number.POSITIVE_INFINITY);
+    expect(phase1IngestDeadline(Number.POSITIVE_INFINITY, 0)).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("RECONCILIATION FIX (2026-08-22): a caller whose remaining window is already <= the reserve gets the WHOLE window, not a negative one -- the confirmed defect in the original single-argument version of this function", () => {
+    const nowMs = 1_700_000_000_000;
+    const pollDeadline = nowMs + 500; // remaining window (500ms) is far smaller than PHASE2_DOWNSTREAM_RESERVE_MS
+    expect(phase1IngestDeadline(pollDeadline, nowMs)).toBe(pollDeadline);
   });
 });

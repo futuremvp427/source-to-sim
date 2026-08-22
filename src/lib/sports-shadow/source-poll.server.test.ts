@@ -6,6 +6,8 @@ import type { OpenEpisodeState } from "./episode";
 import {
   MAX_PAGES_PER_WALLET,
   MAX_PENDING_FILLS_PER_POLL,
+  PENDING_FILLS_OLDEST_SHARE,
+  mergePendingFillSlices,
   pollSportsShadowWallet,
   type EpisodeCacheEntry,
   type NewSignalRow,
@@ -2350,5 +2352,117 @@ describe("Task 13G, Section 8: bootstrap performance under realistic wallet prof
     // next poll is fully safe and idempotent.
     expect(result.newRows).toBe(0);
     expect(repo.fillsByEventKey.size).toBe(0);
+  });
+});
+
+describe("RECONCILIATION FIX (2026-08-22): mergePendingFillSlices -- pending-fill head-of-line-blocking fairness", () => {
+  function row(id: string): { id: string } {
+    return { id };
+  }
+
+  it("concatenates the oldest slice (as-is) with the newest slice reversed back to chronological order", () => {
+    const oldest = [row("old-1"), row("old-2")]; // already oldest-first
+    const newest = [row("new-3"), row("new-2")]; // newest-first (source_ts DESC) -- new-2 is chronologically before new-3
+    const merged = mergePendingFillSlices(oldest, newest);
+    expect(merged.map((r) => r.id)).toEqual(["old-1", "old-2", "new-2", "new-3"]);
+  });
+
+  it("never processes the same fill twice when the two slices fully overlap (small total backlog)", () => {
+    const oldest = [row("a"), row("b"), row("c")];
+    const newest = [row("c"), row("b"), row("a")]; // total pending < combined slice size -- full overlap
+    const merged = mergePendingFillSlices(oldest, newest);
+    expect(merged.map((r) => r.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("guarantees at least the newest slice is present even when the oldest slice alone fills the entire batch -- the actual head-of-line-blocking fix: a fresh eligible MLB fill is never hidden behind a 350+ row old backlog", () => {
+    const oldest = Array.from({ length: PENDING_FILLS_OLDEST_SHARE }, (_, i) => row(`old-${i}`));
+    const newest = [row("fresh-mlb-1"), row("fresh-mlb-2")];
+    const merged = mergePendingFillSlices(oldest, newest);
+    expect(merged).toHaveLength(PENDING_FILLS_OLDEST_SHARE + 2);
+    expect(merged.map((r) => r.id)).toContain("fresh-mlb-1");
+    expect(merged.map((r) => r.id)).toContain("fresh-mlb-2");
+  });
+
+  it("historical backlog rows still make forward progress every poll -- fresh-work fairness does not starve the old queue", () => {
+    const oldest = Array.from({ length: PENDING_FILLS_OLDEST_SHARE }, (_, i) => row(`old-${i}`));
+    const newest = Array.from({ length: MAX_PENDING_FILLS_PER_POLL - PENDING_FILLS_OLDEST_SHARE }, (_, i) => row(`fresh-${i}`));
+    const merged = mergePendingFillSlices(oldest, newest);
+    expect(merged.filter((r) => r.id.startsWith("old-"))).toHaveLength(PENDING_FILLS_OLDEST_SHARE);
+  });
+
+  it("handles an empty newest slice (backlog smaller than the oldest share) without error -- normal oldest-first semantics remain sensible", () => {
+    const merged = mergePendingFillSlices([row("a")], []);
+    expect(merged.map((r) => r.id)).toEqual(["a"]);
+  });
+
+  it("is a pure function of its inputs -- deterministic across repeated/restarted calls with the same underlying rows, no in-memory toggle state", () => {
+    const oldest = [row("a"), row("b")];
+    const newest = [row("d"), row("c")];
+    const first = mergePendingFillSlices(oldest, newest);
+    const second = mergePendingFillSlices(oldest, newest); // simulates a process restart re-issuing the same two queries
+    expect(second).toEqual(first);
+  });
+});
+
+describe("RECONCILIATION FIX (2026-08-22): findPendingDownstreamFills issues two bounded, deterministic slices instead of one oldest-first query", () => {
+  it("queries both an oldest-first and a newest-first slice, each bounded, and merges them via mergePendingFillSlices", async () => {
+    const calls: { ascending: boolean; limit: number }[] = [];
+    let call = 0;
+    const supabaseAdminMock = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            eq: () => ({
+              order: (_col: string, opts: { ascending: boolean }) => ({
+                limit: (n: number) => {
+                  calls.push({ ascending: opts.ascending, limit: n });
+                  call += 1;
+                  // First call (oldest-first) returns a full oldest slice; second (newest-first) returns two fresh rows.
+                  if (call === 1) {
+                    return Promise.resolve({
+                      data: Array.from({ length: PENDING_FILLS_OLDEST_SHARE }, (_, i) => ({
+                        id: `old-${i}`,
+                        event_key: `k-old-${i}`,
+                        wallet_handle: null,
+                        condition_id: null,
+                        asset: "0xasset",
+                        outcome: null,
+                        event_slug: null,
+                        market_slug: null,
+                        side: "BUY",
+                        shares: 1,
+                        price: 0.5,
+                        source_ts: i,
+                      })),
+                      error: null,
+                    });
+                  }
+                  return Promise.resolve({
+                    data: [
+                      { id: "fresh-2", event_key: "k-fresh-2", wallet_handle: null, condition_id: null, asset: "0xasset", outcome: null, event_slug: null, market_slug: null, side: "BUY", shares: 1, price: 0.5, source_ts: 999999 },
+                      { id: "fresh-1", event_key: "k-fresh-1", wallet_handle: null, condition_id: null, asset: "0xasset", outcome: null, event_slug: null, market_slug: null, side: "BUY", shares: 1, price: 0.5, source_ts: 999998 },
+                    ],
+                    error: null,
+                  });
+                },
+              }),
+            }),
+          }),
+        }),
+      }),
+    };
+    vi.doMock("@/integrations/supabase/client.server", () => ({ supabaseAdmin: supabaseAdminMock }));
+    vi.resetModules();
+    const { supabasePollRepository } = await import("./source-poll.server");
+    const rows = await supabasePollRepository.findPendingDownstreamFills("0xwallet", MAX_PENDING_FILLS_PER_POLL);
+    expect(calls).toEqual([
+      { ascending: true, limit: PENDING_FILLS_OLDEST_SHARE },
+      { ascending: false, limit: MAX_PENDING_FILLS_PER_POLL - PENDING_FILLS_OLDEST_SHARE },
+    ]);
+    expect(rows.map((r) => r.id)).toContain("fresh-1");
+    expect(rows.map((r) => r.id)).toContain("fresh-2");
+    expect(rows).toHaveLength(PENDING_FILLS_OLDEST_SHARE + 2);
+    vi.doUnmock("@/integrations/supabase/client.server");
+    vi.resetModules();
   });
 });
