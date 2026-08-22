@@ -130,6 +130,25 @@ type CacheEntry = { value: PmusCandidate[]; expiresAt: number };
 let discoveryCache: CacheEntry | null = null;
 
 /**
+ * FINAL BUILD Part 7: the MLB-specific `GET /v2/leagues/mlb/events` endpoint (documented
+ * at docs.polymarket.us, e.g. `?limit=1000&active=true&closed=false`) was evaluated
+ * against a real live fixture (2026-08-22) as a candidate replacement for the generic
+ * `/v1/events?category=sports` discovery below. EVALUATED AND REJECTED, not left as
+ * research: the MLB-specific endpoint's events DO carry every event-level field this
+ * module needs (id, slug, teams, gameId, startTime), but each market's side/orientation
+ * data is exposed as `outcomes` -- confirmed live to be nothing more than a bare array of
+ * line strings, e.g. `["-2.50","+2.50"]` -- NOT the `marketSides` array of
+ * `{description, team, long, price}` objects the generic endpoint provides and this
+ * module's `eventToCandidates`/PM-US LONG/SHORT resolution (Task 12G) depends on. Adopting
+ * the MLB-specific endpoint would silently lose team/orientation data for every market,
+ * which this module refuses to trade for fewer requests (Part 7's own explicit rule).
+ * The decision IS the implementation: discovery continues against `/v1/events` below,
+ * documented here with the concrete evidence rather than left unresolved. Revisit only if
+ * PM-US's `/v2/leagues/mlb/events` response shape changes to include full marketSides-
+ * equivalent data.
+ */
+
+/**
  * Bounded, briefly-cached baseline discovery of currently-listed MLB sports markets.
  * Paginates GET /v1/events?...&category=sports (stopping at a short/empty page or
  * DISCOVERY_MAX_PAGES, whichever comes first), classifies every event's markets via the

@@ -79,7 +79,8 @@ export async function computeConfigHash(wallets: readonly string[], versions: Ex
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export type ExperimentStage = "SOAK" | "CALIBRATION" | "OOS" | "CLOSED";
+/** Part 18's persisted research state machine, plus terminal FAILED/PAUSED holds. Matches the CHECK constraint on sports_shadow_experiment_epochs.stage exactly. */
+export type ExperimentStage = "PRE_SOAK" | "OPERATIONAL_SOAK" | "CALIBRATION" | "OUT_OF_SAMPLE" | "LIVE_PILOT_REVIEW_READY" | "FAILED" | "PAUSED";
 
 export type ExperimentEpoch = {
   id: string;
@@ -100,7 +101,7 @@ export type ExperimentEpoch = {
  * anything (see epoch.server.ts for the durable write, not yet built).
  */
 export function canFreeze(epoch: Pick<ExperimentEpoch, "stage" | "frozenAtIso">): boolean {
-  return epoch.frozenAtIso === null && (epoch.stage === "SOAK" || epoch.stage === "CALIBRATION");
+  return epoch.frozenAtIso === null && (epoch.stage === "OPERATIONAL_SOAK" || epoch.stage === "CALIBRATION");
 }
 
 /** True when a completed venue-matching result (from resolver.ts) would require a NEW epoch under the CURRENT versions vs. the versions an existing epoch was built with -- lets a caller detect drift before silently mixing incompatible rows. */

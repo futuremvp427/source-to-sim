@@ -122,6 +122,8 @@ export const supabaseObservationRepository: ObservationRepository = {
           settlement_compatibility: row.settlementCompatibility,
           reason: row.reason,
           metadata: row.metadata,
+          rule_fingerprint: row.ruleFingerprint,
+          rule_fingerprint_version: row.ruleFingerprintVersion,
           first_match_status: row.firstMatchStatus,
           recheck_count: row.recheckCount,
           next_recheck_at: row.nextRecheckAt,
@@ -202,6 +204,18 @@ export type ObservationDeps = {
   fetchPmusBook: typeof fetchPmusBook;
   fetchKalshiBook: typeof fetchKalshiBook;
   now: () => number;
+  /**
+   * FINAL BUILD Part 9/10/12: fired once a due row's CAS claim WINS (this call
+   * durably owns the terminal write for that observation) -- regardless of whether the
+   * capture was a genuine success or a real failure, since computePaperFillsForObservation
+   * itself is what decides whether a stale/errored observation produces any paper fill
+   * (Section 13's stale-book gate lives there, not here). Never awaited by the CAS-loss
+   * `skipped` path -- only the worker that actually won the claim triggers downstream
+   * paper-execution work for it. Best-effort: a failure here must never turn an
+   * otherwise-successful book capture into a reported failure for THIS function's own
+   * captured/failed/skipped accounting.
+   */
+  onObservationClaimed: (observationId: string) => Promise<void>;
 };
 
 const defaultDeps: ObservationDeps = {
@@ -209,6 +223,10 @@ const defaultDeps: ObservationDeps = {
   fetchPmusBook,
   fetchKalshiBook,
   now: () => Date.now(),
+  onObservationClaimed: async (observationId) => {
+    const { computePaperFillsForObservation } = await import("./paper.server");
+    await computePaperFillsForObservation(observationId);
+  },
 };
 
 export type PersistMatchResult = { matchId: string; scheduled: number; downgradeSkipped: boolean };
@@ -384,6 +402,12 @@ export async function takeDueSportsShadowObservations(
       if (await d.repo.claimObservationTerminal(row.id, patch)) {
         if (patch.errorCode) failed += 1;
         else captured += 1;
+        try {
+          await d.onObservationClaimed(row.id);
+        } catch {
+          // Best-effort: a paper-execution trigger failure must never turn an
+          // otherwise-successful book capture into a reported failure here.
+        }
       } else {
         skipped += 1;
       }
@@ -416,6 +440,11 @@ export async function takeDueSportsShadowObservations(
     if (await d.repo.claimObservationTerminal(row.id, patch)) {
       if (patch.errorCode) failed += 1;
       else captured += 1;
+      try {
+        await d.onObservationClaimed(row.id);
+      } catch {
+        // Best-effort -- see the identical PM-US branch above for the full rationale.
+      }
     } else {
       skipped += 1;
     }

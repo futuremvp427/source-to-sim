@@ -706,3 +706,60 @@ export function resolveSportsMarket(
     kalshiResult: resolveKalshiMatch(source, kalshiCandidates),
   };
 }
+
+/**
+ * FINAL BUILD Part 6: structured, versioned rule-fingerprint evidence for a match
+ * result, persisted to sports_market_matches.rule_fingerprint so an EXACT match
+ * remains independently auditable later without re-deriving it from
+ * candidateCounts/evidence prose. Every dimension the mission's own Part 6 checklist
+ * names is represented explicitly (never merged into one boolean) so a later audit can
+ * see EXACTLY which dimension made a match NEAR/UNVERIFIED rather than EXACT.
+ *
+ * Deliberately built from the SAME VenueMatchResult fields resolvePmusMatch/
+ * resolveKalshiMatch already compute -- this is a presentation/persistence layer over
+ * existing evidence, not a new matching algorithm. If resolver.ts's matching logic
+ * changes materially, bump RULE_FINGERPRINT_VERSION in epoch.ts (RESOLVER_VERSION),
+ * not this function alone -- the fingerprint's SHAPE can change freely without forcing
+ * a new epoch as long as the underlying matching semantics did not change; a semantics
+ * change always forces one regardless of whether this function's output shape moved.
+ */
+/** Bump whenever buildRuleFingerprint's SHAPE changes in a way that would break a consumer parsing the persisted jsonb -- kept independent of epoch.ts's RESOLVER_VERSION (which tracks matching SEMANTICS, not this function's output shape) to avoid a resolver.ts <-> epoch.ts import cycle. */
+export const RESOLVER_RULE_FINGERPRINT_VERSION = "rule_fingerprint_v1";
+
+export type RuleFingerprint = {
+  teams: { away: string | null; home: string | null };
+  gameIdentity: { targetGameIdentifier: string | null; targetStartTime: string | null; sourceStartTime: string | null };
+  marketType: BetType | null;
+  line: { source: number | null; target: number | null };
+  selectedSide: TargetSide | null;
+  pmusOrientation: PmusOrientation | null;
+  fullGameScope: true; // Phase 1 is full-game-only by construction (eligibility.ts) -- always true, never a derivative/period market.
+  settlement: {
+    compatibility: SettlementCompatibility;
+    extraInnings: RuleDimensionStatus | null;
+    postponement: RuleDimensionStatus | null;
+    pushRisk: RuleDimensionStatus | null;
+  };
+};
+
+export function buildRuleFingerprint(result: VenueMatchResult): RuleFingerprint {
+  return {
+    teams: { away: result.targetAwayTeam, home: result.targetHomeTeam },
+    gameIdentity: {
+      targetGameIdentifier: result.targetGameIdentifier,
+      targetStartTime: result.targetStartTime,
+      sourceStartTime: result.sourceStartTime,
+    },
+    marketType: result.targetBetType,
+    line: { source: result.sourceLine, target: result.targetLine },
+    selectedSide: result.targetSide,
+    pmusOrientation: result.targetPmusOrientation,
+    fullGameScope: true,
+    settlement: {
+      compatibility: result.settlementCompatibility,
+      extraInnings: result.settlementProfile?.extraInnings ?? null,
+      postponement: result.settlementProfile?.postponement ?? null,
+      pushRisk: result.settlementProfile?.pushRisk ?? null,
+    },
+  };
+}

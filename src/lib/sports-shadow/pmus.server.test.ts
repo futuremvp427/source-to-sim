@@ -41,6 +41,23 @@ function eventFixture(id: string, marketSlug: string) {
   };
 }
 
+describe("FINAL BUILD Part 7: discovery deliberately targets /v1/events, never the MLB-specific /v2/leagues/mlb/events endpoint", () => {
+  it("discoverPmusMlbMarkets requests /v1/events -- switching to /v2/leagues/mlb/events without re-verifying its outcomes-vs-marketSides shape would silently lose team/orientation data", async () => {
+    clearPmusDiscoveryCache();
+    const requestedUrls: string[] = [];
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL) => {
+      requestedUrls.push(String(url));
+      return new Response(JSON.stringify({ events: [] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await discoverPmusMlbMarkets(okDeps({ fetchImpl }));
+    expect(requestedUrls.length).toBeGreaterThan(0);
+    for (const url of requestedUrls) {
+      expect(url).toContain("/v1/events");
+      expect(url).not.toContain("/v2/leagues/mlb/events");
+    }
+  });
+});
+
 describe("discoverPmusMlbMarkets", () => {
   it("17. bounded pagination stops at a short page", async () => {
     clearPmusDiscoveryCache();

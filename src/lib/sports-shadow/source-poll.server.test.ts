@@ -39,6 +39,7 @@ class FakeRepo implements PollRepository {
   nextId = 1;
   findLatestEpisodeCalls = 0;
   updateEpisodeAtomicCalls: Array<{ fillId: string; signalId: string; state: OpenEpisodeState }> = [];
+  sellEventsByFillId = new Map<string, { signalId: string | null; shares: number; price: number; notional: number; sourceTs: number }>();
   markFillCompleteCalls: string[] = [];
   markFillTerminalCalls: Array<{ fillId: string; status: string }> = [];
   markFillTerminalUnverifiedCalls: Array<{ fillId: string; reasonCode: string }> = [];
@@ -163,6 +164,8 @@ class FakeRepo implements PollRepository {
       firstSellAt: null,
       lastSellAt: null,
       sellCount: 0,
+      sellShares: 0,
+      sellNotional: 0,
       triggered: true,
       processedEventKeys: new Set([row.episodeKey]),
     };
@@ -172,11 +175,23 @@ class FakeRepo implements PollRepository {
   }
 
   /** Atomic: throws BEFORE any mutation, so a configured failure leaves BOTH the episode state AND the fill's downstream_status unchanged (still PENDING) -- see the Hard Design Gate tests below. */
-  async updateEpisodeAtomic(fillId: string, signalId: string, state: OpenEpisodeState): Promise<void> {
+  async updateEpisodeAtomic(
+    fillId: string,
+    signalId: string,
+    state: OpenEpisodeState,
+    sellEvent?: { shares: number; price: number; notional: number; sourceTs: number },
+  ): Promise<void> {
     if (this.throwOnUpdateEpisodeAtomic) throw this.throwOnUpdateEpisodeAtomic;
     this.updateEpisodeAtomicCalls.push({ fillId, signalId, state });
     const existing = this.episodesById.get(signalId);
     if (existing) existing.state = state;
+    const fill = this.fillsById.get(fillId);
+    if (fill) fill.downstreamStatus = "COMPLETE";
+    if (sellEvent) this.sellEventsByFillId.set(fillId, { signalId, ...sellEvent });
+  }
+
+  async recordPreEpochSell(fillId: string, shares: number, price: number, notional: number, sourceTs: number): Promise<void> {
+    this.sellEventsByFillId.set(fillId, { signalId: null, shares, price, notional, sourceTs });
     const fill = this.fillsById.get(fillId);
     if (fill) fill.downstreamStatus = "COMPLETE";
   }
@@ -717,16 +732,27 @@ describe("pollSportsShadowWallet — episode engine integration", () => {
     expect(episode.state.sellSeen).toBe(true);
     expect(repo.updateEpisodeAtomicCalls.some((c) => c.state.sellSeen)).toBe(true);
     expect([...repo.fillsByEventKey.values()].every((f) => f.downstreamStatus === "COMPLETE")).toBe(true);
+    // FINAL BUILD Part 5: the episode's cumulative sell aggregates AND the individual
+    // auditable sell-event row are both correctly populated for a matched position.
+    expect(episode.state.sellShares).toBe(5);
+    expect(episode.state.sellNotional).toBeCloseTo(5 * 0.55, 9);
+    expect(repo.sellEventsByFillId.size).toBe(1);
+    const [sellEvent] = [...repo.sellEventsByFillId.values()];
+    expect(sellEvent?.signalId).not.toBeNull();
+    expect(sellEvent?.shares).toBe(5);
   });
 
-  it("records SELL_RECORDED with no episode DB write when there is no matching open position, and marks the fill COMPLETE (nothing durable left to do)", async () => {
+  it("FINAL BUILD Part 5: records SELL_RECORDED with no matching open position as a pre-epoch sell event (signal_id null) rather than silently just marking the fill complete with no ledger evidence", async () => {
     const repo = new FakeRepo();
     const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ side: "SELL" })] }) });
     const result = await pollSportsShadowWallet(WALLET, 0, deps);
     expect(result.sellRecordedCount).toBe(1);
     expect(repo.updateEpisodeAtomicCalls).toHaveLength(0);
     expect(repo.episodesById.size).toBe(0);
-    expect(repo.markFillCompleteCalls).toHaveLength(1);
+    expect(repo.markFillCompleteCalls).toHaveLength(0); // recordPreEpochSell handles the fill's completion itself, not markFillComplete
+    expect(repo.sellEventsByFillId.size).toBe(1);
+    const [sellEvent] = [...repo.sellEventsByFillId.values()];
+    expect(sellEvent?.signalId).toBeNull(); // never fabricates a position/signal
     expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("COMPLETE");
   });
 

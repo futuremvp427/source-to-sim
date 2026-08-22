@@ -347,8 +347,17 @@ export type PollRepository = {
   findPendingDownstreamFills(wallet: string, limit: number): Promise<PendingDownstreamFillRow[]>;
   /** Atomically inserts the new episode row AND marks fillId's downstream_status COMPLETE in one transaction. */
   insertEpisodeAtomic(fillId: string, row: NewSignalRow): Promise<{ id: string }>;
-  /** Atomically updates the existing episode's aggregate fields AND marks fillId's downstream_status COMPLETE in one transaction. */
-  updateEpisodeAtomic(fillId: string, signalId: string, state: OpenEpisodeState): Promise<void>;
+  /**
+   * Atomically updates the existing episode's aggregate fields AND marks fillId's
+   * downstream_status COMPLETE in one transaction. `sellEvent`, when provided (a
+   * SELL_RECORDED update against a KNOWN open episode), ALSO atomically inserts the
+   * individual auditable sell-event row in the SAME transaction (FINAL BUILD Part 5/14)
+   * -- omitted entirely for a plain BUY aggregation update (AGGREGATED_BUY/
+   * LATE_RECONCILIATION), which never touches the sell ledger.
+   */
+  updateEpisodeAtomic(fillId: string, signalId: string, state: OpenEpisodeState, sellEvent?: { shares: number; price: number; notional: number; sourceTs: number }): Promise<void>;
+  /** FINAL BUILD Part 5: records a sell fill with NO known forward open position (pre-epoch/untracked -- Part 5's explicit case) and marks the fill COMPLETE, atomically. Never fabricates a signal_id. */
+  recordPreEpochSell(fillId: string, shares: number, price: number, notional: number, sourceTs: number): Promise<void>;
   /** Marks a fill COMPLETE with no paired episode mutation — safe as a lone single-table write (see this module's terminal-classification doc comment). */
   markFillComplete(fillId: string): Promise<void>;
   /** Marks a fill permanently terminal — its own immutable data will never produce a different outcome on retry. */
@@ -528,7 +537,7 @@ export const supabasePollRepository: PollRepository = {
     const { data, error } = await supabaseAdmin
       .from("sports_shadow_signals" as never)
       .select(
-        "id, episode_key, source_first_fill_at, source_last_fill_at, source_vwap, source_shares, source_notional, source_fill_count, source_sell_seen, sports_shadow_source_fills!first_fill_id(event_key)",
+        "id, episode_key, source_first_fill_at, source_last_fill_at, source_vwap, source_shares, source_notional, source_fill_count, source_sell_seen, source_sell_shares, source_sell_notional, sports_shadow_source_fills!first_fill_id(event_key)",
       )
       .eq("source_wallet", wallet)
       .eq("source_condition_id", conditionId)
@@ -548,6 +557,8 @@ export const supabasePollRepository: PollRepository = {
       source_notional: number;
       source_fill_count: number;
       source_sell_seen: boolean;
+      source_sell_shares: number;
+      source_sell_notional: number;
       sports_shadow_source_fills: { event_key: string } | null;
     };
     const row = data as unknown as Row;
@@ -570,6 +581,8 @@ export const supabasePollRepository: PollRepository = {
         firstSellAt: null,
         lastSellAt: null,
         sellCount: 0,
+        sellShares: row.source_sell_shares,
+        sellNotional: row.source_sell_notional,
         triggered: true,
         processedEventKeys: new Set(anchorEventKey ? [anchorEventKey] : []),
       },
@@ -631,7 +644,7 @@ export const supabasePollRepository: PollRepository = {
     return { id: data as unknown as string };
   },
 
-  async updateEpisodeAtomic(fillId, signalId, state) {
+  async updateEpisodeAtomic(fillId, signalId, state, sellEvent) {
     const { error } = await supabaseAdmin.rpc("update_sports_shadow_episode" as never, {
       p_fill_id: fillId,
       p_signal_id: signalId,
@@ -642,6 +655,23 @@ export const supabasePollRepository: PollRepository = {
       p_source_notional: state.totalNotional,
       p_source_fill_count: state.buyFillCount,
       p_source_sell_seen: state.sellSeen,
+      p_source_sell_shares: state.sellShares,
+      p_source_sell_notional: state.sellNotional,
+      p_sell_event_shares: sellEvent?.shares ?? null,
+      p_sell_event_price: sellEvent?.price ?? null,
+      p_sell_event_notional: sellEvent?.notional ?? null,
+      p_sell_event_source_ts: sellEvent?.sourceTs ?? null,
+    } as never);
+    if (error) throw new Error(error.message);
+  },
+
+  async recordPreEpochSell(fillId, shares, price, notional, sourceTs) {
+    const { error } = await supabaseAdmin.rpc("record_pre_epoch_sell" as never, {
+      p_fill_id: fillId,
+      p_shares: shares,
+      p_price: price,
+      p_notional: notional,
+      p_source_ts: sourceTs,
     } as never);
     if (error) throw new Error(error.message);
   },
@@ -1621,15 +1651,27 @@ export async function pollSportsShadowWallet(
         // metadata-fetch call sites).
         if (d.now() >= deadlineAtMs) break;
         try {
-          await d.repo.updateEpisodeAtomic(fill.id, cacheEntry.id, decision.nextState);
+          await d.repo.updateEpisodeAtomic(fill.id, cacheEntry.id, decision.nextState, {
+            shares: fill.shares,
+            price: fill.price,
+            notional: fill.price * fill.shares,
+            sourceTs: fill.sourceTs,
+          });
           positionCache.set(positionKey, { id: cacheEntry.id, state: decision.nextState });
         } catch (err) {
           result.error = result.error ?? `updateEpisodeAtomic (SELL_RECORDED) failed: ${err instanceof Error ? err.message : "unknown error"}`;
           // stays PENDING
         }
       } else {
+        // FINAL BUILD Part 5: a sell with no known forward open position (isPreEpoch)
+        // -- recorded distinctly (signal_id NULL) rather than silently just marking the
+        // fill complete with no ledger evidence at all.
         try {
-          await d.repo.markFillComplete(fill.id);
+          if (decision.isPreEpoch) {
+            await d.repo.recordPreEpochSell(fill.id, fill.shares, fill.price, fill.price * fill.shares, fill.sourceTs);
+          } else {
+            await d.repo.markFillComplete(fill.id);
+          }
         } catch {
           // Best-effort; stays PENDING and is re-evaluated identically next poll.
         }

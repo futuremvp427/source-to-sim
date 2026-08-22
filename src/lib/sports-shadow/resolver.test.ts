@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveKalshiMatch, resolvePmusMatch, resolveSportsMarket, type SourceSignal } from "./resolver";
+import { buildRuleFingerprint, resolveKalshiMatch, resolvePmusMatch, resolveSportsMarket, type SourceSignal } from "./resolver";
 import type { KalshiCandidate } from "./kalshi";
 import type { PmusCandidate } from "./pmus";
 
@@ -713,5 +713,30 @@ describe("Task 12G / P1-K: singleton same-team candidate must prove start-time i
     const oneMsOff = pmusCandidate({ scheduledStartAt: "2026-08-19T22:35:00.001Z" });
     const r = resolvePmusMatch(source(), [oneMsOff]);
     expect(r.status).not.toBe("EXACT");
+  });
+});
+
+describe("FINAL BUILD Part 6: buildRuleFingerprint", () => {
+  it("captures every Part-6-required dimension explicitly, never collapsing them into one boolean", () => {
+    const r = resolvePmusMatch(source(), [pmusCandidate()]);
+    expect(r.status).toBe("EXACT");
+    const fp = buildRuleFingerprint(r);
+    expect(fp.teams.away).toBe(r.targetAwayTeam);
+    expect(fp.teams.home).toBe(r.targetHomeTeam);
+    expect(fp.gameIdentity.targetGameIdentifier).toBe(r.targetGameIdentifier);
+    expect(fp.marketType).toBe(r.targetBetType);
+    expect(fp.line.target).toBe(r.targetLine);
+    expect(fp.selectedSide).toEqual(r.targetSide);
+    expect(fp.fullGameScope).toBe(true);
+    expect(fp.settlement.compatibility).toBe(r.settlementCompatibility);
+  });
+
+  it("settlement sub-dimensions are null (not fabricated) when the resolver never produced a settlementProfile at all", () => {
+    const other = pmusCandidate({ awayTeam: "BOS", homeTeam: "TOR" });
+    const r = resolvePmusMatch(source(), [other]); // NONE -- no settlementProfile computed
+    const fp = buildRuleFingerprint(r);
+    expect(fp.settlement.extraInnings).toBeNull();
+    expect(fp.settlement.postponement).toBeNull();
+    expect(fp.settlement.pushRisk).toBeNull();
   });
 });

@@ -51,10 +51,10 @@ describe("FINAL BUILD Part 17: experiment epoch versioning", () => {
     expect(requiresNewEpoch(versions, changed)).toBe(true);
   });
 
-  it("canFreeze allows freezing from SOAK or CALIBRATION, never twice", () => {
-    expect(canFreeze({ stage: "SOAK", frozenAtIso: null })).toBe(true);
+  it("canFreeze allows freezing from OPERATIONAL_SOAK or CALIBRATION, never twice", () => {
+    expect(canFreeze({ stage: "OPERATIONAL_SOAK", frozenAtIso: null })).toBe(true);
     expect(canFreeze({ stage: "CALIBRATION", frozenAtIso: null })).toBe(true);
-    expect(canFreeze({ stage: "OOS", frozenAtIso: null })).toBe(false);
+    expect(canFreeze({ stage: "OUT_OF_SAMPLE", frozenAtIso: null })).toBe(false);
     expect(canFreeze({ stage: "CALIBRATION", frozenAtIso: "2026-08-01T00:00:00Z" })).toBe(false);
   });
 });

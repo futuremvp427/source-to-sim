@@ -9,7 +9,7 @@
  */
 
 import type { KalshiBookSnapshot } from "./kalshi";
-import type { MatchStatus, ResolverReasonCode, SettlementProfile, TargetSide, VenueMatchResult } from "./resolver";
+import { buildRuleFingerprint, RESOLVER_RULE_FINGERPRINT_VERSION, type MatchStatus, type ResolverReasonCode, type RuleFingerprint, type SettlementProfile, type TargetSide, type VenueMatchResult } from "./resolver";
 import type { BookSnapshot, DepthLevel, SettlementCompatibility as ResolverSettlementCompatibility, Venue } from "./types";
 
 /** The five and only legal requested delays (matches the Task 1 DB CHECK constraint exactly). Defined once here — no module duplicates a slightly different array. */
@@ -56,6 +56,9 @@ export type MatchRow = {
   reason: string | null;
   reasonCode: ResolverReasonCode;
   metadata: Record<string, unknown>;
+  /** FINAL BUILD Part 6: structured, versioned rule-fingerprint evidence (see resolver.ts's buildRuleFingerprint) -- persisted separately from `metadata` for durable, independently-auditable EXACT-match evidence. */
+  ruleFingerprint: RuleFingerprint;
+  ruleFingerprintVersion: string;
   /** Task 12H / P1-M: the FIRST-EVER match_status this (signal, venue) pair ever received — set once, never updated again. Durable audit evidence distinguishing "what we first observed" from "current" for experiment match-rate accounting. */
   firstMatchStatus: MatchStatus;
   /** Task 12H / P1-M: durable per-row recheck bookkeeping — see computeRecheckDecision. */
@@ -190,6 +193,8 @@ export function buildMatchRow(signalId: string, result: VenueMatchResult, rechec
       targetBetType: result.targetBetType,
       targetMarketIdRaw: result.targetMarketId,
     },
+    ruleFingerprint: buildRuleFingerprint(result),
+    ruleFingerprintVersion: RESOLVER_RULE_FINGERPRINT_VERSION,
     firstMatchStatus: recheck.firstMatchStatus,
     recheckCount: recheck.recheckCount,
     nextRecheckAt: recheck.nextRecheckAt,
