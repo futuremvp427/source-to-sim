@@ -156,9 +156,28 @@ export const MAX_PENDING_FILLS_PER_POLL = 500;
  */
 export const PHASE2_DOWNSTREAM_RESERVE_MS = 8_000;
 
-/** Absolute cutoff after which Phase 1 ingestion stops starting new work so Phase 2 always gets real time. Infinite (no deadline) callers are unaffected. */
-export function phase1IngestDeadline(deadlineAtMs: number): number {
-  return Number.isFinite(deadlineAtMs) ? deadlineAtMs - PHASE2_DOWNSTREAM_RESERVE_MS : deadlineAtMs;
+/**
+ * RECONCILIATION FIX (2026-08-22): the original version of this function subtracted
+ * PHASE2_DOWNSTREAM_RESERVE_MS from `deadlineAtMs` UNCONDITIONALLY, with no floor. When a
+ * caller's remaining window (`deadlineAtMs - nowMs`) is already smaller than the reserve
+ * itself -- a real case, not just a test artifact: a LATER wallet in runSourceLane's
+ * rotation can reach `pollSportsShadowWallet` with only a few seconds left before the
+ * shared worker-level ingest deadline -- the unconditional subtraction pushed the ingest
+ * cutoff BEFORE `nowMs`, giving Phase 1 zero opportunity even though real time remained.
+ * Confirmed via 5 failing tests in this file that all passed a short (~500ms) deadline
+ * window and got `pagesFetched: 0` / episode-mutation timing changes they did not expect.
+ *
+ * FIX: only reserve the fixed floor when the window is large enough to have that much
+ * slack to spare. When the window is already at or below the reserve, ingestion gets the
+ * WHOLE remaining window (identical to this file's pre-reserve behavior) rather than a
+ * negative one -- Phase 2 then gets whatever (possibly zero) time is left after Phase 1's
+ * natural stop, exactly like every deadline-exhaustion case already handled elsewhere in
+ * this file (left PENDING, safely retryable, never fabricated).
+ */
+export function phase1IngestDeadline(deadlineAtMs: number, nowMs: number): number {
+  if (!Number.isFinite(deadlineAtMs)) return deadlineAtMs;
+  if (deadlineAtMs - nowMs <= PHASE2_DOWNSTREAM_RESERVE_MS) return deadlineAtMs;
+  return deadlineAtMs - PHASE2_DOWNSTREAM_RESERVE_MS;
 }
 
 /**
@@ -1116,7 +1135,7 @@ export async function pollSportsShadowWallet(
   const detectedAtMs = d.now();
   const result = emptyResult(normalizedWallet);
   // Soak-incident fix: Phase 1 stops early so Phase 2 (durable pending-fill drain) is never starved.
-  const ingestDeadlineAtMs = phase1IngestDeadline(deadlineAtMs);
+  const ingestDeadlineAtMs = phase1IngestDeadline(deadlineAtMs, detectedAtMs);
 
   let hasHistory: boolean;
   try {
