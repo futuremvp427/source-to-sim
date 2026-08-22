@@ -340,14 +340,13 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
       if (!activeKeys.has(key)) await resolveAlert(key);
     }
 
-    // FINAL BUILD Parts 18-21: re-evaluated every cycle -- cheap in the common case
-    // (one SELECT for the current epoch, no further query unless a stage boundary is
-    // actually being approached). soakHealthPassed is a first-pass heuristic (zero
-    // cycle-level errors this cycle) -- Part 18's full health gate (coverage gaps,
-    // corruption, sustained backlog, venue/scheduler starvation) is not yet composed
-    // from a dedicated multi-cycle rollup; documented here, not silently assumed complete.
+    // FINAL BUILD Parts 18-21 + Part 6: re-evaluated every cycle -- cheap in the common
+    // case (one SELECT for the current epoch, plus the soak health rollup ONLY while
+    // still in OPERATIONAL_SOAK -- see stage.server.ts's own doc comment). The soak
+    // health gate is now a real, restart-safe, multi-cycle rollup (soak.server.ts) over
+    // the WHOLE soak window, not a single cycle's own error count.
     const { evaluateAndApplyStageTransition } = await import("./stage.server");
-    await evaluateAndApplyStageTransition(summary.errors.length === 0);
+    await evaluateAndApplyStageTransition();
   } catch {
     // Best-effort by design -- see this field's own doc comment.
   }

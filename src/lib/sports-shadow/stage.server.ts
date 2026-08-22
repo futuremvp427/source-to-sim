@@ -14,6 +14,8 @@ export type StageRepository = {
   getCurrentEpoch(): Promise<ExperimentEpoch | null>;
   /** Independent (clustered) episodes SETTLED since either the epoch's calibration_started_at or oos_started_at, whichever `stage` names -- backed by the SAME authoritative get_sports_shadow_epoch_counters RPC the dashboard uses (Part 7), so stage transitions and the dashboard's milestone counts can never silently disagree, and neither is bounded to a recent-row window. */
   countIndependentSettledSince(epochId: string, stage: "CALIBRATION" | "OUT_OF_SAMPLE"): Promise<number>;
+  /** FINAL BUILD Part 6: the REAL, multi-cycle, restart-safe soak health rollup (soak.server.ts) -- replaces the old single-cycle `summary.errors.length === 0` heuristic. Only ever called while epoch.stage === OPERATIONAL_SOAK. */
+  computeSoakHealth(epochId: string, soakStartedAtIso: string, nowMs: number): Promise<{ passed: boolean; failedChecks: string[] }>;
   transitionStage(epochId: string, stage: StageEpochState["stage"]): Promise<void>;
 };
 
@@ -26,17 +28,25 @@ export const supabaseStageRepository: StageRepository = {
     return stage === "CALIBRATION" ? counters.calibrationIndependentSettledCount : counters.oosIndependentSettledCount;
   },
 
+  async computeSoakHealth(epochId, soakStartedAtIso, nowMs) {
+    const { computeSoakHealthRollup } = await import("./soak.server");
+    return computeSoakHealthRollup(epochId, soakStartedAtIso, nowMs);
+  },
+
   transitionStage: (epochId, stage) => supabaseEpochRepository.transitionStage(epochId, stage),
 };
 
-export type StageEvaluationOutcome = { epochId: string; previousStage: string; nextStage: string | null; reason: string };
+export type StageEvaluationOutcome = { epochId: string; previousStage: string; nextStage: string | null; reason: string; soakFailedChecks: string[] };
 
 /**
- * Part 18's soak health gate is evaluated by the CALLER (worker.server.ts has the
- * telemetry/integrity signals this module does not query itself) and passed in --
- * this function never fabricates a health verdict on its own.
+ * The soak health gate (Part 6) is computed HERE, not passed in by the caller -- unlike
+ * the old single-cycle heuristic, it needs a real multi-cycle rollup query, which only
+ * makes sense (and is only worth the round trip) while the epoch is actually in
+ * OPERATIONAL_SOAK; every other stage skips it entirely, matching the same
+ * "only query what's relevant to the current stage" discipline already used for the
+ * independent-settled counters below.
  */
-export async function evaluateAndApplyStageTransition(soakHealthPassed: boolean, now: () => number = Date.now, repo: StageRepository = supabaseStageRepository): Promise<StageEvaluationOutcome | null> {
+export async function evaluateAndApplyStageTransition(now: () => number = Date.now, repo: StageRepository = supabaseStageRepository): Promise<StageEvaluationOutcome | null> {
   const epoch = await repo.getCurrentEpoch();
   if (!epoch) return null;
 
@@ -51,11 +61,19 @@ export async function evaluateAndApplyStageTransition(soakHealthPassed: boolean,
     oosStartedAtMs: epoch.oosStartedAtIso ? Date.parse(epoch.oosStartedAtIso) : null,
   };
 
-  // Only the counter relevant to the CURRENT stage is worth a real query -- avoids an
-  // unnecessary DB round trip for the common case (still in soak, or terminal).
+  // Only the counter/health check relevant to the CURRENT stage is worth a real query --
+  // avoids unnecessary DB round trips for the common case (calibration, OOS, terminal).
   const independentSettledSinceCalibrationStart =
     epoch.stage === "CALIBRATION" && epoch.calibrationStartedAtIso ? await repo.countIndependentSettledSince(epoch.id, "CALIBRATION") : 0;
   const independentSettledSinceOosStart = epoch.stage === "OUT_OF_SAMPLE" && epoch.oosStartedAtIso ? await repo.countIndependentSettledSince(epoch.id, "OUT_OF_SAMPLE") : 0;
+
+  let soakHealthPassed = true;
+  let soakFailedChecks: string[] = [];
+  if (epoch.stage === "OPERATIONAL_SOAK" && epoch.soakStartedAtIso) {
+    const health = await repo.computeSoakHealth(epoch.id, epoch.soakStartedAtIso, nowMs);
+    soakHealthPassed = health.passed;
+    soakFailedChecks = health.failedChecks;
+  }
 
   const transition = evaluateStageTransition({
     epoch: epochState,
@@ -69,5 +87,5 @@ export async function evaluateAndApplyStageTransition(soakHealthPassed: boolean,
     await repo.transitionStage(epoch.id, transition.nextStage);
   }
 
-  return { epochId: epoch.id, previousStage: epoch.stage, nextStage: transition.nextStage, reason: transition.reason };
+  return { epochId: epoch.id, previousStage: epoch.stage, nextStage: transition.nextStage, reason: transition.reason, soakFailedChecks };
 }

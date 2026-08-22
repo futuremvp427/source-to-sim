@@ -10,6 +10,7 @@ describe("FINAL BUILD Part 25: cycleSummaryToTelemetryEvents", () => {
       sourceLane: {
         walletsAttempted: 3,
         newSignalsCreated: 1,
+        leaseLost: false,
         pmus: { attempted: 1, exact: 1, discoveryFailed: false, deadlineReached: false },
         kalshi: { attempted: 1, exact: 0, discoveryFailed: true, deadlineReached: false },
       },
@@ -18,6 +19,23 @@ describe("FINAL BUILD Part 25: cycleSummaryToTelemetryEvents", () => {
     expect(events.find((e) => e.metric === "cycle_duration_ms")?.value).toBe(1234);
     expect(events.find((e) => e.metric === "wallets_attempted")?.value).toBe(3);
     expect(events.find((e) => e.metric === "discovery_failed" && e.labels?.["venue"] === "KALSHI")?.value).toBe(1);
+  });
+
+  it("FINAL BUILD Part 6: emits per-venue backlog (skipped) and lease_lost -- the soak health rollup's own raw material", () => {
+    const events = cycleSummaryToTelemetryEvents({
+      durationMs: 100,
+      observationLane: { pmus: { attempted: 5, captured: 2, failed: 0, skipped: 3 }, kalshi: { attempted: 0, captured: 0, failed: 0, skipped: 0 } },
+      sourceLane: {
+        walletsAttempted: 1,
+        newSignalsCreated: 0,
+        leaseLost: true,
+        pmus: { attempted: 0, exact: 0, discoveryFailed: false, deadlineReached: false },
+        kalshi: { attempted: 0, exact: 0, discoveryFailed: false, deadlineReached: false },
+      },
+      errors: [],
+    });
+    expect(events.find((e) => e.metric === "skipped" && e.labels?.["venue"] === "PMUS")?.value).toBe(3);
+    expect(events.find((e) => e.metric === "lease_lost")?.value).toBe(1);
   });
 
   it("omits SOURCE/VENUE events entirely when sourceLane is null (lane not acquired this cycle)", () => {

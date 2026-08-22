@@ -59,7 +59,7 @@ export async function recordTelemetry(events: TelemetryEvent[], repo: TelemetryR
 export function cycleSummaryToTelemetryEvents(summary: {
   durationMs: number;
   observationLane: { pmus: { attempted: number; captured: number; failed: number; skipped: number }; kalshi: { attempted: number; captured: number; failed: number; skipped: number } };
-  sourceLane: { walletsAttempted: number; newSignalsCreated: number; pmus: { attempted: number; exact: number; discoveryFailed: boolean; deadlineReached: boolean }; kalshi: { attempted: number; exact: number; discoveryFailed: boolean; deadlineReached: boolean } } | null;
+  sourceLane: { walletsAttempted: number; newSignalsCreated: number; leaseLost: boolean; pmus: { attempted: number; exact: number; discoveryFailed: boolean; deadlineReached: boolean }; kalshi: { attempted: number; exact: number; discoveryFailed: boolean; deadlineReached: boolean } } | null;
   errors: string[];
 }): TelemetryEvent[] {
   const events: TelemetryEvent[] = [
@@ -69,11 +69,17 @@ export function cycleSummaryToTelemetryEvents(summary: {
     { category: "OBSERVATION", metric: "captured", value: summary.observationLane.kalshi.captured, labels: { venue: "KALSHI" } },
     { category: "OBSERVATION", metric: "failed", value: summary.observationLane.pmus.failed, labels: { venue: "PMUS" } },
     { category: "OBSERVATION", metric: "failed", value: summary.observationLane.kalshi.failed, labels: { venue: "KALSHI" } },
+    // FINAL BUILD Part 6: backlog (skipped) is what the soak health rollup sums to
+    // detect a sustained observation backlog across the whole 72h window -- previously
+    // only used per-cycle by alerts.server.ts's threshold check, never accumulated.
+    { category: "OBSERVATION", metric: "skipped", value: summary.observationLane.pmus.skipped, labels: { venue: "PMUS" } },
+    { category: "OBSERVATION", metric: "skipped", value: summary.observationLane.kalshi.skipped, labels: { venue: "KALSHI" } },
   ];
   if (summary.sourceLane) {
     events.push(
       { category: "SOURCE", metric: "wallets_attempted", value: summary.sourceLane.walletsAttempted },
       { category: "SOURCE", metric: "new_signals", value: summary.sourceLane.newSignalsCreated },
+      { category: "SOURCE", metric: "lease_lost", value: summary.sourceLane.leaseLost ? 1 : 0 },
       { category: "VENUE", metric: "exact_matches", value: summary.sourceLane.pmus.exact, labels: { venue: "PMUS" } },
       { category: "VENUE", metric: "exact_matches", value: summary.sourceLane.kalshi.exact, labels: { venue: "KALSHI" } },
       { category: "VENUE", metric: "discovery_failed", value: summary.sourceLane.pmus.discoveryFailed ? 1 : 0, labels: { venue: "PMUS" } },
