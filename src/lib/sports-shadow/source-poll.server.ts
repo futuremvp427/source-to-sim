@@ -140,6 +140,28 @@ export const MAX_PAGES_PER_WALLET = Math.floor(MAX_TRADES_OFFSET / PAGE_SIZE) + 
 export const MAX_PENDING_FILLS_PER_POLL = 500;
 
 /**
+ * ============ SOAK INCIDENT (2026-08-22): PHASE-2 DOWNSTREAM RESERVE ============
+ * PROVEN production failure: Phase 1 (trade-page pagination + persistence) consumed the
+ * whole poll deadline while catching up a heavy backlog, so the Phase-2 deadline guard
+ * below tripped immediately on every single poll. Durably-PENDING fills therefore never
+ * reached classification/episode creation at all -- not "delayed", starved indefinitely,
+ * and the pending backlog only grew.
+ *
+ * FIX: Phase 1 now stops at `deadlineAtMs - PHASE2_DOWNSTREAM_RESERVE_MS`, leaving a
+ * structurally guaranteed slice of every poll for draining durable pending work. Phase 2
+ * still uses the FULL `deadlineAtMs`. Nothing about Phase 1's stop semantics changes: an
+ * interrupted scan is still discarded rather than partially trusted (backlogTruncated),
+ * and unprocessed pending fills still simply stay PENDING.
+ * ================================================================================
+ */
+export const PHASE2_DOWNSTREAM_RESERVE_MS = 8_000;
+
+/** Absolute cutoff after which Phase 1 ingestion stops starting new work so Phase 2 always gets real time. Infinite (no deadline) callers are unaffected. */
+export function phase1IngestDeadline(deadlineAtMs: number): number {
+  return Number.isFinite(deadlineAtMs) ? deadlineAtMs - PHASE2_DOWNSTREAM_RESERVE_MS : deadlineAtMs;
+}
+
+/**
  * FINAL BUILD Part 2 (closes the Task 13G-documented degraded-tuple liveness residual):
  * `countDurableOrdinalFills` used to issue one `count:"exact",head:true` `.like()` query
  * PER distinct tuple prefix, chunked concurrently at a fixed cap with a deadline check
@@ -1093,6 +1115,8 @@ export async function pollSportsShadowWallet(
   const normalizedWallet = wallet.toLowerCase();
   const detectedAtMs = d.now();
   const result = emptyResult(normalizedWallet);
+  // Soak-incident fix: Phase 1 stops early so Phase 2 (durable pending-fill drain) is never starved.
+  const ingestDeadlineAtMs = phase1IngestDeadline(deadlineAtMs);
 
   let hasHistory: boolean;
   try {
@@ -1126,7 +1150,7 @@ export async function pollSportsShadowWallet(
       // response it blocks) open indefinitely. Task 13G / P1-Q: pages already fetched are
       // now discarded, NOT persisted, when the loop is interrupted this way -- see
       // scanConfirmedComplete below.
-      if (d.now() >= deadlineAtMs) {
+      if (d.now() >= ingestDeadlineAtMs) {
         deadlineExceeded = true;
         break;
       }
@@ -1144,7 +1168,7 @@ export async function pollSportsShadowWallet(
       // real renewal RPC -- re-check the deadline immediately after it returns, before
       // starting the next (up to 12s) network request, so that await's own latency can
       // never let the deadline check above become stale by the time the fetch begins.
-      if (d.now() >= deadlineAtMs) {
+      if (d.now() >= ingestDeadlineAtMs) {
         deadlineExceeded = true;
         break;
       }
@@ -1157,7 +1181,7 @@ export async function pollSportsShadowWallet(
       // budget running out as a genuine upstream/network failure.
       let rows: RawTrade[];
       try {
-        rows = await pacedFetchTradesPage(normalizedWallet, offset, d.network, deadlineAtMs, d.now);
+        rows = await pacedFetchTradesPage(normalizedWallet, offset, d.network, ingestDeadlineAtMs, d.now);
       } catch (err) {
         if (err instanceof DeadlineExceededError) {
           deadlineExceeded = true;
@@ -1353,13 +1377,13 @@ export async function pollSportsShadowWallet(
     // as any other unconfirmed-scan discard (see scanConfirmedComplete above) -- nothing
     // here has been persisted yet, so nothing is stranded, only deferred to the wallet's
     // next poll.
-    if (d.now() >= deadlineAtMs) {
+    if (d.now() >= ingestDeadlineAtMs) {
       result.backlogTruncated = true;
     } else {
       for (const pageIdx of pageIndicesOldestFirst) {
         // Task 13G (Codex re-review round 9, P1): checked before EVERY page's
         // reconcile+persist unit, including the first.
-        if (d.now() >= deadlineAtMs) {
+        if (d.now() >= ingestDeadlineAtMs) {
           result.backlogTruncated = true;
           break;
         }
@@ -1386,7 +1410,7 @@ export async function pollSportsShadowWallet(
         // Task 13G (Codex re-review round 4, P1): re-checked here, immediately before
         // this page's own degraded-event reconciliation -- findExistingEventKeys's own
         // await can run past the deadline.
-        if (d.now() >= deadlineAtMs) {
+        if (d.now() >= ingestDeadlineAtMs) {
           result.backlogTruncated = true;
           break;
         }
@@ -1394,7 +1418,7 @@ export async function pollSportsShadowWallet(
           pageDegraded,
           normalizedWallet,
           d.repo,
-          { now: d.now, deadlineAtMs },
+          { now: d.now, deadlineAtMs: ingestDeadlineAtMs },
         );
         if (reconcileError !== null) {
           // Task 13G (Codex re-review round 5, P1): a reconciliation FAILURE (not just a
@@ -1413,7 +1437,7 @@ export async function pollSportsShadowWallet(
 
         // Task 13G / P1-R: checked immediately before this page's persist batch too --
         // reconciliation itself can consume real time.
-        if (d.now() >= deadlineAtMs) {
+        if (d.now() >= ingestDeadlineAtMs) {
           result.backlogTruncated = true;
           break;
         }

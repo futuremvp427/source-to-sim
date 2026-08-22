@@ -47,7 +47,7 @@ import {
 import { ensureCurrentEpoch } from "./epoch.server";
 import { pollSportsShadowWallet, supabasePollRepository, type WalletPollDeps, type WalletPollResult } from "./source-poll.server";
 import type { BetType, Venue } from "./types";
-import { PENDING_BATCH_SIZE, budgetExceeded, detectedAtMsFromSignal, nextRotationIndex, rotateWallets, toSourceSignal, type PendingSignal } from "./worker";
+import { PENDING_BATCH_SIZE, detectedAtMsFromSignal, nextRotationIndex, rotateWallets, toSourceSignal, type PendingSignal } from "./worker";
 
 /** Task 12H / P1-N: split into per-venue lease ids — see runObservationLane's doc comment. */
 export const OBSERVATION_LOCK_ID_PMUS = "sports_shadow_observations_pmus";
@@ -196,6 +196,33 @@ export const FINAL_OBSERVATION_STAGE_DEADLINE_MS_FOR_TEST = FINAL_OBSERVATION_ST
 export const SOURCE_LANE_BUDGET_MS = 30_000;
 export const SOURCE_LEASE_TTL_SECONDS = 60;
 
+/**
+ * ============ SOAK INCIDENT (2026-08-22): STRUCTURAL STARVATION FIX ============
+ * PROVEN ROOT CAUSE (production telemetry over 80 consecutive cycles): wallet source
+ * ingestion consumed the ENTIRE shared 30s lane budget every cycle (wallets_attempted
+ * summed to 120 across 80 cycles = 1.5 of 3 configured wallets per cycle), so by the time
+ * the wallet loop broke, `laneDeadlineAtMs` was already spent and BOTH venue lanes
+ * immediately returned deadlineReached=1 (72/80 cycles, both venues). new_signals stayed
+ * 0 forever and 500+ post-go-live fills sat durably PENDING while the backlog grew.
+ *
+ * FIX: the single shared deadline is split into RESERVED sub-budgets so each downstream
+ * stage has a structurally guaranteed floor that heavy ingestion cannot consume:
+ *   - source ingestion (wallet polls) is bounded by `sourceIngestDeadline(laneStartMs)`
+ *   - venue matching always gets at least VENUE_MATCH_RESERVE_MS, bounded by the FULL
+ *     absolute lane deadline (unchanged semantics: one absolute deadline, no per-venue
+ *     fresh budget, still exactly two-way bounded concurrency)
+ * Deadline semantics, leases/fencing, wallet fairness (the rotation cursor still advances
+ * only past ATTEMPTED wallets) and every "left PENDING, safely retryable" contract are
+ * unchanged -- only WHEN each stage stops starting new work.
+ * ================================================================================
+ */
+export const VENUE_MATCH_RESERVE_MS = 12_000;
+
+/** Absolute cutoff after which wallet source ingestion stops starting new work, leaving VENUE_MATCH_RESERVE_MS of the lane budget for venue matching. */
+export function sourceIngestDeadline(laneStartMs: number): number {
+  return laneStartMs + Math.max(0, SOURCE_LANE_BUDGET_MS - VENUE_MATCH_RESERVE_MS);
+}
+
 const WALLET_CURSOR_ID = "source_wallet_rotation";
 
 /* ------------------------------------------------------------------ */
@@ -310,6 +337,13 @@ export type SportsShadowWorkerDeps = {
    * Overridable so worker.server.test.ts's existing 76 tests never touch real Supabase.
    */
   onCycleComplete: (summary: SportsShadowCycleSummary) => Promise<void>;
+  /**
+   * Soak-incident fix: bounded, cached venue-capability refresh (see
+   * capability.server.ts's own doc comment -- the probes previously had NO call site, so
+   * the durable capability table stayed permanently empty). Runs independently of the
+   * source lease and of whether any signal exists yet; never throws.
+   */
+  refreshVenueCapability: (now: number) => Promise<unknown>;
 };
 
 async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promise<void> {
@@ -376,6 +410,10 @@ const defaultDeps: SportsShadowWorkerDeps = {
   ensureCurrentEpoch,
   now: () => Date.now(),
   onCycleComplete: defaultOnCycleComplete,
+  refreshVenueCapability: async (now: number) => {
+    const { refreshVenueCapabilityIfStale } = await import("./capability.server");
+    return refreshVenueCapabilityIfStale(now);
+  },
 };
 
 /* ------------------------------------------------------------------ */
@@ -722,9 +760,12 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
   // Task 13F: the SAME lane-level deadline now bounds each wallet's OWN poll internally
   // too (see SOURCE_LANE_BUDGET_MS's doc comment) -- not just whether to start the next one.
   const laneDeadlineAtMs = laneStartMs + SOURCE_LANE_BUDGET_MS;
+  // Soak-incident fix: ingestion stops at the reserved sub-budget so venue matching below
+  // always has real time left (see VENUE_MATCH_RESERVE_MS).
+  const ingestDeadlineAtMs = sourceIngestDeadline(laneStartMs);
 
   for (const wallet of orderedWallets) {
-    if (budgetExceeded(d.now() - laneStartMs, SOURCE_LANE_BUDGET_MS)) break; // remaining wallets stay durable for the next cycle -- and the rotation cursor below advances only past what WAS attempted, so they are tried FIRST next cycle
+    if (d.now() >= ingestDeadlineAtMs) break; // remaining wallets stay durable for the next cycle -- and the rotation cursor below advances only past what WAS attempted, so they are tried FIRST next cycle
     // Task 12F / P1-G: "do not continue another wallet" once the lease is lost.
     if (!(await checkpoint())) {
       leaseLost = true;
@@ -735,9 +776,9 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
     // next wallet's poll (whose own first operation, hasAnyFillsForWallet, is a DB call
     // with no deadline check of its own before it), mirroring the identical renewal-
     // latency fix already applied throughout source-poll.server.ts.
-    if (budgetExceeded(d.now() - laneStartMs, SOURCE_LANE_BUDGET_MS)) break;
+    if (d.now() >= ingestDeadlineAtMs) break;
     try {
-      const result: WalletPollResult = await d.pollSportsShadowWallet(wallet, config.goLiveAtMs, { ...d.sourcePollDeps, checkpointLease: checkpoint, epochId }, laneDeadlineAtMs);
+      const result: WalletPollResult = await d.pollSportsShadowWallet(wallet, config.goLiveAtMs, { ...d.sourcePollDeps, checkpointLease: checkpoint, epochId }, ingestDeadlineAtMs);
       newSignalsCreated += result.newSignals.length;
       walletSummaries.push({
         wallet: result.wallet,
@@ -871,6 +912,15 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
     epochId = epoch.id;
   } catch (err) {
     errors.push(`ensureCurrentEpoch failed: ${err instanceof Error ? err.message : "unknown error"}`);
+  }
+
+  // Soak-incident fix: bounded, cached capability refresh -- runs before either lane and
+  // outside the source lease, so an empty/stale capability table is repaired even while
+  // source ingestion is still catching up. Best-effort by contract (never throws).
+  try {
+    await d.refreshVenueCapability(d.now());
+  } catch (err) {
+    errors.push(`venue capability refresh failed: ${err instanceof Error ? err.message : "unknown error"}`);
   }
 
   // LANE A: observation, highest priority, always attempted first. Task 12H/P1-N: both
