@@ -390,4 +390,38 @@ describe("Task 13E, D: the default network path (no fetchImpl override) uses the
       restore();
     }
   });
+
+  // Task 13H: fetchPmusBook shares pacedGetJson and defaultDeps with
+  // discoverPmusMlbMarkets above, so it is structurally guaranteed to be equally
+  // receiver-safe -- but that guarantee had no dedicated proof of its own (F6). Book
+  // capture is the +0/+5/+10/+30/+60 observation burst's actual per-observation network
+  // call, so it deserves the identical explicit regression coverage as discovery.
+  it("fetchPmusBook completes without an Illegal-invocation failure when no fetchImpl override is supplied at all", async () => {
+    const original = globalThis.fetch;
+    function brandedFetch(this: unknown): ReturnType<typeof fetch> {
+      if (this !== globalThis) {
+        throw new TypeError("Illegal invocation: function called with incorrect `this` reference.");
+      }
+      return Promise.resolve(new Response(JSON.stringify({ marketData: { bids: [], offers: [] } }), { status: 200, headers: { "content-type": "application/json" } }));
+    }
+    globalThis.fetch = brandedFetch as typeof fetch;
+    try {
+      const snap = await fetchPmusBook("some-slug", {
+        // Deliberately no `fetchImpl` here -- must fall through to the module's own
+        // defaultDeps.fetchImpl, which Task 13E fixed to be runtimeFetch.
+        reserveRequestSlot: async () => 0,
+        getHostCooldown: async () => ({ blocked: false, reason: null }),
+        recordHostRateLimit: async () => {},
+      });
+      // A null staleReason is only reachable if the branded fetch call succeeded (this
+      // === globalThis) AND the response was parsed as a genuine, non-malformed empty
+      // book -- an Illegal-invocation failure would instead be caught and surfaced as a
+      // non-null staleReason (fetchPmusBook never throws, per its own doc comment).
+      expect(snap.staleReason).toBeNull();
+      expect(snap.bestBid).toBeNull();
+      expect(snap.bestAsk).toBeNull();
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
 });
