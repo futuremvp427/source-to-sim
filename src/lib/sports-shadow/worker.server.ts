@@ -324,13 +324,16 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
       integrityAuditPassed: null, // integrity.server.ts runs on its own (daily) cadence, not every cycle
       schedulerLastRunAgeMs: null, // this IS the scheduler's own current run -- nothing to measure staleness against here
       schedulerStalledThresholdMs: 300_000,
+      sourcePollFailed: summary.sourceLane?.walletSummaries.some((w) => w.error !== null) ?? false,
+      rateLimitStormDetected: false, // no per-cycle 429 counter is threaded through this summary yet
+      settlementStuckCount: 0, // settlement staleness is evaluated by the soak rollup, not per-cycle
     });
     const activeKeys = new Set(alerts.map((a) => a.alertKey));
-    for (const a of alerts) await raiseAlert(a.alertKey, a.severity, a.message);
+    for (const a of alerts) await raiseAlert(a.alertKey, a.severity, a.message, a.kind);
     // Resolve any of THIS cycle's monitored conditions that are no longer active --
     // keeps the dashboard's "currently unresolved" view accurate without a separate
     // sweep job.
-    for (const key of ["venue_discovery_failed:PMUS", "venue_discovery_failed:KALSHI", "lease_lost:PMUS", "lease_lost:KALSHI", "observation_backlog"]) {
+    for (const key of ["venue_discovery_failed:PMUS", "venue_discovery_failed:KALSHI", "lease_lost:PMUS", "lease_lost:KALSHI", "observation_backlog", "source_unhealthy"]) {
       if (!activeKeys.has(key)) await resolveAlert(key);
     }
 
