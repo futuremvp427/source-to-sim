@@ -1,23 +1,84 @@
 import { describe, expect, it } from "vitest";
 
-import { computePaperFillsForObservation, type CapturedObservation, type PaperFillRow, type PaperRepository } from "./paper.server";
-import type { DepthLevel } from "./types";
+import {
+  computePaperFillsForObservation,
+  maybeDecideExpiredRoutingCutoffs,
+  ROUTING_DECISION_CUTOFF_MS,
+  type CapturedObservation,
+  type PaperFillRow,
+  type PaperRepository,
+  type RoutingProvenance,
+  type SignalProvenance,
+  type VenueMatchProvenance,
+} from "./paper.server";
+import type { DepthLevel, Venue } from "./types";
 
-function fakeRepo(observations: Map<string, CapturedObservation>): PaperRepository & { inserted: PaperFillRow[][] } {
-  const inserted: PaperFillRow[][] = [];
+type Key = string;
+function key(signalId: string, requestedDelayMs: number, tier: number): Key {
+  return `${signalId}:${requestedDelayMs}:${tier}`;
+}
+
+/**
+ * Simulates the real DB's two-step provenance/finalize protocol (see the migration's own
+ * doc comment) in-memory: `provenance` mirrors the durable
+ * sports_shadow_paper_fills row's own (pmus_observation_id, kalshi_observation_id,
+ * decided_at) tuple, and `decisions` mirrors its decision-time fields, keyed identically.
+ */
+function fakeRepo(config: {
+  observations?: Map<string, CapturedObservation>;
+  signalProvenance?: Map<string, SignalProvenance>;
+  venueMatches?: Map<string, VenueMatchProvenance>;
+} = {}): PaperRepository & { decisions: Map<Key, PaperFillRow>; provenance: Map<Key, RoutingProvenance> } {
+  const observations = config.observations ?? new Map<string, CapturedObservation>();
+  const provenance = new Map<Key, RoutingProvenance>();
+  const decisions = new Map<Key, PaperFillRow>();
+
   return {
-    inserted,
+    decisions,
+    provenance,
     async getObservation(id) {
       return observations.get(id) ?? null;
     },
-    async getSiblingObservation(signalId, venue, requestedDelayMs) {
-      for (const obs of observations.values()) {
-        if (obs.signalId === signalId && obs.venue === venue && obs.requestedDelayMs === requestedDelayMs) return obs;
+    async getObservationForVenue(signalId, venue, requestedDelayMs) {
+      for (const o of observations.values()) {
+        if (o.signalId === signalId && o.venue === venue && o.requestedDelayMs === requestedDelayMs) return o;
       }
       return null;
     },
-    async insertPaperFills(rows) {
-      inserted.push(rows);
+    async getSignalProvenance(signalId) {
+      return config.signalProvenance?.get(signalId) ?? { experimentEpochId: "epoch-1", firstFillId: "fill-default" };
+    },
+    async getVenueMatch(signalId, venue) {
+      return config.venueMatches?.get(`${signalId}:${venue}`) ?? { targetMarketId: `${venue.toLowerCase()}-market`, selectedSide: "YES" };
+    },
+    async recordRoutingProvenance(signalId, requestedDelayMs, notionalTierUsd, venue, observationId, fireAtMs) {
+      const k = key(signalId, requestedDelayMs, notionalTierUsd);
+      const existing = provenance.get(k) ?? { pmusObservationId: null, kalshiObservationId: null, decidedAt: null, fireAtMs };
+      const updated: RoutingProvenance = {
+        ...existing,
+        pmusObservationId: venue === "PMUS" ? (existing.pmusObservationId ?? observationId) : existing.pmusObservationId,
+        kalshiObservationId: venue === "KALSHI" ? (existing.kalshiObservationId ?? observationId) : existing.kalshiObservationId,
+      };
+      provenance.set(k, updated);
+      return updated;
+    },
+    async finalizeRoutingDecision(signalId, requestedDelayMs, notionalTierUsd, row, decidedAtMs) {
+      const k = key(signalId, requestedDelayMs, notionalTierUsd);
+      const existing = provenance.get(k);
+      if (existing?.decidedAt) return false; // already decided -- the DB-level guard this mirrors
+      provenance.set(k, { ...(existing ?? { pmusObservationId: null, kalshiObservationId: null, fireAtMs: decidedAtMs }), decidedAt: new Date(decidedAtMs).toISOString() });
+      decisions.set(k, row);
+      return true;
+    },
+    async findExpiredPendingRoutingRows(cutoffAtMs, limit) {
+      const out: { signalId: string; requestedDelayMs: number; notionalTierUsd: number; pmusObservationId: string | null; kalshiObservationId: string | null }[] = [];
+      for (const [k, p] of provenance) {
+        if (p.decidedAt !== null || p.fireAtMs > cutoffAtMs) continue;
+        const [signalId, delayStr, tierStr] = k.split(":");
+        out.push({ signalId: signalId!, requestedDelayMs: Number(delayStr), notionalTierUsd: Number(tierStr), pmusObservationId: p.pmusObservationId, kalshiObservationId: p.kalshiObservationId });
+        if (out.length >= limit) break;
+      }
+      return out;
     },
   };
 }
@@ -33,6 +94,8 @@ function obs(overrides: Partial<CapturedObservation> = {}): CapturedObservation 
     signalId: "sig-1",
     venue: "PMUS",
     requestedDelayMs: 0,
+    fireAtMs: 1_700_000_000_000,
+    observed: true,
     stale: false,
     errorCode: null,
     askDepth: GOOD_ASKS,
@@ -40,59 +103,137 @@ function obs(overrides: Partial<CapturedObservation> = {}): CapturedObservation 
   };
 }
 
-describe("FINAL BUILD Parts 9/10/12/13: computePaperFillsForObservation", () => {
-  it("produces exactly 5 paper-fill rows (one per notional tier) when both venues have good, captured depth", async () => {
+function seedObservations(...list: CapturedObservation[]): Map<string, CapturedObservation> {
+  return new Map(list.map((o) => [o.id, o]));
+}
+
+describe("CODEX P1-2: computePaperFillsForObservation -- exactly ONE deterministic decision per (signal, delay, tier), never first-callback-wins", () => {
+  it("both venues captured (good depth) in ONE observation's own call -- decides immediately using both, exactly 5 decisions", async () => {
     const pmus = obs({ id: "obs-pmus", venue: "PMUS" });
     const kalshi = obs({ id: "obs-kalshi", venue: "KALSHI" });
-    const repo = fakeRepo(new Map([["obs-pmus", pmus], ["obs-kalshi", kalshi]]));
-    const rows = await computePaperFillsForObservation("obs-pmus", { repo, now: () => 1_700_000_000_000 });
-    expect(rows).toHaveLength(5); // $5/$10/$25/$50/$100
-    expect(rows.every((r) => r.chosenVenue !== null)).toBe(true);
-    expect(repo.inserted).toHaveLength(1);
+    const repo = fakeRepo({ observations: seedObservations(pmus, kalshi) });
+    const rows = await computePaperFillsForObservation("obs-pmus", { repo, now: () => 1_700_000_000_500 });
+    expect(rows).toHaveLength(5);
+    expect(repo.decisions.size).toBe(5);
+    expect(rows.every((r) => r.cutoffReason === "BOTH_COMPLETE")).toBe(true);
   });
 
-  it("Section 13: a stale observation produces ZERO paper fills -- never converts missing/stale data into a fabricated fill", async () => {
-    const repo = fakeRepo(new Map([["obs-1", obs({ stale: true })]]));
-    const rows = await computePaperFillsForObservation("obs-1", { repo });
+  it("PM-US completes FIRST with Kalshi not yet captured at all -- does NOT decide yet, waits (no premature single-venue decision within the cutoff window)", async () => {
+    const pmus = obs({ id: "obs-pmus", venue: "PMUS" });
+    const repo = fakeRepo({ observations: seedObservations(pmus) });
+    const rows = await computePaperFillsForObservation("obs-pmus", { repo, now: () => pmus.fireAtMs + 1_000 }); // well within the cutoff window
     expect(rows).toHaveLength(0);
-    expect(repo.inserted).toHaveLength(0);
+    expect(repo.decisions.size).toBe(0);
+    // Provenance for PM-US IS recorded, even though nothing decided yet.
+    expect(repo.provenance.get(key("sig-1", 0, 5))?.pmusObservationId).toBe("obs-pmus");
+    expect(repo.provenance.get(key("sig-1", 0, 5))?.kalshiObservationId).toBeNull();
   });
 
-  it("Section 13: a genuinely-failed observation (errorCode set) produces ZERO paper fills", async () => {
-    const repo = fakeRepo(new Map([["obs-1", obs({ errorCode: "HTTP_500" })]]));
-    const rows = await computePaperFillsForObservation("obs-1", { repo });
+  it("Kalshi arrives LATER (before cutoff) via its OWN call -- decides then, using BOTH final same-delay observations, exactly once per tier, no duplicate ladder", async () => {
+    const pmus = obs({ id: "obs-pmus", venue: "PMUS" });
+    const kalshi = obs({ id: "obs-kalshi", venue: "KALSHI", askDepth: [{ price: 0.4, size: 1000 }] }); // better price -- should be chosen if both are considered
+    // Kalshi's row genuinely does not exist yet at the time of PM-US's own call --
+    // the SAME mutable Map is used for both calls, so adding Kalshi's row in between
+    // faithfully simulates it "arriving later," not merely being pre-seeded.
+    const observations = seedObservations(pmus);
+    const repo = fakeRepo({ observations });
+
+    const first = await computePaperFillsForObservation("obs-pmus", { repo, now: () => pmus.fireAtMs + 1_000 });
+    expect(first).toHaveLength(0); // PM-US alone does not decide
+
+    observations.set("obs-kalshi", kalshi);
+    const second = await computePaperFillsForObservation("obs-kalshi", { repo, now: () => pmus.fireAtMs + 2_000 });
+    expect(second).toHaveLength(5); // Kalshi's own call is what triggers the (now-complete) decision
+    expect(second.every((r) => r.chosenVenue === "KALSHI")).toBe(true); // the objectively better price wins because BOTH were actually considered
+    expect(repo.decisions.size).toBe(5);
+
+    // No duplicate ladder: re-invoking PM-US's own observation again changes nothing.
+    const third = await computePaperFillsForObservation("obs-pmus", { repo, now: () => pmus.fireAtMs + 3_000 });
+    expect(third).toHaveLength(0);
+    expect(repo.decisions.size).toBe(5); // still exactly 5, never 10
+  });
+
+  it("no LATER +5 observation can ever alter the +0 decision -- they are entirely separate (signal, delay, tier) keys", async () => {
+    const pmusZero = obs({ id: "obs-pmus-0", venue: "PMUS", requestedDelayMs: 0 });
+    const kalshiZero = obs({ id: "obs-kalshi-0", venue: "KALSHI", requestedDelayMs: 0 });
+    const repo = fakeRepo({ observations: seedObservations(pmusZero, kalshiZero) });
+    await computePaperFillsForObservation("obs-pmus-0", { repo, now: () => pmusZero.fireAtMs });
+    const zeroDecisionBefore = repo.decisions.get(key("sig-1", 0, 5));
+    expect(zeroDecisionBefore).toBeDefined();
+
+    // A completely different delay's observation for the SAME signal.
+    const pmusFive = obs({ id: "obs-pmus-5", venue: "PMUS", requestedDelayMs: 5000, fireAtMs: pmusZero.fireAtMs + 5000, askDepth: [{ price: 0.1, size: 1000 }] });
+    const repo2 = fakeRepo({ observations: seedObservations(pmusZero, kalshiZero, pmusFive) });
+    // Replay the +0 decision into repo2 to simulate "already decided earlier".
+    await computePaperFillsForObservation("obs-pmus-0", { repo: repo2, now: () => pmusZero.fireAtMs });
+    await computePaperFillsForObservation("obs-pmus-5", { repo: repo2, now: () => pmusFive.fireAtMs + 999_999 }); // past cutoff, decides alone
+    const zeroDecisionAfter = repo2.decisions.get(key("sig-1", 0, 5));
+    expect(zeroDecisionAfter).toEqual(zeroDecisionBefore); // completely untouched by the +5 event
+    expect(repo2.decisions.get(key("sig-1", 5000, 5))).toBeDefined(); // the +5 decision is its own separate row
+  });
+
+  it("cutoff expiry: when the sibling never captures and the cutoff window has passed, decides with just the one known venue", async () => {
+    const pmus = obs({ id: "obs-pmus", venue: "PMUS" });
+    const repo = fakeRepo({ observations: seedObservations(pmus) });
+    const rows = await computePaperFillsForObservation("obs-pmus", { repo, now: () => pmus.fireAtMs + ROUTING_DECISION_CUTOFF_MS + 1 });
+    expect(rows).toHaveLength(5);
+    expect(rows.every((r) => r.chosenVenue === "PMUS")).toBe(true);
+    expect(rows.every((r) => r.cutoffReason === "CUTOFF_EXPIRED")).toBe(true);
+  });
+
+  it("a stale/failed observation still records provenance (so the sibling's own eventual call can see 'this venue is known and unavailable') even though it produces no usable depth itself", async () => {
+    const pmusFailed = obs({ id: "obs-pmus", venue: "PMUS", stale: true });
+    const kalshi = obs({ id: "obs-kalshi", venue: "KALSHI" });
+    // Kalshi genuinely does not exist yet at the time of PM-US's own call.
+    const observations = seedObservations(pmusFailed);
+    const repo = fakeRepo({ observations });
+    const rows = await computePaperFillsForObservation("obs-pmus", { repo, now: () => pmusFailed.fireAtMs + 100 });
+    // PM-US is known (failed); Kalshi genuinely not yet captured -- not decided yet.
     expect(rows).toHaveLength(0);
+    expect(repo.provenance.get(key("sig-1", 0, 5))?.pmusObservationId).toBe("obs-pmus");
+
+    observations.set("obs-kalshi", kalshi);
+    const second = await computePaperFillsForObservation("obs-kalshi", { repo, now: () => pmusFailed.fireAtMs + 200 });
+    expect(second).toHaveLength(5); // now both known -> decides
+    expect(second.every((r) => r.chosenVenue === "KALSHI")).toBe(true);
+    expect(second.every((r) => r.pmusResult.available === false)).toBe(true);
   });
 
   it("an observation that does not exist at all produces zero fills without throwing", async () => {
-    const repo = fakeRepo(new Map());
+    const repo = fakeRepo();
     const rows = await computePaperFillsForObservation("nonexistent", { repo });
     expect(rows).toHaveLength(0);
   });
 
-  it("when the sibling venue has not yet captured (still pending), this venue's own fills still route -- single-venue-available path, not blocked by the other", async () => {
+  it("CODEX P1-4: the decided row persists direct target_market_id/selected_side provenance from the CHOSEN venue's own match, plus P2-3's source_fill_id/experiment_epoch_id", async () => {
     const pmus = obs({ id: "obs-pmus", venue: "PMUS" });
-    // No Kalshi observation registered at all -- simulates "still pending."
-    const repo = fakeRepo(new Map([["obs-pmus", pmus]]));
-    const rows = await computePaperFillsForObservation("obs-pmus", { repo });
-    expect(rows).toHaveLength(5);
-    expect(rows.every((r) => r.chosenVenue === "PMUS")).toBe(true);
-    expect(rows.every((r) => r.kalshiResult.available === false)).toBe(true);
-  });
-
-  it("when the sibling venue captured but with a stale/failed result, it is treated as unavailable for routing, not as a bad Kalshi execution", async () => {
-    const pmus = obs({ id: "obs-pmus", venue: "PMUS" });
-    const kalshiFailed = obs({ id: "obs-kalshi", venue: "KALSHI", errorCode: "HTTP_401" });
-    const repo = fakeRepo(new Map([["obs-pmus", pmus], ["obs-kalshi", kalshiFailed]]));
-    const rows = await computePaperFillsForObservation("obs-pmus", { repo });
-    expect(rows.every((r) => r.kalshiResult.available === false)).toBe(true);
-    expect(rows.every((r) => r.chosenVenue === "PMUS")).toBe(true);
+    const kalshi = obs({ id: "obs-kalshi", venue: "KALSHI" });
+    const repo = fakeRepo({
+      observations: seedObservations(pmus, kalshi),
+      signalProvenance: new Map([["sig-1", { experimentEpochId: "epoch-xyz", firstFillId: "fill-anchor-1" }]]),
+      venueMatches: new Map([
+        ["sig-1:PMUS", { targetMarketId: "pmus-slug-1", selectedSide: "TEAM:NYY:LONG" }],
+        ["sig-1:KALSHI", { targetMarketId: "KXMLB-1", selectedSide: "YES" }],
+      ]),
+    });
+    const rows = await computePaperFillsForObservation("obs-pmus", { repo, now: () => 1_700_000_000_500 });
+    for (const r of rows) {
+      expect(r.experimentEpochId).toBe("epoch-xyz");
+      expect(r.sourceFillId).toBe("fill-anchor-1");
+      if (r.chosenVenue === "PMUS") {
+        expect(r.targetMarketId).toBe("pmus-slug-1");
+        expect(r.selectedSide).toBe("TEAM:NYY:LONG");
+      } else if (r.chosenVenue === "KALSHI") {
+        expect(r.targetMarketId).toBe("KXMLB-1");
+        expect(r.selectedSide).toBe("YES");
+      }
+    }
   });
 
   it("Part 11: every persisted fill's fee is populated with a real fee-model version, never fee=0/unversioned", async () => {
     const pmus = obs({ id: "obs-pmus", venue: "PMUS" });
-    const repo = fakeRepo(new Map([["obs-pmus", pmus]]));
-    const rows = await computePaperFillsForObservation("obs-pmus", { repo });
+    const repo = fakeRepo({ observations: seedObservations(pmus) });
+    const rows = await computePaperFillsForObservation("obs-pmus", { repo, now: () => pmus.fireAtMs + ROUTING_DECISION_CUTOFF_MS + 1 });
     for (const r of rows) {
       expect(r.feeModelVersion).not.toBeNull();
       expect(r.feeUsd).not.toBeNull();
@@ -100,18 +241,46 @@ describe("FINAL BUILD Parts 9/10/12/13: computePaperFillsForObservation", () => 
     }
   });
 
-  it("empty ask depth on the triggering venue results in NONE fills, routed to the OTHER venue if it qualifies", async () => {
+  it("empty ask depth on the triggering venue results in NONE for it, routed to the OTHER venue if it qualifies", async () => {
     const pmusEmpty = obs({ id: "obs-pmus", venue: "PMUS", askDepth: [] });
     const kalshiGood = obs({ id: "obs-kalshi", venue: "KALSHI" });
-    const repo = fakeRepo(new Map([["obs-pmus", pmusEmpty], ["obs-kalshi", kalshiGood]]));
-    const rows = await computePaperFillsForObservation("obs-pmus", { repo });
+    const repo = fakeRepo({ observations: seedObservations(pmusEmpty, kalshiGood) });
+    const rows = await computePaperFillsForObservation("obs-pmus", { repo, now: () => 1_700_000_000_500 });
     expect(rows.every((r) => r.chosenVenue === "KALSHI")).toBe(true);
   });
+});
 
-  it("routing decision uses the caller-injected clock, never a real timestamp -- deterministic, no-hindsight", async () => {
+describe("CODEX P1-2: maybeDecideExpiredRoutingCutoffs -- closes the 'sibling never arrives' gap for a venue that was never schedulable at all", () => {
+  it("a routing row with only PM-US's provenance ever recorded, past its cutoff window, gets decided by the sweep", async () => {
     const pmus = obs({ id: "obs-pmus", venue: "PMUS" });
-    const repo = fakeRepo(new Map([["obs-pmus", pmus]]));
-    const rows = await computePaperFillsForObservation("obs-pmus", { repo, now: () => 42 });
-    expect(rows.every((r) => r.routingTimestampMs === 42)).toBe(true);
+    const repo = fakeRepo({ observations: seedObservations(pmus) });
+    // Record provenance WITHOUT deciding (simulates being called well before the cutoff).
+    await computePaperFillsForObservation("obs-pmus", { repo, now: () => pmus.fireAtMs + 1_000 });
+    expect(repo.decisions.size).toBe(0);
+
+    const decidedCount = await maybeDecideExpiredRoutingCutoffs({ repo, now: () => pmus.fireAtMs + ROUTING_DECISION_CUTOFF_MS + 1 });
+    expect(decidedCount).toBe(5);
+    expect(repo.decisions.size).toBe(5);
+    expect([...repo.decisions.values()].every((r) => r.cutoffReason === "CUTOFF_EXPIRED" && r.chosenVenue === "PMUS")).toBe(true);
+  });
+
+  it("a row that is not yet past its cutoff window is left untouched by the sweep", async () => {
+    const pmus = obs({ id: "obs-pmus", venue: "PMUS" });
+    const repo = fakeRepo({ observations: seedObservations(pmus) });
+    await computePaperFillsForObservation("obs-pmus", { repo, now: () => pmus.fireAtMs + 1_000 });
+    const decidedCount = await maybeDecideExpiredRoutingCutoffs({ repo, now: () => pmus.fireAtMs + 1_500 }); // still well within the cutoff
+    expect(decidedCount).toBe(0);
+    expect(repo.decisions.size).toBe(0);
+  });
+
+  it("an already-decided row is never re-decided by the sweep (idempotent, no-hindsight preserved)", async () => {
+    const pmus = obs({ id: "obs-pmus", venue: "PMUS" });
+    const kalshi = obs({ id: "obs-kalshi", venue: "KALSHI" });
+    const repo = fakeRepo({ observations: seedObservations(pmus, kalshi) });
+    await computePaperFillsForObservation("obs-pmus", { repo, now: () => pmus.fireAtMs + 500 });
+    expect(repo.decisions.size).toBe(5); // both already known -> decided immediately
+    const decidedCount = await maybeDecideExpiredRoutingCutoffs({ repo, now: () => pmus.fireAtMs + ROUTING_DECISION_CUTOFF_MS + 1 });
+    expect(decidedCount).toBe(0); // nothing left pending
+    expect(repo.decisions.size).toBe(5);
   });
 });

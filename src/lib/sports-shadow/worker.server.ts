@@ -351,6 +351,17 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
     } catch {
       // Per-venue failures are already swallowed internally; this guards the import itself.
     }
+    // CODEX P1-2: closes the "sibling venue was never schedulable at all" gap -- a
+    // routing decision that only ever recorded ONE venue's provenance (the common case:
+    // most signals are not EXACT-matched on both venues) would otherwise wait forever for
+    // a sibling observation that will never arrive. Bounded, idempotent, best-effort --
+    // see paper.server.ts's own doc comment.
+    try {
+      const { maybeDecideExpiredRoutingCutoffs } = await import("./paper.server");
+      await maybeDecideExpiredRoutingCutoffs();
+    } catch {
+      // Best-effort by design -- see maybeDecideExpiredRoutingCutoffs's own doc comment.
+    }
     const { cycleSummaryToTelemetryEvents, recordTelemetry } = await import("./telemetry.server");
     await recordTelemetry(cycleSummaryToTelemetryEvents(summary));
     const { evaluateAlertConditions, raiseAlert, resolveAlert } = await import("./alerts.server");
