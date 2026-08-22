@@ -67,7 +67,8 @@ async function countIntegrityAudits(sinceIso: string): Promise<{ run: number; fa
  * an accepted simplification since at most one epoch is ever active at a time in
  * practice, and a stuck settlement is urgent regardless of which epoch it belongs to.
  */
-async function countStuckSettlements(now: number): Promise<number> {
+/** Exported for alerts.server.ts's own per-cycle stuck-settlement check (Part 10) -- a single cheap indexed COUNT, reused rather than duplicated. */
+export async function countStuckSettlements(now: number): Promise<number> {
   const cutoffIso = new Date(now - SETTLEMENT_STUCK_THRESHOLD_MS).toISOString();
   const { count, error } = await supabaseAdmin
     .from("sports_shadow_settlements" as never)

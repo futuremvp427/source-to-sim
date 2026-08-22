@@ -156,6 +156,8 @@ export function evaluateAlertConditions(input: {
   sourcePollFailed: boolean;
   rateLimitStormDetected: boolean;
   settlementStuckCount: number;
+  /** The source lane was acquired and wallets ARE configured, but zero wallets were attempted this cycle -- a coverage gap distinct from a single wallet's poll failing. */
+  sourceCoverageGap: boolean;
 }): AlertCondition[] {
   const alerts: AlertCondition[] = [];
   if (input.pmusDiscoveryFailed) alerts.push({ alertKey: "venue_discovery_failed:PMUS", severity: "WARNING", message: "PM-US discovery has failed", kind: "sports_shadow_venue_starved" });
@@ -185,6 +187,9 @@ export function evaluateAlertConditions(input: {
   if (input.rateLimitStormDetected) alerts.push({ alertKey: "rate_limit_storm", severity: "WARNING", message: "Sustained 429/cooldown activity detected", kind: "sports_shadow_rate_limit_storm" });
   if (input.settlementStuckCount > 0) {
     alerts.push({ alertKey: "settlement_stuck", severity: "WARNING", message: `${input.settlementStuckCount} settlement(s) stuck PENDING beyond expected timing`, kind: "sports_shadow_settlement_stuck" });
+  }
+  if (input.sourceCoverageGap) {
+    alerts.push({ alertKey: "source_coverage_gap", severity: "WARNING", message: "Source lane ran but attempted zero configured wallets this cycle", kind: "sports_shadow_source_coverage_gap" });
   }
   return alerts;
 }

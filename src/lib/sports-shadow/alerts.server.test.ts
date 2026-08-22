@@ -16,6 +16,7 @@ function baseInput() {
     sourcePollFailed: false,
     rateLimitStormDetected: false,
     settlementStuckCount: 0,
+    sourceCoverageGap: false,
   };
 }
 
@@ -53,6 +54,12 @@ describe("FINAL BUILD Part 27: evaluateAlertConditions", () => {
     expect(evaluateAlertConditions({ ...baseInput(), rateLimitStormDetected: true })[0]?.kind).toBe("sports_shadow_rate_limit_storm");
     expect(evaluateAlertConditions({ ...baseInput(), settlementStuckCount: 3 })[0]?.kind).toBe("sports_shadow_settlement_stuck");
     expect(evaluateAlertConditions({ ...baseInput(), settlementStuckCount: 0 })).toHaveLength(0);
+  });
+
+  it("raises a source coverage gap when the lane ran but attempted zero configured wallets", () => {
+    const alerts = evaluateAlertConditions({ ...baseInput(), sourceCoverageGap: true });
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.kind).toBe("sports_shadow_source_coverage_gap");
   });
 
   it("multiple simultaneous conditions all surface independently", () => {

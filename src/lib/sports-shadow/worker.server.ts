@@ -329,14 +329,25 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
       schedulerStalledThresholdMs: 300_000,
       sourcePollFailed: summary.sourceLane?.walletSummaries.some((w) => w.error !== null) ?? false,
       rateLimitStormDetected: false, // no per-cycle 429 counter is threaded through this summary yet
-      settlementStuckCount: 0, // settlement staleness is evaluated by the soak rollup, not per-cycle
+      // FINAL BUILD Part 10: a single cheap indexed COUNT, shared with soak.server.ts's
+      // own multi-cycle rollup rather than a duplicated query -- best-effort, so a
+      // failure here must never break telemetry/alert evaluation for the rest of the cycle.
+      settlementStuckCount: await (async () => {
+        try {
+          const { countStuckSettlements } = await import("./soak.server");
+          return await countStuckSettlements(Date.now());
+        } catch {
+          return 0;
+        }
+      })(),
+      sourceCoverageGap: summary.sourceLane !== null && summary.walletCount > 0 && summary.sourceLane.walletsAttempted === 0,
     });
     const activeKeys = new Set(alerts.map((a) => a.alertKey));
     for (const a of alerts) await raiseAlert(a.alertKey, a.severity, a.message, a.kind);
     // Resolve any of THIS cycle's monitored conditions that are no longer active --
     // keeps the dashboard's "currently unresolved" view accurate without a separate
     // sweep job.
-    for (const key of ["venue_discovery_failed:PMUS", "venue_discovery_failed:KALSHI", "lease_lost:PMUS", "lease_lost:KALSHI", "observation_backlog", "source_unhealthy"]) {
+    for (const key of ["venue_discovery_failed:PMUS", "venue_discovery_failed:KALSHI", "lease_lost:PMUS", "lease_lost:KALSHI", "observation_backlog", "source_unhealthy", "settlement_stuck", "source_coverage_gap"]) {
       if (!activeKeys.has(key)) await resolveAlert(key);
     }
 
