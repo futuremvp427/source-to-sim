@@ -38,10 +38,25 @@ function fakeRepo(
   current: ExperimentEpoch | null,
   independentCount = 0,
   soakHealth: { passed: boolean; failedChecks: string[] } = { passed: true, failedChecks: [] },
-): StageRepository & { transitions: { epochId: string; stage: string }[] } {
+  oosClassification: "KILL" | "CONTINUE_RESEARCH" | "NEW_EPOCH_REQUIRED" | "LIVE_PILOT_REVIEW_READY" = "CONTINUE_RESEARCH",
+): StageRepository & {
+  transitions: { epochId: string; stage: string }[];
+  calibrationSnapshots: number;
+  oosSnapshots: number;
+  notifications: { epochId: string; kind: string }[];
+} {
   const transitions: { epochId: string; stage: string }[] = [];
+  const notifications: { epochId: string; kind: string }[] = [];
+  const state = { calibrationSnapshots: 0, oosSnapshots: 0 };
   return {
     transitions,
+    get calibrationSnapshots() {
+      return state.calibrationSnapshots;
+    },
+    get oosSnapshots() {
+      return state.oosSnapshots;
+    },
+    notifications,
     async getCurrentEpoch() {
       return current;
     },
@@ -50,6 +65,18 @@ function fakeRepo(
     },
     async computeSoakHealth() {
       return soakHealth;
+    },
+    async evaluateOosClassification() {
+      return oosClassification;
+    },
+    async persistCalibrationSnapshot() {
+      state.calibrationSnapshots += 1;
+    },
+    async persistFinalOosSnapshot() {
+      state.oosSnapshots += 1;
+    },
+    async notifyMilestone(epochId, kind) {
+      notifications.push({ epochId, kind });
     },
     async transitionStage(epochId, stage) {
       transitions.push({ epochId, stage });
@@ -85,6 +112,7 @@ describe("FINAL BUILD Parts 18-21: evaluateAndApplyStageTransition", () => {
     const repo = fakeRepo(epoch({ stage: "OPERATIONAL_SOAK", soakStartedAtIso: new Date(soakStart).toISOString() }));
     const outcome = await evaluateAndApplyStageTransition(() => now, repo);
     expect(outcome?.nextStage).toBe("CALIBRATION");
+    expect(repo.notifications).toContainEqual({ epochId: "epoch-1", kind: "sports_shadow_soak_passed" });
   });
 
   it("OPERATIONAL_SOAK epoch past 72h with a FAILING health gate transitions to FAILED, never silently to CALIBRATION", async () => {
@@ -94,14 +122,17 @@ describe("FINAL BUILD Parts 18-21: evaluateAndApplyStageTransition", () => {
     const outcome = await evaluateAndApplyStageTransition(() => now, repo);
     expect(outcome?.nextStage).toBe("FAILED");
     expect(outcome?.soakFailedChecks).toEqual(["cycle error rate too high"]);
+    expect(repo.notifications).toContainEqual({ epochId: "epoch-1", kind: "sports_shadow_soak_failed" });
   });
 
-  it("CALIBRATION queries independent-settled-since-calibration-start and transitions once both minimums are met", async () => {
+  it("CALIBRATION queries independent-settled-since-calibration-start, transitions once both minimums are met, and persists+alerts the milestone snapshot exactly once", async () => {
     const calStart = Date.parse("2026-08-01T00:00:00Z");
     const now = calStart + 15 * 24 * 60 * 60 * 1000;
     const repo = fakeRepo(epoch({ stage: "CALIBRATION", calibrationStartedAtIso: new Date(calStart).toISOString() }), 100);
     const outcome = await evaluateAndApplyStageTransition(() => now, repo);
     expect(outcome?.nextStage).toBe("OUT_OF_SAMPLE");
+    expect(repo.calibrationSnapshots).toBe(1);
+    expect(repo.notifications).toContainEqual({ epochId: "epoch-1", kind: "sports_shadow_calibration_100" });
   });
 
   it("CALIBRATION with insufficient independent count stays in place even past the duration minimum", async () => {
@@ -133,5 +164,52 @@ describe("FINAL BUILD Parts 18-21: evaluateAndApplyStageTransition", () => {
     const outcome = await evaluateAndApplyStageTransition(() => Date.now(), repo);
     expect(outcome?.nextStage).toBeNull();
     expect(repo.transitions).toHaveLength(0);
+  });
+});
+
+describe("FINAL BUILD Part 5/8/10: OUT_OF_SAMPLE gate -- classification-gated promotion, snapshot, and milestone alerts", () => {
+  const oosStart = Date.parse("2026-08-01T00:00:00Z");
+  const gateMetNow = oosStart + 15 * 24 * 60 * 60 * 1000;
+
+  it("reaching the sample/duration floor with classification LIVE_PILOT_REVIEW_READY promotes the stage, snapshots, and alerts both the OOS and live-pilot milestones", async () => {
+    const repo = fakeRepo(epoch({ stage: "OUT_OF_SAMPLE", oosStartedAtIso: new Date(oosStart).toISOString() }), 200, undefined, "LIVE_PILOT_REVIEW_READY");
+    const outcome = await evaluateAndApplyStageTransition(() => gateMetNow, repo);
+    expect(outcome?.nextStage).toBe("LIVE_PILOT_REVIEW_READY");
+    expect(repo.oosSnapshots).toBe(1);
+    expect(repo.notifications).toContainEqual({ epochId: "epoch-1", kind: "sports_shadow_oos_300" });
+    expect(repo.notifications).toContainEqual({ epochId: "epoch-1", kind: "sports_shadow_live_pilot_review_ready" });
+  });
+
+  it("reaching the floor with classification KILL transitions to FAILED, still snapshots, but never sends the live-pilot alert", async () => {
+    const repo = fakeRepo(epoch({ stage: "OUT_OF_SAMPLE", oosStartedAtIso: new Date(oosStart).toISOString() }), 200, undefined, "KILL");
+    const outcome = await evaluateAndApplyStageTransition(() => gateMetNow, repo);
+    expect(outcome?.nextStage).toBe("FAILED");
+    expect(repo.oosSnapshots).toBe(1);
+    expect(repo.notifications.some((n) => n.kind === "sports_shadow_live_pilot_review_ready")).toBe(false);
+  });
+
+  it("reaching the floor with classification CONTINUE_RESEARCH stays in OUT_OF_SAMPLE (cannot reach LIVE_PILOT_REVIEW_READY prematurely) but still snapshots the milestone -- 300 total reached is a data fact independent of the promotion verdict", async () => {
+    const repo = fakeRepo(epoch({ stage: "OUT_OF_SAMPLE", oosStartedAtIso: new Date(oosStart).toISOString() }), 200, undefined, "CONTINUE_RESEARCH");
+    const outcome = await evaluateAndApplyStageTransition(() => gateMetNow, repo);
+    expect(outcome?.nextStage).toBeNull();
+    expect(repo.oosSnapshots).toBe(1);
+    expect(repo.notifications).toContainEqual({ epochId: "epoch-1", kind: "sports_shadow_oos_300" });
+  });
+
+  it("below the sample/duration floor: classification is never evaluated (avoids a wasted full-epoch analytics run), no snapshot, no milestone alert, stays in place", async () => {
+    let classificationCalls = 0;
+    const base = fakeRepo(epoch({ stage: "OUT_OF_SAMPLE", oosStartedAtIso: new Date(oosStart).toISOString() }), 50);
+    const repo: StageRepository = {
+      ...base,
+      async evaluateOosClassification() {
+        classificationCalls += 1;
+        return "CONTINUE_RESEARCH";
+      },
+    };
+    const now = oosStart + 1000;
+    const outcome = await evaluateAndApplyStageTransition(() => now, repo);
+    expect(outcome?.nextStage).toBeNull();
+    expect(base.oosSnapshots).toBe(0);
+    expect(classificationCalls).toBe(0);
   });
 });

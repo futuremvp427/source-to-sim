@@ -32,6 +32,16 @@ export type StageTransitionInput = {
   independentSettledSinceOosStart: number;
   /** Part 18's soak success gate (no coverage gap, no corruption, no sustained backlog, etc.) -- evaluated by the caller from telemetry/integrity results, never computed here. */
   soakHealthPassed: boolean;
+  /**
+   * The REAL promotion decision (classification.ts), evaluated by the caller ONLY once
+   * the OOS sample/duration minimums below are already met (an expensive analytics run
+   * every OOS cycle would be wasteful otherwise). null/undefined means "not yet
+   * evaluated this cycle" and is treated identically to CONTINUE_RESEARCH -- reaching
+   * the sample/duration floor is NECESSARY but never sufficient on its own to reach
+   * LIVE_PILOT_REVIEW_READY; the full checklist (positive expectancy, stress survival,
+   * drawdown, liquidity, integrity, confidence, ...) must also pass.
+   */
+  oosClassification?: "KILL" | "CONTINUE_RESEARCH" | "NEW_EPOCH_REQUIRED" | "LIVE_PILOT_REVIEW_READY" | null;
 };
 
 export type StageTransition = {
@@ -77,7 +87,14 @@ export function evaluateStageTransition(input: StageTransitionInput): StageTrans
       const elapsed = nowMs - (epoch.oosStartedAtMs ?? nowMs);
       const durationOk = elapsed >= OOS_MIN_DURATION_MS;
       const countOk = input.independentSettledSinceOosStart >= OOS_MIN_INDEPENDENT_EPISODES;
-      if (durationOk && countOk) return { nextStage: "LIVE_PILOT_REVIEW_READY", reason: "OOS minimums met (>=14 additional days AND >=200 additional independent settled episodes)" };
+      if (durationOk && countOk) {
+        // Reaching the sample/duration floor is necessary but NEVER sufficient on its
+        // own -- the mission's own explicit rule. Only the real classification decision
+        // (computed by the caller from actual analytics) may promote or kill from here.
+        if (input.oosClassification === "LIVE_PILOT_REVIEW_READY") return { nextStage: "LIVE_PILOT_REVIEW_READY", reason: "OOS minimums met AND the full promotion checklist passed" };
+        if (input.oosClassification === "KILL") return { nextStage: "FAILED", reason: "OOS minimums met but classification is KILL (net expectancy not positive)" };
+        return { nextStage: null, reason: `OOS minimums met but classification is ${input.oosClassification ?? "not yet evaluated"} -- continuing research, not yet promotable` };
+      }
       return {
         nextStage: null,
         reason: `OOS in progress: ${input.independentSettledSinceOosStart}/${OOS_MIN_INDEPENDENT_EPISODES} independent, ${Math.round(elapsed / 86_400_000)}/${OOS_MIN_DURATION_MS / 86_400_000} days`,

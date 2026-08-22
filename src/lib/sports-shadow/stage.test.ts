@@ -99,15 +99,42 @@ describe("FINAL BUILD Parts 18-21: evaluateStageTransition", () => {
     expect(t.nextStage).toBeNull();
   });
 
-  it("OUT_OF_SAMPLE transitions to LIVE_PILOT_REVIEW_READY once its own minimums are met", () => {
+  it("OUT_OF_SAMPLE transitions to LIVE_PILOT_REVIEW_READY once its own minimums are met AND the real classification says so", () => {
     const t = evaluateStageTransition({
       epoch: epoch({ stage: "OUT_OF_SAMPLE", oosStartedAtMs: NOW - OOS_MIN_DURATION_MS - 1 }),
       nowMs: NOW,
       independentSettledSinceCalibrationStart: 0,
       independentSettledSinceOosStart: OOS_MIN_INDEPENDENT_EPISODES,
       soakHealthPassed: true,
+      oosClassification: "LIVE_PILOT_REVIEW_READY",
     });
     expect(t.nextStage).toBe("LIVE_PILOT_REVIEW_READY");
+  });
+
+  it("OUT_OF_SAMPLE minimums met but classification KILL transitions to FAILED, never silently to LIVE_PILOT_REVIEW_READY", () => {
+    const t = evaluateStageTransition({
+      epoch: epoch({ stage: "OUT_OF_SAMPLE", oosStartedAtMs: NOW - OOS_MIN_DURATION_MS - 1 }),
+      nowMs: NOW,
+      independentSettledSinceCalibrationStart: 0,
+      independentSettledSinceOosStart: OOS_MIN_INDEPENDENT_EPISODES,
+      soakHealthPassed: true,
+      oosClassification: "KILL",
+    });
+    expect(t.nextStage).toBe("FAILED");
+  });
+
+  it("OUT_OF_SAMPLE minimums met but reaching the floor alone (no classification, or CONTINUE_RESEARCH) is NEVER sufficient to reach LIVE_PILOT_REVIEW_READY -- the mission's own explicit rule", () => {
+    const base = {
+      epoch: epoch({ stage: "OUT_OF_SAMPLE" as const, oosStartedAtMs: NOW - OOS_MIN_DURATION_MS - 1 }),
+      nowMs: NOW,
+      independentSettledSinceCalibrationStart: 0,
+      independentSettledSinceOosStart: OOS_MIN_INDEPENDENT_EPISODES,
+      soakHealthPassed: true,
+    };
+    expect(evaluateStageTransition({ ...base }).nextStage).toBeNull();
+    expect(evaluateStageTransition({ ...base, oosClassification: null }).nextStage).toBeNull();
+    expect(evaluateStageTransition({ ...base, oosClassification: "CONTINUE_RESEARCH" }).nextStage).toBeNull();
+    expect(evaluateStageTransition({ ...base, oosClassification: "NEW_EPOCH_REQUIRED" }).nextStage).toBeNull();
   });
 
   it("terminal stages (LIVE_PILOT_REVIEW_READY, FAILED, PAUSED) never auto-transition -- requires explicit human action", () => {
