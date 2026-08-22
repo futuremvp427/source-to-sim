@@ -48,6 +48,121 @@ function CapabilityRow({ label, capability }: { label: string; capability: { dis
   );
 }
 
+function usd(n: number): string {
+  return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 });
+}
+
+function pct(n: number): string {
+  return `${(n * 100).toFixed(1)}%`;
+}
+
+function ClassificationBadge({ label }: { label: string }) {
+  const tone = label === "LIVE_PILOT_REVIEW_READY" ? "default" : label === "KILL" ? "destructive" : label === "CANDIDATE_FOR_OOS" || label === "INTERESTING" ? "secondary" : "outline";
+  return <Badge variant={tone}>{label}</Badge>;
+}
+
+function ResultsSection({ results }: { results: NonNullable<import("@/lib/sports-shadow/dashboard.server").DashboardResults> }) {
+  const { fullEpoch, calibration, oos } = results;
+  const core = fullEpoch.analytics.core;
+  const risk = fullEpoch.analytics.risk;
+
+  return (
+    <>
+      <Card className="sm:col-span-2">
+        <CardHeader>
+          <CardTitle className="text-base">Results — Whole Epoch (declared strategy: ${fullEpoch.notionalTierUsd})</CardTitle>
+          <CardDescription>Every number below is paper-simulated. No live orders, no funds.</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-1 text-sm sm:grid-cols-2">
+          <div>Raw episodes: {core.rawEpisodeCount} · Independent: {core.independentEpisodeCount}</div>
+          <div>Settled: {core.settledCount} ({core.wins}W / {core.losses}L / {core.pushes}P)</div>
+          <div>Net P&amp;L: <span className="font-medium">{usd(core.netPnlUsd)}</span> (gross {usd(core.grossPnlUsd)}, fees {usd(core.feesUsd)})</div>
+          <div>ROI: {pct(core.roi)}</div>
+          <div>Expectancy / independent episode: {usd(core.expectancyPerIndependentEpisode)}</div>
+          <div>Bootstrap 90% CI: [{usd(fullEpoch.bootstrap.lowerUsd)}, {usd(fullEpoch.bootstrap.upperUsd)}] (P(positive) = {pct(fullEpoch.bootstrap.probabilityPositive)})</div>
+          <div>Baseline ({fullEpoch.baseline.version}): {usd(fullEpoch.baseline.baselineExpectancyPerEpisodeUsd)}/episode — edge {usd(fullEpoch.baseline.edgeUsd)}</div>
+          <div>Max drawdown: {usd(risk.maxDrawdownUsd)} (peak {usd(risk.peakEquityUsd)}, {risk.equityCurve.length} settled points)</div>
+          <div>Largest win / loss: {usd(risk.largestWinUsd)} / {usd(risk.largestLossUsd)} (concentration {pct(risk.profitConcentration)})</div>
+        </CardContent>
+      </Card>
+
+      <Card className="sm:col-span-2">
+        <CardHeader>
+          <CardTitle className="text-base">Robustness</CardTitle>
+          <CardDescription>The headline result above is never a retroactively selected subgroup — these are stress tests applied on top of it.</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-1 text-sm sm:grid-cols-2">
+          <div>Top 5 wins removed: {usd(fullEpoch.robustness.top5WinsRemoved.remaining.netPnlUsd)} (removed {usd(fullEpoch.robustness.top5WinsRemoved.removedNetPnlUsd)})</div>
+          <div>Largest win removed: {usd(fullEpoch.robustness.largestWinRemoved.remaining.netPnlUsd)}</div>
+          <div>Largest loss removed: {usd(fullEpoch.robustness.largestLossRemoved.remaining.netPnlUsd)}</div>
+          <div>+1¢ adverse stress: {usd(fullEpoch.robustness.oneCentAdverseStress.netPnlUsd)}</div>
+          <div>+2¢ adverse stress: {usd(fullEpoch.robustness.twoCentAdverseStress.netPnlUsd)}</div>
+          <div>First half / second half: {usd(fullEpoch.robustness.firstHalfSecondHalf.firstHalf.netPnlUsd)} / {usd(fullEpoch.robustness.firstHalfSecondHalf.secondHalf.netPnlUsd)}</div>
+          <div>Wallet concentration (HHI): {fullEpoch.robustness.walletConcentration.herfindahlIndex.toFixed(2)} ({fullEpoch.robustness.walletConcentration.walletCount} wallets, top {pct(fullEpoch.robustness.walletConcentration.topWalletShareOfNetPnl)})</div>
+          <div className="sm:col-span-2">
+            Size-tier capacity: {fullEpoch.robustness.sizeTierCapacity.map((t) => `$${t.key}: ${usd(t.metrics.netPnlUsd)}`).join(" · ")}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="sm:col-span-2">
+        <CardHeader>
+          <CardTitle className="text-base">Execution &amp; Breakdowns</CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-1 text-sm sm:grid-cols-2">
+          <div>Match rate: {pct(fullEpoch.analytics.execution.matchRate)} · Reject: {pct(fullEpoch.analytics.execution.rejectRate)} · Liquidity failure: {pct(fullEpoch.analytics.execution.liquidityFailureRate)}</div>
+          <div>Avg spread: {fullEpoch.analytics.execution.averageSpread?.toFixed(4) ?? "n/a"} · Avg slippage: {fullEpoch.analytics.execution.averageSlippageCents?.toFixed(2) ?? "n/a"}¢</div>
+          <div className="sm:col-span-2">By venue: {fullEpoch.analytics.breakdowns.byChosenVenue.map((b) => `${b.key}: ${usd(b.metrics.netPnlUsd)}`).join(" · ") || "n/a"}</div>
+          <div className="sm:col-span-2">By bet type: {fullEpoch.analytics.breakdowns.byBetType.map((b) => `${b.key}: ${usd(b.metrics.netPnlUsd)}`).join(" · ") || "n/a"}</div>
+          <div className="sm:col-span-2">By wallet: {fullEpoch.analytics.breakdowns.byWallet.map((b) => `${b.key.slice(0, 8)}…: ${usd(b.metrics.netPnlUsd)}`).join(" · ") || "n/a"}</div>
+        </CardContent>
+      </Card>
+
+      {calibration ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between text-base">
+              Calibration <ClassificationBadge label={calibration.classification} />
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1 text-sm">
+            <div>Independent settled: {calibration.report.analytics.core.independentSettledCount}</div>
+            <div>Net P&amp;L: {usd(calibration.report.analytics.core.netPnlUsd)} · Expectancy: {usd(calibration.report.analytics.core.expectancyPerIndependentEpisode)}</div>
+            <div>P(positive): {pct(calibration.report.bootstrap.probabilityPositive)}</div>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {oos ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between text-base">
+              Out-of-Sample <ClassificationBadge label={oos.classification} />
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1 text-sm">
+            <div>Independent settled: {oos.report.analytics.core.independentSettledCount}</div>
+            <div>Net P&amp;L: {usd(oos.report.analytics.core.netPnlUsd)} · Expectancy: {usd(oos.report.analytics.core.expectancyPerIndependentEpisode)}</div>
+            <div>P(positive): {pct(oos.report.bootstrap.probabilityPositive)}</div>
+            {oos.gate.ready ? (
+              <div className="font-medium text-foreground">LIVE_PILOT_REVIEW_READY — research classification only, no trading is enabled by this label.</div>
+            ) : (
+              <div>
+                <div className="font-medium">Blocked from LIVE_PILOT_REVIEW_READY:</div>
+                <ul className="list-inside list-disc text-muted-foreground">
+                  {oos.gate.blockedReasons.map((r) => (
+                    <li key={r}>{r}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      ) : null}
+    </>
+  );
+}
+
 function SportsShadowDashboard() {
   const fetchDashboard = useServerFn(getSportsShadowDashboard);
   const { data, isLoading, error } = useQuery({
@@ -98,7 +213,7 @@ function SportsShadowDashboard() {
               <CardDescription>Independent (clustered) settled episodes — never raw fill count.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-1 text-sm">
-              <div>Raw episodes (last 500): {data.milestones.rawEpisodeCount}</div>
+              <div>Raw episodes (full epoch): {data.milestones.rawEpisodeCount}</div>
               <div>Independent clusters: {data.milestones.independentEpisodeCount}</div>
               <div className="font-medium">Independent settled: {data.milestones.settledIndependentCount}</div>
               <div className="text-muted-foreground">
@@ -157,6 +272,8 @@ function SportsShadowDashboard() {
               )}
             </CardContent>
           </Card>
+
+          {data.results ? <ResultsSection results={data.results} /> : null}
         </div>
       ) : null}
 

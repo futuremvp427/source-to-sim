@@ -6,8 +6,13 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import type { EpisodeAnalysisReport } from "./analytics.server";
+import { computeEpisodeAnalysisReport, fetchAllEpisodeOutcomes } from "./analytics.server";
+import type { CalibrationClassification, LivePilotGateResult, OosClassification } from "./classification";
+import { evaluateCalibrationClassification, evaluateOosClassification } from "./classification.server";
 import { getEpochCounters, nextMilestoneFor } from "./counters.server";
 import type { ExperimentStage } from "./epoch";
+import { OOS_MIN_DURATION_MS, OOS_MIN_INDEPENDENT_EPISODES } from "./stage";
 import type { Venue } from "./types";
 
 export type DashboardEpochSummary = {
@@ -18,6 +23,8 @@ export type DashboardEpochSummary = {
   stageEnteredAtIso: string;
   gitSha: string;
   configHash: string;
+  calibrationStartedAtIso: string | null;
+  oosStartedAtIso: string | null;
 } | null;
 
 export type DashboardVenueCapability = { venue: Venue; discoveryAvailable: boolean; orderbookAvailable: boolean; checkedAtIso: string } | null;
@@ -33,6 +40,13 @@ export type DashboardMilestoneProgress = {
 
 export type DashboardIntegrityStatus = { lastRunIso: string | null; passed: boolean | null; checksFailed: number };
 
+export type DashboardResults = {
+  /** Whole-epoch declared-strategy analysis -- the headline numbers (Part 9). */
+  fullEpoch: EpisodeAnalysisReport;
+  calibration: { classification: CalibrationClassification; report: EpisodeAnalysisReport } | null;
+  oos: { classification: OosClassification; gate: LivePilotGateResult; report: EpisodeAnalysisReport } | null;
+} | null;
+
 export type SportsShadowDashboardData = {
   epoch: DashboardEpochSummary;
   pmusCapability: DashboardVenueCapability;
@@ -41,6 +55,7 @@ export type SportsShadowDashboardData = {
   milestones: DashboardMilestoneProgress;
   integrity: DashboardIntegrityStatus;
   unresolvedAlertCount: number;
+  results: DashboardResults;
 };
 
 const WALLET_SUMMARY_LIMIT = 10;
@@ -96,6 +111,8 @@ export async function loadSportsShadowDashboard(): Promise<SportsShadowDashboard
     stage_entered_at: string;
     git_sha: string;
     config_hash: string;
+    calibration_started_at: string | null;
+    oos_started_at: string | null;
   } | null;
 
   const epoch: DashboardEpochSummary = epochRow
@@ -107,6 +124,8 @@ export async function loadSportsShadowDashboard(): Promise<SportsShadowDashboard
         stageEnteredAtIso: epochRow.stage_entered_at,
         gitSha: epochRow.git_sha,
         configHash: epochRow.config_hash,
+        calibrationStartedAtIso: epochRow.calibration_started_at,
+        oosStartedAtIso: epochRow.oos_started_at,
       }
     : null;
 
@@ -143,6 +162,30 @@ export async function loadSportsShadowDashboard(): Promise<SportsShadowDashboard
     ? { lastRunIso: integrityRow.run_at, passed: integrityRow.passed, checksFailed: integrityRow.checks_failed }
     : { lastRunIso: null, passed: null, checksFailed: 0 };
 
+  // FINAL BUILD Part 9: RESULTS -- computed live from the complete, unbounded-by-volume
+  // episode-outcome fetch (never the 500-row-bounded signalRows above). This is a
+  // research dashboard read, not a hot path (30s client poll interval) -- recomputing on
+  // every load keeps it always current rather than depending on a milestone snapshot
+  // that may not exist yet for this epoch.
+  const results: DashboardResults = epoch
+    ? await (async () => {
+        const allRows = await fetchAllEpisodeOutcomes(epoch.id);
+        const fullEpoch = computeEpisodeAnalysisReport(allRows, { sinceIso: null, untilIso: null });
+
+        const calibration = epoch.calibrationStartedAtIso ? await evaluateCalibrationClassification(epoch.id, epoch.calibrationStartedAtIso) : null;
+
+        let oos: { classification: OosClassification; gate: LivePilotGateResult; report: EpisodeAnalysisReport } | null = null;
+        if (epoch.oosStartedAtIso) {
+          const counters = await getEpochCounters(epoch.id);
+          const durationOk = Date.now() - Date.parse(epoch.oosStartedAtIso) >= OOS_MIN_DURATION_MS;
+          const countOk = counters.oosIndependentSettledCount >= OOS_MIN_INDEPENDENT_EPISODES;
+          oos = await evaluateOosClassification(epoch.id, epoch.oosStartedAtIso, durationOk && countOk);
+        }
+
+        return { fullEpoch, calibration, oos };
+      })()
+    : null;
+
   return {
     epoch,
     pmusCapability: toCapability(pmusCapRes.data),
@@ -151,5 +194,6 @@ export async function loadSportsShadowDashboard(): Promise<SportsShadowDashboard
     milestones,
     integrity,
     unresolvedAlertCount: alertsRes.count ?? 0,
+    results,
   };
 }
