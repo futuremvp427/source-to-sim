@@ -6,32 +6,24 @@
  * onCycleComplete) -- a failure here must never break the cycle it was evaluated from.
  */
 
-import { supabaseAdmin } from "@/integrations/supabase/client.server";
-
 import type { ExperimentEpoch } from "./epoch";
 import { supabaseEpochRepository } from "./epoch.server";
 import { evaluateStageTransition, type StageEpochState } from "./stage";
 
 export type StageRepository = {
   getCurrentEpoch(): Promise<ExperimentEpoch | null>;
-  /** Independent (clustered) episodes SETTLED since the given ISO timestamp -- reuses cluster_key already persisted at signal-creation time (Part 16), never recomputed here. */
-  countIndependentSettledSince(sinceIso: string): Promise<number>;
+  /** Independent (clustered) episodes SETTLED since either the epoch's calibration_started_at or oos_started_at, whichever `stage` names -- backed by the SAME authoritative get_sports_shadow_epoch_counters RPC the dashboard uses (Part 7), so stage transitions and the dashboard's milestone counts can never silently disagree, and neither is bounded to a recent-row window. */
+  countIndependentSettledSince(epochId: string, stage: "CALIBRATION" | "OUT_OF_SAMPLE"): Promise<number>;
   transitionStage(epochId: string, stage: StageEpochState["stage"]): Promise<void>;
 };
 
 export const supabaseStageRepository: StageRepository = {
   getCurrentEpoch: () => supabaseEpochRepository.getCurrentEpoch(),
 
-  async countIndependentSettledSince(sinceIso) {
-    const { data, error } = await supabaseAdmin
-      .from("sports_shadow_signals" as never)
-      .select("cluster_key, source_wallet, created_at")
-      .gte("created_at", sinceIso)
-      .in("status", ["SETTLED_WIN", "SETTLED_LOSS", "SETTLED_PUSH"]);
-    if (error) throw new Error(error.message);
-    const rows = (data ?? []) as unknown as { cluster_key: string | null; source_wallet: string; created_at: string }[];
-    const clusters = new Set(rows.map((r) => r.cluster_key ?? `__unclustered_${r.source_wallet}_${r.created_at}`));
-    return clusters.size;
+  async countIndependentSettledSince(epochId, stage) {
+    const { getEpochCounters } = await import("./counters.server");
+    const counters = await getEpochCounters(epochId);
+    return stage === "CALIBRATION" ? counters.calibrationIndependentSettledCount : counters.oosIndependentSettledCount;
   },
 
   transitionStage: (epochId, stage) => supabaseEpochRepository.transitionStage(epochId, stage),
@@ -62,8 +54,8 @@ export async function evaluateAndApplyStageTransition(soakHealthPassed: boolean,
   // Only the counter relevant to the CURRENT stage is worth a real query -- avoids an
   // unnecessary DB round trip for the common case (still in soak, or terminal).
   const independentSettledSinceCalibrationStart =
-    epoch.stage === "CALIBRATION" && epoch.calibrationStartedAtIso ? await repo.countIndependentSettledSince(epoch.calibrationStartedAtIso) : 0;
-  const independentSettledSinceOosStart = epoch.stage === "OUT_OF_SAMPLE" && epoch.oosStartedAtIso ? await repo.countIndependentSettledSince(epoch.oosStartedAtIso) : 0;
+    epoch.stage === "CALIBRATION" && epoch.calibrationStartedAtIso ? await repo.countIndependentSettledSince(epoch.id, "CALIBRATION") : 0;
+  const independentSettledSinceOosStart = epoch.stage === "OUT_OF_SAMPLE" && epoch.oosStartedAtIso ? await repo.countIndependentSettledSince(epoch.id, "OUT_OF_SAMPLE") : 0;
 
   const transition = evaluateStageTransition({
     epoch: epochState,

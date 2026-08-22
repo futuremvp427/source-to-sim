@@ -22,6 +22,13 @@ export type SportsShadowConfig = {
   wallets: string[];
   /** Epoch ms. Null when disabled (irrelevant); always a finite number when enabled. */
   goLiveAtMs: number | null;
+  /**
+   * FINAL BUILD Part 17/analytics: attached to every experiment epoch created from this
+   * config (epoch.server.ts's ensureCurrentEpoch) so a milestone snapshot can always name
+   * the exact code revision it was produced under. Metadata only -- never fails config
+   * validation when absent, unlike wallets/goLiveAt which are safety-relevant.
+   */
+  gitSha: string;
 };
 
 export type ConfigResult = { ok: true; config: SportsShadowConfig } | { ok: false; reason: string };
@@ -92,8 +99,10 @@ export function parseSportsShadowConfig(env: Record<string, string | undefined>)
   const enabledRaw = (env["SPORTS_SHADOW_ENABLED"] ?? "").trim().toLowerCase();
   const enabled = enabledRaw === "true" || enabledRaw === "1";
 
+  const gitSha = (env["SPORTS_SHADOW_GIT_SHA"] ?? "").trim() || "unknown";
+
   if (!enabled) {
-    return { ok: true, config: { enabled: false, wallets: [], goLiveAtMs: null } };
+    return { ok: true, config: { enabled: false, wallets: [], goLiveAtMs: null, gitSha } };
   }
 
   const walletsRaw = env["SPORTS_SHADOW_WALLETS"] ?? "";
@@ -106,7 +115,7 @@ export function parseSportsShadowConfig(env: Record<string, string | undefined>)
 
   return {
     ok: true,
-    config: { enabled: true, wallets: walletsResult.wallets, goLiveAtMs: goLiveResult.goLiveAtMs },
+    config: { enabled: true, wallets: walletsResult.wallets, goLiveAtMs: goLiveResult.goLiveAtMs, gitSha },
   };
 }
 

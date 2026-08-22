@@ -44,6 +44,7 @@ import {
   type LeaseCheckpoint,
   type SportsLeaseRepository,
 } from "./sports-lease.server";
+import { ensureCurrentEpoch } from "./epoch.server";
 import { pollSportsShadowWallet, supabasePollRepository, type WalletPollDeps, type WalletPollResult } from "./source-poll.server";
 import type { BetType, Venue } from "./types";
 import { PENDING_BATCH_SIZE, budgetExceeded, detectedAtMsFromSignal, nextRotationIndex, rotateWallets, toSourceSignal, type PendingSignal } from "./worker";
@@ -299,6 +300,8 @@ export type SportsShadowWorkerDeps = {
   persistVenueMatch: typeof persistVenueMatch;
   takeDueSportsShadowObservations: typeof takeDueSportsShadowObservations;
   pollSportsShadowWallet: typeof pollSportsShadowWallet;
+  /** FINAL BUILD Part 17/analytics: resolves (creating if necessary) the current experiment epoch once per cycle so every new episode this cycle can be attributed to it -- overridable so worker.server.test.ts's existing tests never touch real Supabase. */
+  ensureCurrentEpoch: typeof ensureCurrentEpoch;
   now: () => number;
   /**
    * FINAL BUILD Parts 25/27: fired once at the end of every cycle (enabled or not) with
@@ -360,6 +363,7 @@ const defaultDeps: SportsShadowWorkerDeps = {
   persistVenueMatch,
   takeDueSportsShadowObservations,
   pollSportsShadowWallet,
+  ensureCurrentEpoch,
   now: () => Date.now(),
   onCycleComplete: defaultOnCycleComplete,
 };
@@ -689,6 +693,19 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
   }
   const orderedWallets = rotateWallets(config.wallets, startIndex);
 
+  // FINAL BUILD Part 17/analytics: resolved ONCE per cycle (not per wallet) -- cheap in
+  // the common case (one SELECT, no write unless config/versions actually drifted) and
+  // every episode created THIS cycle shares the identical epoch attribution. A failure
+  // here is best-effort: episodes still get created (untagged, epochId null) rather than
+  // blocking source-signal collection on epoch bookkeeping.
+  let epochId: string | null = null;
+  try {
+    const epoch = await d.ensureCurrentEpoch(config.wallets, config.goLiveAtMs ?? d.now(), config.gitSha);
+    epochId = epoch.id;
+  } catch (err) {
+    errors.push(`ensureCurrentEpoch failed: ${err instanceof Error ? err.message : "unknown error"}`);
+  }
+
   const walletSummaries: WalletSummary[] = [];
   let newSignalsCreated = 0;
   let walletsAttempted = 0;
@@ -712,7 +729,7 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
     // latency fix already applied throughout source-poll.server.ts.
     if (budgetExceeded(d.now() - laneStartMs, SOURCE_LANE_BUDGET_MS)) break;
     try {
-      const result: WalletPollResult = await d.pollSportsShadowWallet(wallet, config.goLiveAtMs, { ...d.sourcePollDeps, checkpointLease: checkpoint }, laneDeadlineAtMs);
+      const result: WalletPollResult = await d.pollSportsShadowWallet(wallet, config.goLiveAtMs, { ...d.sourcePollDeps, checkpointLease: checkpoint, epochId }, laneDeadlineAtMs);
       newSignalsCreated += result.newSignals.length;
       walletSummaries.push({
         wallet: result.wallet,

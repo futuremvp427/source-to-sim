@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
 import type { SportsShadowConfig } from "./config";
+import type { ExperimentEpoch } from "./epoch";
 import type { PmusCandidate } from "./pmus";
 import type { KalshiCandidate } from "./kalshi";
 import type { VenueMatchResult } from "./resolver";
@@ -28,7 +29,34 @@ const WALLET_B = "0x32ed517a571c01b6e9adecf61ba81ca48ff2f960";
 const WALLET_C = "0x5268527977f700f9bf9b6d5cd843859e4e70135d";
 
 function enabledConfig(overrides: Partial<SportsShadowConfig> = {}): SportsShadowConfig {
-  return { enabled: true, wallets: [WALLET_A], goLiveAtMs: 1_700_000_000_000, ...overrides };
+  return { enabled: true, wallets: [WALLET_A], goLiveAtMs: 1_700_000_000_000, gitSha: "test-sha", ...overrides };
+}
+
+function fakeEpoch(goLiveAtMs: number): ExperimentEpoch {
+  return {
+    id: "epoch-fake",
+    createdAtIso: new Date(goLiveAtMs).toISOString(),
+    goLiveAtIso: new Date(goLiveAtMs).toISOString(),
+    walletCohort: [WALLET_A],
+    gitSha: "test-sha",
+    configHash: "test-hash",
+    versions: {
+      classifierVersion: "c1",
+      episodeVersion: "e1",
+      resolverVersion: "r1",
+      routerVersion: "rt1",
+      pmusFeeModelVersion: "pf1",
+      kalshiFeeModelVersion: "kf1",
+      executionSimulatorVersion: "x1",
+      settlementVersion: "s1",
+    },
+    stage: "OPERATIONAL_SOAK",
+    stageEnteredAtIso: new Date(goLiveAtMs).toISOString(),
+    soakStartedAtIso: new Date(goLiveAtMs).toISOString(),
+    calibrationStartedAtIso: null,
+    oosStartedAtIso: null,
+    frozenAtIso: null,
+  };
 }
 
 /** In-memory lease repo mirroring the real RPC's CAS semantics (shared shape with sports-lease.server.test.ts's fake). */
@@ -169,6 +197,7 @@ function baseDeps(overrides: Partial<SportsShadowWorkerDeps> = {}): Partial<Spor
     discoverPmus: vi.fn(async () => [] as PmusCandidate[]),
     discoverKalshi: vi.fn(async () => [] as KalshiCandidate[]),
     persistVenueMatch: vi.fn(async () => ({ matchId: "match-1", scheduled: 0, downgradeSkipped: false })) as unknown as SportsShadowWorkerDeps["persistVenueMatch"],
+    ensureCurrentEpoch: vi.fn(async (_wallets: readonly string[], goLiveAtMs: number) => fakeEpoch(goLiveAtMs)) as unknown as SportsShadowWorkerDeps["ensureCurrentEpoch"],
     now: () => 1_700_000_100_000,
     ...overrides,
   };
@@ -179,7 +208,7 @@ describe("runSportsShadowCycle — disabled config", () => {
     const pollSportsShadowWallet = vi.fn();
     const takeDueSportsShadowObservations = vi.fn();
     const summary = await runSportsShadowCycle(
-      { enabled: false, wallets: [], goLiveAtMs: null },
+      { enabled: false, wallets: [], goLiveAtMs: null, gitSha: "test-sha" },
       baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never, takeDueSportsShadowObservations: takeDueSportsShadowObservations as never }),
     );
     expect(summary.configEnabled).toBe(false);
@@ -346,6 +375,35 @@ describe("runSportsShadowCycle — wallet polling (fixed order)", () => {
     const pollSportsShadowWallet = vi.fn(async (wallet: string) => emptyWalletResult(wallet, { orphanedFillsRecovered: 3 }));
     const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never }));
     expect(summary.sourceLane?.walletSummaries[0]?.orphanedFillsRecovered).toBe(3);
+  });
+});
+
+describe("runSportsShadowCycle — epoch attribution (repository-completion pass)", () => {
+  it("resolves the current epoch once per cycle and threads its id into every wallet's poll deps so new episodes are attributed to it", async () => {
+    const ensureCurrentEpoch = vi.fn(async (_wallets: readonly string[], goLiveAtMs: number) => fakeEpoch(goLiveAtMs));
+    const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, deps: { epochId: string | null }) => emptyWalletResult(wallet));
+    await runSportsShadowCycle(
+      enabledConfig({ wallets: [WALLET_A, WALLET_B] }),
+      baseDeps({ ensureCurrentEpoch: ensureCurrentEpoch as never, pollSportsShadowWallet: pollSportsShadowWallet as never }),
+    );
+    expect(ensureCurrentEpoch).toHaveBeenCalledTimes(1);
+    for (const call of pollSportsShadowWallet.mock.calls) {
+      expect(call[2].epochId).toBe("epoch-fake");
+    }
+  });
+
+  it("a failed ensureCurrentEpoch is recorded as a cycle error but never blocks wallet polling -- episodes still get created (epochId null) rather than data collection stalling on epoch bookkeeping", async () => {
+    const ensureCurrentEpoch = vi.fn(async () => {
+      throw new Error("epoch table unreachable");
+    });
+    const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, deps: { epochId: string | null }) => emptyWalletResult(wallet));
+    const summary = await runSportsShadowCycle(
+      enabledConfig({ wallets: [WALLET_A] }),
+      baseDeps({ ensureCurrentEpoch: ensureCurrentEpoch as never, pollSportsShadowWallet: pollSportsShadowWallet as never }),
+    );
+    expect(summary.errors.some((e) => e.includes("ensureCurrentEpoch failed"))).toBe(true);
+    expect(pollSportsShadowWallet).toHaveBeenCalledTimes(1);
+    expect(pollSportsShadowWallet.mock.calls[0]?.[2].epochId).toBeNull();
   });
 });
 
@@ -1374,7 +1432,7 @@ describe("FINAL BUILD Parts 25/27: onCycleComplete telemetry/alert hook", () => 
 
   it("is NEVER called when the config is disabled -- no telemetry/alert side effects from a disabled cycle", async () => {
     const onCycleComplete = vi.fn(async () => {});
-    await runSportsShadowCycle({ enabled: false, wallets: [], goLiveAtMs: null }, baseDeps({ onCycleComplete }));
+    await runSportsShadowCycle({ enabled: false, wallets: [], goLiveAtMs: null, gitSha: "test-sha" }, baseDeps({ onCycleComplete }));
     expect(onCycleComplete).not.toHaveBeenCalled();
   });
 

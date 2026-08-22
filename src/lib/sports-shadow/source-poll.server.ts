@@ -298,6 +298,8 @@ export type NewSignalRow = {
   sourceEventSlug: string | null;
   sourceMarketSlug: string | null;
   sourceOutcome: string | null;
+  /** FINAL BUILD Part 17/analytics: the current experiment epoch at insert time, or null when ensureCurrentEpoch failed this cycle (best-effort -- collection must never block on epoch bookkeeping). */
+  experimentEpochId: string | null;
 };
 
 /** A durably-persisted fill whose downstream (classification + episode) processing has not yet safely completed. Reconstructed entirely from already-stored columns — never re-fetched from the source API. */
@@ -641,6 +643,7 @@ export const supabasePollRepository: PollRepository = {
       p_scheduled_start_at: row.scheduledStartAt,
       p_away_team: row.awayTeam,
       p_home_team: row.homeTeam,
+      p_experiment_epoch_id: row.experimentEpochId,
       p_bet_type: row.betType,
       p_selected_side: row.selectedSide,
       p_line: row.line,
@@ -718,6 +721,8 @@ export type WalletPollDeps = {
   now: () => number;
   /** Task 12F / P1-G: checked between trade pages and before each pending fill's downstream write so this poll can never continue non-idempotent episode mutations after its caller's source lease has been lost. Defaults to always-true for any caller not exercising lease-loss behavior. */
   checkpointLease: LeaseCheckpoint;
+  /** FINAL BUILD Part 17/analytics: the current experiment epoch, resolved once per cycle by the caller (worker.server.ts's runSourceLane) -- null when ensureCurrentEpoch failed this cycle. Every newly-created episode is tagged with this so per-epoch analytics/counters can scope to it. */
+  epochId: string | null;
 };
 
 const defaultWalletPollDeps: WalletPollDeps = {
@@ -726,6 +731,7 @@ const defaultWalletPollDeps: WalletPollDeps = {
   fetchSourceMarketMetadata,
   now: () => Date.now(),
   checkpointLease: NO_OP_LEASE_CHECKPOINT,
+  epochId: null,
 };
 
 export type NewSignalSummary = {
@@ -1735,6 +1741,7 @@ export async function pollSportsShadowWallet(
       sourceEventSlug: metadata.eventSlug,
       sourceMarketSlug: metadata.marketSlug,
       sourceOutcome: fill.outcome,
+      experimentEpochId: d.epochId,
     };
     // Task 13G / P1-R: CHECK BUDGET immediately before this mutating write too -- see the
     // identical comment on the SELL_RECORDED branch above.

@@ -6,6 +6,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { getEpochCounters, nextMilestoneFor } from "./counters.server";
 import type { ExperimentStage } from "./epoch";
 import type { Venue } from "./types";
 
@@ -115,8 +116,27 @@ export async function loadSportsShadowDashboard(): Promise<SportsShadowDashboard
   }
 
   const signalRows = (signalsRes.data ?? []) as unknown as DashboardSignalRow[];
+  // Recent-activity view only (bounded to 500) -- NOT the authoritative milestone
+  // counter, which would silently under-count once the epoch exceeds this window. See
+  // milestones below.
   const wallets = summarizeWallets(signalRows);
-  const milestones = computeMilestoneProgress(signalRows);
+
+  // FINAL BUILD Part 7: authoritative, unbounded-by-volume milestone counts via an
+  // indexed SQL aggregate (get_sports_shadow_epoch_counters) -- correct at any epoch
+  // size, while this dashboard read itself stays a single bounded RPC call. Falls back
+  // to the bounded-signal-rows computation only when there is no current epoch at all
+  // (nothing to count either way).
+  const milestones: DashboardMilestoneProgress = epoch
+    ? await (async () => {
+        const counters = await getEpochCounters(epoch.id);
+        return {
+          rawEpisodeCount: counters.rawEpisodeCount,
+          independentEpisodeCount: counters.independentEpisodeCount,
+          settledIndependentCount: counters.settledIndependentCount,
+          nextMilestone: nextMilestoneFor(counters),
+        };
+      })()
+    : computeMilestoneProgress(signalRows);
 
   const integrityRow = integrityRes.data as unknown as { run_at: string; passed: boolean; checks_failed: number } | null;
   const integrity: DashboardIntegrityStatus = integrityRow

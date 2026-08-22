@@ -25,7 +25,7 @@ BEGIN
   -- denied, service_role allowed -- real execution attempt, not just catalog inspection.
   ------------------------------------------------------------------
   -- FINAL BUILD Part 16: signature grew a trailing DEFAULT-valued p_cluster_key param.
-  v_oid := 'public.insert_sports_shadow_episode(uuid, text, text, text, text, text, text, text, text, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, text, timestamptz, text, text, text, text, numeric, text)'::regprocedure;
+  v_oid := 'public.insert_sports_shadow_episode(uuid, text, text, text, text, text, text, text, text, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, text, timestamptz, text, text, text, text, numeric, text, uuid)'::regprocedure;
 
   SELECT EXISTS (
     SELECT 1 FROM pg_proc p, LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
