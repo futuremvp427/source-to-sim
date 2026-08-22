@@ -1,7 +1,7 @@
 /** Responsive dashboard shell: brand bar, health chip, tab navigation. */
 import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { Activity, FlaskConical, LayoutGrid, Server, Wallet } from "lucide-react";
+import { Activity, FlaskConical, LayoutGrid, Server, Trophy, Wallet } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -16,6 +16,7 @@ export const TABS = [
 ] as const;
 
 export type TabKey = (typeof TABS)[number]["key"];
+
 
 export function Shell({
   tab,
