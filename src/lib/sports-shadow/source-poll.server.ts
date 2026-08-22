@@ -1264,6 +1264,29 @@ export async function pollSportsShadowWallet(
     // reconciliation AND insertRawFillsBatch have all genuinely completed, and stopping
     // after any earlier page still leaves every later (unprocessed) page's content
     // discoverable as genuinely-new on the wallet's next poll.
+    //
+    // RESIDUAL RISK (Codex re-review round 10, confirmed, NOT eliminated -- explicitly
+    // accepted, matching the SAME safety-preserved/liveness-limited category as the
+    // sustained-trading-burst residual risk documented from the start of this task): a
+    // single PAGE is still the smallest atomic commit unit. If one page's own degraded-
+    // tuple reconciliation (up to PAGE_SIZE=250 distinct prefixes, chunked at
+    // RECONCILE_PREFIX_CAP concurrent count queries at a time) cannot fully complete
+    // before the shared deadline -- e.g. this wallet's turn started late in a lane whose
+    // budget earlier wallets mostly consumed -- that page commits nothing, and an
+    // unchanged retry next poll can face the identical situation. Going one level finer
+    // (checkpointing mid-page reconciliation progress, or committing a page's reliable
+    // events separately from its still-reconciling degraded ones) would reopen the exact
+    // partial-page stranding risk page-alignment (round 3) exists to prevent: a later
+    // poll's overlap check can only safely treat a page as "covered" once its reliable AND
+    // degraded content were verified and committed TOGETHER. The complete fix requires a
+    // schema change out of this task's scope (Section 10): an indexed, generated
+    // `tuple_prefix` column on `sports_shadow_source_fills` (derived from `event_key`,
+    // stripping the trailing `#N`) would let an entire page's distinct prefixes be counted
+    // in ONE `GROUP BY` query regardless of count, eliminating the chunked-round-trips
+    // approach -- and this residual risk -- at the root. Given the forward-only bootstrap
+    // redesign (typically 1-2 pages) and realistically small steady-state gaps, triggering
+    // this requires an unusual page (near PAGE_SIZE distinct degraded tuples) landing at a
+    // moment when very little shared budget remains -- an edge case, not the routine path.
     const eventsByPageIndex = new Map<number, NormalizedEvent[]>();
     for (const event of allEvents) {
       const pageIdx = pageIndexByRawRow.get(event.raw) ?? 0;
