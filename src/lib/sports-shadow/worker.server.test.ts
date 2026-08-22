@@ -18,6 +18,7 @@ import {
   OBSERVATION_LOCK_ID_PMUS,
   OBSERVATION_STAGE_DEADLINE_MS,
   SOURCE_LANE_BUDGET_MS,
+  sourceIngestDeadline,
   SOURCE_LOCK_ID,
   runSportsShadowCycle,
   type SportsShadowWorkerDeps,
@@ -435,7 +436,7 @@ describe("runSportsShadowCycle — Task 12D/P1-B wallet fairness", () => {
     const workerRepo = makeFakeWorkerRepo([], [], 0);
     let now = 1_700_000_100_000;
     const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
-      if (wallet === WALLET_A) now += 31_000; // consumes the whole 30s SOURCE_LANE_BUDGET_MS
+      if (wallet === WALLET_A) now += 31_000; // consumes the whole ingest sub-budget (soak-incident fix) and then some
       return emptyWalletResult(wallet);
     });
     await runSportsShadowCycle(
