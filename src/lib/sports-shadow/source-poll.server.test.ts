@@ -290,6 +290,7 @@ const ELIGIBLE_METADATA: SourceMarketMetadata = {
   sourceGameId: "game-1",
   eventSlug: "yankees-vs-red-sox-2026-08-19",
   marketSlug: "yankees-moneyline",
+  sourceRulesDescription: null,
 };
 
 function makeNetworkDeps(pages: Record<number, unknown> | ((offset: number) => unknown)): SourcePollNetworkDeps {

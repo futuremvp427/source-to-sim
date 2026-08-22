@@ -7,6 +7,18 @@ const COMPATIBLE_PMUS_RULES =
   "This market will settle to the winner of the game. Extra innings are included if played. If the game is delayed, postponed, or suspended and not rescheduled within two weeks, the market will settle to the last fair market price.";
 const COMPATIBLE_KALSHI_RULES =
   "If the named team wins the game, then the market resolves to Yes. Extra innings are included in this market. If this game is postponed or delayed, the market will remain open and close after the rescheduled game has finished.";
+/**
+ * CODEX P1-6: mirrors the SAME dual-dimension confirmed-compatible language as the
+ * target-side constants above (extra innings included + postponement handled) --
+ * matches the real gamma-api.polymarket.com `description` field's own resolution-rules
+ * text style (live-confirmed, e.g. an MLB moneyline market's actual postponement clause).
+ * Used as `source()`'s default so every PRE-EXISTING test in this file (written before
+ * source-side rules existed at all) continues to see the SAME "both sides agree" EXACT
+ * outcome its target-only rulesDescription already implied -- tests exercising a genuine
+ * cross-venue MISMATCH override this explicitly (see the CODEX P1-6 describe block).
+ */
+const COMPATIBLE_SOURCE_RULES =
+  "This market will resolve to the winner of the game. Extra innings are included in this market. If the game is postponed, this market will remain open until the game has been completed.";
 
 function source(overrides: Partial<SourceSignal> = {}): SourceSignal {
   return {
@@ -17,6 +29,7 @@ function source(overrides: Partial<SourceSignal> = {}): SourceSignal {
     line: null,
     selectedOutcomeRaw: "New York Yankees",
     conditionId: "0xcond",
+    sourceRulesDescription: COMPATIBLE_SOURCE_RULES,
     sourceGameId: "game-1",
     eventSlug: "mlb-nyy-bal-2026-08-19",
     marketSlug: "mlb-nyy-bal-2026-08-19",
@@ -738,5 +751,57 @@ describe("FINAL BUILD Part 6: buildRuleFingerprint", () => {
     expect(fp.settlement.extraInnings).toBeNull();
     expect(fp.settlement.postponement).toBeNull();
     expect(fp.settlement.pushRisk).toBeNull();
+  });
+});
+
+describe("CODEX P1-6: EXACT requires the SOURCE's own settlement rules to positively agree with the target's, not merely that the target's text alone looks safe", () => {
+  it("same game/team/line but the SOURCE has no rules text at all (Gamma returned none) -- never a false EXACT, downgrades to UNVERIFIED", () => {
+    const s = source({ sourceRulesDescription: null });
+    const target = pmusCandidate(); // target text is COMPATIBLE_PMUS_RULES -- confirmed extra-innings-included + postponement-handled
+    const r = resolvePmusMatch(s, [target]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.status).toBe("UNVERIFIED");
+  });
+
+  it("shortened/called-game divergence: source confirms extra innings are INCLUDED, target confirms they are EXCLUDED -- a genuine economic mismatch, never a false EXACT", () => {
+    const s = source({ sourceRulesDescription: "This market resolves to the winner. Extra innings are included. If postponed, the market remains open until completed." });
+    const target = pmusCandidate({ rulesDescription: "This market will settle to the winner of the regulation game. Extra innings are not included. If postponed, the market remains open until completed." });
+    const r = resolvePmusMatch(s, [target]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.settlementProfile?.extraInnings).toBe("KNOWN_INCOMPATIBLE");
+  });
+
+  it("void/push divergence is orthogonal to text: a whole-integer line (genuine push risk) stays UNVERIFIED regardless of how confidently both sides' TEXT agrees on other dimensions -- never assumes numeric-line agreement implies push-safety", () => {
+    const s = source({ betType: "TOTAL", line: 8, selectedOutcomeRaw: "Over", sourceRulesDescription: COMPATIBLE_SOURCE_RULES });
+    const target = pmusCandidate({ betType: "TOTAL", line: 8, sides: [{ description: "Over", teamAbbreviation: null, long: true }], rulesDescription: COMPATIBLE_PMUS_RULES });
+    const r = resolvePmusMatch(s, [target]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.settlementProfile?.pushRisk).toBe("UNVERIFIED");
+  });
+
+  it("reschedule/cancel divergence: source is silent on postponement (UNVERIFIED), target explicitly handles it -- still UNVERIFIED overall, never assumed compatible from the target's confidence alone", () => {
+    const s = source({ sourceRulesDescription: "This market resolves to the winner of the game." }); // no postponement/extra-innings language at all
+    const target = pmusCandidate(); // COMPATIBLE_PMUS_RULES -- confident target text
+    const r = resolvePmusMatch(s, [target]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.settlementProfile?.postponement).toBe("UNVERIFIED");
+    expect(r.settlementProfile?.extraInnings).toBe("UNVERIFIED");
+  });
+
+  it("both sides genuinely agree on every dimension -- correctly reaches EXACT (the fix does not make EXACT unreachable, only unearned)", () => {
+    const s = source({ sourceRulesDescription: COMPATIBLE_SOURCE_RULES });
+    const target = pmusCandidate({ rulesDescription: COMPATIBLE_PMUS_RULES });
+    const r = resolvePmusMatch(s, [target]);
+    expect(r.status).toBe("EXACT");
+    expect(r.settlementProfile?.extraInnings).toBe("EXACT_COMPATIBLE");
+    expect(r.settlementProfile?.postponement).toBe("EXACT_COMPATIBLE");
+  });
+
+  it("the same cross-venue agreement requirement applies to Kalshi, not just PM-US", () => {
+    const s = source({ sourceRulesDescription: "Extra innings are included. If postponed, remains open." });
+    const kalshi = kalshiCandidate({ rulesPrimary: "Extra innings are not included in this market.", rulesSecondary: null });
+    const r = resolveKalshiMatch(s, [kalshi]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.settlementProfile?.extraInnings).toBe("KNOWN_INCOMPATIBLE");
   });
 });

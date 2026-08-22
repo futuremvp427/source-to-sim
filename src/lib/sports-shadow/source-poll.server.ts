@@ -349,6 +349,8 @@ export type NewSignalRow = {
   sourceOutcome: string | null;
   /** FINAL BUILD Part 17/analytics: the current experiment epoch at insert time, or null when ensureCurrentEpoch failed this cycle (best-effort -- collection must never block on epoch bookkeeping). */
   experimentEpochId: string | null;
+  /** CODEX P1-6: the source market's own Gamma-provided resolution-rules text, durably persisted so resolver.ts's cross-venue settlement-rule equivalence check has it available at MATCH time (a separate lane, potentially long after this signal was created) without re-fetching Gamma. */
+  sourceRulesDescription: string | null;
 };
 
 /** A durably-persisted fill whose downstream (classification + episode) processing has not yet safely completed. Reconstructed entirely from already-stored columns — never re-fetched from the source API. */
@@ -770,6 +772,7 @@ export const supabasePollRepository: PollRepository = {
       p_selected_side: row.selectedSide,
       p_line: row.line,
       p_cluster_key: clusterKey,
+      p_source_rules_description: row.sourceRulesDescription,
     } as never);
     if (error) throw new Error(error.message);
     return { id: data as unknown as string };
@@ -1968,6 +1971,7 @@ export async function pollSportsShadowWallet(
       sourceMarketSlug: metadata.marketSlug,
       sourceOutcome: fill.outcome,
       experimentEpochId: d.epochId,
+      sourceRulesDescription: metadata.sourceRulesDescription,
     };
     // Task 13G / P1-R: CHECK BUDGET immediately before this mutating write too -- see the
     // identical comment on the SELL_RECORDED branch above.

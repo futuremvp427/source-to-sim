@@ -24,6 +24,8 @@ export type SourceMarketMetadata = {
   sourceGameId: string | null;
   eventSlug: string | null;
   marketSlug: string | null;
+  /** CODEX P1-6: the SOURCE (Polymarket Gamma) market's own resolution-rules text (its `description` field -- confirmed, not invented, to carry the same postponement/extra-innings/void language as the target venues' own rulesDescription). Null when Gamma did not return one. Never used for eligibility/classification -- only for resolver.ts's cross-venue settlement-rule equivalence check. */
+  sourceRulesDescription: string | null;
 };
 
 /** One resolvable target contract candidate, shape-normalized across venues (Task 5/6). */

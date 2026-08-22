@@ -57,6 +57,8 @@ type RawGammaMarket = {
   line?: number;
   gameStartTime?: string;
   events?: RawGammaEvent[];
+  /** CODEX P1-6: confirmed present on the real gamma-api.polymarket.com response (live-verified, e.g. an MLB moneyline market's description includes "If the game is postponed, this market will remain open until the game has been completed..."). The SAME structural role as PmusCandidate/KalshiCandidate's own rulesDescription. */
+  description?: string | null;
 };
 
 function unverifiedResult(conditionId: string, reasonCode: "UNVERIFIED_FETCH_FAILED" | "UNVERIFIED_EMPTY_RESPONSE" | "UNVERIFIED_MALFORMED_RESPONSE", reason: string): SourceMarketMetadata {
@@ -75,6 +77,7 @@ function unverifiedResult(conditionId: string, reasonCode: "UNVERIFIED_FETCH_FAI
     sourceGameId: null,
     eventSlug: null,
     marketSlug: null,
+    sourceRulesDescription: null,
   };
 }
 
@@ -202,5 +205,6 @@ export async function fetchSourceMarketMetadata(conditionId: string, deps: Parti
     sourceGameId: event?.gameId !== undefined ? String(event.gameId) : null,
     eventSlug: event?.slug ?? null,
     marketSlug: market.slug ?? null,
+    sourceRulesDescription: market.description ?? null,
   };
 }

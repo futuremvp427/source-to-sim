@@ -77,6 +77,7 @@ describe("fetchSourceMarketMetadata", () => {
       sourceGameId: "10079198",
       eventSlug: "mlb-wsh-tex-2026-08-19",
       marketSlug: "mlb-wsh-tex-2026-08-19-total-7pt5",
+      sourceRulesDescription: null, // GAMMA_TOTAL_FIXTURE does not set a `description` field
     });
   });
 
@@ -253,6 +254,11 @@ describe("fetchSourceMarketMetadata", () => {
         conditionId: "0xintegration",
         slug: "mlb-nyy-bal-2026-08-19",
         sportsMarketType: "moneyline",
+        // CODEX P1-6: EXACT now requires the SOURCE's own rules text to positively agree
+        // with the target's -- this test is about team-code matching (P1-D), not P1-6's
+        // settlement-rule dimension, so give it real agreeing text rather than leaving it
+        // unset and accidentally downgrading to UNVERIFIED on an unrelated dimension.
+        description: "This market will resolve to the winner of the game. Extra innings are included. If the game is postponed, this market will remain open until completed.",
         line: null,
         events: [
           {
@@ -284,6 +290,7 @@ describe("fetchSourceMarketMetadata", () => {
       sourceGameId: metadata.sourceGameId,
       eventSlug: metadata.eventSlug,
       marketSlug: metadata.marketSlug,
+      sourceRulesDescription: metadata.sourceRulesDescription,
     };
 
     const pmusCandidate: PmusCandidate = {

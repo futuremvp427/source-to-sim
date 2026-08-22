@@ -287,6 +287,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
         sourceMarketSlug: null,
         sourceOutcome: "AWY",
         experimentEpochId: null,
+        sourceRulesDescription: null,
       });
 
       const latest = await supabasePollRepository.findLatestEpisode(wallet, "0xcondition", "0xasset");
@@ -382,6 +383,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
           sourceMarketSlug: null,
           sourceOutcome: "AWY",
           experimentEpochId: null,
+          sourceRulesDescription: null,
         }),
       ).rejects.toThrow();
 

@@ -43,6 +43,8 @@ export type SignalRow = {
   selectedOutcomeRaw: string;
   eventSlug: string | null;
   marketSlug: string | null;
+  /** CODEX P1-6: the source market's own Gamma-provided resolution-rules text, durably persisted at signal creation -- see resolver.ts's cross-venue settlement-rule equivalence check. */
+  sourceRulesDescription: string | null;
 };
 
 export type PendingSignal = SignalRow & { missingPmus: boolean; missingKalshi: boolean };
@@ -67,6 +69,7 @@ export function toSourceSignal(row: SignalRow): SourceSignal | null {
     sourceGameId: null,
     eventSlug: row.eventSlug,
     marketSlug: row.marketSlug,
+    sourceRulesDescription: row.sourceRulesDescription,
   };
 }
 

@@ -106,6 +106,7 @@ function signalRow(overrides: Partial<SignalRow> = {}): SignalRow {
     selectedOutcomeRaw: "New York Yankees",
     eventSlug: "mlb-nyy-bal-2026-08-19",
     marketSlug: "mlb-nyy-bal-2026-08-19",
+    sourceRulesDescription: null,
     ...overrides,
   };
 }

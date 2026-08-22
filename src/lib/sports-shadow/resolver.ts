@@ -92,6 +92,8 @@ export type SourceSignal = {
   line: number | null;
   selectedOutcomeRaw: string;
   conditionId: string;
+  /** CODEX P1-6: the source (Polymarket Gamma) market's own resolution-rules text -- see buildSettlementProfile's cross-venue combining logic below. Null when Gamma never returned one for this market. */
+  sourceRulesDescription: string | null;
   sourceGameId: string | null;
   eventSlug: string | null;
   marketSlug: string | null;
@@ -173,10 +175,33 @@ function analyzePushRisk(line: number | null): RuleDimensionStatus {
   return isHalfPointLine(line) ? "EXACT_COMPATIBLE" : "UNVERIFIED";
 }
 
-function buildSettlementProfile(rulesText: string | null, line: number | null): SettlementProfile {
+/**
+ * CODEX P1-6: `analyzeExtraInnings`/`analyzePostponement` each answer "what does THIS
+ * side's own text confirm" -- EXACT_COMPATIBLE means confirmed-included/handled,
+ * KNOWN_INCOMPATIBLE means confirmed-excluded/different, UNVERIFIED means the text says
+ * nothing decisive. Genuine cross-venue economic equivalence requires BOTH sides to
+ * confirm the SAME behavior -- same game/team/line alone proves nothing about whether,
+ * say, a postponement or an extra-innings rule difference makes them different contracts.
+ */
+function combineDimension(source: RuleDimensionStatus, target: RuleDimensionStatus): RuleDimensionStatus {
+  if (source === "UNVERIFIED" || target === "UNVERIFIED") return "UNVERIFIED"; // neither side positively proves anything -- never assume agreement from silence
+  return source === target ? "EXACT_COMPATIBLE" : "KNOWN_INCOMPATIBLE"; // both sides agree vs. a genuine confirmed MISMATCH (e.g. one includes extra innings, the other excludes them)
+}
+
+/**
+ * CODEX P1-6: previously analyzed ONLY the target venue's own rulesDescription --
+ * "target text looks unrestrictive" was silently treated as proof of cross-venue
+ * equivalence, when it never incorporated what the SOURCE (Polymarket) market's own
+ * resolution rules actually say. `sourceRulesText` is confirmed (not invented) to be
+ * populated from gamma-api's own `description` field (source-metadata.server.ts) -- the
+ * exact same class of resolution-rules text PM-US/Kalshi's own rulesDescription already
+ * carries. pushRisk stays source-independent: it is a pure function of the (already
+ * exact-equality-required) traded line value itself, not of either venue's prose.
+ */
+function buildSettlementProfile(targetRulesText: string | null, sourceRulesText: string | null, line: number | null): SettlementProfile {
   return {
-    extraInnings: analyzeExtraInnings(rulesText),
-    postponement: analyzePostponement(rulesText),
+    extraInnings: combineDimension(analyzeExtraInnings(sourceRulesText), analyzeExtraInnings(targetRulesText)),
+    postponement: combineDimension(analyzePostponement(sourceRulesText), analyzePostponement(targetRulesText)),
     pushRisk: analyzePushRisk(line),
   };
 }
@@ -385,7 +410,7 @@ function evaluatePmusCandidate(source: SourceSignal, outcome: SourceOutcome, can
       // J9: missing/ambiguous PM-US orientation must never default LONG -- fails closed to UNVERIFIED.
       return { status: "UNVERIFIED", candidate, targetSide: null, pmusOrientation: null, profile: null, reason: "matched PM-US moneyline side has no resolvable LONG/SHORT orientation" };
     }
-    const profile = buildSettlementProfile(candidate.rulesDescription, null);
+    const profile = buildSettlementProfile(candidate.rulesDescription, source.sourceRulesDescription, null);
     const compat = overallCompatibility(profile);
     const status = compat === "COMPATIBLE" ? "EXACT" : compat === "INCOMPATIBLE" ? "NEAR" : "UNVERIFIED";
     return { status, candidate, targetSide: { kind: "TEAM", team: outcome.team }, pmusOrientation: orientation, profile, reason: `moneyline side matched for ${outcome.team}` };
@@ -402,7 +427,7 @@ function evaluatePmusCandidate(source: SourceSignal, outcome: SourceOutcome, can
       return Math.abs(impliedLine - outcome.line) < 1e-9;
     });
     if (matchingSide) {
-      const profile = buildSettlementProfile(candidate.rulesDescription, candidate.line);
+      const profile = buildSettlementProfile(candidate.rulesDescription, source.sourceRulesDescription, candidate.line);
       const compat = overallCompatibility(profile);
       const status = compat === "COMPATIBLE" ? "EXACT" : compat === "INCOMPATIBLE" ? "NEAR" : "UNVERIFIED";
       return { status, candidate, targetSide: { kind: "TEAM", team: outcome.team }, pmusOrientation: sideOrientation(matchingSide), profile, reason: `spread side matched: ${outcome.team} ${outcome.line}` };
@@ -422,7 +447,7 @@ function evaluatePmusCandidate(source: SourceSignal, outcome: SourceOutcome, can
   if (orientation === null) {
     return { status: "UNVERIFIED", candidate, targetSide: null, pmusOrientation: null, profile: null, reason: "matched PM-US total side has no resolvable LONG/SHORT orientation" };
   }
-  const profile = buildSettlementProfile(candidate.rulesDescription, candidate.line);
+  const profile = buildSettlementProfile(candidate.rulesDescription, source.sourceRulesDescription, candidate.line);
   const compat = overallCompatibility(profile);
   const status = compat === "COMPATIBLE" ? "EXACT" : compat === "INCOMPATIBLE" ? "NEAR" : "UNVERIFIED";
   return { status, candidate, targetSide: { kind: outcome.direction }, pmusOrientation: orientation, profile, reason: `total side matched: ${outcome.direction} ${outcome.line}` };
@@ -541,9 +566,9 @@ function kalshiRulesText(c: KalshiCandidate): string | null {
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
-function evaluateKalshiCandidate(outcome: SourceOutcome, candidate: KalshiCandidate, side: "YES" | "NO", targetLineOverride?: number): KalshiEvalOutcome {
+function evaluateKalshiCandidate(source: SourceSignal, outcome: SourceOutcome, candidate: KalshiCandidate, side: "YES" | "NO", targetLineOverride?: number): KalshiEvalOutcome {
   const line = targetLineOverride ?? candidate.line;
-  const profile = buildSettlementProfile(kalshiRulesText(candidate), outcome.kind === "MONEYLINE" ? null : line);
+  const profile = buildSettlementProfile(kalshiRulesText(candidate), source.sourceRulesDescription, outcome.kind === "MONEYLINE" ? null : line);
   const compat = overallCompatibility(profile);
   const status = compat === "COMPATIBLE" ? "EXACT" : compat === "INCOMPATIBLE" ? "NEAR" : "UNVERIFIED";
   return { status, candidate, targetSide: { kind: side }, profile, reason: `matched via ${side} side` };
@@ -589,11 +614,11 @@ export function resolveKalshiMatch(source: SourceSignal, candidates: KalshiCandi
   if (outcome.kind === "MONEYLINE") {
     const direct = typeMatches.find((c) => c.propositionTeam === outcome.team);
     if (direct) {
-      evaluations = [evaluateKalshiCandidate(outcome, direct, "YES")];
+      evaluations = [evaluateKalshiCandidate(source, outcome, direct, "YES")];
     } else {
       const opponent = opponentOf(source, outcome.team);
       const complement = typeMatches.find((c) => c.propositionTeam === opponent);
-      if (complement) evaluations = [evaluateKalshiCandidate(outcome, complement, "NO")];
+      if (complement) evaluations = [evaluateKalshiCandidate(source, outcome, complement, "NO")];
       else for (const c of typeMatches) nearFallback.push({ candidate: c, reason: "no Kalshi ticker names the source team or its opponent directly" });
     }
   } else if (outcome.kind === "SPREAD") {
@@ -602,14 +627,14 @@ export function resolveKalshiMatch(source: SourceSignal, candidates: KalshiCandi
     const positiveLine = Math.abs(outcome.line);
     const direct = typeMatches.find((c) => c.propositionTeam === propositionTeam && c.line !== null && Math.abs(c.line - positiveLine) < 1e-9);
     if (direct) {
-      evaluations = [evaluateKalshiCandidate(outcome, direct, wantsDirect ? "YES" : "NO", positiveLine)];
+      evaluations = [evaluateKalshiCandidate(source, outcome, direct, wantsDirect ? "YES" : "NO", positiveLine)];
     } else {
       for (const c of typeMatches) nearFallback.push({ candidate: c, reason: `no Kalshi spread candidate for ${propositionTeam} at line ${positiveLine} (source: ${outcome.team} ${outcome.line})` });
     }
   } else {
     const direct = typeMatches.find((c) => c.line !== null && Math.abs(c.line - outcome.line) < 1e-9);
     if (direct) {
-      evaluations = [evaluateKalshiCandidate(outcome, direct, outcome.direction === "OVER" ? "YES" : "NO")];
+      evaluations = [evaluateKalshiCandidate(source, outcome, direct, outcome.direction === "OVER" ? "YES" : "NO")];
     } else {
       for (const c of typeMatches) nearFallback.push({ candidate: c, reason: `total candidate line ${c.line} does not match source line ${outcome.line}` });
     }

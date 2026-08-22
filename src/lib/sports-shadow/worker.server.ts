@@ -263,6 +263,7 @@ type RawPendingSignalRow = {
   source_market_slug: string | null;
   missing_pmus: boolean;
   missing_kalshi: boolean;
+  source_rules_description: string | null;
 };
 
 /**
@@ -291,6 +292,7 @@ export const supabaseWorkerRepository: WorkerRepository = {
       marketSlug: r.source_market_slug,
       missingPmus: r.missing_pmus,
       missingKalshi: r.missing_kalshi,
+      sourceRulesDescription: r.source_rules_description,
     }));
   },
 
