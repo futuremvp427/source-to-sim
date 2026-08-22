@@ -1563,6 +1563,25 @@ describe("Task 13I / P1-T: pacedFetchTradesPage threads the caller's deadline in
   });
 });
 
+describe("FINAL BUILD Part 3: Sports Shadow's own source wallet query must never rely on the upstream /trades default (which is takerOnly=true)", () => {
+  it("every /trades request pollSportsShadowWallet issues explicitly includes takerOnly=false -- a maker-side sports fill (the common case for a DCA-style wallet) must never be silently excluded", async () => {
+    const repo = new FakeRepo();
+    const requestedUrls: string[] = [];
+    const network: SourcePollNetworkDeps = {
+      fetchImpl: (async (url: string | URL) => {
+        requestedUrls.push(String(url));
+        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+      }) as unknown as typeof fetch,
+      reserveRequestSlot: async () => 0,
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      recordHostRateLimit: async () => {},
+    };
+    await pollSportsShadowWallet(WALLET, 0, { repo, network });
+    expect(requestedUrls.length).toBeGreaterThan(0);
+    for (const url of requestedUrls) expect(url).toContain("takerOnly=false");
+  });
+});
+
 /* ======================================================================
  * TASK 13G / P1-Q: FORMAL ADVERSARIAL PROOF -- an incomplete scan can never
  * strand real source data. This describe block REPLACES Task 13F's

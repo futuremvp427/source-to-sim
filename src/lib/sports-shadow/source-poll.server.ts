@@ -139,17 +139,17 @@ export const MAX_PAGES_PER_WALLET = Math.floor(MAX_TRADES_OFFSET / PAGE_SIZE) + 
 export const MAX_PENDING_FILLS_PER_POLL = 500;
 
 /**
- * Task 13G (Codex re-review rounds 7-8, P1): the CHUNK size `countDurableOrdinalFills`
- * reconciles CONCURRENTLY at a time -- keeps the number of simultaneous Supabase
- * subrequests small and predictable (relevant on a subrequest-limited runtime like
- * Cloudflare Workers) regardless of how many distinct prefixes a large catch-up scan's
- * batch happens to contain. Every chunk is processed in sequence (not just the first) so
- * which prefixes get reconciled depends only on how many chunks the shared deadline
- * allows, never on a prefix's fixed position in the array -- round 7's first version of
- * this fix took only the first CAP prefixes and permanently starved every later one,
- * since the same oldest-first ordering reselects the identical leading slice every poll.
+ * FINAL BUILD Part 2 (closes the Task 13G-documented degraded-tuple liveness residual):
+ * `countDurableOrdinalFills` used to issue one `count:"exact",head:true` `.like()` query
+ * PER distinct tuple prefix, chunked concurrently at a fixed cap with a deadline check
+ * BETWEEN chunks -- correct, but a page with more distinct prefixes than the shared
+ * deadline allowed chunks for could repeatedly fail to fully reconcile. The new
+ * `count_durable_ordinal_fills` RPC (see
+ * supabase/migrations/20260823070000_sports_shadow_tuple_prefix.sql) groups by the new
+ * indexed, GENERATED `tuple_prefix` column server-side, so an ENTIRE page's distinct
+ * prefixes are now counted in exactly ONE bounded round trip regardless of how many
+ * there are -- no chunking, no per-chunk deadline loop, no starvation possible.
  */
-export const RECONCILE_PREFIX_CAP = 25;
 
 
 const REQUEST_TIMEOUT_MS = 12_000;
@@ -492,62 +492,34 @@ export const supabasePollRepository: PollRepository = {
     const out = new Map<string, number>();
     if (tuplePrefixes.length === 0) return out;
     for (const prefix of tuplePrefixes) out.set(prefix, 0);
-    // Task 13G (Codex re-review rounds 3-7, P1): four prior designs for this method each
-    // failed differently -- (a) one sequential LIKE-count query per prefix: correct and
-    // unambiguous, but unbounded WALL TIME for many distinct prefixes; (b) one unpaged
-    // read of the wallet's whole degraded history: silently truncated by PostgREST's
-    // per-request row cap; (c) that read paginated via fetchAllRowsAfterId: correct
-    // completeness but genuinely unbounded time for a wallet with a large degraded
-    // history, AND unable to distinguish "exactly at the page cap" from "more remain" once
-    // crossed -- permanently misclassifying every future fill for that wallet, since the
-    // table only grows; (d) exact `prefix#N` candidate keys via `.in()`: bounded response
-    // size, but since this file's own docs note EVERY currently-observed /trades row lacks
-    // a native id/log index (degraded is the NORMAL case, not rare), `tuplePrefixes.length`
-    // can reach the low thousands for a large scan, producing a `.in()` filter with
-    // hundreds of thousands of values -- a request URI PostgREST/its proxy rejects
-    // outright; (e) reading the wallet's degraded history bounded by MAX_TRADES_OFFSET:
-    // WRONG -- that constant only bounds how deep one LIVE /trades snapshot can be
-    // paginated, not this DURABLE table's cumulative row count, which keeps every row it
-    // has ever seen across every poll and is therefore genuinely unbounded over a wallet's
-    // lifetime.
-    //
-    // FIX: go back to (a)'s query shape -- per-prefix `count: "exact", head: true"` (no
-    // rows returned, so NEVER subject to the row cap, and an EXACT number regardless of
-    // how large the wallet's cumulative history has grown -- no pagination, no ambiguity)
-    // -- but issue them in CONCURRENT CHUNKS of RECONCILE_PREFIX_CAP, looping over every
-    // chunk (not just the first), with a deadline check BETWEEN chunks. Concurrency within
-    // a chunk keeps real wall time for that chunk close to one round trip; chunking (not a
-    // one-shot hard cap) keeps the number of SIMULTANEOUS subrequests small and predictable
-    // (relevant on a subrequest-limited runtime like Cloudflare Workers) while still
-    // covering every requested prefix within one poll whenever the deadline allows.
-    //
-    // Task 13G (Codex re-review round 8, P1): an earlier version of this fix took only the
-    // FIRST RECONCILE_PREFIX_CAP prefixes and permanently deferred the rest. Since
-    // `tuplePrefixes` is rebuilt in the SAME oldest-first order every poll from the SAME
-    // underlying (not-yet-durable) source data, that was not a "temporary" deferral at
-    // all -- it deterministically re-selected the identical leading slice every single
-    // time, starving any prefix beyond position RECONCILE_PREFIX_CAP forever. Looping over
-    // every chunk fixes this: which prefixes get reconciled no longer depends on their
-    // position in the array, only on how many chunks the deadline allows -- a genuinely
-    // temporary, poll-to-poll-varying limit tied to wall-clock budget, not a fixed slice.
-    for (let i = 0; i < tuplePrefixes.length; i += RECONCILE_PREFIX_CAP) {
-      if (deadline && deadline.now() >= deadline.deadlineAtMs) {
-        for (const prefix of tuplePrefixes.slice(i)) out.set(prefix, Number.POSITIVE_INFINITY);
-        break;
-      }
-      const chunk = tuplePrefixes.slice(i, i + RECONCILE_PREFIX_CAP);
-      const results = await Promise.all(
-        chunk.map(async (prefix) => {
-          const { count, error } = await supabaseAdmin
-            .from("sports_shadow_source_fills" as never)
-            .select("id", { count: "exact", head: true })
-            .eq("wallet", wallet)
-            .like("event_key", `${prefix}%`);
-          if (error) throw new Error(error.message);
-          return { prefix, count: count ?? 0 };
-        }),
-      );
-      for (const { prefix, count } of results) out.set(prefix, count);
+    // FINAL BUILD Part 2: a deadline already gone before this call even starts still
+    // defers every requested prefix (Number.POSITIVE_INFINITY sentinel, unchanged
+    // contract -- see reconcileDegradedEvents's own handling of this value below).
+    if (deadline && deadline.now() >= deadline.deadlineAtMs) {
+      for (const prefix of tuplePrefixes) out.set(prefix, Number.POSITIVE_INFINITY);
+      return out;
+    }
+    // Task 13G (Codex re-review rounds 3-7, P1) narrated the failure of four prior
+    // per-prefix designs (unbounded per-prefix queries, an unpaged read truncated by
+    // PostgREST's row cap, a paginated read still unbounded over a wallet's lifetime, and
+    // an exact-key `.in()` filter whose URL could reach hundreds of thousands of
+    // characters) -- see git history for the full account. FINAL BUILD Part 2 replaces
+    // the per-prefix-chunked-with-a-deadline-loop fix those rounds converged on with a
+    // single grouped, exact, bounded RPC (`count_durable_ordinal_fills`, see
+    // supabase/migrations/20260823070000_sports_shadow_tuple_prefix.sql): the new
+    // GENERATED `tuple_prefix` column lets Postgres itself GROUP BY prefix server-side,
+    // so an entire page's distinct prefixes are counted in exactly ONE round trip
+    // regardless of count -- an RPC call is a JSON POST body, not a URL query string, so
+    // the `.in()` design's URL-length failure mode does not apply here. This closes the
+    // "same page can retry forever" liveness hole: there is no longer a per-poll ceiling
+    // on how many distinct prefixes one page's reconciliation can cover.
+    const { data, error } = await supabaseAdmin.rpc(
+      "count_durable_ordinal_fills" as never,
+      { p_wallet: wallet, p_tuple_prefixes: tuplePrefixes } as never,
+    );
+    if (error) throw new Error(error.message);
+    for (const row of (data ?? []) as unknown as { tuple_prefix: string; fill_count: number }[]) {
+      out.set(row.tuple_prefix, row.fill_count);
     }
     return out;
   },
@@ -1308,28 +1280,19 @@ export async function pollSportsShadowWallet(
     // after any earlier page still leaves every later (unprocessed) page's content
     // discoverable as genuinely-new on the wallet's next poll.
     //
-    // RESIDUAL RISK (Codex re-review round 10, confirmed, NOT eliminated -- explicitly
-    // accepted, matching the SAME safety-preserved/liveness-limited category as the
-    // sustained-trading-burst residual risk documented from the start of this task): a
-    // single PAGE is still the smallest atomic commit unit. If one page's own degraded-
-    // tuple reconciliation (up to PAGE_SIZE=250 distinct prefixes, chunked at
-    // RECONCILE_PREFIX_CAP concurrent count queries at a time) cannot fully complete
-    // before the shared deadline -- e.g. this wallet's turn started late in a lane whose
-    // budget earlier wallets mostly consumed -- that page commits nothing, and an
-    // unchanged retry next poll can face the identical situation. Going one level finer
-    // (checkpointing mid-page reconciliation progress, or committing a page's reliable
-    // events separately from its still-reconciling degraded ones) would reopen the exact
-    // partial-page stranding risk page-alignment (round 3) exists to prevent: a later
-    // poll's overlap check can only safely treat a page as "covered" once its reliable AND
-    // degraded content were verified and committed TOGETHER. The complete fix requires a
-    // schema change out of this task's scope (Section 10): an indexed, generated
-    // `tuple_prefix` column on `sports_shadow_source_fills` (derived from `event_key`,
-    // stripping the trailing `#N`) would let an entire page's distinct prefixes be counted
-    // in ONE `GROUP BY` query regardless of count, eliminating the chunked-round-trips
-    // approach -- and this residual risk -- at the root. Given the forward-only bootstrap
-    // redesign (typically 1-2 pages) and realistically small steady-state gaps, triggering
-    // this requires an unusual page (near PAGE_SIZE distinct degraded tuples) landing at a
-    // moment when very little shared budget remains -- an edge case, not the routine path.
+    // RESIDUAL RISK (Codex re-review round 10) -- CLOSED by FINAL BUILD Part 2: a single
+    // PAGE is still the smallest atomic commit unit, and one page's own degraded-tuple
+    // reconciliation (up to PAGE_SIZE=250 distinct prefixes) previously required one
+    // count query PER CHUNK of prefixes, with a deadline check between chunks -- a page
+    // with more distinct prefixes than the shared deadline allowed chunks for could
+    // repeatedly fail to fully reconcile. The schema change this doc comment used to defer
+    // (Section 10) has now been made: an indexed, GENERATED `tuple_prefix` column on
+    // `sports_shadow_source_fills` (see
+    // supabase/migrations/20260823070000_sports_shadow_tuple_prefix.sql) lets
+    // `countDurableOrdinalFills` count an entire page's distinct prefixes in exactly ONE
+    // grouped RPC round trip, regardless of how many there are -- there is no longer a
+    // per-poll ceiling on how many distinct prefixes one page's reconciliation can cover,
+    // so this residual is eliminated at the root, not merely mitigated.
     const eventsByPageIndex = new Map<number, NormalizedEvent[]>();
     for (const event of allEvents) {
       const pageIdx = pageIndexByRawRow.get(event.raw) ?? 0;
