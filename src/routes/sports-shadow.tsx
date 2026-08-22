@@ -9,9 +9,10 @@
  *
  * No trading controls anywhere on this page -- read-only research/operations only.
  */
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
+import { ArrowLeft } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -174,6 +175,13 @@ function SportsShadowDashboard() {
   return (
     <div className="mx-auto w-full max-w-5xl space-y-4 px-3 py-6 sm:px-6">
       <header className="space-y-1">
+        <Link
+          to="/"
+          className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <ArrowLeft className="size-3" aria-hidden />
+          Back to Mirror dashboard
+        </Link>
         <h1 className="text-2xl font-bold tracking-tight">Sports Forward Shadow</h1>
         <p className="text-sm text-muted-foreground">
           Read-only research dashboard. Paper simulation only — no live orders, no funds, no trading controls on this page.

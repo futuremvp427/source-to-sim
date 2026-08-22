@@ -1,5 +1,6 @@
 /** Overview screen: master paper portfolio, sleeves, contributions, recent feed. */
-import { ArrowUpRight, LineChart } from "lucide-react";
+import { ArrowUpRight, LineChart, Trophy } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 
 import { formatTime, formatUsd } from "@/lib/mirror-trader";
 import {
@@ -13,7 +14,7 @@ import {
   shortWallet,
   walletBadge,
 } from "@/lib/ui/portfolio-view";
-import { useMasterPortfolio, useShadowDashboard } from "@/lib/ui/use-dashboard-queries";
+import { useMasterPortfolio, useShadowDashboard, useSportsShadowDashboard } from "@/lib/ui/use-dashboard-queries";
 
 import {
   Chip,
@@ -27,7 +28,36 @@ import {
 
 const RECENT_LIMIT = 8;
 
+function SportsShadowCard() {
+  const { data, isPending } = useSportsShadowDashboard();
+  const epoch = data?.epoch;
+  const stage = epoch?.stage ?? "Not started";
+  const wallets = epoch?.walletCohort.length ?? 0;
+
+  return (
+    <TerminalCard
+      title="Sports Forward Shadow — Research"
+      subtitle={isPending ? "Loading status…" : epoch ? `${wallets} wallet(s) · stage ${stage}` : "No active research epoch"}
+      action={
+        <Link
+          to="/sports-shadow"
+          className="inline-flex items-center gap-1 rounded border border-[var(--paper)]/40 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.1em] text-[var(--paper)] transition-colors hover:bg-[var(--paper-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <Trophy className="size-3" aria-hidden />
+          Open Sports Shadow
+        </Link>
+      }
+    >
+      <p className="max-w-3xl text-[11px] text-muted-foreground">
+        A separate read-only research area tracking sports-wallet source activity across Polymarket US and Kalshi.
+        Paper simulation only — no live orders, no trading controls.
+      </p>
+    </TerminalCard>
+  );
+}
+
 export function OverviewView({
+
   onOpenWeather,
   onOpenActivity,
 }: {
@@ -51,7 +81,10 @@ export function OverviewView({
         </TerminalCard>
       ) : null}
 
+      <SportsShadowCard />
+
       <TerminalCard
+
         title="Master paper portfolio"
         subtitle={
           portfolio

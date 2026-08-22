@@ -1,7 +1,7 @@
 /** Responsive dashboard shell: brand bar, health chip, tab navigation. */
 import type { ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { Activity, FlaskConical, LayoutGrid, Server, Wallet } from "lucide-react";
+import { Activity, FlaskConical, LayoutGrid, Server, Trophy, Wallet } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -16,6 +16,7 @@ export const TABS = [
 ] as const;
 
 export type TabKey = (typeof TABS)[number]["key"];
+
 
 export function Shell({
   tab,
@@ -79,13 +80,19 @@ export function Shell({
               {t.label}
             </button>
           ))}
+          <Link
+            to="/sports-shadow"
+            className="rounded border border-[var(--paper)]/40 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--paper)] transition-colors hover:bg-[var(--paper-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            Sports Shadow
+          </Link>
         </nav>
       </header>
 
       <main className="mx-auto w-full max-w-7xl px-3 py-3 pb-24 sm:px-6 sm:pb-8">{children}</main>
 
       <nav
-        className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-5 border-t border-border/70 bg-background/95 backdrop-blur sm:hidden"
+        className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-6 border-t border-border/70 bg-background/95 backdrop-blur sm:hidden"
         aria-label="Sections"
       >
         {TABS.map((t) => {
@@ -106,6 +113,13 @@ export function Shell({
             </button>
           );
         })}
+        <Link
+          to="/sports-shadow"
+          className="flex min-h-14 flex-col items-center justify-center gap-1 text-[10px] font-medium text-[var(--paper)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        >
+          <Trophy className="size-4" aria-hidden />
+          Sports Shadow
+        </Link>
       </nav>
     </div>
   );
