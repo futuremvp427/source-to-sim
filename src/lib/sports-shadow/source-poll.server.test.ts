@@ -2549,63 +2549,114 @@ describe("RECONCILIATION FIX (2026-08-22): mergePendingFillSlices -- pending-fil
 });
 
 describe("RECONCILIATION FIX (2026-08-22): findPendingDownstreamFills issues two bounded, deterministic slices instead of one oldest-first query", () => {
-  it("queries both an oldest-first and a newest-first slice, each bounded, and merges them via mergePendingFillSlices", async () => {
-    const calls: { ascending: boolean; limit: number }[] = [];
+  /** Mocks the two chained `.order()` calls (source_ts, then id) findPendingDownstreamFills now issues, resolving each slice via `respond(callIndex)`. */
+  function mockSupabaseTwoOrderChain(calls: { col: string; ascending: boolean; limit: number }[], respond: (callIndex: number) => { data: unknown[]; error: null }) {
     let call = 0;
-    const supabaseAdminMock = {
+    return {
       from: () => ({
         select: () => ({
           eq: () => ({
             eq: () => ({
-              order: (_col: string, opts: { ascending: boolean }) => ({
-                limit: (n: number) => {
-                  calls.push({ ascending: opts.ascending, limit: n });
-                  call += 1;
-                  // First call (oldest-first) returns a full oldest slice; second (newest-first) returns two fresh rows.
-                  if (call === 1) {
-                    return Promise.resolve({
-                      data: Array.from({ length: PENDING_FILLS_OLDEST_SHARE }, (_, i) => ({
-                        id: `old-${i}`,
-                        event_key: `k-old-${i}`,
-                        wallet_handle: null,
-                        condition_id: null,
-                        asset: "0xasset",
-                        outcome: null,
-                        event_slug: null,
-                        market_slug: null,
-                        side: "BUY",
-                        shares: 1,
-                        price: 0.5,
-                        source_ts: i,
-                      })),
-                      error: null,
-                    });
-                  }
-                  return Promise.resolve({
-                    data: [
-                      { id: "fresh-2", event_key: "k-fresh-2", wallet_handle: null, condition_id: null, asset: "0xasset", outcome: null, event_slug: null, market_slug: null, side: "BUY", shares: 1, price: 0.5, source_ts: 999999 },
-                      { id: "fresh-1", event_key: "k-fresh-1", wallet_handle: null, condition_id: null, asset: "0xasset", outcome: null, event_slug: null, market_slug: null, side: "BUY", shares: 1, price: 0.5, source_ts: 999998 },
-                    ],
-                    error: null,
-                  });
-                },
+              order: (col1: string, opts1: { ascending: boolean }) => ({
+                order: (col2: string, opts2: { ascending: boolean }) => ({
+                  limit: (n: number) => {
+                    if (opts2.ascending !== opts1.ascending) throw new Error("tie-break direction must match primary direction");
+                    calls.push({ col: `${col1},${col2}`, ascending: opts1.ascending, limit: n });
+                    call += 1;
+                    return Promise.resolve(respond(call));
+                  },
+                }),
               }),
             }),
           }),
         }),
       }),
     };
+  }
+
+  it("queries both an oldest-first and a newest-first slice, each bounded, both with an `id` tie-breaker, and merges them via mergePendingFillSlices", async () => {
+    const calls: { col: string; ascending: boolean; limit: number }[] = [];
+    const supabaseAdminMock = mockSupabaseTwoOrderChain(calls, (callIndex) => {
+      // First call (oldest-first) returns a full oldest slice; second (newest-first) returns two fresh rows.
+      if (callIndex === 1) {
+        return {
+          data: Array.from({ length: PENDING_FILLS_OLDEST_SHARE }, (_, i) => ({
+            id: `old-${i}`,
+            event_key: `k-old-${i}`,
+            wallet_handle: null,
+            condition_id: null,
+            asset: "0xasset",
+            outcome: null,
+            event_slug: null,
+            market_slug: null,
+            side: "BUY",
+            shares: 1,
+            price: 0.5,
+            source_ts: i,
+          })),
+          error: null,
+        };
+      }
+      return {
+        data: [
+          { id: "fresh-2", event_key: "k-fresh-2", wallet_handle: null, condition_id: null, asset: "0xasset", outcome: null, event_slug: null, market_slug: null, side: "BUY", shares: 1, price: 0.5, source_ts: 999999 },
+          { id: "fresh-1", event_key: "k-fresh-1", wallet_handle: null, condition_id: null, asset: "0xasset", outcome: null, event_slug: null, market_slug: null, side: "BUY", shares: 1, price: 0.5, source_ts: 999998 },
+        ],
+        error: null,
+      };
+    });
     vi.doMock("@/integrations/supabase/client.server", () => ({ supabaseAdmin: supabaseAdminMock }));
     vi.resetModules();
     const { supabasePollRepository } = await import("./source-poll.server");
     const rows = await supabasePollRepository.findPendingDownstreamFills("0xwallet", MAX_PENDING_FILLS_PER_POLL);
     expect(calls).toEqual([
-      { ascending: true, limit: PENDING_FILLS_OLDEST_SHARE },
-      { ascending: false, limit: MAX_PENDING_FILLS_PER_POLL - PENDING_FILLS_OLDEST_SHARE },
+      { col: "source_ts,id", ascending: true, limit: PENDING_FILLS_OLDEST_SHARE },
+      { col: "source_ts,id", ascending: false, limit: MAX_PENDING_FILLS_PER_POLL - PENDING_FILLS_OLDEST_SHARE },
     ]);
     expect(rows.map((r) => r.id)).toContain("fresh-1");
     expect(rows.map((r) => r.id)).toContain("fresh-2");
     expect(rows).toHaveLength(PENDING_FILLS_OLDEST_SHARE + 2);
+    vi.doUnmock("@/integrations/supabase/client.server");
+    vi.resetModules();
+  });
+
+  it("CODEX P2-1: a large group of rows sharing an IDENTICAL source_ts is still returned in a fully deterministic order (id tie-break) -- repeated calls never reshuffle which rows win a bounded slice", async () => {
+    const tiedRows = Array.from({ length: PENDING_FILLS_OLDEST_SHARE + 50 }, (_, i) => ({
+      id: `tied-${String(i).padStart(3, "0")}`,
+      event_key: `k-tied-${i}`,
+      wallet_handle: null,
+      condition_id: null,
+      asset: "0xasset",
+      outcome: null,
+      event_slug: null,
+      market_slug: null,
+      side: "BUY",
+      shares: 1,
+      price: 0.5,
+      source_ts: 1_700_000_000, // every row shares the SAME source_ts
+    }));
+    const calls: { col: string; ascending: boolean; limit: number }[] = [];
+    const supabaseAdminMock = mockSupabaseTwoOrderChain(calls, (callIndex) => {
+      // Real Postgres applies the query's own ORDER BY -- simulate that here rather than
+      // returning insertion order, so this test actually exercises the tie-break, not just
+      // records that the column was requested.
+      const isOldestQuery = callIndex % 2 === 1; // each findPendingDownstreamFills call issues exactly 2 queries (oldest, then newest), so parity cycles regardless of how many times it's invoked overall
+      const sorted = [...tiedRows].sort((a, b) => (isOldestQuery ? a.id.localeCompare(b.id) : b.id.localeCompare(a.id)));
+      return { data: sorted.slice(0, isOldestQuery ? PENDING_FILLS_OLDEST_SHARE : MAX_PENDING_FILLS_PER_POLL - PENDING_FILLS_OLDEST_SHARE), error: null };
+    });
+    vi.doMock("@/integrations/supabase/client.server", () => ({ supabaseAdmin: supabaseAdminMock }));
+    vi.resetModules();
+    const { supabasePollRepository } = await import("./source-poll.server");
+    const first = await supabasePollRepository.findPendingDownstreamFills("0xwallet", MAX_PENDING_FILLS_PER_POLL);
+    const second = await supabasePollRepository.findPendingDownstreamFills("0xwallet", MAX_PENDING_FILLS_PER_POLL);
+    // Same tied input, same query -> byte-identical selection and order every time.
+    expect(second.map((r) => r.id)).toEqual(first.map((r) => r.id));
+    // The oldest slice deterministically wins the lexicographically-smallest ids; the
+    // newest slice (reversed by mergePendingFillSlices) contributes the remaining
+    // lexicographically-largest ids -- together, a stable, non-overlapping partition of
+    // the tied group rather than an arbitrary/reshuffling one.
+    expect(first[0]?.id).toBe("tied-000");
+    expect(first.at(-1)?.id).toBe(`tied-${PENDING_FILLS_OLDEST_SHARE + 49}`);
     vi.doUnmock("@/integrations/supabase/client.server");
     vi.resetModules();
   });

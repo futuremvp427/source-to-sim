@@ -701,9 +701,17 @@ export const supabasePollRepository: PollRepository = {
         .eq("wallet", wallet)
         .eq("downstream_status", "PENDING");
 
+    // CODEX P2-1: `id` is a deterministic, total-order tie-breaker for rows sharing an
+    // identical source_ts (a real case, not merely theoretical -- e.g. bulk-imported or
+    // degraded-identity history). Each slice's tie-break direction matches its own primary
+    // direction so both remain a consistent, deterministic partition of the SAME total
+    // order, ensuring repeated/restarted polling makes identical, converging progress
+    // rather than risking an arbitrary subset of a tied group winning forever.
     const [oldest, newest] = await Promise.all([
-      baseQuery().order("source_ts", { ascending: true }).limit(oldestShare),
-      newestShare > 0 ? baseQuery().order("source_ts", { ascending: false }).limit(newestShare) : Promise.resolve({ data: [] as unknown[], error: null }),
+      baseQuery().order("source_ts", { ascending: true }).order("id", { ascending: true }).limit(oldestShare),
+      newestShare > 0
+        ? baseQuery().order("source_ts", { ascending: false }).order("id", { ascending: false }).limit(newestShare)
+        : Promise.resolve({ data: [] as unknown[], error: null }),
     ]);
     if (oldest.error) throw new Error(oldest.error.message);
     if (newest.error) throw new Error(newest.error.message);
