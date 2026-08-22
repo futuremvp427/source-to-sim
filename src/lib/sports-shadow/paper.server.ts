@@ -53,7 +53,7 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 import { evaluateNotionalTiers, SPORTS_SHADOW_NOTIONALS_USD, type DepthWalkResult } from "./depth-walk";
-import { computeTakerFee, type FeeResult } from "./fees";
+import { computeTakerFeeForFills, type FeeResult } from "./fees";
 import { routeExecution, type RoutingDecision } from "./router";
 import type { DepthLevel, Venue } from "./types";
 
@@ -270,7 +270,10 @@ function evaluateVenue(venue: Venue, obs: CapturedObservation | null): { availab
   const depthWalk = evaluateNotionalTiers(obs.askDepth);
   const fees: Record<number, FeeResult> = {};
   for (const [tier, dw] of Object.entries(depthWalk)) {
-    fees[Number(tier)] = dw.contractsFilled > 0 && dw.averageExecutionPrice !== null ? computeTakerFee(venue, dw.contractsFilled, dw.averageExecutionPrice) : { feeUsd: 0, valid: false, reason: "no contracts filled", feeModelVersion: "n/a", effectiveDate: "n/a" };
+    // CODEX P1-5: computed PER PRICE LEVEL actually consumed (dw.fills), never against
+    // the blended averageExecutionPrice -- see fees.ts's computeTakerFeeForFills doc
+    // comment for why those are mathematically different numbers, not a rounding nuance.
+    fees[Number(tier)] = dw.contractsFilled > 0 && dw.fills.length > 0 ? computeTakerFeeForFills(venue, dw.fills) : { feeUsd: 0, valid: false, reason: "no contracts filled", feeModelVersion: "n/a", effectiveDate: "n/a" };
   }
   return { available: true, depthWalk, fees };
 }

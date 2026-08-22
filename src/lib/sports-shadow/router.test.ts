@@ -16,6 +16,7 @@ function fullFill(overrides: Partial<DepthWalkResult> = {}): DepthWalkResult {
     bestAvailablePrice: 0.49,
     worstExecutionPrice: 0.51,
     levelsConsumed: 2,
+    fills: [{ price: 0.49, contracts: 100 }, { price: 0.51, contracts: 100 }],
     priceImpact: 0.01,
     priceImpactCents: 1,
     invalidReason: null,

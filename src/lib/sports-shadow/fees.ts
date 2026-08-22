@@ -12,6 +12,7 @@
  * (paper.server.ts) must check `valid` before folding a fee into a net-P&L figure.
  */
 
+import type { ConsumedLevel } from "./depth-walk";
 import type { Venue } from "./types";
 
 export type FeeResult = {
@@ -134,7 +135,55 @@ export function computeKalshiTakerFee(contracts: number, priceUsd: number): FeeR
   };
 }
 
-/** Dispatch by venue — the only entry point paper.server.ts should call. */
+/** Dispatch by venue. Callers with a SINGLE known execution price (e.g. a level-by-level caller, or a test) use this directly; a multi-level walked fill must use computeTakerFeeForFills below instead -- see its own doc comment for why. */
 export function computeTakerFee(venue: Venue, contracts: number, priceUsd: number): FeeResult {
   return venue === "PMUS" ? computePmusTakerFee(contracts, priceUsd) : computeKalshiTakerFee(contracts, priceUsd);
+}
+
+/**
+ * ============ CODEX P1-5: EXECUTION-GRANULARITY FEE COMPUTATION ============
+ * PROVEN root cause: paper.server.ts previously collapsed a walked fill to ONE blended
+ * VWAP (depth-walk.ts's averageExecutionPrice) before computing a SINGLE fee against it.
+ * Both venues' documented fee formulas are Θ × C × p × (1-p) -- a CONCAVE, nonlinear
+ * function of price -- so summing the fee computed separately at each price level a fill
+ * actually touched is mathematically NOT the same number as computing one fee at the
+ * blended average price. Example: 5 contracts at p=0.50 (p(1-p)=0.2500) plus 5 at p=0.90
+ * (p(1-p)=0.0900) sums to Θ×(5×0.25 + 5×0.09) = Θ×1.70; the SAME 10 contracts blended to
+ * VWAP=0.70 gives Θ×10×0.70×0.30 = Θ×2.10 -- a real, provable discrepancy, not a rounding
+ * artifact.
+ *
+ * FIX: computes the venue's own fee formula ONCE PER PRICE LEVEL actually consumed
+ * (depth-walk.ts's `fills`, each level treated as its own fill event against its own
+ * resting price -- consistent with how a real sweep against a multi-level book is
+ * actually matched, price level by price level), applying each venue's own documented
+ * per-fill rounding rule (PM-US: banker's rounding to the nearest cent; Kalshi: round up
+ * to the nearest centicent) AT EACH LEVEL before summing -- never rounds once at the end,
+ * which would itself reintroduce a blended-computation artifact.
+ *
+ * Fails closed as a WHOLE: if ANY level's own fee computation is invalid (a malformed
+ * price/contracts pair, which should be structurally impossible from a genuine
+ * depth-walk.ts result but is never trusted blindly), the entire aggregate is invalid --
+ * never silently drops just that level's fee and returns a partial total.
+ */
+export function computeTakerFeeForFills(venue: Venue, fills: readonly ConsumedLevel[]): FeeResult {
+  const version = venue === "PMUS" ? PMUS_FEE_MODEL_VERSION : KALSHI_FEE_MODEL_VERSION;
+  const effectiveDate = venue === "PMUS" ? "2026-07-01" : "2026-02-05";
+  if (fills.length === 0) {
+    return invalidFee(version, effectiveDate, "no consumed price levels to compute a fee against");
+  }
+  let totalFeeUsd = 0;
+  for (const level of fills) {
+    const result = computeTakerFee(venue, level.contracts, level.price);
+    if (!result.valid) {
+      return invalidFee(version, effectiveDate, `level at price ${level.price}: ${result.reason}`);
+    }
+    totalFeeUsd += result.feeUsd;
+  }
+  return {
+    feeUsd: Math.round(totalFeeUsd * 1e6) / 1e6, // strip float summation noise beyond centicent precision, never rounds the VALUE itself
+    valid: true,
+    reason: null,
+    feeModelVersion: version,
+    effectiveDate,
+  };
 }

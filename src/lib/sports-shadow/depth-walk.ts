@@ -23,6 +23,16 @@ export type SportsShadowNotionalUsd = (typeof SPORTS_SHADOW_NOTIONALS_USD)[numbe
 
 export type ExecutionStatus = "FULL" | "PARTIAL" | "NONE" | "INVALID";
 
+/**
+ * CODEX P1-5: one price level's own contribution to a walked fill -- price and contracts
+ * consumed AT THAT price specifically, never blended. Both venues' documented fee
+ * formulas (fees.ts) are NONLINEAR in price (Θ × C × p × (1-p)), so summing fees computed
+ * per-level is NOT the same number as computing one fee against the blended VWAP -- see
+ * fees.ts's computeTakerFeeForFills, the only fee entry point that should ever consume
+ * this array for a multi-level fill.
+ */
+export type ConsumedLevel = { price: number; contracts: number };
+
 export type DepthWalkResult = {
   status: ExecutionStatus;
   requestedNotionalUsd: number;
@@ -31,7 +41,7 @@ export type DepthWalkResult = {
   /** filledNotionalUsd / requestedNotionalUsd. 0 for NONE/INVALID. */
   fillRatio: number;
   contractsFilled: number;
-  /** VWAP over the amount actually filled: filledNotionalUsd / contractsFilled. null for NONE/INVALID. */
+  /** VWAP over the amount actually filled: filledNotionalUsd / contractsFilled. null for NONE/INVALID. Diagnostic/display only -- NEVER fed into fee computation (see `fills` + CODEX P1-5). */
   averageExecutionPrice: number | null;
   /** The lowest valid ask price in the depth, before walking. null only when depth is empty or evidence is INVALID. */
   bestAvailablePrice: number | null;
@@ -39,6 +49,8 @@ export type DepthWalkResult = {
   worstExecutionPrice: number | null;
   /** Count of distinct (post price-aggregation) price levels actually touched by the walk. */
   levelsConsumed: number;
+  /** CODEX P1-5: every price level actually consumed, in the order walked (best price first), each with its own contracts -- the execution-granularity record fees.ts's computeTakerFeeForFills requires. Empty for NONE/INVALID. */
+  fills: readonly ConsumedLevel[];
   /** Raw PRE-FEE execution impact: averageExecutionPrice - bestAvailablePrice. Never fee-adjusted. null for NONE/INVALID. */
   priceImpact: number | null;
   /** priceImpact * 100 — sub-cent precision preserved, never rounded. null for NONE/INVALID. */
@@ -75,6 +87,7 @@ function invalidResult(requestedNotionalUsd: number, reason: string): DepthWalkR
     bestAvailablePrice: null,
     worstExecutionPrice: null,
     levelsConsumed: 0,
+    fills: [],
     priceImpact: null,
     priceImpactCents: null,
     invalidReason: reason,
@@ -137,6 +150,7 @@ export function walkBuyDepth(levels: readonly DepthLevel[], requestedNotionalUsd
       bestAvailablePrice: null,
       worstExecutionPrice: null,
       levelsConsumed: 0,
+      fills: [],
       priceImpact: null,
       priceImpactCents: null,
       invalidReason: null,
@@ -148,6 +162,10 @@ export function walkBuyDepth(levels: readonly DepthLevel[], requestedNotionalUsd
   let totalSpend = 0;
   let levelsConsumed = 0;
   let worstExecutionPrice: number | null = null;
+  // CODEX P1-5: preserved so fees.ts can compute the fee AT EACH level's own price
+  // (both venues' fee formulas are nonlinear in price -- see fees.ts's own doc comment)
+  // instead of collapsing to one blended VWAP before the fee is ever computed.
+  const fills: ConsumedLevel[] = [];
 
   for (const level of sorted) {
     if (remainingNotional <= EPSILON) break;
@@ -159,6 +177,7 @@ export function walkBuyDepth(levels: readonly DepthLevel[], requestedNotionalUsd
     remainingNotional -= spendAtLevel;
     levelsConsumed += 1;
     worstExecutionPrice = level.price;
+    fills.push({ price: level.price, contracts: contractsAtLevel });
   }
 
   if (totalContracts <= 0) {
@@ -173,6 +192,7 @@ export function walkBuyDepth(levels: readonly DepthLevel[], requestedNotionalUsd
       bestAvailablePrice,
       worstExecutionPrice: null,
       levelsConsumed: 0,
+      fills: [],
       priceImpact: null,
       priceImpactCents: null,
       invalidReason: null,
@@ -204,6 +224,7 @@ export function walkBuyDepth(levels: readonly DepthLevel[], requestedNotionalUsd
     bestAvailablePrice,
     worstExecutionPrice,
     levelsConsumed,
+    fills,
     priceImpact: Math.max(0, priceImpact),
     priceImpactCents: Math.max(0, priceImpact) * 100,
     invalidReason: null,

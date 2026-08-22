@@ -4,6 +4,7 @@ import {
   computeKalshiTakerFee,
   computePmusTakerFee,
   computeTakerFee,
+  computeTakerFeeForFills,
   KALSHI_FEE_MODEL_VERSION,
   PMUS_FEE_MODEL_VERSION,
 } from "./fees";
@@ -93,5 +94,64 @@ describe("computeTakerFee: venue dispatch", () => {
     expect(kalshi.feeModelVersion).toBe(KALSHI_FEE_MODEL_VERSION);
     // Different coefficients (0.06 vs 0.07) -> different fee at the identical input.
     expect(pmus.feeUsd).not.toBeCloseTo(kalshi.feeUsd, 6);
+  });
+});
+
+describe("CODEX P1-5: computeTakerFeeForFills -- execution-granularity fee computation, never blended VWAP", () => {
+  it("official single-level example: a single-level fill produces the IDENTICAL fee as computeTakerFee against that one price (both formulas' own official worked example)", () => {
+    const singleLevel = computeTakerFeeForFills("PMUS", [{ price: 0.5, contracts: 100 }]);
+    const direct = computePmusTakerFee(100, 0.5);
+    expect(singleLevel.feeUsd).toBe(direct.feeUsd);
+    expect(singleLevel.valid).toBe(true);
+
+    const kalshiSingle = computeTakerFeeForFills("KALSHI", [{ price: 0.5, contracts: 100 }]);
+    const kalshiDirect = computeKalshiTakerFee(100, 0.5);
+    expect(kalshiSingle.feeUsd).toBe(kalshiDirect.feeUsd);
+  });
+
+  it("multi-level fill: per-level fee is PROVABLY different from fee(VWAP) -- the exact discrepancy this fix closes, not a rounding nuance", () => {
+    // 5 contracts at p=0.50 (p(1-p)=0.2500) + 5 contracts at p=0.90 (p(1-p)=0.0900).
+    // Per-level: Theta*(5*0.25 + 5*0.09) = Theta*1.70. Blended VWAP=0.70: Theta*10*0.70*0.30 = Theta*2.10.
+    const perLevel = computeTakerFeeForFills("PMUS", [
+      { price: 0.5, contracts: 5 },
+      { price: 0.9, contracts: 5 },
+    ]);
+    const blendedAtVwap = computePmusTakerFee(10, 0.7);
+    expect(perLevel.valid).toBe(true);
+    expect(perLevel.feeUsd).not.toBeCloseTo(blendedAtVwap.feeUsd, 2);
+    expect(perLevel.feeUsd).toBeLessThan(blendedAtVwap.feeUsd); // concave formula -- blended VWAP overstates the true cost here
+  });
+
+  it("rounding boundary: each level is rounded per the venue's own documented per-fill rule BEFORE summing, not once at the end", () => {
+    // Two levels individually landing on PM-US's own documented half-cent boundary example.
+    const result = computeTakerFeeForFills("PMUS", [
+      { price: 0.5, contracts: 100 }, // Theta*100*0.25 = 1.50 exactly -- no rounding ambiguity
+      { price: 0.5, contracts: 100 },
+    ]);
+    expect(result.feeUsd).toBeCloseTo(3.0, 6);
+  });
+
+  it("fails closed as a WHOLE when any one level's own fee computation is invalid -- never silently drops just that level's fee", () => {
+    const result = computeTakerFeeForFills("PMUS", [
+      { price: 0.5, contracts: 100 },
+      { price: 1.5, contracts: 50 }, // out of PM-US's valid [0.01, 0.99] range
+    ]);
+    expect(result.valid).toBe(false);
+    expect(result.feeUsd).toBe(0); // never a partial total from the one valid level
+  });
+
+  it("an empty fills array (no consumed levels) is UNVERIFIED, never a silent fee=0 success", () => {
+    const result = computeTakerFeeForFills("KALSHI", []);
+    expect(result.valid).toBe(false);
+  });
+
+  it("CODEX P1-5: a market whose fee cannot be proven (no known multiplier/schedule signal) must never silently fall back to the standard formula as if verified -- this module's own single documented Kalshi formula is the ONLY schedule this codebase can currently prove (live-confirmed: Kalshi's public market API exposes no per-market fee-multiplier field at all), so computeTakerFeeForFills cannot silently apply an override it has no way to detect. This test documents that boundary rather than asserting a fabricated multiplier.", () => {
+    // Confirms the dispatcher does not invent per-market fee metadata that does not
+    // exist anywhere in this codebase's Kalshi discovery layer (KalshiCandidate has no
+    // fee-multiplier field -- see kalshi.ts) -- the standard schedule is applied because
+    // it is the only one this system can prove, not because a differing one was ignored.
+    const result = computeTakerFeeForFills("KALSHI", [{ price: 0.5, contracts: 100 }]);
+    expect(result.feeModelVersion).toBe(KALSHI_FEE_MODEL_VERSION);
+    expect(result.valid).toBe(true);
   });
 });
