@@ -22,18 +22,18 @@ STABLE
 SECURITY INVOKER
 AS $$
   SELECT
-    count(*) FILTER (WHERE category = 'SYSTEM' AND metric = 'cycle_duration_ms')::bigint,
-    COALESCE(sum(value) FILTER (WHERE metric = 'cycle_error_count'), 0),
-    COALESCE(sum(value) FILTER (WHERE category = 'OBSERVATION' AND metric = 'captured'), 0),
-    COALESCE(sum(value) FILTER (WHERE category = 'OBSERVATION' AND metric = 'failed'), 0),
-    COALESCE(sum(value) FILTER (WHERE category = 'OBSERVATION' AND metric = 'skipped'), 0),
-    COALESCE(sum(value) FILTER (WHERE category = 'VENUE' AND metric = 'discovery_failed' AND labels->>'venue' = 'PMUS'), 0),
-    count(*) FILTER (WHERE category = 'VENUE' AND metric = 'discovery_failed' AND labels->>'venue' = 'PMUS')::bigint,
-    COALESCE(sum(value) FILTER (WHERE category = 'VENUE' AND metric = 'discovery_failed' AND labels->>'venue' = 'KALSHI'), 0),
-    count(*) FILTER (WHERE category = 'VENUE' AND metric = 'discovery_failed' AND labels->>'venue' = 'KALSHI')::bigint,
-    count(*) FILTER (WHERE category = 'SOURCE' AND metric = 'wallets_attempted')::bigint,
-    count(*) FILTER (WHERE category = 'SOURCE' AND metric = 'wallets_attempted' AND value = 0)::bigint,
-    COALESCE(sum(value) FILTER (WHERE category = 'SOURCE' AND metric = 'lease_lost'), 0)
+    count(*) FILTER (WHERE category = 'SYSTEM' AND metric = 'cycle_duration_ms')::bigint AS actual_cycle_count,
+    COALESCE(sum(value) FILTER (WHERE metric = 'cycle_error_count'), 0) AS total_cycle_errors,
+    COALESCE(sum(value) FILTER (WHERE category = 'OBSERVATION' AND metric = 'captured'), 0) AS observation_captured_total,
+    COALESCE(sum(value) FILTER (WHERE category = 'OBSERVATION' AND metric = 'failed'), 0) AS observation_failed_total,
+    COALESCE(sum(value) FILTER (WHERE category = 'OBSERVATION' AND metric = 'skipped'), 0) AS observation_backlog_total,
+    COALESCE(sum(value) FILTER (WHERE category = 'VENUE' AND metric = 'discovery_failed' AND labels->>'venue' = 'PMUS'), 0) AS pmus_discovery_failed_count,
+    count(*) FILTER (WHERE category = 'VENUE' AND metric = 'discovery_failed' AND labels->>'venue' = 'PMUS')::bigint AS pmus_discovery_attempted_cycles,
+    COALESCE(sum(value) FILTER (WHERE category = 'VENUE' AND metric = 'discovery_failed' AND labels->>'venue' = 'KALSHI'), 0) AS kalshi_discovery_failed_count,
+    count(*) FILTER (WHERE category = 'VENUE' AND metric = 'discovery_failed' AND labels->>'venue' = 'KALSHI')::bigint AS kalshi_discovery_attempted_cycles,
+    count(*) FILTER (WHERE category = 'SOURCE' AND metric = 'wallets_attempted')::bigint AS source_lane_acquired_cycles,
+    count(*) FILTER (WHERE category = 'SOURCE' AND metric = 'wallets_attempted' AND value = 0)::bigint AS source_starved_cycles,
+    COALESCE(sum(value) FILTER (WHERE category = 'SOURCE' AND metric = 'lease_lost'), 0) AS lease_lost_count
   FROM public.sports_shadow_telemetry_events
   WHERE experiment_epoch_id = p_epoch_id AND created_at >= p_since;
 $$;

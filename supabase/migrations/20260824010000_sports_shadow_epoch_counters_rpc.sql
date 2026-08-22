@@ -26,7 +26,7 @@ LANGUAGE sql
 STABLE
 SECURITY INVOKER
 AS $$
-  WITH epoch AS (
+  WITH epoch_row AS (
     SELECT calibration_started_at, oos_started_at
     FROM public.sports_shadow_experiment_epochs
     WHERE id = p_epoch_id
@@ -46,14 +46,14 @@ AS $$
     (SELECT count(*) FROM sig WHERE status LIKE 'SETTLED%')::bigint AS settled_count,
     (SELECT count(DISTINCT pf.signal_id) FROM public.sports_shadow_paper_fills pf
       WHERE pf.experiment_epoch_id = p_epoch_id AND pf.fill_status = 'REJECTED')::bigint AS rejected_count,
-    (SELECT count(DISTINCT sig.effective_cluster) FROM sig, epoch
-      WHERE sig.status LIKE 'SETTLED%' AND epoch.calibration_started_at IS NOT NULL
-        AND sig.created_at >= epoch.calibration_started_at
-        AND (epoch.oos_started_at IS NULL OR sig.created_at < epoch.oos_started_at)
+    (SELECT count(DISTINCT sig.effective_cluster) FROM sig, epoch_row
+      WHERE sig.status LIKE 'SETTLED%' AND epoch_row.calibration_started_at IS NOT NULL
+        AND sig.created_at >= epoch_row.calibration_started_at
+        AND (epoch_row.oos_started_at IS NULL OR sig.created_at < epoch_row.oos_started_at)
     )::bigint AS calibration_independent_settled_count,
-    (SELECT count(DISTINCT sig.effective_cluster) FROM sig, epoch
-      WHERE sig.status LIKE 'SETTLED%' AND epoch.oos_started_at IS NOT NULL
-        AND sig.created_at >= epoch.oos_started_at
+    (SELECT count(DISTINCT sig.effective_cluster) FROM sig, epoch_row
+      WHERE sig.status LIKE 'SETTLED%' AND epoch_row.oos_started_at IS NOT NULL
+        AND sig.created_at >= epoch_row.oos_started_at
     )::bigint AS oos_independent_settled_count;
 $$;
 

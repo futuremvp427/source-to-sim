@@ -110,6 +110,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_signal_detection_time.sql
+      - name: Verify final-build analytics schema/RPCs -- epoch attribution, epoch counters, episode outcomes, soak telemetry rollup, milestone snapshots (repository-completion pass)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_final_build_analytics.sql
       - name: Export local Supabase connection env for the PostgREST integration harness
         run: |
           eval "$(supabase status -o env)"
