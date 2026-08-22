@@ -18,6 +18,7 @@ import {
   OBSERVATION_LOCK_ID_PMUS,
   OBSERVATION_STAGE_DEADLINE_MS,
   SOURCE_LANE_BUDGET_MS,
+  sourceIngestDeadline,
   SOURCE_LOCK_ID,
   runSportsShadowCycle,
   type SportsShadowWorkerDeps,
@@ -348,12 +349,14 @@ describe("runSportsShadowCycle — wallet polling (fixed order)", () => {
     expect(new Set(deadlines).size).toBe(1); // identical deadline value passed to every wallet this lane
   });
 
-  it("Task 13F: the lane deadline equals now() + SOURCE_LANE_BUDGET_MS at lane start, proving the SAME existing 30s constant now bounds a wallet's OWN in-flight work too, not just whether to start the next wallet", async () => {
+  it("SOAK-INCIDENT FIX: the wallet-poll deadline is the RESERVED ingest sub-budget (lane start + 30s - VENUE_MATCH_RESERVE_MS), so heavy ingestion can never consume the venue-matching lanes' budget", async () => {
     const fixedNow = 1_700_000_000_000;
     const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, _deps: unknown, _deadlineAtMs: number) => emptyWalletResult(wallet));
     await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A] }), baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never, now: () => fixedNow }));
-    expect(pollSportsShadowWallet.mock.calls[0]?.[3]).toBe(fixedNow + SOURCE_LANE_BUDGET_MS);
+    expect(pollSportsShadowWallet.mock.calls[0]?.[3]).toBe(sourceIngestDeadline(fixedNow));
+    expect(pollSportsShadowWallet.mock.calls[0]?.[3]).toBeLessThan(fixedNow + SOURCE_LANE_BUDGET_MS);
   });
+
 
   it("one bad wallet does not prevent the next wallet from being attempted", async () => {
     const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
@@ -433,7 +436,7 @@ describe("runSportsShadowCycle — Task 12D/P1-B wallet fairness", () => {
     const workerRepo = makeFakeWorkerRepo([], [], 0);
     let now = 1_700_000_100_000;
     const pollSportsShadowWallet = vi.fn(async (wallet: string) => {
-      if (wallet === WALLET_A) now += 31_000; // consumes the whole 30s SOURCE_LANE_BUDGET_MS
+      if (wallet === WALLET_A) now += 31_000; // consumes the whole ingest sub-budget (soak-incident fix) and then some
       return emptyWalletResult(wallet);
     });
     await runSportsShadowCycle(

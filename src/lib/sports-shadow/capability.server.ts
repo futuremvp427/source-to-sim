@@ -141,3 +141,41 @@ export async function probeKalshiCapability(deps: Partial<CapabilityProbeDeps> =
   await d.repo.upsert(row);
   return row;
 }
+
+/**
+ * ============ SOAK INCIDENT (2026-08-22): CAPABILITY WAS NEVER PROBED ============
+ * PROVEN root cause of the empty sports_shadow_venue_capability table: probePmusCapability
+ * and probeKalshiCapability had NO call site anywhere in the codebase -- capability was
+ * never probed at all, so this was NOT a downstream effect of the starvation bug and the
+ * dashboard's "not yet checked" state was literally accurate. This refresher gives them a
+ * real, bounded, cached cadence during the operational soak, independent of whether any
+ * signal exists yet.
+ * ================================================================================
+ */
+export const CAPABILITY_PROBE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Probes at most the two venues, sequentially (never concurrent fan-out -- Cloudflare
+ * connection discipline), and only when that venue's durable row is missing or older than
+ * CAPABILITY_PROBE_MAX_AGE_MS. Never throws: a probe failure is itself a capability signal
+ * for that venue only and must never break the cycle.
+ */
+export async function refreshVenueCapabilityIfStale(now: number = Date.now(), deps: Partial<CapabilityProbeDeps> = {}): Promise<VenueCapabilityRow[]> {
+  const d = { ...defaultDeps, ...deps };
+  const refreshed: VenueCapabilityRow[] = [];
+  const probes: [Venue, () => Promise<VenueCapabilityRow>][] = [
+    ["PMUS", () => probePmusCapability(d)],
+    ["KALSHI", () => probeKalshiCapability(d)],
+  ];
+  for (const [venue, probe] of probes) {
+    try {
+      const existing = await d.repo.get(venue);
+      const ageMs = existing === null ? Number.POSITIVE_INFINITY : now - Date.parse(existing.checkedAtIso);
+      if (Number.isFinite(ageMs) && ageMs < CAPABILITY_PROBE_MAX_AGE_MS) continue;
+      refreshed.push(await probe());
+    } catch {
+      // Per-venue best-effort: the other venue is still attempted, and the cycle proceeds.
+    }
+  }
+  return refreshed;
+}

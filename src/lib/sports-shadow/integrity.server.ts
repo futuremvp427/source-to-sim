@@ -122,7 +122,30 @@ const CHECKS: Check[] = [
   },
 ];
 
-export async function runIntegrityAudit(checks: Check[] = CHECKS): Promise<IntegrityAuditResult> {
+/**
+ * ============ SOAK INCIDENT (2026-08-22): SYNTHETIC AUDIT ROWS IN PRODUCTION ============
+ * PROVEN cause of the three fake FAILED rows (checks named 'a', 'b', 'throws',
+ * 'still-runs', detail 'query exploded'): integrity.server.test.ts injected fake `checks`
+ * but NOT a fake persistence layer, so runIntegrityAudit's hardcoded supabaseAdmin insert
+ * wrote every test fixture straight into the production audit table, where the dashboard
+ * then reported it as a real production health failure.
+ *
+ * FIX: persistence is now an injected dependency. Tests pass an in-memory recorder and can
+ * no longer reach production by construction.
+ * ================================================================================
+ */
+export type IntegrityAuditRecorder = (result: IntegrityAuditResult) => Promise<void>;
+
+export const supabaseIntegrityAuditRecorder: IntegrityAuditRecorder = async (result) => {
+  await supabaseAdmin.from("sports_shadow_integrity_audits" as never).insert({
+    passed: result.passed,
+    checks_run: result.checksRun,
+    checks_failed: result.checksFailed,
+    findings: result.findings,
+  } as never);
+};
+
+export async function runIntegrityAudit(checks: Check[] = CHECKS, record: IntegrityAuditRecorder = supabaseIntegrityAuditRecorder): Promise<IntegrityAuditResult> {
   const findings: IntegrityFinding[] = [];
   for (const check of checks) {
     try {
@@ -135,12 +158,7 @@ export async function runIntegrityAudit(checks: Check[] = CHECKS): Promise<Integ
   const result: IntegrityAuditResult = { passed: checksFailed === 0, checksRun: findings.length, checksFailed, findings };
 
   try {
-    await supabaseAdmin.from("sports_shadow_integrity_audits" as never).insert({
-      passed: result.passed,
-      checks_run: result.checksRun,
-      checks_failed: result.checksFailed,
-      findings: result.findings,
-    } as never);
+    await record(result);
   } catch {
     // Best-effort persistence -- a failure to WRITE the audit record must not make the
     // audit itself throw (the caller still gets the in-memory result back).
