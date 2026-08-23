@@ -46,7 +46,11 @@ AS $$
   WITH entry_fills AS (
     SELECT DISTINCT ON (pf_inner.signal_id, pf_inner.notional_tier_usd) pf_inner.*
     FROM public.sports_shadow_paper_fills pf_inner
-    WHERE pf_inner.side = 'ENTRY' AND pf_inner.trigger_source_fill_id IS NULL
+    -- Lifecycle trigger_source_fill_id is introduced later in
+    -- 20260825120000_sports_shadow_follower_lifecycle.sql. This migration can only
+    -- depend on the schema available at this point; the lifecycle migration replaces
+    -- this RPC again with the trigger-aware outcome model.
+    WHERE pf_inner.side = 'ENTRY'
     ORDER BY pf_inner.signal_id, pf_inner.notional_tier_usd, pf_inner.routing_timestamp ASC, pf_inner.id ASC
   ),
   routed AS (
@@ -63,10 +67,7 @@ AS $$
       pf.contracts,
       pf.vwap,
       pf.fee_usd,
-      CASE
-        WHEN p.id IS NOT NULL THEN COALESCE(pf.all_in_cost_usd, 0) + COALESCE(p.add_cost_usd, 0)
-        ELSE pf.all_in_cost_usd
-      END AS all_in_cost_usd,
+      pf.all_in_cost_usd,
       pf.reject_reason,
       pf.routing_timestamp,
       o.spread,
@@ -75,31 +76,10 @@ AS $$
       o.observed_at,
       pf.pmus_result,
       pf.kalshi_result,
-      CASE
-        WHEN p.status = 'CLOSED' THEN
-          CASE
-            WHEN COALESCE(p.realized_pnl_usd, 0) > 0 THEN 'SETTLED_WIN'
-            WHEN COALESCE(p.realized_pnl_usd, 0) < 0 THEN 'SETTLED_LOSS'
-            ELSE 'SETTLED_PUSH'
-          END
-        WHEN st.settlement_status IS NOT NULL THEN st.settlement_status
-        ELSE NULL
-      END AS settlement_status,
-      CASE
-        WHEN p.status = 'CLOSED' THEN COALESCE(p.realized_pnl_usd, 0)
-        WHEN st.settlement_status IN ('SETTLED_WIN', 'SETTLED_LOSS', 'SETTLED_PUSH', 'VOID', 'CANCELED') THEN COALESCE(st.gross_pnl_usd, 0) + COALESCE(p.realized_pnl_usd, 0)
-        ELSE st.gross_pnl_usd
-      END AS gross_pnl_usd,
-      CASE
-        WHEN p.status = 'CLOSED' THEN COALESCE(p.total_fees_usd, pf.fee_usd, 0)
-        WHEN st.settlement_status IN ('SETTLED_WIN', 'SETTLED_LOSS', 'SETTLED_PUSH', 'VOID', 'CANCELED') THEN COALESCE(p.total_fees_usd, pf.fee_usd, 0) + COALESCE(st.total_fees_usd, 0)
-        ELSE st.total_fees_usd
-      END AS total_fees_usd,
-      CASE
-        WHEN p.status = 'CLOSED' THEN COALESCE(p.realized_pnl_usd, 0)
-        WHEN st.settlement_status IN ('SETTLED_WIN', 'SETTLED_LOSS', 'SETTLED_PUSH', 'VOID', 'CANCELED') THEN COALESCE(st.net_pnl_usd, 0) + COALESCE(p.realized_pnl_usd, 0)
-        ELSE st.net_pnl_usd
-      END AS net_pnl_usd
+      st.settlement_status,
+      st.gross_pnl_usd,
+      st.total_fees_usd,
+      st.net_pnl_usd
     FROM public.sports_shadow_signals s
     JOIN entry_fills pf ON pf.signal_id = s.id
     LEFT JOIN public.sports_quote_observations o ON o.id = (
@@ -109,8 +89,6 @@ AS $$
         ELSE NULL
       END
     )
-    LEFT JOIN public.sports_shadow_paper_positions p
-      ON p.signal_id = s.id AND p.venue = pf.chosen_venue AND p.notional_tier_usd = pf.notional_tier_usd
     LEFT JOIN public.sports_shadow_settlements st
       ON st.signal_id = s.id AND st.venue = pf.chosen_venue AND st.notional_tier_usd = pf.notional_tier_usd
     WHERE s.experiment_epoch_id = p_epoch_id
@@ -150,7 +128,6 @@ AS $$
         WHERE pf2.signal_id = s.id
           AND pf2.notional_tier_usd = tier.notional_tier_usd
           AND pf2.side = 'ENTRY'
-          AND pf2.trigger_source_fill_id IS NULL
       )
   )
   SELECT * FROM routed
