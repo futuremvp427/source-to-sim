@@ -155,3 +155,54 @@ describe("CODEX P1-5: computeTakerFeeForFills -- execution-granularity fee compu
     expect(result.valid).toBe(true);
   });
 });
+
+describe("CODEX P1-4 (round 2): net fee model re-investigation", () => {
+  it("version/date corrected to the currently-in-force schedule (was stale at the Feb 2026 label)", () => {
+    expect(KALSHI_FEE_MODEL_VERSION).toBe("KALSHI_FEE_V2_2026-07-07");
+    expect(computeKalshiTakerFee(100, 0.5).effectiveDate).toBe("2026-07-07");
+  });
+
+  it("official worked rounding example: 1 contract at $0.33 rounds UP from a genuinely non-centicent-aligned raw fee", () => {
+    // 0.07 * 1 * 0.33 * 0.67 = 0.0154770 -- the next centicent multiple at or above it is 0.0155.
+    const result = computeKalshiTakerFee(1, 0.33);
+    expect(result.valid).toBe(true);
+    expect(result.feeUsd).toBeCloseTo(0.0155, 6);
+    expect(result.feeUsd).toBeGreaterThanOrEqual(0.07 * 1 * 0.33 * 0.67);
+  });
+
+  it("netFeeComplete: PM-US's model is complete (no undocumented cross-fill mechanism); Kalshi's is a documented, bounded, safe upper bound (the balance-rounding/rebate accumulator is not modeled)", () => {
+    const pmus = computePmusTakerFee(100, 0.5);
+    const kalshi = computeKalshiTakerFee(100, 0.5);
+    expect(pmus.netFeeComplete).toBe(true);
+    expect(pmus.reason).toBeNull();
+    expect(kalshi.netFeeComplete).toBe(false);
+    expect(kalshi.valid).toBe(true); // still a REAL, documented, currently-in-force formula -- not unverified
+    expect(kalshi.reason).toMatch(/rebate|balance-rounding/i);
+  });
+
+  it("netFeeComplete propagates through computeTakerFeeForFills for both a single level and a multi-level book, valid or invalid", () => {
+    expect(computeTakerFeeForFills("KALSHI", [{ price: 0.5, contracts: 100 }]).netFeeComplete).toBe(false);
+    expect(computeTakerFeeForFills("PMUS", [{ price: 0.5, contracts: 100 }]).netFeeComplete).toBe(true);
+    expect(
+      computeTakerFeeForFills("KALSHI", [
+        { price: 0.5, contracts: 50 },
+        { price: 0.6, contracts: 50 },
+      ]).netFeeComplete,
+    ).toBe(false);
+    expect(computeTakerFeeForFills("KALSHI", []).netFeeComplete).toBe(false); // invalid, but the venue's own model completeness is still an honest false, not a placeholder true
+  });
+
+  it("Kalshi's multiplier M=1 applies to every market this system's own BetType can ever describe -- MONEYLINE/SPREAD/TOTAL are all team/game-level markets, never the player-prop exception the documented non-default multiplier names. A fee computed for any of these is the correctly-applicable schedule, not an unjustified guess.", () => {
+    // This module's fee functions take no betType parameter at all (contracts/price
+    // only) -- the guarantee comes from the TYPE SYSTEM (types.ts's BetType union),
+    // not a runtime check, exactly like this codebase's own established pattern of
+    // trusting an exhaustive union rather than defending against values the compiler
+    // already makes unreachable. Documents the boundary rather than asserting a
+    // fabricated non-default multiplier this codebase has no way to observe (Kalshi's
+    // public market API exposes no per-market fee-multiplier field -- see the test
+    // immediately above this describe block).
+    const result = computeKalshiTakerFee(100, 0.5);
+    expect(result.valid).toBe(true);
+    expect(result.feeUsd).toBeCloseTo(0.07 * 100 * 0.5 * 0.5, 6); // M=1 -- unmultiplied base formula
+  });
+});

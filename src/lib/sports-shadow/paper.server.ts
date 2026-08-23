@@ -286,7 +286,10 @@ function evaluateVenue(venue: Venue, obs: CapturedObservation | null): { availab
     // CODEX P1-5: computed PER PRICE LEVEL actually consumed (dw.fills), never against
     // the blended averageExecutionPrice -- see fees.ts's computeTakerFeeForFills doc
     // comment for why those are mathematically different numbers, not a rounding nuance.
-    fees[Number(tier)] = dw.contractsFilled > 0 && dw.fills.length > 0 ? computeTakerFeeForFills(venue, dw.fills) : { feeUsd: 0, valid: false, reason: "no contracts filled", feeModelVersion: "n/a", effectiveDate: "n/a" };
+    fees[Number(tier)] =
+      dw.contractsFilled > 0 && dw.fills.length > 0
+        ? computeTakerFeeForFills(venue, dw.fills)
+        : { feeUsd: 0, valid: false, netFeeComplete: true, reason: "no contracts filled", feeModelVersion: "n/a", effectiveDate: "n/a" };
   }
   return { available: true, depthWalk, fees };
 }

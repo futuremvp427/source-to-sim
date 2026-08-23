@@ -25,7 +25,7 @@ function fullFill(overrides: Partial<DepthWalkResult> = {}): DepthWalkResult {
 }
 
 function validFee(feeUsd: number): FeeResult {
-  return { feeUsd, valid: true, reason: null, feeModelVersion: "TEST_V1", effectiveDate: "2026-01-01" };
+  return { feeUsd, valid: true, netFeeComplete: true, reason: null, feeModelVersion: "TEST_V1", effectiveDate: "2026-01-01" };
 }
 
 const NOW = 1_700_000_000_000;
@@ -119,7 +119,7 @@ describe("FINAL BUILD Part 12: no-hindsight router", () => {
   it("T-router-9: an invalid/UNVERIFIED fee disqualifies a venue even with a perfectly good depth-walk result", () => {
     const decision = routeExecution(
       100,
-      { available: true, depthWalk: fullFill(), fee: { feeUsd: 0, valid: false, reason: "price out of range", feeModelVersion: "V1", effectiveDate: "2026-01-01" } },
+      { available: true, depthWalk: fullFill(), fee: { feeUsd: 0, valid: false, netFeeComplete: true, reason: "price out of range", feeModelVersion: "V1", effectiveDate: "2026-01-01" } },
       { available: true, depthWalk: fullFill(), fee: validFee(1) },
       NOW,
     );
