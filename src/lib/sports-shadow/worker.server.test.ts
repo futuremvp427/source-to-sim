@@ -176,6 +176,7 @@ function emptyWalletResult(wallet: string, overrides: Partial<WalletPollResult> 
     duplicateRows: 0,
     invalidRows: 0,
     metadataFetchFailures: 0,
+    metadataDeadlineReached: false,
     ineligibleRows: 0,
     unverifiedRows: 0,
     terminalUnverifiedRows: 0,
