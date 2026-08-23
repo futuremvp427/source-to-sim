@@ -2155,6 +2155,14 @@ export async function pollSportsShadowWallet(
     }
   }
 
+  // RECOVERY: final flush of the pre-go-live drain buffer. Runs after every loop exit path
+  // (normal end, deadline break, lease-loss break) because it is a lone, bounded,
+  // idempotent single-table write of a disposition already decided from immutable local
+  // data -- skipping it would strand the whole batch as PENDING again, which is exactly the
+  // stall this recovery fixes. A failure is best-effort: those fills simply stay PENDING and
+  // get the identical decision next poll.
+  await flushPreGoLive();
+
   return result;
 }
 
