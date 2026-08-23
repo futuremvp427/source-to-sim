@@ -362,6 +362,14 @@ describe("buildObservationRows — scheduling", () => {
     for (const r of rows) expect(r.sourceTimestamp).toBe(sourceTs);
   });
 
+  it("CODEX P1-3: triggerSourceFillId defaults to null (the ENTRY plan) but is threaded through to every row when a lifecycle trigger id is supplied", () => {
+    const entryRows = buildObservationRows("sig-1", "match-1", "PMUS", detectedAtMs, sourceTs)!;
+    expect(entryRows.every((r) => r.triggerSourceFillId === null)).toBe(true);
+
+    const lifecycleRows = buildObservationRows("sig-1", "match-1", "PMUS", detectedAtMs, sourceTs, "trigger-1")!;
+    expect(lifecycleRows.every((r) => r.triggerSourceFillId === "trigger-1")).toBe(true);
+  });
+
   it("19. an invalid detectedAt fails closed (returns null, schedules nothing)", () => {
     expect(buildObservationRows("sig-1", "match-1", "PMUS", Number.NaN, sourceTs)).toBeNull();
     expect(buildObservationRows("sig-1", "match-1", "PMUS", 0, sourceTs)).toBeNull();

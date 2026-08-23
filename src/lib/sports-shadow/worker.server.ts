@@ -364,6 +364,16 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
     } catch {
       // Best-effort by design -- see maybeDecideExpiredRoutingCutoffs's own doc comment.
     }
+    // CODEX P1-3 (follower lifecycle): schedules the observation-capture burst for any
+    // source DCA buy/partial-or-full sell recorded (source-poll.server.ts) since the
+    // last cycle -- same bounded/idempotent/best-effort maintenance-task pattern as
+    // the routing-cutoff sweep immediately above.
+    try {
+      const { scheduleLifecycleObservations } = await import("./observation.server");
+      await scheduleLifecycleObservations();
+    } catch {
+      // Best-effort by design -- see scheduleLifecycleObservations's own doc comment.
+    }
     const {
       cycleSummaryToTelemetryEvents,
       recordTelemetry,
