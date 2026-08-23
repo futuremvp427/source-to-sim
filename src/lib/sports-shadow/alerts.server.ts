@@ -158,6 +158,8 @@ export function evaluateAlertConditions(input: {
   settlementStuckCount: number;
   /** The source lane was acquired and wallets ARE configured, but zero wallets were attempted this cycle -- a coverage gap distinct from a single wallet's poll failing. */
   sourceCoverageGap: boolean;
+  /** CODEX P1-1 (round 2): at least one wallet ACTUALLY POLLED this cycle ended with an unresolved source-coverage gap (source-poll.server.ts's continuous invariant) -- distinct from sourceCoverageGap above (zero wallets attempted at all). */
+  sourceCoverageIncomplete: boolean;
   /** CODEX P2-2: at least one 429-cooldown persistence write has genuinely failed (not merely a 429 itself) within the lookback window -- durable rate-limit coordination is degraded, distinct from rateLimitStormDetected (an upstream condition, not a failure of OUR OWN persistence). */
   rateLimitPersistFailureDetected: boolean;
 }): AlertCondition[] {
@@ -192,6 +194,14 @@ export function evaluateAlertConditions(input: {
   }
   if (input.sourceCoverageGap) {
     alerts.push({ alertKey: "source_coverage_gap", severity: "WARNING", message: "Source lane ran but attempted zero configured wallets this cycle", kind: "sports_shadow_source_coverage_gap" });
+  }
+  if (input.sourceCoverageIncomplete) {
+    alerts.push({
+      alertKey: "source_coverage_incomplete",
+      severity: "WARNING",
+      message: "At least one polled wallet has an unresolved source-coverage gap -- blocks all research-stage progression",
+      kind: "sports_shadow_source_coverage_gap",
+    });
   }
   if (input.rateLimitPersistFailureDetected) {
     alerts.push({ alertKey: "rate_limit_persist_failed", severity: "WARNING", message: "A 429-cooldown persistence write has failed -- durable rate-limit coordination is degraded", kind: "sports_shadow_rate_limit_storm" });

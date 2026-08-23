@@ -24,6 +24,7 @@ describe("FINAL BUILD Part 25: cycleSummaryToTelemetryEvents", () => {
         walletsAttempted: 3,
         newSignalsCreated: 1,
         leaseLost: false,
+        walletSummaries: [{ sourceCoverageComplete: true }, { sourceCoverageComplete: false }, { sourceCoverageComplete: true }],
         pmus: { attempted: 1, exact: 1, discoveryFailed: false, deadlineReached: false },
         kalshi: { attempted: 1, exact: 0, discoveryFailed: true, deadlineReached: false },
       },
@@ -33,6 +34,24 @@ describe("FINAL BUILD Part 25: cycleSummaryToTelemetryEvents", () => {
     expect(events.find((e) => e.metric === "cycle_duration_ms")?.value).toBe(1234);
     expect(events.find((e) => e.metric === "wallets_attempted")?.value).toBe(3);
     expect(events.find((e) => e.metric === "discovery_failed" && e.labels?.["venue"] === "KALSHI")?.value).toBe(1);
+  });
+
+  it("CODEX P1-1 (round 2): emits wallets_incomplete_coverage counting only wallets whose poll ended with an unresolved coverage gap", () => {
+    const events = cycleSummaryToTelemetryEvents({
+      durationMs: 1,
+      observationLane: { pmus: { attempted: 0, captured: 0, failed: 0, skipped: 0 }, kalshi: { attempted: 0, captured: 0, failed: 0, skipped: 0 } },
+      sourceLane: {
+        walletsAttempted: 3,
+        newSignalsCreated: 0,
+        leaseLost: false,
+        walletSummaries: [{ sourceCoverageComplete: true }, { sourceCoverageComplete: false }, { sourceCoverageComplete: false }],
+        pmus: { attempted: 0, exact: 0, discoveryFailed: false, deadlineReached: false },
+        kalshi: { attempted: 0, exact: 0, discoveryFailed: false, deadlineReached: false },
+      },
+      errors: [],
+      epochId: "epoch-1",
+    });
+    expect(events.find((e) => e.metric === "wallets_incomplete_coverage")?.value).toBe(2);
   });
 
   it("FINAL BUILD repository-completion pass (Codex-caught P1): every event is tagged with the cycle's resolved epoch id, even when epochId is null (best-effort epoch resolution failure)", () => {
@@ -63,6 +82,7 @@ describe("FINAL BUILD Part 25: cycleSummaryToTelemetryEvents", () => {
         walletsAttempted: 1,
         newSignalsCreated: 0,
         leaseLost: true,
+        walletSummaries: [{ sourceCoverageComplete: true }],
         pmus: { attempted: 0, exact: 0, discoveryFailed: false, deadlineReached: false },
         kalshi: { attempted: 0, exact: 0, discoveryFailed: false, deadlineReached: false },
       },

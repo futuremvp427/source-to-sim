@@ -64,6 +64,36 @@ async function countIntegrityAudits(sinceIso: string): Promise<{ run: number; fa
 }
 
 /**
+ * CODEX P1-1 (round 2): a CURRENT snapshot (unlike the other counts in this rollup, an
+ * unresolved coverage gap is a standing condition, not a discrete windowed event) --
+ * `since`/epoch scoping does not apply. Also used directly by stage.server.ts as the
+ * absolute cross-stage block, so both consumers share this ONE query rather than two
+ * independently-derived signals that could silently disagree.
+ *
+ * ACCEPTED SIMPLIFICATION: counts every row with coverage_complete = false, regardless
+ * of whether that wallet is still in the currently-configured roster. Removing a wallet
+ * from SPORTS_SHADOW_WALLETS without also resolving/clearing its coverage row would
+ * leave a stale block in place -- an operational cleanup step, not a correctness gap in
+ * the invariant itself (a wallet that WAS tracked and has a real unresolved gap must
+ * still block, even if a later config change stops polling it).
+ */
+export async function countWalletsWithIncompleteCoverage(): Promise<number> {
+  try {
+    const { count, error } = await supabaseAdmin
+      .from("sports_shadow_wallet_coverage" as never)
+      .select("wallet", { count: "exact", head: true })
+      .eq("coverage_complete", false);
+    if (error) throw new Error(error.message);
+    return count ?? 0;
+  } catch {
+    // Fails CLOSED in the direction that matters: a read failure must never be silently
+    // treated as "no gap" (which would incorrectly let research progress) -- treated as
+    // if at least one wallet has an unresolved gap instead.
+    return 1;
+  }
+}
+
+/**
  * NOT epoch-scoped (sports_shadow_settlements carries no experiment_epoch_id column) --
  * an accepted simplification since at most one epoch is ever active at a time in
  * practice, and a stuck settlement is urgent regardless of which epoch it belongs to.
@@ -85,13 +115,15 @@ export async function computeSoakHealthRollup(epochId: string, soakStartedAtIso:
   // slice) -- see telemetry.server.ts's own doc comment for why this table (unlike the
   // shared http_rate_limits current-cooldown snapshot) is the durable, queryable history
   // this rollup needs.
-  const [telemetry, integrity, stuckSettlements, rateLimitStormCount, rateLimitPersistFailureCount] = await Promise.all([
+  const [telemetry, integrity, stuckSettlements, rateLimitStormCount, rateLimitPersistFailureCount, walletsWithIncompleteCoverageCount] = await Promise.all([
     fetchTelemetryRollup(epochId, soakStartedAtIso),
     countIntegrityAudits(soakStartedAtIso),
     countStuckSettlements(now),
     countRecentRateLimitEvents(now, Math.max(0, now - Date.parse(soakStartedAtIso))),
     // CODEX P2-2: same whole-soak-window treatment as rateLimitStormCount above.
     countRecentRateLimitPersistFailures(now, Math.max(0, now - Date.parse(soakStartedAtIso))),
+    // CODEX P1-1 (round 2): a current snapshot, not window-scoped -- see the function's own doc comment.
+    countWalletsWithIncompleteCoverage(),
   ]);
 
   const expectedCycleCount = Math.max(0, Math.floor((now - Date.parse(soakStartedAtIso)) / EXPECTED_CYCLE_INTERVAL_MS));
@@ -114,6 +146,7 @@ export async function computeSoakHealthRollup(epochId: string, soakStartedAtIso:
     settlementStuckCount: stuckSettlements,
     rateLimitStormCount,
     rateLimitPersistFailureCount,
+    walletsWithIncompleteCoverageCount,
   };
 
   return { ...evaluateSoakHealth(input), input };

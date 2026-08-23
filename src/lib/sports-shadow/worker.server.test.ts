@@ -182,6 +182,7 @@ function emptyWalletResult(wallet: string, overrides: Partial<WalletPollResult> 
     leaseLost: false,
     error: null,
     sourceCoverageComplete: true,
+    sourceCoverageIncompleteReason: null,
     ...overrides,
   };
 }

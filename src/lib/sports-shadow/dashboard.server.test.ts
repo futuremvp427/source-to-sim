@@ -88,6 +88,7 @@ function mockSupabaseAdmin(overrides: Partial<Record<string, { data: unknown; er
     sports_shadow_signals: { ...OK, data: [] },
     sports_shadow_integrity_audits: { ...OK, data: null },
     sports_shadow_alerts: { ...OK, count: 0 },
+    sports_shadow_wallet_coverage: { ...OK, data: [] },
   };
   const byTable = { ...defaults, ...overrides };
   return { from: (table: string) => queryBuilder(byTable[table] ?? OK) };
@@ -106,9 +107,24 @@ describe("CODEX P2-4: loadSportsShadowDashboard distinguishes a genuine empty/ze
 
   it("a healthy load reports every section NOT degraded, with genuine empty/zero values", async () => {
     const data = await loadWith();
-    expect(data.degraded).toEqual({ epoch: false, capability: false, signals: false, integrity: false, alerts: false, milestones: false, results: false });
+    expect(data.degraded).toEqual({ epoch: false, capability: false, signals: false, integrity: false, alerts: false, milestones: false, results: false, coverage: false });
     expect(data.epoch).toBeNull();
     expect(data.unresolvedAlertCount).toBe(0);
+    expect(data.coverageGaps).toEqual([]);
+  });
+
+  it("CODEX P1-1 (round 2): coverage query failure: degraded.coverage=true, coverageGaps falls back to empty but is NOT 'no gaps'", async () => {
+    const data = await loadWith({ sports_shadow_wallet_coverage: ERR });
+    expect(data.degraded.coverage).toBe(true);
+    expect(data.coverageGaps).toEqual([]);
+  });
+
+  it("CODEX P1-1 (round 2): a genuine unresolved coverage gap surfaces with its wallet and reason", async () => {
+    const data = await loadWith({
+      sports_shadow_wallet_coverage: { ...OK, data: [{ wallet: "0xgap", coverage_complete: false, incomplete_reason: "steady-state gap" }] },
+    });
+    expect(data.degraded.coverage).toBe(false);
+    expect(data.coverageGaps).toEqual([{ wallet: "0xgap", incompleteReason: "steady-state gap" }]);
   });
 
   it("epoch query failure: degraded.epoch=true, epoch stays null, milestones/results ALSO degrade (their correctness depends on knowing the current epoch)", async () => {

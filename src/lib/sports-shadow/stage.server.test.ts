@@ -39,6 +39,7 @@ function fakeRepo(
   independentCount = 0,
   soakHealth: { passed: boolean; failedChecks: string[] } = { passed: true, failedChecks: [] },
   oosClassification: "KILL" | "CONTINUE_RESEARCH" | "NEW_EPOCH_REQUIRED" | "LIVE_PILOT_REVIEW_READY" = "CONTINUE_RESEARCH",
+  sourceCoverageGapDetected = false,
 ): StageRepository & {
   transitions: { epochId: string; stage: string }[];
   calibrationSnapshots: number;
@@ -65,6 +66,9 @@ function fakeRepo(
     },
     async computeSoakHealth() {
       return soakHealth;
+    },
+    async hasUnresolvedSourceCoverageGap() {
+      return sourceCoverageGapDetected;
     },
     async evaluateOosClassification() {
       return oosClassification;
@@ -164,6 +168,28 @@ describe("FINAL BUILD Parts 18-21: evaluateAndApplyStageTransition", () => {
     const outcome = await evaluateAndApplyStageTransition(() => Date.now(), repo);
     expect(outcome?.nextStage).toBeNull();
     expect(repo.transitions).toHaveLength(0);
+  });
+
+  it("CODEX P1-1 (round 2): an unresolved source-coverage gap blocks OPERATIONAL_SOAK -> CALIBRATION even though the health gate and duration both pass", async () => {
+    const soakStart = Date.parse("2026-08-01T00:00:00Z");
+    const now = soakStart + SOAK_DURATION_MS + 1000;
+    const repo = fakeRepo(
+      epoch({ stage: "OPERATIONAL_SOAK", soakStartedAtIso: new Date(soakStart).toISOString() }),
+      0,
+      { passed: true, failedChecks: [] },
+      "CONTINUE_RESEARCH",
+      true, // sourceCoverageGapDetected
+    );
+    const outcome = await evaluateAndApplyStageTransition(() => now, repo);
+    expect(outcome?.nextStage).toBeNull();
+    expect(outcome?.reason).toMatch(/source-coverage gap/);
+    expect(repo.transitions).toHaveLength(0);
+  });
+
+  it("CODEX P1-1 (round 2): is queried every cycle regardless of stage, and a gap-free wallet fleet never blocks a transition that would otherwise proceed", async () => {
+    const repo = fakeRepo(epoch({ stage: "PRE_SOAK" }), 0, { passed: true, failedChecks: [] }, "CONTINUE_RESEARCH", false);
+    const outcome = await evaluateAndApplyStageTransition(() => Date.now(), repo);
+    expect(outcome?.nextStage).toBe("OPERATIONAL_SOAK");
   });
 });
 

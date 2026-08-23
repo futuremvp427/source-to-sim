@@ -18,6 +18,8 @@ export type StageRepository = {
   countIndependentSettledSince(epochId: string, stage: "CALIBRATION" | "OUT_OF_SAMPLE"): Promise<number>;
   /** FINAL BUILD Part 6: the REAL, multi-cycle, restart-safe soak health rollup (soak.server.ts) -- replaces the old single-cycle `summary.errors.length === 0` heuristic. Only ever called while epoch.stage === OPERATIONAL_SOAK. */
   computeSoakHealth(epochId: string, soakStartedAtIso: string, nowMs: number): Promise<{ passed: boolean; failedChecks: string[] }>;
+  /** CODEX P1-1 (round 2): checked EVERY cycle, regardless of stage -- an absolute block, not a soak-only concern. Shares the exact same query soak.server.ts's own health rollup uses (soak.server.ts's countWalletsWithIncompleteCoverage), so the two consumers can never silently disagree. */
+  hasUnresolvedSourceCoverageGap(): Promise<boolean>;
   /** FINAL BUILD Part 5/8: the real promotion decision, computed ONLY once the OOS sample/duration floor is already met. */
   evaluateOosClassification(epochId: string, oosStartedAtIso: string, oosSampleAndDurationMet: boolean): Promise<"KILL" | "CONTINUE_RESEARCH" | "NEW_EPOCH_REQUIRED" | "LIVE_PILOT_REVIEW_READY">;
   /** FINAL BUILD Part 8: insert-only, idempotent -- a no-op if a snapshot for this (epoch, kind, version) already exists. */
@@ -40,6 +42,11 @@ export const supabaseStageRepository: StageRepository = {
   async computeSoakHealth(epochId, soakStartedAtIso, nowMs) {
     const { computeSoakHealthRollup } = await import("./soak.server");
     return computeSoakHealthRollup(epochId, soakStartedAtIso, nowMs);
+  },
+
+  async hasUnresolvedSourceCoverageGap() {
+    const { countWalletsWithIncompleteCoverage } = await import("./soak.server");
+    return (await countWalletsWithIncompleteCoverage()) > 0;
   },
 
   async evaluateOosClassification(epochId, oosStartedAtIso, oosSampleAndDurationMet) {
@@ -112,6 +119,11 @@ export async function evaluateAndApplyStageTransition(now: () => number = Date.n
     soakFailedChecks = health.failedChecks;
   }
 
+  // CODEX P1-1 (round 2): checked EVERY cycle regardless of stage -- see stage.ts's own
+  // doc comment for why this is an absolute cross-stage block, not folded only into
+  // soak's own health gate.
+  const sourceCoverageGapDetected = await repo.hasUnresolvedSourceCoverageGap();
+
   // FINAL BUILD Part 8: CALIBRATION's gate has exactly one outcome once reached (always
   // transitions to OUT_OF_SAMPLE -- see stage.ts), so it's safe to snapshot BEFORE
   // computing the transition below; nothing about the transition depends on the snapshot.
@@ -150,6 +162,7 @@ export async function evaluateAndApplyStageTransition(now: () => number = Date.n
     independentSettledSinceOosStart,
     soakHealthPassed,
     oosClassification,
+    sourceCoverageGapDetected,
   });
 
   if (transition.nextStage !== null) {

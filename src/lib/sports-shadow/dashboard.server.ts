@@ -31,6 +31,9 @@ export type DashboardVenueCapability = { venue: Venue; discoveryAvailable: boole
 
 export type DashboardWalletSummary = { wallet: string; episodeCount: number; lastActivityIso: string | null };
 
+/** CODEX P1-1 (round 2): every currently-tracked wallet with an unresolved, durably-proven source-coverage gap -- empty means no gap, NOT "not checked" (see degraded.coverage for that distinction). */
+export type DashboardCoverageGap = { wallet: string; incompleteReason: string | null };
+
 export type DashboardMilestoneProgress = {
   rawEpisodeCount: number;
   independentEpisodeCount: number;
@@ -66,6 +69,8 @@ export type DashboardDegradedFlags = {
   alerts: boolean;
   milestones: boolean;
   results: boolean;
+  /** CODEX P1-1 (round 2): true only when the coverage-gap query itself failed -- fails toward "assume a gap exists" at the call site (evaluateAndApplyStageTransition's own repository query), never toward "assume none" here. */
+  coverage: boolean;
 };
 
 export type SportsShadowDashboardData = {
@@ -73,6 +78,8 @@ export type SportsShadowDashboardData = {
   pmusCapability: DashboardVenueCapability;
   kalshiCapability: DashboardVenueCapability;
   wallets: DashboardWalletSummary[];
+  /** CODEX P1-1 (round 2): every currently-tracked wallet with an unresolved source-coverage gap -- see stage.ts's own absolute cross-stage block, which this dashboard section makes visible to an operator. */
+  coverageGaps: DashboardCoverageGap[];
   milestones: DashboardMilestoneProgress;
   integrity: DashboardIntegrityStatus;
   unresolvedAlertCount: number;
@@ -115,7 +122,7 @@ export function computeMilestoneProgress(rows: readonly DashboardSignalRow[]): D
 }
 
 export async function loadSportsShadowDashboard(): Promise<SportsShadowDashboardData> {
-  const [epochRes, pmusCapRes, kalshiCapRes, signalsRes, integrityRes, alertsRes] = await Promise.all([
+  const [epochRes, pmusCapRes, kalshiCapRes, signalsRes, integrityRes, alertsRes, coverageRes] = await Promise.all([
     supabaseAdmin.from("sports_shadow_experiment_epochs" as never).select("*").eq("is_current", true).maybeSingle(),
     supabaseAdmin.from("sports_shadow_venue_capability" as never).select("*").eq("venue", "PMUS").maybeSingle(),
     supabaseAdmin.from("sports_shadow_venue_capability" as never).select("*").eq("venue", "KALSHI").maybeSingle(),
@@ -123,6 +130,9 @@ export async function loadSportsShadowDashboard(): Promise<SportsShadowDashboard
     supabaseAdmin.from("sports_shadow_signals" as never).select("source_wallet, cluster_key, status, created_at").order("created_at", { ascending: false }).limit(500),
     supabaseAdmin.from("sports_shadow_integrity_audits" as never).select("run_at, passed, checks_failed").order("run_at", { ascending: false }).limit(1).maybeSingle(),
     supabaseAdmin.from("sports_shadow_alerts" as never).select("id", { count: "exact", head: true }).is("resolved_at", null),
+    // CODEX P1-1 (round 2): every wallet's coverage row is small/bounded by the configured
+    // wallet roster itself -- no LIMIT needed, same reasoning as pmus/kalshi capability above.
+    supabaseAdmin.from("sports_shadow_wallet_coverage" as never).select("wallet, coverage_complete, incomplete_reason").eq("coverage_complete", false),
   ]);
 
   // CODEX P2-4: every query's `.error` is now checked explicitly BEFORE its `.data`/
@@ -138,7 +148,12 @@ export async function loadSportsShadowDashboard(): Promise<SportsShadowDashboard
     alerts: alertsRes.error !== null,
     milestones: false,
     results: false,
+    coverage: coverageRes.error !== null,
   };
+
+  const coverageGaps: DashboardCoverageGap[] = degraded.coverage
+    ? []
+    : ((coverageRes.data ?? []) as unknown as { wallet: string; incomplete_reason: string | null }[]).map((r) => ({ wallet: r.wallet, incompleteReason: r.incomplete_reason }));
 
   const epochRow = degraded.epoch
     ? null
@@ -247,6 +262,7 @@ export async function loadSportsShadowDashboard(): Promise<SportsShadowDashboard
     pmusCapability: toCapability(pmusCapRes),
     kalshiCapability: toCapability(kalshiCapRes),
     wallets,
+    coverageGaps,
     milestones,
     integrity,
     unresolvedAlertCount: degraded.alerts ? 0 : (alertsRes.count ?? 0),

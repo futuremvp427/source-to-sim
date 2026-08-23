@@ -118,6 +118,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_open_positions.sql
+      - name: Verify sports_shadow_wallet_coverage schema contract and the continuous coverage invariant (CODEX P1-1 round 2)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_wallet_coverage.sql
       - name: Export local Supabase connection env for the PostgREST integration harness
         run: |
           eval "$(supabase status -o env)"

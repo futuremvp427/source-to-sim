@@ -163,3 +163,90 @@ describe("FINAL BUILD Parts 18-21: evaluateStageTransition", () => {
     expect(t1).toEqual(t2);
   });
 });
+
+describe("CODEX P1-1 (round 2): sourceCoverageGapDetected blocks every progression past OPERATIONAL_SOAK", () => {
+  it("blocks OPERATIONAL_SOAK -> CALIBRATION even when 72h elapsed and the health gate otherwise passed", () => {
+    const t = evaluateStageTransition({
+      epoch: epoch({ stage: "OPERATIONAL_SOAK", soakStartedAtMs: NOW - SOAK_DURATION_MS - 1 }),
+      nowMs: NOW,
+      independentSettledSinceCalibrationStart: 0,
+      independentSettledSinceOosStart: 0,
+      soakHealthPassed: true,
+      sourceCoverageGapDetected: true,
+    });
+    expect(t.nextStage).toBeNull();
+    expect(t.reason).toMatch(/source-coverage gap/);
+  });
+
+  it("blocks CALIBRATION -> OUT_OF_SAMPLE even when duration/count minimums are met", () => {
+    const t = evaluateStageTransition({
+      epoch: epoch({ stage: "CALIBRATION", calibrationStartedAtMs: NOW - CALIBRATION_MIN_DURATION_MS - 1 }),
+      nowMs: NOW,
+      independentSettledSinceCalibrationStart: CALIBRATION_MIN_INDEPENDENT_EPISODES,
+      independentSettledSinceOosStart: 0,
+      soakHealthPassed: true,
+      sourceCoverageGapDetected: true,
+    });
+    expect(t.nextStage).toBeNull();
+    expect(t.reason).toMatch(/source-coverage gap/);
+  });
+
+  it("blocks OUT_OF_SAMPLE -> LIVE_PILOT_REVIEW_READY even when classification says promote", () => {
+    const t = evaluateStageTransition({
+      epoch: epoch({ stage: "OUT_OF_SAMPLE", oosStartedAtMs: NOW - OOS_MIN_DURATION_MS - 1 }),
+      nowMs: NOW,
+      independentSettledSinceCalibrationStart: 0,
+      independentSettledSinceOosStart: OOS_MIN_INDEPENDENT_EPISODES,
+      soakHealthPassed: true,
+      oosClassification: "LIVE_PILOT_REVIEW_READY",
+      sourceCoverageGapDetected: true,
+    });
+    expect(t.nextStage).toBeNull();
+    expect(t.reason).toMatch(/source-coverage gap/);
+  });
+
+  it("does NOT block the initial PRE_SOAK -> OPERATIONAL_SOAK activation -- that is epoch bootstrapping, not progression past soak", () => {
+    const t = evaluateStageTransition({
+      epoch: epoch({ stage: "PRE_SOAK" }),
+      nowMs: NOW,
+      independentSettledSinceCalibrationStart: 0,
+      independentSettledSinceOosStart: 0,
+      soakHealthPassed: true,
+      sourceCoverageGapDetected: true,
+    });
+    expect(t.nextStage).toBe("OPERATIONAL_SOAK");
+  });
+
+  it("does not affect terminal stages", () => {
+    for (const stage of ["LIVE_PILOT_REVIEW_READY", "FAILED", "PAUSED"] as const) {
+      const t = evaluateStageTransition({
+        epoch: epoch({ stage }),
+        nowMs: NOW,
+        independentSettledSinceCalibrationStart: 999,
+        independentSettledSinceOosStart: 999,
+        soakHealthPassed: true,
+        sourceCoverageGapDetected: true,
+      });
+      expect(t.nextStage).toBeNull();
+    }
+  });
+
+  it("omitting sourceCoverageGapDetected (undefined) behaves exactly like false -- fully backward compatible", () => {
+    const withGapFalse = evaluateStageTransition({
+      epoch: epoch({ stage: "OPERATIONAL_SOAK", soakStartedAtMs: NOW - SOAK_DURATION_MS - 1 }),
+      nowMs: NOW,
+      independentSettledSinceCalibrationStart: 0,
+      independentSettledSinceOosStart: 0,
+      soakHealthPassed: true,
+      sourceCoverageGapDetected: false,
+    });
+    const omitted = evaluateStageTransition({
+      epoch: epoch({ stage: "OPERATIONAL_SOAK", soakStartedAtMs: NOW - SOAK_DURATION_MS - 1 }),
+      nowMs: NOW,
+      independentSettledSinceCalibrationStart: 0,
+      independentSettledSinceOosStart: 0,
+      soakHealthPassed: true,
+    });
+    expect(omitted).toEqual(withGapFalse);
+  });
+});

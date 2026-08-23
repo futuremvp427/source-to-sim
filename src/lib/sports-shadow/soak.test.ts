@@ -21,6 +21,7 @@ function healthyInput(overrides: Partial<SoakHealthInput> = {}): SoakHealthInput
     settlementStuckCount: 0,
     rateLimitStormCount: 0,
     rateLimitPersistFailureCount: 0,
+    walletsWithIncompleteCoverageCount: 0,
     ...overrides,
   };
 }
@@ -91,6 +92,11 @@ describe("evaluateSoakHealth", () => {
   it("CODEX P2-2: fails on any recorded rate-limit-cooldown persistence failure, distinct from a rate-limit storm", () => {
     const result = evaluateSoakHealth(healthyInput({ rateLimitPersistFailureCount: 1 }));
     expect(result.failedChecks.some((c) => c.includes("persistence failure"))).toBe(true);
+  });
+
+  it("CODEX P1-1 (round 2): fails while any wallet has an unresolved source-coverage gap", () => {
+    const result = evaluateSoakHealth(healthyInput({ walletsWithIncompleteCoverageCount: 1 }));
+    expect(result.failedChecks.some((c) => c.includes("source-coverage gap"))).toBe(true);
   });
 
   it("reports every failing check at once, not just the first", () => {

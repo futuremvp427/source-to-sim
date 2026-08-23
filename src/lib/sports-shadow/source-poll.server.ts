@@ -460,9 +460,15 @@ export type PollRepository = {
    * yet proven," forcing one genuine verification pass. See the migration's own doc
    * comment (20260825010000_sports_shadow_wallet_source_coverage.sql) for the full model.
    */
-  getWalletCoverage(wallet: string): Promise<{ coveredThroughTs: number | null; coverageComplete: boolean } | null>;
-  /** Best-effort durable upsert of the coverage watermark -- a failure here must never fail the poll (see its call site's own try/catch); at worst, the next poll re-verifies a range it did not strictly need to. */
-  upsertWalletCoverage(wallet: string, coveredThroughTs: number | null, coverageComplete: boolean): Promise<void>;
+  getWalletCoverage(wallet: string): Promise<{ coveredThroughTs: number | null; coverageComplete: boolean; incompleteReason: string | null } | null>;
+  /**
+   * Best-effort durable upsert of the coverage watermark -- a failure here must never fail
+   * the poll (see its call sites' own try/catch); at worst, the next poll re-verifies a
+   * range it did not strictly need to. `incompleteReason` (CODEX P1-1 round 2) is the
+   * human-readable "why" persisted alongside coverageComplete=false -- null when marking
+   * coverage complete (clears any prior reason) or when no reason applies.
+   */
+  upsertWalletCoverage(wallet: string, coveredThroughTs: number | null, coverageComplete: boolean, incompleteReason: string | null): Promise<void>;
 };
 
 type RawPendingFillRow = {
@@ -835,19 +841,22 @@ export const supabasePollRepository: PollRepository = {
   async getWalletCoverage(wallet) {
     const { data, error } = await supabaseAdmin
       .from("sports_shadow_wallet_coverage" as never)
-      .select("covered_through_ts, coverage_complete")
+      .select("covered_through_ts, coverage_complete, incomplete_reason")
       .eq("wallet", wallet)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return null;
-    const row = data as unknown as { covered_through_ts: number | null; coverage_complete: boolean };
-    return { coveredThroughTs: row.covered_through_ts, coverageComplete: row.coverage_complete };
+    const row = data as unknown as { covered_through_ts: number | null; coverage_complete: boolean; incomplete_reason: string | null };
+    return { coveredThroughTs: row.covered_through_ts, coverageComplete: row.coverage_complete, incompleteReason: row.incomplete_reason };
   },
 
-  async upsertWalletCoverage(wallet, coveredThroughTs, coverageComplete) {
+  async upsertWalletCoverage(wallet, coveredThroughTs, coverageComplete, incompleteReason) {
     const { error } = await supabaseAdmin
       .from("sports_shadow_wallet_coverage" as never)
-      .upsert({ wallet, covered_through_ts: coveredThroughTs, coverage_complete: coverageComplete, updated_at: new Date().toISOString() } as never, { onConflict: "wallet" });
+      .upsert(
+        { wallet, covered_through_ts: coveredThroughTs, coverage_complete: coverageComplete, incomplete_reason: incompleteReason, updated_at: new Date().toISOString() } as never,
+        { onConflict: "wallet" },
+      );
     if (error) throw new Error(error.message);
   },
 };
@@ -924,6 +933,8 @@ export type WalletPollResult = {
   error: string | null;
   /** CODEX P1-1: durably known/proven coverage state as of the END of this poll -- true only once a scan has actually crossed goLiveAtMs or reached genuine history-start, never merely because the offset ceiling was hit. See sports_shadow_wallet_coverage. */
   sourceCoverageComplete: boolean;
+  /** CODEX P1-1 (round 2): the human-readable reason coverage is currently incomplete, when it is -- null whenever sourceCoverageComplete is true. Propagated into WalletSummary/telemetry/dashboard so an operator can see WHY, not just THAT. */
+  sourceCoverageIncompleteReason: string | null;
 };
 
 function emptyResult(wallet: string): WalletPollResult {
@@ -949,6 +960,7 @@ function emptyResult(wallet: string): WalletPollResult {
     leaseLost: false,
     error: null,
     sourceCoverageComplete: false,
+    sourceCoverageIncompleteReason: null,
   };
 }
 
@@ -1260,7 +1272,7 @@ export async function pollSportsShadowWallet(
    * (no row yet -- true for every wallet before this fix's migration) is treated as "not
    * yet proven," forcing one genuine verification pass -- never an implicit pass.
    */
-  let coverage: { coveredThroughTs: number | null; coverageComplete: boolean } | null = null;
+  let coverage: { coveredThroughTs: number | null; coverageComplete: boolean; incompleteReason: string | null } | null = null;
   try {
     coverage = await d.repo.getWalletCoverage(normalizedWallet);
   } catch (err) {
@@ -1275,6 +1287,7 @@ export async function pollSportsShadowWallet(
   // Default reflects whatever was already durably known; overridden below only once this
   // scan's own fetch+persist work is confirmed (scanConfirmedComplete).
   result.sourceCoverageComplete = coverage?.coverageComplete ?? false;
+  result.sourceCoverageIncompleteReason = coverage?.incompleteReason ?? null;
 
   // Task 13G / P1-Q (Codex re-review): bootstrap and steady-state share the SAME page
   // ceiling. Bootstrap typically stops after just one page in the common case (see the
@@ -1642,10 +1655,11 @@ export async function pollSportsShadowWallet(
     // skipped by a later poll that trusts the watermark. Best-effort: a failure to WRITE
     // the watermark must never fail the poll -- the next poll simply re-verifies the same
     // (already-durable, idempotent-safe) range instead of a strictly new one.
+    let steadyStateGapReason: string | null = null;
     if (provingCoverage && allPagesPersistedThisWindow) {
       try {
         if (coverageProvenCompleteThisScan) {
-          await d.repo.upsertWalletCoverage(normalizedWallet, windowEndTs ?? null, true);
+          await d.repo.upsertWalletCoverage(normalizedWallet, windowEndTs ?? null, true, null);
         } else if (ranOutOfPages && allEventsBySourceOrder.length > 0) {
           // Offset ceiling reached within this window without proving completion --
           // allEventsBySourceOrder is sorted ascending by sourceTs (normalizeSourceEvents'
@@ -1653,13 +1667,62 @@ export async function pollSportsShadowWallet(
           // observed. Inclusive boundary, matching shadow.server.ts's own established
           // fetchUntilCheckpointCovered convention: events sharing that exact second are
           // re-fetched (idempotent no-op) rather than risk skipping one on the next window.
-          await d.repo.upsertWalletCoverage(normalizedWallet, allEventsBySourceOrder[0]!.sourceTs, false);
+          await d.repo.upsertWalletCoverage(
+            normalizedWallet,
+            allEventsBySourceOrder[0]!.sourceTs,
+            false,
+            `windowed catch-up scan exhausted the /trades offset ceiling (>${MAX_TRADES_OFFSET}) before reaching the go-live boundary or genuine history-start -- resuming from the oldest timestamp observed this scan on the next poll`,
+          );
         }
       } catch (err) {
         void err;
       }
+    } else if (!provingCoverage && ranOutOfPages) {
+      /**
+       * CODEX P1-1 (round 2): the CONTINUOUS half of the invariant -- coverage_complete
+       * previously stayed durably true forever once proven once, so a wallet whose
+       * scheduler was down long enough for more than MAX_TRADES_OFFSET (10,000) new
+       * trades to accumulate would have its steady-state overlap search exhaust the same
+       * offset ceiling WITHOUT ever finding overlap with already-durable history --
+       * proof an unresolved gap now exists between the last proven watermark and current
+       * activity -- yet nothing downgraded coverage_complete back to false, so every
+       * later poll kept trusting a watermark that could no longer prove continuity, and
+       * the older, still-uncaptured fills behind the ceiling were permanently stranded.
+       *
+       * FIX: coverage is downgraded back to INCOMPLETE the moment this is detected.
+       * covered_through_ts is left UNCHANGED (still the last point this module can
+       * actually prove continuity up to, not re-derived from this scan's own newest-page-
+       * first fetch, which proves nothing about continuity). The NEXT poll
+       * (provingCoverage becomes true again automatically, since coverage.coverageComplete
+       * is now false) re-enters the SAME windowed catch-up recovery this module already
+       * proves correct for bootstrap, walking backward from "now" bounded by that
+       * watermark until it once again reaches go-live/history-start -- never a fresh
+       * "from now" scan that would silently skip the gap.
+       *
+       * Applied regardless of allPagesPersistedThisWindow (unlike the provingCoverage
+       * branch above): marking coverage INCOMPLETE is always the SAFE direction -- it can
+       * only ever trigger extra verification work later, never data loss -- unlike
+       * advancing the watermark forward, which requires durable persistence first.
+       *
+       * If this interval turns out to be genuinely unrecoverable (the gap never closes),
+       * this is NOT silently accepted as done: stage.ts's sourceCoverageGapDetected
+       * absolute guard (and soak.ts's own health-gate input) block ALL further research
+       * progression for as long as coverage_complete remains false for any wallet -- a
+       * real FAIL-CLOSED outcome, not merely a retry loop with no consequence.
+       */
+      steadyStateGapReason = `steady-state overlap search exhausted the /trades offset ceiling (>${MAX_TRADES_OFFSET}) without finding overlap with existing durable history -- an unresolved gap exists since covered_through_ts=${coverage?.coveredThroughTs ?? "unknown (never previously proven)"}`;
+      try {
+        await d.repo.upsertWalletCoverage(normalizedWallet, coverage?.coveredThroughTs ?? null, false, steadyStateGapReason);
+      } catch (err) {
+        void err;
+      }
     }
-    result.sourceCoverageComplete = coverageProvenCompleteThisScan || (coverage?.coverageComplete ?? false);
+    result.sourceCoverageComplete = provingCoverage
+      ? coverageProvenCompleteThisScan
+      : ranOutOfPages
+        ? false // CODEX P1-1 (round 2): steady-state gap just detected above -- never report complete this poll even if the durable write itself failed.
+        : (coverage?.coverageComplete ?? false);
+    result.sourceCoverageIncompleteReason = result.sourceCoverageComplete ? null : (steadyStateGapReason ?? coverage?.incompleteReason ?? "coverage not yet proven");
   }
 
   /*

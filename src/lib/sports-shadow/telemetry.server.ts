@@ -213,7 +213,15 @@ export async function computeSchedulerLastRunAgeMs(nowMs: number = Date.now(), r
 export function cycleSummaryToTelemetryEvents(summary: {
   durationMs: number;
   observationLane: { pmus: { attempted: number; captured: number; failed: number; skipped: number }; kalshi: { attempted: number; captured: number; failed: number; skipped: number } };
-  sourceLane: { walletsAttempted: number; newSignalsCreated: number; leaseLost: boolean; pmus: { attempted: number; exact: number; discoveryFailed: boolean; deadlineReached: boolean }; kalshi: { attempted: number; exact: number; discoveryFailed: boolean; deadlineReached: boolean } } | null;
+  sourceLane: {
+    walletsAttempted: number;
+    newSignalsCreated: number;
+    leaseLost: boolean;
+    /** CODEX P1-1 (round 2): only sourceCoverageComplete is read here -- the full WalletSummary is accepted structurally. */
+    walletSummaries: { sourceCoverageComplete: boolean }[];
+    pmus: { attempted: number; exact: number; discoveryFailed: boolean; deadlineReached: boolean };
+    kalshi: { attempted: number; exact: number; discoveryFailed: boolean; deadlineReached: boolean };
+  } | null;
   errors: string[];
   /**
    * FINAL BUILD Part 6/repository-completion pass (Codex-caught P1): every event this
@@ -242,6 +250,11 @@ export function cycleSummaryToTelemetryEvents(summary: {
       { category: "SOURCE", metric: "wallets_attempted", value: summary.sourceLane.walletsAttempted },
       { category: "SOURCE", metric: "new_signals", value: summary.sourceLane.newSignalsCreated },
       { category: "SOURCE", metric: "lease_lost", value: summary.sourceLane.leaseLost ? 1 : 0 },
+      // CODEX P1-1 (round 2): durable per-cycle visibility into the continuous
+      // source-coverage invariant -- how many of the wallets actually polled THIS cycle
+      // ended it with an unresolved coverage gap (see source-poll.server.ts's own doc
+      // comment for the steady-state gap-detection this counts).
+      { category: "SOURCE", metric: "wallets_incomplete_coverage", value: summary.sourceLane.walletSummaries.filter((w) => !w.sourceCoverageComplete).length },
       { category: "VENUE", metric: "exact_matches", value: summary.sourceLane.pmus.exact, labels: { venue: "PMUS" } },
       { category: "VENUE", metric: "exact_matches", value: summary.sourceLane.kalshi.exact, labels: { venue: "KALSHI" } },
       { category: "VENUE", metric: "discovery_failed", value: summary.sourceLane.pmus.discoveryFailed ? 1 : 0, labels: { venue: "PMUS" } },

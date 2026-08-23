@@ -383,6 +383,24 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
     // raw 429s -- see telemetry.server.ts's own doc comment for why this is a distinct
     // signal from rateLimitStormDetected.
     const recentRateLimitPersistFailures = await countRecentRateLimitPersistFailures();
+    // CODEX P1-1 (round 2): the DURABLE standing state (same query stage.server.ts uses
+    // as its absolute cross-stage block), not merely "did a wallet polled THIS cycle show
+    // a gap" -- a cycle that lost its lease before polling any wallet, or simply didn't
+    // reach a gapped wallet in its rotation this time, must not auto-resolve an alert for
+    // a gap that is still genuinely open in the database.
+    const sourceCoverageIncomplete = await (async () => {
+      try {
+        const { countWalletsWithIncompleteCoverage } = await import("./soak.server");
+        return (await countWalletsWithIncompleteCoverage()) > 0;
+      } catch {
+        // countWalletsWithIncompleteCoverage already fails CLOSED internally (returns 1,
+        // never throws, on its own query failure) -- this outer catch only guards against
+        // the dynamic import itself failing, an even rarer case. Fails CLOSED here too,
+        // for the same reason: an unknown coverage state must never be silently treated
+        // as "no gap."
+        return true;
+      }
+    })();
     await recordTelemetry(cycleSummaryToTelemetryEvents(summary));
     const { evaluateAlertConditions, raiseAlert, resolveAlert } = await import("./alerts.server");
     const alerts = evaluateAlertConditions({
@@ -410,13 +428,25 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
       })(),
       sourceCoverageGap: summary.sourceLane !== null && summary.walletCount > 0 && summary.sourceLane.walletsAttempted === 0,
       rateLimitPersistFailureDetected: recentRateLimitPersistFailures >= RATE_LIMIT_PERSIST_FAILURE_THRESHOLD,
+      sourceCoverageIncomplete,
     });
     const activeKeys = new Set(alerts.map((a) => a.alertKey));
     for (const a of alerts) await raiseAlert(a.alertKey, a.severity, a.message, a.kind);
     // Resolve any of THIS cycle's monitored conditions that are no longer active --
     // keeps the dashboard's "currently unresolved" view accurate without a separate
     // sweep job.
-    for (const key of ["venue_discovery_failed:PMUS", "venue_discovery_failed:KALSHI", "lease_lost:PMUS", "lease_lost:KALSHI", "observation_backlog", "source_unhealthy", "settlement_stuck", "source_coverage_gap", "rate_limit_persist_failed"]) {
+    for (const key of [
+      "venue_discovery_failed:PMUS",
+      "venue_discovery_failed:KALSHI",
+      "lease_lost:PMUS",
+      "lease_lost:KALSHI",
+      "observation_backlog",
+      "source_unhealthy",
+      "settlement_stuck",
+      "source_coverage_gap",
+      "rate_limit_persist_failed",
+      "source_coverage_incomplete",
+    ]) {
       if (!activeKeys.has(key)) await resolveAlert(key);
     }
 
@@ -469,6 +499,9 @@ export type WalletSummary = {
   backlogTruncated: boolean;
   orphanedFillsRecovered: number;
   error: string | null;
+  /** CODEX P1-1 (round 2): durably known/proven coverage state as of the end of this wallet's poll -- see WalletPollResult's own doc comment. */
+  sourceCoverageComplete: boolean;
+  sourceCoverageIncompleteReason: string | null;
 };
 
 export type VenueResolutionSummary = {
@@ -818,6 +851,8 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
         backlogTruncated: result.backlogTruncated,
         orphanedFillsRecovered: result.orphanedFillsRecovered,
         error: result.error,
+        sourceCoverageComplete: result.sourceCoverageComplete,
+        sourceCoverageIncompleteReason: result.sourceCoverageIncompleteReason,
       });
       if (result.error) errors.push(`wallet ${wallet}: ${result.error}`);
       walletsAttempted += 1;
@@ -826,9 +861,20 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
         break; // do not continue another wallet
       }
     } catch (err) {
-      // One bad wallet must not prevent the next wallet when budget allows.
+      // One bad wallet must not prevent the next wallet when budget allows. CODEX P1-1
+      // (round 2): fails CLOSED on coverage too -- a poll that threw before even
+      // completing cannot positively prove coverage, so it is never reported complete.
       const message = err instanceof Error ? err.message : "unknown error";
-      walletSummaries.push({ wallet, isBootstrap: false, newSignals: 0, backlogTruncated: false, orphanedFillsRecovered: 0, error: message });
+      walletSummaries.push({
+        wallet,
+        isBootstrap: false,
+        newSignals: 0,
+        backlogTruncated: false,
+        orphanedFillsRecovered: 0,
+        error: message,
+        sourceCoverageComplete: false,
+        sourceCoverageIncompleteReason: `wallet poll threw before coverage could be verified: ${message}`,
+      });
       errors.push(`wallet ${wallet} poll threw: ${message}`);
       walletsAttempted += 1;
     }

@@ -312,6 +312,33 @@ function SportsShadowDashboard() {
             </CardContent>
           </Card>
 
+          {/* CODEX P1-1 (round 2): source coverage is now a continuous invariant -- a
+              wallet appearing here BLOCKS all further research-stage progression (see
+              stage.ts's absolute cross-stage guard) until it resolves. */}
+          <Card className="sm:col-span-2">
+            <CardHeader>
+              <CardTitle className="flex items-center justify-between text-base">
+                Source Coverage
+                {data.degraded.coverage ? <DegradedBadge /> : null}
+              </CardTitle>
+              <CardDescription>Wallets with an unresolved source-coverage gap block ALL research-stage progression until resolved.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-1 text-sm">
+              {data.degraded.coverage ? (
+                <div className="text-destructive">Coverage status unavailable -- this is NOT "no gaps," the query itself did not succeed.</div>
+              ) : data.coverageGaps.length === 0 ? (
+                <div className="text-muted-foreground">No unresolved source-coverage gaps.</div>
+              ) : (
+                data.coverageGaps.map((g) => (
+                  <div key={g.wallet} className="flex items-center justify-between border-b border-border/50 py-1 last:border-0">
+                    <span className="truncate font-mono text-xs">{g.wallet}</span>
+                    <span className="truncate text-destructive">{g.incompleteReason ?? "incomplete"}</span>
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+
           {data.degraded.results ? (
             <Card className="sm:col-span-2">
               <CardHeader>

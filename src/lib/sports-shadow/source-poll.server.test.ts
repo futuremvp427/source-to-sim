@@ -64,8 +64,8 @@ class FakeRepo implements PollRepository {
    * supabasePollRepository.getWalletCoverage's own doc comment for why that asymmetry is
    * deliberate.
    */
-  coverageOverride = new Map<string, { coveredThroughTs: number | null; coverageComplete: boolean }>();
-  upsertWalletCoverageCalls: Array<{ wallet: string; coveredThroughTs: number | null; coverageComplete: boolean }> = [];
+  coverageOverride = new Map<string, { coveredThroughTs: number | null; coverageComplete: boolean; incompleteReason: string | null }>();
+  upsertWalletCoverageCalls: Array<{ wallet: string; coveredThroughTs: number | null; coverageComplete: boolean; incompleteReason: string | null }> = [];
   throwOnUpsertWalletCoverage: Error | null = null;
 
   async hasAnyFillsForWallet(wallet: string): Promise<boolean> {
@@ -76,17 +76,17 @@ class FakeRepo implements PollRepository {
     return false;
   }
 
-  async getWalletCoverage(wallet: string): Promise<{ coveredThroughTs: number | null; coverageComplete: boolean } | null> {
+  async getWalletCoverage(wallet: string): Promise<{ coveredThroughTs: number | null; coverageComplete: boolean; incompleteReason: string | null } | null> {
     const override = this.coverageOverride.get(wallet);
     if (override) return override;
     const hasHistory = await this.hasAnyFillsForWallet(wallet);
-    return { coveredThroughTs: null, coverageComplete: hasHistory };
+    return { coveredThroughTs: null, coverageComplete: hasHistory, incompleteReason: null };
   }
 
-  async upsertWalletCoverage(wallet: string, coveredThroughTs: number | null, coverageComplete: boolean): Promise<void> {
-    this.upsertWalletCoverageCalls.push({ wallet, coveredThroughTs, coverageComplete });
+  async upsertWalletCoverage(wallet: string, coveredThroughTs: number | null, coverageComplete: boolean, incompleteReason: string | null): Promise<void> {
+    this.upsertWalletCoverageCalls.push({ wallet, coveredThroughTs, coverageComplete, incompleteReason });
     if (this.throwOnUpsertWalletCoverage) throw this.throwOnUpsertWalletCoverage;
-    this.coverageOverride.set(wallet, { coveredThroughTs, coverageComplete });
+    this.coverageOverride.set(wallet, { coveredThroughTs, coverageComplete, incompleteReason });
   }
 
   async findExistingEventKeys(wallet: string, eventKeys: string[]): Promise<Set<string>> {
@@ -554,7 +554,7 @@ describe("CODEX P1-1: durable source-coverage watermark -- the /trades offset ce
   it("an already-durable wallet with an explicitly PRE-EXISTING coverage gap (coverageComplete=false despite having history) resumes recovery via the watermark exactly like a first-ever bootstrap would", async () => {
     const repo = new FakeRepo();
     repo.fillsByEventKey.set("sid:preexisting", { id: "fill-pre", row: { eventKey: "sid:preexisting", wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
-    repo.coverageOverride.set(WALLET.toLowerCase(), { coveredThroughTs: 1_700_000_000, coverageComplete: false });
+    repo.coverageOverride.set(WALLET.toLowerCase(), { coveredThroughTs: 1_700_000_000, coverageComplete: false, incompleteReason: "pre-existing gap" });
     const goLiveAtMs = 1_699_999_000_000;
     const network = makeWindowedNetworkDeps({
       "1700000000": { 0: [trade({ id: "pre-go-live-2", transactionHash: "0xtx-pre-go-live-2", timestamp: 1_699_998_000 })] },
@@ -563,6 +563,104 @@ describe("CODEX P1-1: durable source-coverage watermark -- the /trades offset ce
     const result = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps);
     expect(result.isBootstrap).toBe(false); // hasHistory=true -- this is resumption, not bootstrap
     expect(result.sourceCoverageComplete).toBe(true); // recovery completes via the SAME windowed mechanism
+  });
+});
+
+describe("CODEX P1-1 (round 2): source coverage is a CONTINUOUS invariant -- a wallet already proven complete can be downgraded back to incomplete", () => {
+  it("REQUIRED TEST: >10,000 unread trades after simulated downtime -- steady-state overlap search exhausts the offset ceiling without finding overlap, coverage downgrades to incomplete, never silently stays complete", async () => {
+    const repo = new FakeRepo();
+    // Coverage was already durably proven complete by an earlier poll.
+    repo.coverageOverride.set(WALLET.toLowerCase(), { coveredThroughTs: 1_699_000_000, coverageComplete: true, incompleteReason: null });
+    const goLiveAtMs = 1_699_999_000_000;
+    // Simulates extended scheduler downtime: every page, at every offset up through the
+    // ceiling, is a FULL page of brand-new trades this wallet has never seen before --
+    // overlap can never be found, exactly like more than MAX_TRADES_OFFSET new activity
+    // having accumulated since the last poll.
+    const network = makeNetworkDeps((offset) =>
+      Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `gap-${offset}-${i}`, transactionHash: `0xtx-gap-${offset}-${i}`, timestamp: 1_700_100_000 - offset })),
+    );
+    const { deps } = makeDeps({ repo, network });
+
+    const result = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps);
+
+    // A. never silently stays complete.
+    expect(result.sourceCoverageComplete).toBe(false);
+    expect(result.sourceCoverageIncompleteReason).toMatch(/steady-state/);
+    expect(result.backlogTruncated).toBe(true);
+    // B. explicitly persisted, with a reason, and the ORIGINAL watermark preserved
+    // (never re-derived from this scan's own newest-page-first, non-continuity-proving
+    // fetch) -- the next poll resumes windowed catch-up from exactly this point.
+    const lastCall = repo.upsertWalletCoverageCalls.at(-1);
+    expect(lastCall?.coverageComplete).toBe(false);
+    expect(lastCall?.coveredThroughTs).toBe(1_699_000_000);
+    expect(lastCall?.incompleteReason).toMatch(/offset ceiling/);
+    expect(repo.coverageOverride.get(WALLET.toLowerCase())?.coverageComplete).toBe(false);
+  });
+
+  it("REQUIRED TEST (continued): the very next poll automatically re-enters windowed catch-up recovery (provingCoverage) and can eventually re-prove completeness -- A. eventual recovery", async () => {
+    const repo = new FakeRepo();
+    repo.coverageOverride.set(WALLET.toLowerCase(), { coveredThroughTs: 1_699_000_000, coverageComplete: true, incompleteReason: null });
+    const goLiveAtMs = 1_699_999_000_000;
+    const gapNetwork = makeNetworkDeps((offset) =>
+      Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `gap2-${offset}-${i}`, transactionHash: `0xtx-gap2-${offset}-${i}`, timestamp: 1_700_100_000 - offset })),
+    );
+    const { deps: gapDeps } = makeDeps({ repo, network: gapNetwork });
+    const first = await pollSportsShadowWallet(WALLET, goLiveAtMs, gapDeps);
+    expect(first.sourceCoverageComplete).toBe(false);
+    const watermark = repo.coverageOverride.get(WALLET.toLowerCase())?.coveredThroughTs;
+    expect(watermark).toBe(1_699_000_000);
+
+    // Recovery poll: windowed catch-up (end=<watermark>) immediately finds a fill strictly
+    // before go-live -- proving the boundary crossed, exactly like bootstrap recovery.
+    const recoveryNetwork: SourcePollNetworkDeps = {
+      fetchImpl: (async (url: string | URL) => {
+        const u = new URL(String(url));
+        expect(u.searchParams.get("end")).toBe(String(watermark)); // resumes from the PRESERVED watermark, not a fresh "from now" scan
+        return new Response(JSON.stringify([trade({ id: "pre-go-live-recovery", transactionHash: "0xtx-pre-go-live-recovery", timestamp: 1_699_998_000 })]), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as typeof fetch,
+      reserveRequestSlot: async () => 0,
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      recordHostRateLimit: async () => {},
+    };
+    const { deps: recoveryDeps } = makeDeps({ repo, network: recoveryNetwork });
+    const second = await pollSportsShadowWallet(WALLET, goLiveAtMs, recoveryDeps);
+    expect(second.sourceCoverageComplete).toBe(true);
+    expect(second.sourceCoverageIncompleteReason).toBeNull();
+    expect(repo.coverageOverride.get(WALLET.toLowerCase())?.coverageComplete).toBe(true);
+  });
+
+  it("REQUIRED TEST (continued): B. if the gap never resolves, coverage explicitly remains incomplete across repeated polls -- never silently completes", async () => {
+    const repo = new FakeRepo();
+    repo.coverageOverride.set(WALLET.toLowerCase(), { coveredThroughTs: 1_699_000_000, coverageComplete: true, incompleteReason: null });
+    const goLiveAtMs = 1_699_999_000_000;
+    // Every window this wallet is ever polled in returns a full page of brand-new trades
+    // that never reach go-live and never find overlap -- an interval that, in this test,
+    // never actually resolves (analogous to a persistently unrecoverable upstream gap).
+    const network: SourcePollNetworkDeps = {
+      fetchImpl: (async (url: string | URL) => {
+        const u = new URL(String(url));
+        const offset = Number(u.searchParams.get("offset"));
+        const end = u.searchParams.get("end") ?? "top";
+        return new Response(
+          JSON.stringify(Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `stuck-${end}-${offset}-${i}`, transactionHash: `0xtx-stuck-${end}-${offset}-${i}`, timestamp: 1_700_050_000 - offset }))),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }) as typeof fetch,
+      reserveRequestSlot: async () => 0,
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      recordHostRateLimit: async () => {},
+    };
+    const { deps } = makeDeps({ repo, network });
+
+    for (let i = 0; i < 3; i += 1) {
+      const result = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps);
+      // Never silently complete, no matter how many polls: fail CLOSED, not fail OPEN.
+      expect(result.sourceCoverageComplete).toBe(false);
+    }
+    expect(repo.coverageOverride.get(WALLET.toLowerCase())?.coverageComplete).toBe(false);
   });
 });
 
