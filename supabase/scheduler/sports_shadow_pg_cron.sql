@@ -15,54 +15,113 @@
 --      reuse of the project's existing 'project_url' vault secret if General Shadow's
 --      own cron job already established one -- see docs/PRODUCTION-HARDENING.md).
 -- Even if accidentally applied before SPORTS_SHADOW_ENABLED=true is set in the
--- application's own environment config, this is SAFE by construction: the hook route
--- (src/routes/api/public/hooks/sports-shadow.ts) reads SPORTS_SHADOW_ENABLED from
--- process.env, which this SQL file cannot set, so the cycle immediately no-ops
--- (configEnabled:false) on every invocation until a human separately flips that flag --
--- this is exactly Part 43's "disabled smoke" contract, satisfied structurally.
+-- application's own environment config, this is SAFE by construction: every hook route
+-- below reads SPORTS_SHADOW_ENABLED from process.env, which this SQL file cannot set,
+-- so every job immediately no-ops (configEnabled:false) on every invocation until a
+-- human separately flips that flag -- this is exactly Part 43's "disabled smoke"
+-- contract, satisfied structurally.
 -- =========================================================================================
 --
--- CADENCE: 30 seconds, matching Supabase's own documented pg_cron+pg_net example
--- cadence and General Shadow's proven-in-production 1-minute-scale pattern at half the
--- interval -- NOT chosen merely because the observation plan contains "+5s" (Section
--- 29's own explicit warning against that reasoning). The scheduled INVOCATION cadence
--- only needs to service due observation rows with acceptable measured lateness; the
--- rows' own fire_at timestamps (t0/+5/+10/+30/+60) are what determines correctness, not
--- the poll cadence. 30s is the SAFEST starting point given no production lateness
--- telemetry exists yet for this specific route (Part 29's explicit instruction: "Start
--- with the safest cadence supported by actual production telemetry" -- there is none
--- yet, so start conservative). Revisit only after real +5/+10 lateness p95/p99 is
--- observed via sports_shadow_telemetry_events once soak begins.
+-- ============================== CODEX P2-1: THREE INDEPENDENT JOBS ==============================
+-- ROOT CAUSE (Codex P2-1 finding, re-verified during the FINAL CODEX CLEANUP PASS):
+-- the ORIGINAL version of this artifact scheduled exactly ONE cron job
+-- ('sports-shadow-cycle') hitting ONE route that ran the FULL combined cycle --
+-- observation (both venues) THEN source/matching THEN a final observation catch-pass --
+-- sequentially, inside ONE pg_net HTTP call. worker.server.ts's own DEFENSIBLE WORST
+-- CASE analysis for each stage is:
+--   observation (main pass):        ~16s  (OBSERVATION_STAGE_DEADLINE_MS + one in-flight fetch)
+--   source/matching:                 ~42s  (SOURCE_LANE_BUDGET_MS + one in-flight fetch)
+--   observation (final +0 catch):   ~14s  (FINAL_OBSERVATION_STAGE_DEADLINE_MS + one in-flight fetch)
+--   TOTAL SEQUENTIAL WORST CASE:     ~72s
+-- This 72s figure EXCEEDS both the 30s cron cadence (tolerable -- overlap safety is
+-- lease-guarded, see below) AND the artifact's own previous 45000ms pg_net timeout --
+-- meaning a genuinely slow cycle could have its underlying HTTP request aborted by
+-- pg_net mid-execution, an entirely different (and less safe, less observable) failure
+-- mode than the application's own internal deadlines, which always stop cleanly and
+-- leave state safely retryable.
 --
--- TIMEOUT: net.http_post's own `timeout_milliseconds` is set explicitly below --
--- pg_net's default (5000ms) would abort a real Sports Shadow cycle invocation before it
--- could even complete a single paced upstream request's worst-case bound (see
--- http-rate-limit.server.ts's documented ~20-35s worst case per request). 45000ms gives
--- headroom over SOURCE_LANE_BUDGET_MS (30s) plus one already-started request's own
--- ~12s ceiling, without being so long that a genuinely hung invocation blocks pg_net's
--- worker pool indefinitely.
+-- FIX: the combined cycle is split into THREE independently scheduled, independently
+-- leased, independently deadlined, independently timed-out, independently
+-- heartbeat/telemetry'd jobs -- each hitting its OWN route:
+--   1. sports-shadow-cycle-observation  -> /api/public/hooks/sports-shadow-observation
+--      Runs BOTH venues' observation lanes (worst case ~16s -- see worker.server.ts's
+--      OBSERVATION-LANE LATENCY AUDIT) on its own tight cadence, completely independent
+--      of the source job's own much slower cadence. No final +0 catch pass is needed
+--      here -- this job's own tight, frequent cadence naturally catches any fresh +0
+--      row within a few seconds of the source job creating it, without needing a second
+--      pass appended to any single invocation.
+--   2. sports-shadow-cycle-source       -> /api/public/hooks/sports-shadow
+--      Runs ONLY the source/matching lane (worst case ~42s) -- never runs observation at
+--      all, so it can never be the reason an observation row is captured late.
+--   3. sports-shadow-cycle-settlement   -> /api/public/hooks/sports-shadow-settlement
+--      NEW: wires runSettlementBatch (settlement.orchestrator.server.ts) into an actual
+--      production call site for the first time -- it had none before this pass. Worst
+--      case ~30s (SETTLEMENT_BATCH_BUDGET_MS + one in-flight ~10s settlement check).
+-- Each job's own lease (OBSERVATION_LOCK_ID_PMUS/KALSHI, SOURCE_LOCK_ID,
+-- SETTLEMENT_LOCK_ID) is completely independent of the other two -- a slow/backlogged
+-- job can never block or delay either of the other two from acquiring ITS OWN lease and
+-- running on ITS OWN schedule. Each job's own pg_net timeout_milliseconds is now sized
+-- with real headroom over ONLY that job's own worst case (never the old combined-cycle
+-- figure), so a genuinely slow invocation of any one job can complete cleanly via its
+-- own internal deadline well before pg_net would ever consider aborting it.
+-- ================================================================================
 --
--- OVERLAP SAFETY: not handled here at all -- by design. Two overlapping invocations of
--- this cron job hitting the SAME route concurrently is already made safe by the
--- application's own lease/fencing mechanism (sports-lease.server.ts), exactly the same
--- way General Shadow's own overlapping-invocation tolerance already works. This SQL
--- file does not need pg_cron's own run-history/skip-if-running features.
+-- OVERLAP SAFETY: not handled by pg_cron's own run-history/skip-if-running features for
+-- any of the three jobs -- by design, unchanged from the original single-job artifact.
+-- Two overlapping invocations of the SAME job hitting the SAME route concurrently are
+-- already made safe by that job's own lease/fencing mechanism (sports-lease.server.ts),
+-- exactly the same way General Shadow's own overlapping-invocation tolerance already
+-- works. Two DIFFERENT jobs (e.g. observation and source) running concurrently is not
+-- "overlap" at all in the sense this section means -- they were always designed to
+-- coexist via fully independent leases, even back when both ran inside one combined
+-- invocation (Task 12H/P1-N's per-venue observation isolation; Task 12F/P1-G's
+-- independent source lease).
 --
--- IDEMPOTENT INSTALL/REMOVAL: cron.unschedule is called first so re-running this script
--- (e.g. to change the cadence) never creates a second, duplicate job under the same name.
+-- IDEMPOTENT INSTALL/REMOVAL: cron.unschedule is called first for each current job name
+-- AND the legacy combined job name ('sports-shadow-cycle'), so re-running this script
+-- (e.g. to change any one job's cadence) never creates duplicates and never leaves the
+-- old fourth source invocation behind in an existing deployment.
 
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 CREATE EXTENSION IF NOT EXISTS pg_net;
 
 DO $$
 BEGIN
-  PERFORM cron.unschedule(jobid) FROM cron.job WHERE jobname = 'sports-shadow-cycle';
+  PERFORM cron.unschedule(jobid) FROM cron.job WHERE jobname IN ('sports-shadow-cycle', 'sports-shadow-cycle-observation', 'sports-shadow-cycle-source', 'sports-shadow-cycle-settlement');
 EXCEPTION
-  WHEN OTHERS THEN NULL; -- no existing job under this name yet -- nothing to remove
+  WHEN OTHERS THEN NULL; -- no existing job under these names yet -- nothing to remove
 END $$;
 
+-- JOB 1: OBSERVATION (worst case ~16s). Tight cadence -- the whole point of splitting
+-- this out is to let it run frequently and independently of the much slower source job.
+-- timeout_milliseconds (25000ms) gives comfortable headroom over the ~16s worst case
+-- without being so long that a genuinely hung invocation blocks pg_net's worker pool
+-- for materially longer than the job's own cadence.
 SELECT cron.schedule(
-  'sports-shadow-cycle',
+  'sports-shadow-cycle-observation',
+  '10 seconds',
+  $$
+  SELECT net.http_post(
+    url := (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'sports_shadow_project_url')
+      || '/api/public/hooks/sports-shadow-observation',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-sports-shadow-secret', (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'sports_shadow_hook_secret')
+    ),
+    body := '{}'::jsonb,
+    timeout_milliseconds := 25000
+  ) AS request_id;
+  $$
+);
+
+-- JOB 2: SOURCE/MATCHING (worst case ~42s). Same 30s cadence and same reasoning the
+-- original combined job used for this lane specifically -- see SOURCE_LANE_BUDGET_MS's
+-- own doc comment (worker.server.ts) for why 30s is the safest starting cadence absent
+-- real production lateness telemetry. timeout_milliseconds (50000ms) gives headroom
+-- over the ~42s worst case for JUST this lane, now that it never has to also account
+-- for a sequential observation pass on either side of it.
+SELECT cron.schedule(
+  'sports-shadow-cycle-source',
   '30 seconds',
   $$
   SELECT net.http_post(
@@ -73,17 +132,46 @@ SELECT cron.schedule(
       'x-sports-shadow-secret', (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'sports_shadow_hook_secret')
     ),
     body := '{}'::jsonb,
-    timeout_milliseconds := 45000
+    timeout_milliseconds := 50000
   ) AS request_id;
   $$
 );
 
--- Health telemetry (Part 21's own explicit requirement): pg_cron's own run history is
--- already durable in cron.job_run_details -- no separate table needed for "did the
--- scheduler fire." A human/operator can inspect recent runs via:
---   SELECT jobid, status, return_message, start_time, end_time
---   FROM cron.job_run_details
---   WHERE jobid = (SELECT jobid FROM cron.job WHERE jobname = 'sports-shadow-cycle')
---   ORDER BY start_time DESC LIMIT 20;
--- Application-level cycle telemetry (durations, lease outcomes, per-lane results) is
--- separately written to sports_shadow_telemetry_events by the route/worker itself.
+-- JOB 3: SETTLEMENT (worst case ~30s, new). A settled/PENDING position's own recheck
+-- backoff (10min-6h, see computeNextSettlementCheckAtMs) already spaces individual
+-- positions out generously -- a once-a-minute cadence is conservative headroom for a
+-- lane that has never run in production before, matching SOURCE_LEASE_TTL_SECONDS's own
+-- cadence. pg_cron's 'N seconds' interval syntax only accepts 1-59 -- standard cron
+-- syntax '* * * * *' is the correct way to express exactly once per minute.
+-- timeout_milliseconds (40000ms) gives headroom over the ~30s worst case.
+SELECT cron.schedule(
+  'sports-shadow-cycle-settlement',
+  '* * * * *',
+  $$
+  SELECT net.http_post(
+    url := (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'sports_shadow_project_url')
+      || '/api/public/hooks/sports-shadow-settlement',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-sports-shadow-secret', (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'sports_shadow_hook_secret')
+    ),
+    body := '{}'::jsonb,
+    timeout_milliseconds := 40000
+  ) AS request_id;
+  $$
+);
+
+-- Health telemetry (Part 21's own explicit requirement, now per-job): pg_cron's own run
+-- history is already durable in cron.job_run_details -- no separate table needed for
+-- "did each job fire." A human/operator can inspect recent runs via:
+--   SELECT j.jobname, r.status, r.return_message, r.start_time, r.end_time
+--   FROM cron.job_run_details r JOIN cron.job j ON j.jobid = r.jobid
+--   WHERE j.jobname IN ('sports-shadow-cycle-observation', 'sports-shadow-cycle-source', 'sports-shadow-cycle-settlement')
+--   ORDER BY r.start_time DESC LIMIT 60;
+-- Application-level per-job telemetry (durations, lease outcomes, per-lane results) is
+-- separately written to sports_shadow_telemetry_events by each job's own route/worker
+-- function -- SYSTEM/cycle_duration_ms for the source job (unchanged from before this
+-- pass, preserving soak.server.ts's existing rollup semantics exactly), SYSTEM/
+-- observation_cycle_duration_ms for the observation job, and SYSTEM/
+-- settlement_cycle_duration_ms for the settlement job -- each with its own independent
+-- "scheduler_stopped:<job>" staleness alert (worker.server.ts).

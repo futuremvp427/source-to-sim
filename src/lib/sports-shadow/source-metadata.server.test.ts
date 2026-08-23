@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import { DeadlineExceededError } from "../http-rate-limit.server";
 import type { PmusCandidate } from "./pmus";
 import { resolvePmusMatch, type SourceSignal } from "./resolver";
-import { fetchSourceMarketMetadata } from "./source-metadata.server";
+import { GAMMA_HOST, fetchSourceMarketMetadata, type GammaNetworkDeps } from "./source-metadata.server";
 
 const GAMMA_TOTAL_FIXTURE = [
   {
@@ -40,11 +41,26 @@ function fakeThrowingFetch(err: unknown): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
+/**
+ * CODEX P2-2: fetchSourceMarketMetadata now routes through the shared host-aware rate
+ * limiter -- every test in this file must inject a no-op cooldown/reservation so it never
+ * reaches the real Supabase-backed http-rate-limit.server.ts functions.
+ */
+function fakeGammaDeps(fetchImpl: typeof fetch): GammaNetworkDeps {
+  return {
+    fetchImpl,
+    reserveRequestSlot: async () => 0,
+    getHostCooldown: async () => ({ blocked: false, reason: null }),
+    recordHostRateLimit: async () => {},
+    now: () => Date.now(),
+  };
+}
+
 describe("fetchSourceMarketMetadata", () => {
   it("maps a real gamma-api totals market into structured, ELIGIBLE SourceMarketMetadata", async () => {
     const result = await fetchSourceMarketMetadata(
       "0x98d25978a8e8afa9e318bb75ce261f161150f42f79bec8183f0800594ed58434",
-      fakeFetch(GAMMA_TOTAL_FIXTURE),
+      fakeGammaDeps(fakeFetch(GAMMA_TOTAL_FIXTURE)),
     );
     expect(result).toEqual({
       conditionId: "0x98d25978a8e8afa9e318bb75ce261f161150f42f79bec8183f0800594ed58434",
@@ -61,6 +77,7 @@ describe("fetchSourceMarketMetadata", () => {
       sourceGameId: "10079198",
       eventSlug: "mlb-wsh-tex-2026-08-19",
       marketSlug: "mlb-wsh-tex-2026-08-19-total-7pt5",
+      sourceRulesDescription: null, // GAMMA_TOTAL_FIXTURE does not set a `description` field
     });
   });
 
@@ -73,42 +90,42 @@ describe("fetchSourceMarketMetadata", () => {
         question: "Mike Trout: Home Runs O/U 0.5",
       },
     ];
-    const result = await fetchSourceMarketMetadata("0xprop", fakeFetch(propFixture));
+    const result = await fetchSourceMarketMetadata("0xprop", fakeGammaDeps(fakeFetch(propFixture)));
     expect(result.status).toBe("INELIGIBLE");
     expect(result.betType).toBeNull();
     expect(result.reasonCode).toBe("REJECT_PROP");
   });
 
   it("26. fails closed with UNVERIFIED_FETCH_FAILED on a request that throws (e.g. timeout/abort)", async () => {
-    const result = await fetchSourceMarketMetadata("0xtimeout", fakeThrowingFetch(new DOMException("The operation was aborted", "AbortError")));
+    const result = await fetchSourceMarketMetadata("0xtimeout", fakeGammaDeps(fakeThrowingFetch(new DOMException("The operation was aborted", "AbortError"))));
     expect(result.status).toBe("UNVERIFIED");
     expect(result.betType).toBeNull();
     expect(result.reasonCode).toBe("UNVERIFIED_FETCH_FAILED");
   });
 
   it("26b. fails closed with UNVERIFIED_FETCH_FAILED on an HTTP error status", async () => {
-    const result = await fetchSourceMarketMetadata("0xerr", fakeFetch({}, false));
+    const result = await fetchSourceMarketMetadata("0xerr", fakeGammaDeps(fakeFetch({}, false)));
     expect(result.status).toBe("UNVERIFIED");
     expect(result.betType).toBeNull();
     expect(result.reasonCode).toBe("UNVERIFIED_FETCH_FAILED");
   });
 
   it("27. fails closed with UNVERIFIED_EMPTY_RESPONSE when gamma-api returns no market for the conditionId", async () => {
-    const result = await fetchSourceMarketMetadata("0xmissing", fakeFetch([]));
+    const result = await fetchSourceMarketMetadata("0xmissing", fakeGammaDeps(fakeFetch([])));
     expect(result.status).toBe("UNVERIFIED");
     expect(result.betType).toBeNull();
     expect(result.reasonCode).toBe("UNVERIFIED_EMPTY_RESPONSE");
   });
 
   it("28. fails closed with UNVERIFIED_MALFORMED_RESPONSE on non-JSON response bodies", async () => {
-    const result = await fetchSourceMarketMetadata("0xmalformed", fakeMalformedFetch());
+    const result = await fetchSourceMarketMetadata("0xmalformed", fakeGammaDeps(fakeMalformedFetch()));
     expect(result.status).toBe("UNVERIFIED");
     expect(result.betType).toBeNull();
     expect(result.reasonCode).toBe("UNVERIFIED_MALFORMED_RESPONSE");
   });
 
   it("28b. fails closed with UNVERIFIED_MALFORMED_RESPONSE when the response shape is not an array", async () => {
-    const result = await fetchSourceMarketMetadata("0xshape", fakeFetch({ not: "an array" }));
+    const result = await fetchSourceMarketMetadata("0xshape", fakeGammaDeps(fakeFetch({ not: "an array" })));
     expect(result.status).toBe("UNVERIFIED");
     expect(result.betType).toBeNull();
     expect(result.reasonCode).toBe("UNVERIFIED_MALFORMED_RESPONSE");
@@ -139,7 +156,7 @@ describe("fetchSourceMarketMetadata", () => {
         ],
       },
     ];
-    const result = await fetchSourceMarketMetadata("0xyankees-redsox", fakeFetch(fixture));
+    const result = await fetchSourceMarketMetadata("0xyankees-redsox", fakeGammaDeps(fakeFetch(fixture)));
     expect(result.status).toBe("ELIGIBLE");
     expect(result.awayTeam).toBe("NYY");
     expect(result.homeTeam).toBe("BOS");
@@ -167,7 +184,7 @@ describe("fetchSourceMarketMetadata", () => {
         ],
       },
     ];
-    const result = await fetchSourceMarketMetadata("0xalias", fakeFetch(fixture));
+    const result = await fetchSourceMarketMetadata("0xalias", fakeGammaDeps(fakeFetch(fixture)));
     expect(result.status).toBe("ELIGIBLE");
     expect(result.awayTeam).toBe("NYY");
     expect(result.homeTeam).toBe("BOS");
@@ -194,7 +211,7 @@ describe("fetchSourceMarketMetadata", () => {
         ],
       },
     ];
-    const result = await fetchSourceMarketMetadata("0xunknown-team", fakeFetch(fixture));
+    const result = await fetchSourceMarketMetadata("0xunknown-team", fakeGammaDeps(fakeFetch(fixture)));
     expect(result.status).toBe("UNVERIFIED");
     expect(result.reasonCode).toBe("UNVERIFIED_UNKNOWN_TEAM");
     expect(result.awayTeam).toBeNull();
@@ -223,7 +240,7 @@ describe("fetchSourceMarketMetadata", () => {
         ],
       },
     ];
-    const result = await fetchSourceMarketMetadata("0xconflict", fakeFetch(fixture));
+    const result = await fetchSourceMarketMetadata("0xconflict", fakeGammaDeps(fakeFetch(fixture)));
     expect(result.status).toBe("UNVERIFIED");
     expect(result.reasonCode).toBe("UNVERIFIED_CONFLICTING_METADATA");
     expect(result.awayTeam).toBeNull();
@@ -237,6 +254,11 @@ describe("fetchSourceMarketMetadata", () => {
         conditionId: "0xintegration",
         slug: "mlb-nyy-bal-2026-08-19",
         sportsMarketType: "moneyline",
+        // CODEX P1-6: EXACT now requires the SOURCE's own rules text to positively agree
+        // with the target's -- this test is about team-code matching (P1-D), not P1-6's
+        // settlement-rule dimension, so give it real agreeing text rather than leaving it
+        // unset and accidentally downgrading to UNVERIFIED on an unrelated dimension.
+        description: "This market will resolve to the winner of the game. Extra innings are included. If the game is postponed, this market will remain open until completed.",
         line: null,
         events: [
           {
@@ -251,7 +273,7 @@ describe("fetchSourceMarketMetadata", () => {
         ],
       },
     ];
-    const metadata = await fetchSourceMarketMetadata("0xintegration", fakeFetch(fixture));
+    const metadata = await fetchSourceMarketMetadata("0xintegration", fakeGammaDeps(fakeFetch(fixture)));
     expect(metadata.status).toBe("ELIGIBLE");
     expect(metadata.betType).toBe("MONEYLINE");
 
@@ -268,6 +290,7 @@ describe("fetchSourceMarketMetadata", () => {
       sourceGameId: metadata.sourceGameId,
       eventSlug: metadata.eventSlug,
       marketSlug: metadata.marketSlug,
+      sourceRulesDescription: metadata.sourceRulesDescription,
     };
 
     const pmusCandidate: PmusCandidate = {
@@ -296,7 +319,7 @@ describe("fetchSourceMarketMetadata", () => {
       marketStatus: "MARKET_STATUS_OPEN",
       question: "New York Yankees vs. Baltimore Orioles",
       rulesDescription:
-        "This market will settle to the winner of the game. Extra innings are included if played. If the game is delayed, postponed, or suspended and not rescheduled within two weeks, the market will settle to the last fair market price.",
+        "This market will settle to the winner of the game. Extra innings are included if played. If the game is delayed, postponed, or suspended, this market will remain open until the game has been completed.",
       sides: [
         { description: "New York Yankees", teamAbbreviation: "nyy", long: true },
         { description: "Baltimore Orioles", teamAbbreviation: "bal", long: false },
@@ -327,10 +350,16 @@ describe("Task 13E, F: the default fetch path (no fetchImpl argument) uses the C
   it("fetchSourceMarketMetadata completes without an Illegal-invocation failure when no fetchImpl argument is supplied at all", async () => {
     const restore = installThisSensitiveGlobalFetch();
     try {
-      // Deliberately omitting the second (fetchImpl) argument entirely -- must fall
-      // through to the function's own default parameter, which Task 13E fixed to be
-      // runtimeFetch instead of a bare captured `fetch` reference.
-      const result = await fetchSourceMarketMetadata("0xcanary");
+      // Deliberately omitting `fetchImpl` from deps -- must fall through to
+      // GammaNetworkDeps's own default, which Task 13E fixed to be runtimeFetch instead of
+      // a bare captured `fetch` reference. The rate-limiter deps ARE overridden (CODEX
+      // P2-2 added them) so this test never reaches the real Supabase-backed
+      // http-rate-limit.server.ts functions -- unrelated to what this test verifies.
+      const result = await fetchSourceMarketMetadata("0xcanary", {
+        reserveRequestSlot: async () => 0,
+        getHostCooldown: async () => ({ blocked: false, reason: null }),
+        recordHostRateLimit: async () => {},
+      });
       // The branded fetch really was called and returned successfully -- an empty
       // markets array resolves to UNVERIFIED_EMPTY_RESPONSE, never a thrown error.
       expect(result.status).toBe("UNVERIFIED");
@@ -338,5 +367,76 @@ describe("Task 13E, F: the default fetch path (no fetchImpl argument) uses the C
     } finally {
       restore();
     }
+  });
+});
+
+describe("CODEX P2-2: Gamma metadata now routes through the shared host-aware rate limiter", () => {
+  it("a cooldown-blocked host resolves to UNVERIFIED_FETCH_FAILED (retryable -- classifyUnverifiedDisposition never converts this to permanent) WITHOUT ever attempting the request", async () => {
+    const fetchImpl = vi.fn();
+    const result = await fetchSourceMarketMetadata("0xcooldown", {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      getHostCooldown: async () => ({ blocked: true, reason: "recent 429" }),
+    });
+    expect(result.status).toBe("UNVERIFIED");
+    expect(result.reasonCode).toBe("UNVERIFIED_FETCH_FAILED");
+    expect(result.ineligibleReason).toMatch(/cooldown/i);
+    expect(fetchImpl).not.toHaveBeenCalled(); // never even attempted the request
+  });
+
+  it("a genuine 429 records the cooldown via recordHostRateLimit and resolves to UNVERIFIED_FETCH_FAILED -- subsequent same-host work must respect the recorded cooldown rather than continuing to hammer Gamma", async () => {
+    const recordHostRateLimit = vi.fn(async () => {});
+    const fetchImpl = vi.fn(async () => new Response("rate limited", { status: 429, headers: { "retry-after": "30" } })) as unknown as typeof fetch;
+    const first = await fetchSourceMarketMetadata("0xratelimited", {
+      fetchImpl,
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      reserveRequestSlot: async () => 0,
+      recordHostRateLimit,
+    });
+    expect(first.reasonCode).toBe("UNVERIFIED_FETCH_FAILED");
+    expect(recordHostRateLimit).toHaveBeenCalledWith(GAMMA_HOST, 30_000);
+
+    // A SECOND lookup, using a repo/cooldown store that now reflects that recorded
+    // cooldown, must be blocked before ever attempting another request -- this is the
+    // actual "does not continue to hammer Gamma" property, proven end-to-end rather than
+    // merely asserting the first call's side effect in isolation.
+    const secondFetch = vi.fn();
+    const second = await fetchSourceMarketMetadata("0xratelimited-2", {
+      fetchImpl: secondFetch as unknown as typeof fetch,
+      getHostCooldown: async () => ({ blocked: true, reason: "429 retry-after" }),
+    });
+    expect(second.reasonCode).toBe("UNVERIFIED_FETCH_FAILED");
+    expect(secondFetch).not.toHaveBeenCalled();
+  });
+
+  it("reserveRequestSlot's own granted wait is honored (paced, not fired immediately)", async () => {
+    const waitedMs: number[] = [];
+    const originalSetTimeout = global.setTimeout;
+    vi.spyOn(global, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+      if (ms !== undefined && ms > 0 && ms < 5_000) waitedMs.push(ms); // the pacing sleep specifically, not the 10s request-timeout timer
+      return originalSetTimeout(fn, 0);
+    }) as unknown as typeof setTimeout);
+    try {
+      const result = await fetchSourceMarketMetadata("0xpaced", {
+        fetchImpl: fakeFetch([]) as unknown as typeof fetch,
+        getHostCooldown: async () => ({ blocked: false, reason: null }),
+        reserveRequestSlot: async () => 250,
+      });
+      expect(waitedMs).toContain(250);
+      expect(result.status).toBe("UNVERIFIED"); // request still completed after pacing
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("a caller deadline already reached before the cooldown check throws DeadlineExceededError, not an UNVERIFIED result -- a scheduler-budget exhaustion is never persisted as evidence about the market", async () => {
+    const fetchImpl = vi.fn();
+    await expect(
+      fetchSourceMarketMetadata(
+        "0xdeadline",
+        { fetchImpl: fetchImpl as unknown as typeof fetch, now: () => 1_000 },
+        500, // deadline already in the past relative to now()
+      ),
+    ).rejects.toThrow(DeadlineExceededError);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

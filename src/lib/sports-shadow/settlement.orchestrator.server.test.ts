@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { runSettlementBatch, settlePosition, type OpenPaperPosition, type SettlementRepository, type SettlementRow } from "./settlement.orchestrator.server";
+import {
+  computeNextSettlementCheckAtMs,
+  runSettlementBatch,
+  settlePosition,
+  SETTLEMENT_RECHECK_BASE_MS,
+  SETTLEMENT_RECHECK_MAX_MS,
+  type OpenPaperPosition,
+  type SettlementRepository,
+  type SettlementRow,
+} from "./settlement.orchestrator.server";
 
 function position(overrides: Partial<OpenPaperPosition> = {}): OpenPaperPosition {
   return {
@@ -11,6 +20,7 @@ function position(overrides: Partial<OpenPaperPosition> = {}): OpenPaperPosition
     selectedSide: "TEAM:NYY:LONG",
     entryContracts: 20,
     entryAllInCostUsd: 10.5,
+    checkAttemptCount: 0,
     ...overrides,
   };
 }
@@ -98,5 +108,133 @@ describe("FINAL BUILD Part 15: runSettlementBatch", () => {
     expect(summary.errors).toBe(1);
     expect(summary.settled).toBe(1);
     expect(upserted).toHaveLength(1); // the failed position's row was never upserted
+  });
+
+  it("CODEX P2-3: a still-PENDING position persists an incremented checkAttemptCount and a future nextCheckAtMs -- never re-selected on the very next cycle", async () => {
+    const positions = [position({ signalId: "a", checkAttemptCount: 2 })];
+    const upserted: SettlementRow[] = [];
+    const repo: SettlementRepository = {
+      async findOpenPositions() {
+        return positions;
+      },
+      async upsertSettlement(row) {
+        upserted.push(row);
+      },
+    };
+    const fetchImpl = fetchReturning({ markets: [{ status: "MARKET_STATUS_ACTIVE" }] });
+    const nowMs = 1_700_000_000_000;
+    await runSettlementBatch(50, repo, fetchImpl, () => nowMs);
+    expect(upserted).toHaveLength(1);
+    expect(upserted[0]?.settlementStatus).toBe("PENDING");
+    expect(upserted[0]?.checkAttemptCount).toBe(3); // 2 -> 3, this check counted
+    expect(upserted[0]?.nextCheckAtMs).toBe(computeNextSettlementCheckAtMs(nowMs, 3));
+    expect(upserted[0]?.nextCheckAtMs!).toBeGreaterThan(nowMs);
+  });
+
+  it("CODEX P2-3: a terminally-settled position persists nextCheckAtMs=null -- no further checks needed", async () => {
+    const positions = [position({ signalId: "a", checkAttemptCount: 5 })];
+    const upserted: SettlementRow[] = [];
+    const repo: SettlementRepository = {
+      async findOpenPositions() {
+        return positions;
+      },
+      async upsertSettlement(row) {
+        upserted.push(row);
+      },
+    };
+    const fetchImpl = fetchReturning({ markets: [{ status: "MARKET_STATUS_RESOLVED", marketSides: [{ long: true, price: "1" }, { long: false, price: "0" }] }] });
+    await runSettlementBatch(50, repo, fetchImpl);
+    expect(upserted[0]?.settlementStatus).toBe("SETTLED_WIN");
+    expect(upserted[0]?.nextCheckAtMs).toBeNull();
+    expect(upserted[0]?.checkAttemptCount).toBe(6);
+  });
+
+  it("CODEX P2-1 REQUIRED TEST: a deadline reached before a position starts leaves it (and everything after it) completely untouched, safely retryable", async () => {
+    const positions = [position({ signalId: "a" }), position({ signalId: "b" }), position({ signalId: "c" })];
+    const upserted: SettlementRow[] = [];
+    const repo: SettlementRepository = {
+      async findOpenPositions() {
+        return positions;
+      },
+      async upsertSettlement(row) {
+        upserted.push(row);
+      },
+    };
+    const fetchImpl = fetchReturning({ markets: [{ status: "MARKET_STATUS_RESOLVED", marketSides: [{ long: true, price: "1" }, { long: false, price: "0" }] }] });
+    const nowMs = 1_700_000_000_000;
+    // The deadline is already exhausted before the FIRST position is even started.
+    const summary = await runSettlementBatch(50, repo, fetchImpl, () => nowMs, nowMs);
+    expect(summary.deadlineReached).toBe(true);
+    expect(summary.checked).toBe(0);
+    expect(summary.settled).toBe(0);
+    expect(upserted).toHaveLength(0); // nothing persisted -- never a rushed/partial write
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("a deadline reached mid-batch stops starting NEW positions but never aborts one already in flight, and reports deadlineReached", async () => {
+    const positions = [position({ signalId: "a" }), position({ signalId: "b" })];
+    const upserted: SettlementRow[] = [];
+    const repo: SettlementRepository = {
+      async findOpenPositions() {
+        return positions;
+      },
+      async upsertSettlement(row) {
+        upserted.push(row);
+      },
+    };
+    const fetchImpl = fetchReturning({ markets: [{ status: "MARKET_STATUS_RESOLVED", marketSides: [{ long: true, price: "1" }, { long: false, price: "0" }] }] });
+    let calls = 0;
+    // Deadline is still in the future for the first call's pre-check, but has passed by
+    // the time the SECOND position's pre-check runs -- proves the check happens BEFORE
+    // each position, not merely once at the top of the batch.
+    const now = () => {
+      calls += 1;
+      return calls === 1 ? 0 : 1_000;
+    };
+    const summary = await runSettlementBatch(50, repo, fetchImpl, now, 500);
+    expect(summary.deadlineReached).toBe(true);
+    expect(summary.checked).toBe(1);
+    expect(upserted).toHaveLength(1);
+    expect(upserted[0]?.signalId).toBe("a");
+  });
+
+  it("no deadline passed (legacy default) never reports deadlineReached, even with many positions", async () => {
+    const positions = [position({ signalId: "a" }), position({ signalId: "b" })];
+    const repo: SettlementRepository = {
+      async findOpenPositions() {
+        return positions;
+      },
+      async upsertSettlement() {},
+    };
+    const fetchImpl = fetchReturning({ markets: [{ status: "MARKET_STATUS_ACTIVE" }] });
+    const summary = await runSettlementBatch(50, repo, fetchImpl);
+    expect(summary.deadlineReached).toBe(false);
+    expect(summary.checked).toBe(2);
+  });
+});
+
+describe("CODEX P2-3: computeNextSettlementCheckAtMs -- exponential backoff for a persistently-PENDING position", () => {
+  it("the FIRST check (attemptCountAfterThisCheck=1) uses the 10-minute base, not the ceiling", () => {
+    const nowMs = 1_700_000_000_000;
+    expect(computeNextSettlementCheckAtMs(nowMs, 1)).toBe(nowMs + SETTLEMENT_RECHECK_BASE_MS);
+  });
+
+  it("doubles per additional attempt", () => {
+    const nowMs = 1_700_000_000_000;
+    expect(computeNextSettlementCheckAtMs(nowMs, 2)).toBe(nowMs + SETTLEMENT_RECHECK_BASE_MS * 2);
+    expect(computeNextSettlementCheckAtMs(nowMs, 3)).toBe(nowMs + SETTLEMENT_RECHECK_BASE_MS * 4);
+  });
+
+  it("is capped at SETTLEMENT_RECHECK_MAX_MS regardless of how many attempts have accumulated", () => {
+    const nowMs = 1_700_000_000_000;
+    expect(computeNextSettlementCheckAtMs(nowMs, 20)).toBe(nowMs + SETTLEMENT_RECHECK_MAX_MS);
+    expect(computeNextSettlementCheckAtMs(nowMs, 1000)).toBe(nowMs + SETTLEMENT_RECHECK_MAX_MS);
+  });
+
+  it("never returns a time at/before now -- always strictly in the future", () => {
+    const nowMs = 1_700_000_000_000;
+    for (const attempt of [1, 2, 5, 10, 50]) {
+      expect(computeNextSettlementCheckAtMs(nowMs, attempt)).toBeGreaterThan(nowMs);
+    }
   });
 });

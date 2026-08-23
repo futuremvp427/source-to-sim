@@ -42,4 +42,8 @@ describe("sports shadow scheduler hook authorization contract", () => {
   it("never uses a timer/daemon/sleep-as-scheduling pattern", () => {
     expect(source).not.toMatch(/setInterval|while\s*\(\s*true\s*\)|setTimeout/);
   });
+
+  it("CODEX P2-1: invokes runSportsShadowCycle with the 'source' lane only -- observation and settlement now have their own independent scheduler hooks", () => {
+    expect(source).toMatch(/runSportsShadowCycle\(configResult\.config,\s*\{\},\s*"source"\)/);
+  });
 });

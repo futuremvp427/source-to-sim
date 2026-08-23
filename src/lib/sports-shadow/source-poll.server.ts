@@ -113,14 +113,15 @@ import {
   DeadlineExceededError,
   getHostCooldown,
   parseRetryAfterMs,
-  recordHostRateLimit,
+  recordHostRateLimitReporting,
   reserveRequestSlot,
 } from "../http-rate-limit.server";
 import { buildTradesUrl, MAX_TRADES_OFFSET, PAGE_SIZE } from "../shadow.server";
 import { normalizeSourceEvents, type NormalizedEvent, type RawTrade } from "../shadow-core";
 import { classifyUnverifiedDisposition, type UnverifiedReasonCode } from "./eligibility";
-import { decideFill, type EligibleFill, type OpenEpisodeState } from "./episode";
+import { computeExitFraction, decideFill, remainingShares, type EligibleFill, type OpenEpisodeState } from "./episode";
 import { computeClusterKey } from "./independence";
+import { wrapRecordHostRateLimitWithTelemetry } from "./telemetry.server";
 import { runtimeFetch } from "./runtime-fetch.server";
 import { fetchSourceMarketMetadata } from "./source-metadata.server";
 import { isEligibleForEpisodeTrigger } from "./source-poll";
@@ -218,7 +219,7 @@ const defaultNetworkDeps: SourcePollNetworkDeps = {
   fetchImpl: runtimeFetch,
   reserveRequestSlot,
   getHostCooldown,
-  recordHostRateLimit,
+  recordHostRateLimit: wrapRecordHostRateLimitWithTelemetry(recordHostRateLimitReporting),
 };
 
 /**
@@ -235,6 +236,14 @@ async function pacedFetchTradesPage(
   deps: SourcePollNetworkDeps,
   deadlineAtMs: number = Number.POSITIVE_INFINITY,
   now: () => number = Date.now,
+  /**
+   * CODEX P1-1: the SAME `end` timestamp parameter shadow.server.ts's own
+   * fetchUntilCheckpointCovered already uses in production to walk successive time
+   * windows once the /trades offset ceiling is reached within one window -- never an
+   * invented/unsupported parameter. Undefined (default) preserves the exact prior
+   * behavior (paginate "now" backward with no window boundary).
+   */
+  endTs?: number,
 ): Promise<RawTrade[]> {
   if (now() >= deadlineAtMs) {
     throw new DeadlineExceededError(`${DATA_API_HOST} request skipped: caller deadline already reached`);
@@ -256,18 +265,12 @@ async function pacedFetchTradesPage(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const url = buildTradesUrl(PAGE_SIZE, offset, wallet);
+    const url = buildTradesUrl(PAGE_SIZE, offset, wallet, endTs);
     const response = await deps.fetchImpl(url, { headers: { Accept: "application/json" }, signal: controller.signal });
     if (response.status === 429) {
-      // Task 13I / P1-T (Codex re-review): see pmus.server.ts's pacedGetJson for the full
-      // rationale -- recordHostRateLimit is a NEW post-fetch operation with its own
-      // up-to-5s bound; skip it once the deadline is already gone rather than silently
-      // stacking it on top of the already-accepted fetch overrun. `deadlineAtMs` defaults
-      // to Number.POSITIVE_INFINITY here, so this is always true for callers with no
-      // deadline at all -- exact prior behavior preserved.
-      if (now() < deadlineAtMs) {
-        await deps.recordHostRateLimit(DATA_API_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
-      }
+      // CODEX P2-2 (round 2): always recorded now, regardless of the caller's own
+      // deadline -- see pmus.server.ts's identical pacedGetJson for the full rationale.
+      await deps.recordHostRateLimit(DATA_API_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
       throw new Error(`${DATA_API_HOST} rate limited (429) on /trades offset=${offset}`);
     }
     if (!response.ok) {
@@ -341,6 +344,8 @@ export type NewSignalRow = {
   sourceOutcome: string | null;
   /** FINAL BUILD Part 17/analytics: the current experiment epoch at insert time, or null when ensureCurrentEpoch failed this cycle (best-effort -- collection must never block on epoch bookkeeping). */
   experimentEpochId: string | null;
+  /** CODEX P1-6: the source market's own Gamma-provided resolution-rules text, durably persisted so resolver.ts's cross-venue settlement-rule equivalence check has it available at MATCH time (a separate lane, potentially long after this signal was created) without re-fetching Gamma. */
+  sourceRulesDescription: string | null;
 };
 
 /** A durably-persisted fill whose downstream (classification + episode) processing has not yet safely completed. Reconstructed entirely from already-stored columns — never re-fetched from the source API. */
@@ -428,6 +433,12 @@ export type PollRepository = {
   countDurableOrdinalFills(wallet: string, tuplePrefixes: string[], deadline?: { now: () => number; deadlineAtMs: number }): Promise<Map<string, number>>;
   /** Most recent episode (by source_last_fill_at) for this exact position, if any. */
   findLatestEpisode(wallet: string, conditionId: string, asset: string): Promise<EpisodeCacheEntry | null>;
+  /**
+   * CODEX P1-3 (follower lifecycle): legacy direct writer retained for tests/tools, but
+   * the production source-poll path now records lifecycle triggers through
+   * updateEpisodeAtomic so the fill completion and follower reaction commit together.
+   */
+  recordLifecycleTrigger(signalId: string, sourceFillId: string, triggerType: "ADD" | "EXIT", trackedShares: number, exitFraction: number | null, addFraction: number | null, price: number, sourceTs: number): Promise<void>;
   /** Bounded, oldest-source_ts-first: every fill for this wallet whose downstream processing has not yet safely completed. Includes fills inserted THIS poll and any orphaned by an earlier failure/crash — see this module's Task 12D/P1-A doc comment. */
   findPendingDownstreamFills(wallet: string, limit: number): Promise<PendingDownstreamFillRow[]>;
   /** Atomically inserts the new episode row AND marks fillId's downstream_status COMPLETE in one transaction. */
@@ -438,9 +449,17 @@ export type PollRepository = {
    * SELL_RECORDED update against a KNOWN open episode), ALSO atomically inserts the
    * individual auditable sell-event row in the SAME transaction (FINAL BUILD Part 5/14)
    * -- omitted entirely for a plain BUY aggregation update (AGGREGATED_BUY/
-   * LATE_RECONCILIATION), which never touches the sell ledger.
+   * LATE_RECONCILIATION), which never touches the sell ledger. `lifecycleTrigger`, when
+   * provided, is inserted in that same transaction as well; a trigger insert failure must
+   * leave the source fill PENDING so the follower ADD/EXIT reaction is never lost.
    */
-  updateEpisodeAtomic(fillId: string, signalId: string, state: OpenEpisodeState, sellEvent?: { shares: number; price: number; notional: number; sourceTs: number }): Promise<void>;
+  updateEpisodeAtomic(
+    fillId: string,
+    signalId: string,
+    state: OpenEpisodeState,
+    sellEvent?: { shares: number; price: number; notional: number; sourceTs: number; untrackedShares: number },
+    lifecycleTrigger?: { triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; addFraction: number | null; price: number; sourceTs: number },
+  ): Promise<void>;
   /** FINAL BUILD Part 5: records a sell fill with NO known forward open position (pre-epoch/untracked -- Part 5's explicit case) and marks the fill COMPLETE, atomically. Never fabricates a signal_id. */
   recordPreEpochSell(fillId: string, shares: number, price: number, notional: number, sourceTs: number): Promise<void>;
   /** Marks a fill COMPLETE with no paired episode mutation — safe as a lone single-table write (see this module's terminal-classification doc comment). */
@@ -449,6 +468,21 @@ export type PollRepository = {
   markFillTerminal(fillId: string, status: "TERMINAL_INELIGIBLE" | "TERMINAL_INVALID"): Promise<void>;
   /** Task 12F / P1-H: marks a fill TERMINAL_UNVERIFIED, durably retaining the exact classifier reason code for later audit/accounting -- distinct from TERMINAL_INELIGIBLE (a positive ineligibility determination) since "could not verify" and "determined ineligible" remain different outcomes. */
   markFillTerminalUnverified(fillId: string, reasonCode: UnverifiedReasonCode): Promise<void>;
+  /**
+   * CODEX P1-1: durable per-wallet source-coverage watermark. `null` means no row exists
+   * yet -- the real (supabasePollRepository) implementation's caller treats that as "not
+   * yet proven," forcing one genuine verification pass. See the migration's own doc
+   * comment (20260825010000_sports_shadow_wallet_source_coverage.sql) for the full model.
+   */
+  getWalletCoverage(wallet: string): Promise<{ coveredThroughTs: number | null; coverageComplete: boolean; incompleteReason: string | null } | null>;
+  /**
+   * Best-effort durable upsert of the coverage watermark -- a failure here must never fail
+   * the poll (see its call sites' own try/catch); at worst, the next poll re-verifies a
+   * range it did not strictly need to. `incompleteReason` (CODEX P1-1 round 2) is the
+   * human-readable "why" persisted alongside coverageComplete=false -- null when marking
+   * coverage complete (clears any prior reason) or when no reason applies.
+   */
+  upsertWalletCoverage(wallet: string, coveredThroughTs: number | null, coverageComplete: boolean, incompleteReason: string | null): Promise<void>;
 };
 
 type RawPendingFillRow = {
@@ -622,7 +656,7 @@ export const supabasePollRepository: PollRepository = {
     const { data, error } = await supabaseAdmin
       .from("sports_shadow_signals" as never)
       .select(
-        "id, episode_key, source_first_fill_at, source_last_fill_at, source_vwap, source_shares, source_notional, source_fill_count, source_sell_seen, source_sell_shares, source_sell_notional, sports_shadow_source_fills!first_fill_id(event_key)",
+        "id, episode_key, source_first_fill_at, source_last_fill_at, source_vwap, source_shares, source_notional, source_fill_count, source_sell_seen, source_sell_shares, source_sell_notional, untracked_sell_shares, untracked_sell_notional, sports_shadow_source_fills!first_fill_id(event_key)",
       )
       .eq("source_wallet", wallet)
       .eq("source_condition_id", conditionId)
@@ -644,6 +678,8 @@ export const supabasePollRepository: PollRepository = {
       source_sell_seen: boolean;
       source_sell_shares: number;
       source_sell_notional: number;
+      untracked_sell_shares: number;
+      untracked_sell_notional: number;
       sports_shadow_source_fills: { event_key: string } | null;
     };
     const row = data as unknown as Row;
@@ -668,10 +704,26 @@ export const supabasePollRepository: PollRepository = {
         sellCount: 0,
         sellShares: row.source_sell_shares,
         sellNotional: row.source_sell_notional,
+        untrackedSellShares: row.untracked_sell_shares,
+        untrackedSellNotional: row.untracked_sell_notional,
         triggered: true,
         processedEventKeys: new Set(anchorEventKey ? [anchorEventKey] : []),
       },
     };
+  },
+
+  async recordLifecycleTrigger(signalId, sourceFillId, triggerType, trackedShares, exitFraction, addFraction, price, sourceTs) {
+    const { error } = await supabaseAdmin.rpc("record_sports_shadow_lifecycle_trigger" as never, {
+      p_signal_id: signalId,
+      p_source_fill_id: sourceFillId,
+      p_trigger_type: triggerType,
+      p_tracked_shares: trackedShares,
+      p_exit_fraction: exitFraction,
+      p_add_fraction: addFraction,
+      p_price: price,
+      p_source_ts: sourceTs,
+    } as never);
+    if (error) throw new Error(error.message);
   },
 
   async findPendingDownstreamFills(wallet, limit) {
@@ -684,9 +736,17 @@ export const supabasePollRepository: PollRepository = {
         .eq("wallet", wallet)
         .eq("downstream_status", "PENDING");
 
+    // CODEX P2-1: `id` is a deterministic, total-order tie-breaker for rows sharing an
+    // identical source_ts (a real case, not merely theoretical -- e.g. bulk-imported or
+    // degraded-identity history). Each slice's tie-break direction matches its own primary
+    // direction so both remain a consistent, deterministic partition of the SAME total
+    // order, ensuring repeated/restarted polling makes identical, converging progress
+    // rather than risking an arbitrary subset of a tied group winning forever.
     const [oldest, newest] = await Promise.all([
-      baseQuery().order("source_ts", { ascending: true }).limit(oldestShare),
-      newestShare > 0 ? baseQuery().order("source_ts", { ascending: false }).limit(newestShare) : Promise.resolve({ data: [] as unknown[], error: null }),
+      baseQuery().order("source_ts", { ascending: true }).order("id", { ascending: true }).limit(oldestShare),
+      newestShare > 0
+        ? baseQuery().order("source_ts", { ascending: false }).order("id", { ascending: false }).limit(newestShare)
+        : Promise.resolve({ data: [] as unknown[], error: null }),
     ]);
     if (oldest.error) throw new Error(oldest.error.message);
     if (newest.error) throw new Error(newest.error.message);
@@ -741,12 +801,13 @@ export const supabasePollRepository: PollRepository = {
       p_selected_side: row.selectedSide,
       p_line: row.line,
       p_cluster_key: clusterKey,
+      p_source_rules_description: row.sourceRulesDescription,
     } as never);
     if (error) throw new Error(error.message);
     return { id: data as unknown as string };
   },
 
-  async updateEpisodeAtomic(fillId, signalId, state, sellEvent) {
+  async updateEpisodeAtomic(fillId, signalId, state, sellEvent, lifecycleTrigger) {
     const { error } = await supabaseAdmin.rpc("update_sports_shadow_episode" as never, {
       p_fill_id: fillId,
       p_signal_id: signalId,
@@ -763,6 +824,15 @@ export const supabasePollRepository: PollRepository = {
       p_sell_event_price: sellEvent?.price ?? null,
       p_sell_event_notional: sellEvent?.notional ?? null,
       p_sell_event_source_ts: sellEvent?.sourceTs ?? null,
+      p_untracked_sell_shares: state.untrackedSellShares,
+      p_untracked_sell_notional: state.untrackedSellNotional,
+      p_sell_event_untracked_shares: sellEvent?.untrackedShares ?? 0,
+      p_lifecycle_trigger_type: lifecycleTrigger?.triggerType ?? null,
+      p_lifecycle_trigger_tracked_shares: lifecycleTrigger?.trackedShares ?? null,
+      p_lifecycle_trigger_exit_fraction: lifecycleTrigger?.exitFraction ?? null,
+      p_lifecycle_trigger_add_fraction: lifecycleTrigger?.addFraction ?? null,
+      p_lifecycle_trigger_price: lifecycleTrigger?.price ?? null,
+      p_lifecycle_trigger_source_ts: lifecycleTrigger?.sourceTs ?? null,
     } as never);
     if (error) throw new Error(error.message);
   },
@@ -799,6 +869,28 @@ export const supabasePollRepository: PollRepository = {
       .from("sports_shadow_source_fills" as never)
       .update({ downstream_status: "TERMINAL_UNVERIFIED", downstream_unverified_reason: reasonCode } as never)
       .eq("id", fillId);
+    if (error) throw new Error(error.message);
+  },
+
+  async getWalletCoverage(wallet) {
+    const { data, error } = await supabaseAdmin
+      .from("sports_shadow_wallet_coverage" as never)
+      .select("covered_through_ts, coverage_complete, incomplete_reason")
+      .eq("wallet", wallet)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return null;
+    const row = data as unknown as { covered_through_ts: number | null; coverage_complete: boolean; incomplete_reason: string | null };
+    return { coveredThroughTs: row.covered_through_ts, coverageComplete: row.coverage_complete, incompleteReason: row.incomplete_reason };
+  },
+
+  async upsertWalletCoverage(wallet, coveredThroughTs, coverageComplete, incompleteReason) {
+    const { error } = await supabaseAdmin
+      .from("sports_shadow_wallet_coverage" as never)
+      .upsert(
+        { wallet, covered_through_ts: coveredThroughTs, coverage_complete: coverageComplete, incomplete_reason: incompleteReason, updated_at: new Date().toISOString() } as never,
+        { onConflict: "wallet" },
+      );
     if (error) throw new Error(error.message);
   },
 };
@@ -873,6 +965,10 @@ export type WalletPollResult = {
   leaseLost: boolean;
   /** First error encountered, if any. Partial progress made before the error is still reflected in the other fields above — one bad page/row does not discard already-persisted evidence. */
   error: string | null;
+  /** CODEX P1-1: durably known/proven coverage state as of the END of this poll -- true only once a scan has actually crossed goLiveAtMs or reached genuine history-start, never merely because the offset ceiling was hit. See sports_shadow_wallet_coverage. */
+  sourceCoverageComplete: boolean;
+  /** CODEX P1-1 (round 2): the human-readable reason coverage is currently incomplete, when it is -- null whenever sourceCoverageComplete is true. Propagated into WalletSummary/telemetry/dashboard so an operator can see WHY, not just THAT. */
+  sourceCoverageIncompleteReason: string | null;
 };
 
 function emptyResult(wallet: string): WalletPollResult {
@@ -897,6 +993,8 @@ function emptyResult(wallet: string): WalletPollResult {
     orphanedFillsRecovered: 0,
     leaseLost: false,
     error: null,
+    sourceCoverageComplete: false,
+    sourceCoverageIncompleteReason: null,
   };
 }
 
@@ -1198,6 +1296,33 @@ export async function pollSportsShadowWallet(
   }
   result.isBootstrap = !hasHistory;
 
+  /**
+   * CODEX P1-1: `hasHistory` alone is NOT proof this wallet's history has ever been
+   * durably captured back to goLiveAtMs -- a wallet whose lifetime trade count (or whose
+   * gap since a prior poll) exceeds MAX_TRADES_OFFSET (10,000) could previously have its
+   * bootstrap/resumption scan hit that ceiling and get treated as complete regardless
+   * (see the "ranOutOfPages" handling below, pre-fix). `coverage` is the durable
+   * per-wallet watermark that makes this provable instead of assumed. `coverage === null`
+   * (no row yet -- true for every wallet before this fix's migration) is treated as "not
+   * yet proven," forcing one genuine verification pass -- never an implicit pass.
+   */
+  let coverage: { coveredThroughTs: number | null; coverageComplete: boolean; incompleteReason: string | null } | null = null;
+  try {
+    coverage = await d.repo.getWalletCoverage(normalizedWallet);
+  } catch (err) {
+    // Best-effort read: a failure here must not fail the whole poll -- fail toward
+    // "not yet proven" (provingCoverage=true), the safe direction, rather than silently
+    // trusting an unreadable coverage state as complete.
+    void err;
+  }
+  const provingCoverage = !(coverage?.coverageComplete ?? false);
+  const windowEndTs: number | undefined = provingCoverage ? (coverage?.coveredThroughTs ?? undefined) : undefined;
+  let coverageProvenCompleteThisScan = false;
+  // Default reflects whatever was already durably known; overridden below only once this
+  // scan's own fetch+persist work is confirmed (scanConfirmedComplete).
+  result.sourceCoverageComplete = coverage?.coverageComplete ?? false;
+  result.sourceCoverageIncompleteReason = coverage?.incompleteReason ?? null;
+
   // Task 13G / P1-Q (Codex re-review): bootstrap and steady-state share the SAME page
   // ceiling. Bootstrap typically stops after just one page in the common case (see the
   // go-live-boundary-crossing check below), but must be allowed to walk as far as
@@ -1252,7 +1377,7 @@ export async function pollSportsShadowWallet(
       // budget running out as a genuine upstream/network failure.
       let rows: RawTrade[];
       try {
-        rows = await pacedFetchTradesPage(normalizedWallet, offset, d.network, ingestDeadlineAtMs, d.now);
+        rows = await pacedFetchTradesPage(normalizedWallet, offset, d.network, ingestDeadlineAtMs, d.now, windowEndTs);
       } catch (err) {
         if (err instanceof DeadlineExceededError) {
           deadlineExceeded = true;
@@ -1263,12 +1388,17 @@ export async function pollSportsShadowWallet(
       result.pagesFetched += 1;
       if (rows.length === 0) {
         naturalEnd = true;
+        // CODEX P1-1: an empty page within a coverage-proving window (windowEndTs set, or
+        // windowEndTs undefined but this IS page 0) proves genuine history-start -- there
+        // is nothing older left to cover, so coverage is complete by construction, not
+        // merely "this window's ceiling wasn't hit."
+        if (provingCoverage) coverageProvenCompleteThisScan = true;
         break;
       }
       rawPages.push(rows);
       result.rowsFetched += rows.length;
 
-      if (!hasHistory) {
+      if (provingCoverage) {
         // Task 13G / P1-Q (Codex re-review, P1): a FIXED one-page bootstrap is unsound in
         // general -- if more than PAGE_SIZE post-go-live trades already exist by the time
         // a wallet's first-ever poll runs, page 0 alone would not reach back to
@@ -1290,10 +1420,12 @@ export async function pollSportsShadowWallet(
         const crossedGoLive = normalizeSourceEvents(rows, normalizedWallet).some((e) => e.sourceTs * 1000 < goLiveAtMs);
         if (crossedGoLive) {
           naturalEnd = true;
+          coverageProvenCompleteThisScan = true; // proof this scan has walked continuously across the go-live boundary
           break;
         }
         if (rows.length < PAGE_SIZE) {
           naturalEnd = true;
+          coverageProvenCompleteThisScan = true; // genuine history-start reached -- nothing older exists to cover
           break;
         }
         continue; // keep paging further back -- go-live boundary not yet reached
@@ -1448,14 +1580,21 @@ export async function pollSportsShadowWallet(
     // as any other unconfirmed-scan discard (see scanConfirmedComplete above) -- nothing
     // here has been persisted yet, so nothing is stranded, only deferred to the wallet's
     // next poll.
+    // CODEX P1-1: tracks whether EVERY page of THIS window was durably persisted before
+    // this poll's deadline -- gates coverage-watermark advancement below. Advancing the
+    // watermark past rows this poll only OBSERVED but never actually finished persisting
+    // would let a later poll believe a range is durable when part of it is not.
+    let allPagesPersistedThisWindow = true;
     if (d.now() >= ingestDeadlineAtMs) {
       result.backlogTruncated = true;
+      allPagesPersistedThisWindow = false;
     } else {
       for (const pageIdx of pageIndicesOldestFirst) {
         // Task 13G (Codex re-review round 9, P1): checked before EVERY page's
         // reconcile+persist unit, including the first.
         if (d.now() >= ingestDeadlineAtMs) {
           result.backlogTruncated = true;
+          allPagesPersistedThisWindow = false;
           break;
         }
         const pageEvents = eventsByPageIndex.get(pageIdx)!;
@@ -1483,6 +1622,7 @@ export async function pollSportsShadowWallet(
         // await can run past the deadline.
         if (d.now() >= ingestDeadlineAtMs) {
           result.backlogTruncated = true;
+          allPagesPersistedThisWindow = false;
           break;
         }
         const { newDegraded: pageNewDegraded, duplicateCount: pageDegradedDuplicates, error: reconcileError } = await reconcileDegradedEvents(
@@ -1498,6 +1638,7 @@ export async function pollSportsShadowWallet(
           // the exact same partial-page stranding risk as any other partial-page commit.
           result.error = result.error ?? reconcileError;
           result.backlogTruncated = true;
+          allPagesPersistedThisWindow = false;
           break;
         }
         result.duplicateRows += pageReliableDuplicates + pageDegradedDuplicates;
@@ -1510,6 +1651,7 @@ export async function pollSportsShadowWallet(
         // reconciliation itself can consume real time.
         if (d.now() >= ingestDeadlineAtMs) {
           result.backlogTruncated = true;
+          allPagesPersistedThisWindow = false;
           break;
         }
         const batch = pageGenuinelyNew.map((event) => toRawFillRow(event));
@@ -1534,10 +1676,87 @@ export async function pollSportsShadowWallet(
           result.error = result.error ?? `insertRawFillsBatch failed: ${err instanceof Error ? err.message : "unknown error"}`;
           result.invalidRows += pageGenuinelyNew.length;
           result.backlogTruncated = true;
+          allPagesPersistedThisWindow = false;
           break;
         }
       }
     }
+
+    // CODEX P1-1: durable coverage-watermark advancement. Only when EVERY fetched page of
+    // this window is confirmed both FETCHED (scanConfirmedComplete, already required to
+    // reach this block) and durably PERSISTED (allPagesPersistedThisWindow) is it safe to
+    // advance covered_through_ts -- otherwise a not-yet-durable row could be silently
+    // skipped by a later poll that trusts the watermark. Best-effort: a failure to WRITE
+    // the watermark must never fail the poll -- the next poll simply re-verifies the same
+    // (already-durable, idempotent-safe) range instead of a strictly new one.
+    let steadyStateGapReason: string | null = null;
+    if (provingCoverage && allPagesPersistedThisWindow) {
+      try {
+        if (coverageProvenCompleteThisScan) {
+          await d.repo.upsertWalletCoverage(normalizedWallet, windowEndTs ?? null, true, null);
+        } else if (ranOutOfPages && allEventsBySourceOrder.length > 0) {
+          // Offset ceiling reached within this window without proving completion --
+          // allEventsBySourceOrder is sorted ascending by sourceTs (normalizeSourceEvents'
+          // own return statement), so its first element is the OLDEST timestamp actually
+          // observed. Inclusive boundary, matching shadow.server.ts's own established
+          // fetchUntilCheckpointCovered convention: events sharing that exact second are
+          // re-fetched (idempotent no-op) rather than risk skipping one on the next window.
+          await d.repo.upsertWalletCoverage(
+            normalizedWallet,
+            allEventsBySourceOrder[0]!.sourceTs,
+            false,
+            `windowed catch-up scan exhausted the /trades offset ceiling (>${MAX_TRADES_OFFSET}) before reaching the go-live boundary or genuine history-start -- resuming from the oldest timestamp observed this scan on the next poll`,
+          );
+        }
+      } catch (err) {
+        void err;
+      }
+    } else if (!provingCoverage && ranOutOfPages) {
+      /**
+       * CODEX P1-1 (round 2): the CONTINUOUS half of the invariant -- coverage_complete
+       * previously stayed durably true forever once proven once, so a wallet whose
+       * scheduler was down long enough for more than MAX_TRADES_OFFSET (10,000) new
+       * trades to accumulate would have its steady-state overlap search exhaust the same
+       * offset ceiling WITHOUT ever finding overlap with already-durable history --
+       * proof an unresolved gap now exists between the last proven watermark and current
+       * activity -- yet nothing downgraded coverage_complete back to false, so every
+       * later poll kept trusting a watermark that could no longer prove continuity, and
+       * the older, still-uncaptured fills behind the ceiling were permanently stranded.
+       *
+       * FIX: coverage is downgraded back to INCOMPLETE the moment this is detected.
+       * covered_through_ts is left UNCHANGED (still the last point this module can
+       * actually prove continuity up to, not re-derived from this scan's own newest-page-
+       * first fetch, which proves nothing about continuity). The NEXT poll
+       * (provingCoverage becomes true again automatically, since coverage.coverageComplete
+       * is now false) re-enters the SAME windowed catch-up recovery this module already
+       * proves correct for bootstrap, walking backward from "now" bounded by that
+       * watermark until it once again reaches go-live/history-start -- never a fresh
+       * "from now" scan that would silently skip the gap.
+       *
+       * Applied regardless of allPagesPersistedThisWindow (unlike the provingCoverage
+       * branch above): marking coverage INCOMPLETE is always the SAFE direction -- it can
+       * only ever trigger extra verification work later, never data loss -- unlike
+       * advancing the watermark forward, which requires durable persistence first.
+       *
+       * If this interval turns out to be genuinely unrecoverable (the gap never closes),
+       * this is NOT silently accepted as done: stage.ts's sourceCoverageGapDetected
+       * absolute guard (and soak.ts's own health-gate input) block ALL further research
+       * progression for as long as coverage_complete remains false for any wallet -- a
+       * real FAIL-CLOSED outcome, not merely a retry loop with no consequence.
+       */
+      steadyStateGapReason = `steady-state overlap search exhausted the /trades offset ceiling (>${MAX_TRADES_OFFSET}) without finding overlap with existing durable history -- an unresolved gap exists since covered_through_ts=${coverage?.coveredThroughTs ?? "unknown (never previously proven)"}`;
+      try {
+        await d.repo.upsertWalletCoverage(normalizedWallet, coverage?.coveredThroughTs ?? null, false, steadyStateGapReason);
+      } catch (err) {
+        void err;
+      }
+    }
+    result.sourceCoverageComplete = provingCoverage
+      ? coverageProvenCompleteThisScan
+      : ranOutOfPages
+        ? false // CODEX P1-1 (round 2): steady-state gap just detected above -- never report complete this poll even if the durable write itself failed.
+        : (coverage?.coverageComplete ?? false);
+    result.sourceCoverageIncompleteReason = result.sourceCoverageComplete ? null : (steadyStateGapReason ?? coverage?.incompleteReason ?? "coverage not yet proven");
   }
 
   /*
@@ -1620,7 +1839,13 @@ export async function pollSportsShadowWallet(
     let metadata = metadataCache.get(fill.conditionId);
     if (!metadata) {
       try {
-        metadata = await d.fetchSourceMarketMetadata(fill.conditionId);
+        // CODEX P2-2: deadlineAtMs threaded through so Gamma's own cooldown-check/
+        // reservation-wait cannot silently consume this loop's remaining Phase 2 budget --
+        // a genuine budget exhaustion there throws DeadlineExceededError (caught by this
+        // try/catch, stays PENDING); a cooldown-blocked host or a real 429 instead resolves
+        // to an explicit, cacheable UNVERIFIED_FETCH_FAILED result (see
+        // fetchSourceMarketMetadata's own doc comment).
+        metadata = await d.fetchSourceMarketMetadata(fill.conditionId, {}, deadlineAtMs);
       } catch (err) {
         result.error = result.error ?? `fetchSourceMarketMetadata failed: ${err instanceof Error ? err.message : "unknown error"}`;
         result.metadataFetchFailures += 1;
@@ -1758,12 +1983,28 @@ export async function pollSportsShadowWallet(
         // metadata-fetch call sites).
         if (d.now() >= deadlineAtMs) break;
         try {
+          let lifecycleTrigger: { triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; addFraction: number | null; price: number; sourceTs: number } | undefined;
+          if (decision.trackedShares > 0) {
+            const remainingBeforeSell = remainingShares(cacheEntry.state);
+            const exitFraction = computeExitFraction(decision.trackedShares, remainingBeforeSell);
+            if (exitFraction !== null) {
+              lifecycleTrigger = {
+                triggerType: "EXIT",
+                trackedShares: decision.trackedShares,
+                exitFraction,
+                addFraction: null,
+                price: fill.price,
+                sourceTs: fill.sourceTs,
+              };
+            }
+          }
           await d.repo.updateEpisodeAtomic(fill.id, cacheEntry.id, decision.nextState, {
             shares: fill.shares,
             price: fill.price,
             notional: fill.price * fill.shares,
             sourceTs: fill.sourceTs,
-          });
+            untrackedShares: decision.untrackedShares,
+          }, lifecycleTrigger);
           positionCache.set(positionKey, { id: cacheEntry.id, state: decision.nextState });
         } catch (err) {
           result.error = result.error ?? `updateEpisodeAtomic (SELL_RECORDED) failed: ${err instanceof Error ? err.message : "unknown error"}`;
@@ -1801,7 +2042,24 @@ export async function pollSportsShadowWallet(
         // branch above.
         if (d.now() >= deadlineAtMs) break;
         try {
-          await d.repo.updateEpisodeAtomic(fill.id, cacheEntry.id, decision.nextState);
+          const remainingBeforeAdd = remainingShares(cacheEntry.state);
+          const addFraction = remainingBeforeAdd > 0 ? fill.shares / remainingBeforeAdd : null;
+          await d.repo.updateEpisodeAtomic(
+            fill.id,
+            cacheEntry.id,
+            decision.nextState,
+            undefined,
+            addFraction !== null
+              ? {
+                  triggerType: "ADD",
+                  trackedShares: fill.shares,
+                  exitFraction: null,
+                  addFraction,
+                  price: fill.price,
+                  sourceTs: fill.sourceTs,
+                }
+              : undefined,
+          );
           positionCache.set(positionKey, { id: cacheEntry.id, state: decision.nextState });
         } catch (err) {
           result.error = result.error ?? `updateEpisodeAtomic failed: ${err instanceof Error ? err.message : "unknown error"}`;
@@ -1837,6 +2095,7 @@ export async function pollSportsShadowWallet(
       sourceMarketSlug: metadata.marketSlug,
       sourceOutcome: fill.outcome,
       experimentEpochId: d.epochId,
+      sourceRulesDescription: metadata.sourceRulesDescription,
     };
     // Task 13G / P1-R: CHECK BUDGET immediately before this mutating write too -- see the
     // identical comment on the SELL_RECORDED branch above.

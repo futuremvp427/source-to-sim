@@ -7,6 +7,32 @@
  * this module is purely the persistence/PnL-math layer on top of that authoritative
  * check. A position with no ENTRY fill at all (never actually executable) is never
  * settled -- there is nothing to compute P&L against.
+ *
+ * ============ CODEX P1-4: SETTLEMENT PROVENANCE + TERMINAL-ROW EXCLUSION ============
+ * PROVEN root cause #1: findOpenPositions recovered target_market_id/selected_side via
+ * `sports_market_matches!inner(...)` joined on signal_id ALONE, with no venue filter. A
+ * signal EXACT-matched on BOTH venues has TWO rows in sports_market_matches (one per
+ * venue, its own UNIQUE(signal_id, venue)) -- this join could bind whichever row
+ * PostgREST happened to return, independent of which venue was actually chosen_venue.
+ *
+ * FIX: paper.server.ts's routing decision now persists target_market_id/selected_side
+ * DIRECTLY on sports_shadow_paper_fills at decision time, from the CHOSEN venue's own
+ * match row (paper.server.ts's own P1-4 doc comment). Settlement reads these two columns
+ * straight off the fill row it is already selecting -- no join to sports_market_matches
+ * at all, so there is no venue-ambiguous path left to take.
+ *
+ * PROVEN root cause #2: findOpenPositions selected every FULL/PARTIAL ENTRY fill with a
+ * chosen_venue, with no exclusion for a position that ALREADY has a terminal
+ * sports_shadow_settlements row. A bounded batch (`limit`) could be entirely consumed by
+ * already-settled positions on every single call, starving genuinely unsettled ones
+ * indefinitely.
+ *
+ * FIX: a `NOT EXISTS` against sports_shadow_settlements excludes any position whose
+ * settlement is already in a TERMINAL state (anything other than PENDING) -- a row with
+ * no settlement yet, or one still PENDING, remains selectable (re-checked, exactly as
+ * before); ordering is oldest-decided-first so a persistent backlog still drains in
+ * order rather than resampling the same page.
+ * ================================================================================
  */
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
@@ -22,6 +48,8 @@ export type OpenPaperPosition = {
   selectedSide: string; // "TEAM:...:LONG" / "TEAM:...:SHORT" / "YES" / "NO"
   entryContracts: number;
   entryAllInCostUsd: number;
+  /** CODEX P2-3: how many times this position has already been checked and found still-PENDING -- 0 for a position with no settlement row yet. Feeds computeNextSettlementCheckAtMs's exponential backoff. */
+  checkAttemptCount: number;
 };
 
 export type SettlementRow = {
@@ -35,6 +63,10 @@ export type SettlementRow = {
   grossPnlUsd: number | null;
   totalFeesUsd: number;
   netPnlUsd: number | null;
+  /** CODEX P2-3: when this position becomes eligible for another check -- null once terminal (no further checks needed). Set by runSettlementBatch, not settlePosition itself (settlePosition has no opinion on backoff timing). */
+  nextCheckAtMs: number | null;
+  /** CODEX P2-3: total times checked so far, INCLUDING this one -- persisted so the next call's backoff calculation has the correct count even after a process restart. */
+  checkAttemptCount: number;
 };
 
 export type SettlementRepository = {
@@ -51,15 +83,12 @@ function parsePmusOrientation(selectedSide: string): "LONG" | "SHORT" | null {
 
 export const supabaseSettlementRepository: SettlementRepository = {
   async findOpenPositions(limit) {
-    const { data, error } = await supabaseAdmin
-      .from("sports_shadow_paper_fills" as never)
-      .select(
-        "signal_id, chosen_venue, notional_tier_usd, contracts, all_in_cost_usd, side, fill_status, sports_market_matches!inner(target_market_id, selected_side)",
-      )
-      .eq("side", "ENTRY")
-      .in("fill_status", ["FULL", "PARTIAL"])
-      .not("chosen_venue", "is", null)
-      .limit(limit);
+    // CODEX P1-4: a single indexed RPC that (a) excludes any position whose settlement
+    // is already TERMINAL and (b) reads target_market_id/selected_side DIRECTLY off the
+    // paper_fill row itself (persisted at routing-decision time from the CHOSEN venue's
+    // own match, never re-derived here via an ambiguous signal_id-only join) -- see this
+    // module's own doc comment and the migration's.
+    const { data, error } = await supabaseAdmin.rpc("find_open_sports_shadow_paper_positions" as never, { p_limit: limit } as never);
     if (error) throw new Error(error.message);
     type Row = {
       signal_id: string;
@@ -67,22 +96,25 @@ export const supabaseSettlementRepository: SettlementRepository = {
       notional_tier_usd: number;
       contracts: number;
       all_in_cost_usd: number | null;
-      sports_market_matches: { target_market_id: string | null; selected_side: string | null } | null;
+      target_market_id: string | null;
+      selected_side: string | null;
+      check_attempt_count: number;
     };
     const rows = (data ?? []) as unknown as Row[];
     const out: OpenPaperPosition[] = [];
     for (const r of rows) {
-      const targetMarketId = r.sports_market_matches?.target_market_id;
-      const selectedSide = r.sports_market_matches?.selected_side;
-      if (!targetMarketId || !selectedSide || r.all_in_cost_usd === null) continue; // incomplete provenance -- never settle against a fabricated key
+      // The RPC's own WHERE clause already requires these to be non-null -- this is a
+      // defensive re-check, never a silent fabrication.
+      if (!r.target_market_id || !r.selected_side || r.all_in_cost_usd === null) continue;
       out.push({
         signalId: r.signal_id,
         venue: r.chosen_venue,
         notionalTierUsd: r.notional_tier_usd,
-        targetMarketId,
-        selectedSide,
+        targetMarketId: r.target_market_id,
+        selectedSide: r.selected_side,
         entryContracts: r.contracts,
         entryAllInCostUsd: r.all_in_cost_usd,
+        checkAttemptCount: r.check_attempt_count,
       });
     }
     return out;
@@ -101,6 +133,8 @@ export const supabaseSettlementRepository: SettlementRepository = {
         gross_pnl_usd: row.grossPnlUsd,
         total_fees_usd: row.totalFeesUsd,
         net_pnl_usd: row.netPnlUsd,
+        next_check_at: row.nextCheckAtMs ? new Date(row.nextCheckAtMs).toISOString() : null,
+        check_attempt_count: row.checkAttemptCount,
         updated_at: new Date().toISOString(),
       } as never,
       { onConflict: "signal_id,venue,notional_tier_usd" },
@@ -143,6 +177,12 @@ export async function settlePosition(position: OpenPaperPosition, fetchImpl?: ty
       grossPnlUsd: null,
       totalFeesUsd: 0,
       netPnlUsd: null,
+      // CODEX P2-3: placeholder -- runSettlementBatch overrides both fields with the
+      // real computed backoff before persisting. settlePosition itself has no opinion
+      // on recheck timing (it doesn't know `now`, and testing its own PENDING/resolved
+      // classification shouldn't require reasoning about backoff too).
+      nextCheckAtMs: null,
+      checkAttemptCount: position.checkAttemptCount,
     };
   }
 
@@ -167,6 +207,8 @@ export async function settlePosition(position: OpenPaperPosition, fetchImpl?: ty
     grossPnlUsd,
     totalFeesUsd: 0, // entry fee is already netted into entryAllInCostUsd; no exit fee for a held-to-resolution position
     netPnlUsd: grossPnlUsd,
+    nextCheckAtMs: null, // terminal -- runSettlementBatch confirms and persists null; no further checks needed
+    checkAttemptCount: position.checkAttemptCount,
   };
 }
 
@@ -182,22 +224,77 @@ function unresolvableRow(position: OpenPaperPosition, reason: string): Settlemen
     grossPnlUsd: null,
     totalFeesUsd: 0,
     netPnlUsd: null,
+    nextCheckAtMs: null, // terminal
+    checkAttemptCount: position.checkAttemptCount,
   };
 }
 
-/** Bounded batch: settles up to `limit` open positions in one call. Errors on one position never abort the batch for the rest. */
-export async function runSettlementBatch(limit = 50, repo: SettlementRepository = supabaseSettlementRepository, fetchImpl?: typeof fetch): Promise<{ checked: number; settled: number; errors: number }> {
+/** 10-minute base, doubling per attempt, capped at 6 hours -- see computeNextSettlementCheckAtMs's own doc comment. */
+export const SETTLEMENT_RECHECK_BASE_MS = 10 * 60 * 1000;
+export const SETTLEMENT_RECHECK_MAX_MS = 6 * 60 * 60 * 1000;
+/** 10min * 2^6 = 640min already exceeds the 6h cap -- higher attempt counts are clamped here so the exponent itself never grows unbounded. */
+const SETTLEMENT_RECHECK_MAX_BACKOFF_EXPONENT = 6;
+
+/**
+ * CODEX P2-3: pure exponential backoff for a position still PENDING after a REAL venue
+ * check. A persistently-PENDING position (a future game, genuinely nothing wrong) is
+ * rechecked less and less often instead of consuming a bounded batch slot every single
+ * cycle -- but a position new to the queue (attemptCountAfterThisCheck=1, its first-ever
+ * check) is still rechecked within the 10-minute base window, never starved by an
+ * aggressive ceiling. Reasonable backoff based on known game/market lifecycle: capped at
+ * 6 hours so a genuinely-settled market is never delayed excessively even after many
+ * PENDING attempts.
+ */
+export function computeNextSettlementCheckAtMs(nowMs: number, attemptCountAfterThisCheck: number): number {
+  const exponent = Math.min(Math.max(0, attemptCountAfterThisCheck - 1), SETTLEMENT_RECHECK_MAX_BACKOFF_EXPONENT);
+  const backoffMs = SETTLEMENT_RECHECK_BASE_MS * 2 ** exponent;
+  return nowMs + Math.min(SETTLEMENT_RECHECK_MAX_MS, backoffMs);
+}
+
+/**
+ * CODEX P2-1: `runSettlementBatch` had NO call site anywhere in the app (confirmed while
+ * wiring the new independent settlement scheduler job) -- giving it one for the first
+ * time means it must be bounded exactly like every other scheduled lane in this
+ * package, not merely row-count-limited. Each position's own settlePosition call owns a
+ * fixed, un-preemptible ~10s upstream-fetch ceiling (settlement.server.ts's
+ * SETTLEMENT_TIMEOUT_MS) with no way to abort it from outside once started -- so, same
+ * pattern as source-poll.server.ts/observation.server.ts, `deadlineAtMs` is checked
+ * BEFORE each position (never mid-fetch): once reached, every remaining position is left
+ * completely untouched (still PENDING at its existing next_check_at), safely retried by
+ * a later invocation -- never a fabricated partial result. Defaults to `Infinity` (no
+ * bound) so every pre-existing caller/test keeps its exact current behavior; only the
+ * new settlement job (worker.server.ts) passes a real deadline.
+ */
+export async function runSettlementBatch(
+  limit = 50,
+  repo: SettlementRepository = supabaseSettlementRepository,
+  fetchImpl?: typeof fetch,
+  now: () => number = Date.now,
+  deadlineAtMs = Infinity,
+): Promise<{ checked: number; settled: number; errors: number; deadlineReached: boolean }> {
   const positions = await repo.findOpenPositions(limit);
   let settled = 0;
   let errors = 0;
+  let processed = 0;
+  let deadlineReached = false;
   for (const position of positions) {
+    if (now() >= deadlineAtMs) {
+      deadlineReached = true;
+      break;
+    }
+    processed += 1;
     try {
       const row = await settlePosition(position, fetchImpl);
-      await repo.upsertSettlement(row);
-      if (row.settlementStatus !== "PENDING") settled += 1;
+      const checkAttemptCount = position.checkAttemptCount + 1;
+      const finalRow: SettlementRow =
+        row.settlementStatus === "PENDING"
+          ? { ...row, checkAttemptCount, nextCheckAtMs: computeNextSettlementCheckAtMs(now(), checkAttemptCount) }
+          : { ...row, checkAttemptCount, nextCheckAtMs: null };
+      await repo.upsertSettlement(finalRow);
+      if (finalRow.settlementStatus !== "PENDING") settled += 1;
     } catch {
       errors += 1;
     }
   }
-  return { checked: positions.length, settled, errors };
+  return { checked: processed, settled, errors, deadlineReached };
 }

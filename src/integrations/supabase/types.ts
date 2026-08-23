@@ -2647,6 +2647,7 @@ export type Database = {
           pmus_discovery_attempted_cycles: number
           pmus_discovery_failed_count: number
           source_lane_acquired_cycles: number
+          source_lease_skipped_count: number
           source_starved_cycles: number
           total_cycle_errors: number
         }[]

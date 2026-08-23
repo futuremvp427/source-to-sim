@@ -236,6 +236,7 @@ const {
   clampCooldownMs,
   getHostCooldown,
   recordHostRateLimit,
+  recordHostRateLimitReporting,
   reserveRequestSlot,
   DeadlineExceededError,
   ReservationUnavailableError,
@@ -355,6 +356,48 @@ describe("recordHostRateLimit", () => {
   it("never throws even if the RPC itself fails (best-effort write)", async () => {
     currentFake = makeFakeSupabase({ cooldownRow: null, rpcThrows: true }).supabaseAdmin;
     await expect(recordHostRateLimit(DATA_API_HOST, null)).resolves.toBeUndefined();
+  });
+});
+
+describe("CODEX P2-2: recordHostRateLimitReporting -- same bounded write as recordHostRateLimit, but reports success/failure instead of swallowing it", () => {
+  it("reports ok:true on a successful write", async () => {
+    currentFake = makeFakeSupabase({ cooldownRow: null }).supabaseAdmin;
+    const result = await recordHostRateLimitReporting(DATA_API_HOST, 5_000);
+    expect(result).toEqual({ ok: true, error: null });
+  });
+
+  it("reports ok:false with the error message when the RPC itself errors (never throws)", async () => {
+    const { supabaseAdmin } = makeFakeSupabase({ cooldownRow: null });
+    currentFake = {
+      ...supabaseAdmin,
+      rpc: () => ({
+        abortSignal: () => Promise.resolve({ data: null, error: { message: "constraint violation" } }),
+      }),
+    } as never;
+    const result = await recordHostRateLimitReporting(DATA_API_HOST, 5_000);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/constraint violation/);
+  });
+
+  it("reports ok:false when the RPC itself throws (never propagates)", async () => {
+    currentFake = makeFakeSupabase({ cooldownRow: null, rpcThrows: true }).supabaseAdmin;
+    const result = await recordHostRateLimitReporting(DATA_API_HOST, null);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/network down/);
+  });
+
+  it("reports ok:false when the write hits its own COOLDOWN_WRITE_DEADLINE_MS abort", async () => {
+    vi.useFakeTimers();
+    try {
+      currentFake = makeFakeSupabase({ cooldownRow: null, rpcHangs: true }).supabaseAdmin;
+      const promise = recordHostRateLimitReporting(DATA_API_HOST, null);
+      let result: Awaited<ReturnType<typeof recordHostRateLimitReporting>> | undefined;
+      promise.then((r) => { result = r; });
+      await vi.advanceTimersByTimeAsync(COOLDOWN_WRITE_DEADLINE_MS_FOR_TEST + 100);
+      expect(result?.ok).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

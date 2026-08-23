@@ -130,22 +130,20 @@ export async function getHostCooldown(host: string): Promise<HostCooldown> {
 }
 
 /**
- * Records (extends, never shortens) a cooldown for a host after observing a
- * 429. Bounded and safely awaitable by both 429 paths (/trades and
- * /activity): a real AbortController + postgrest-js's .abortSignal() cancels
- * the underlying request at COOLDOWN_WRITE_DEADLINE_MS instead of merely
- * abandoning it, so a stalled RPC can never hold either caller open. Still
- * best-effort in outcome -- a failure (including the deadline abort) is
- * swallowed rather than thrown, since the request that triggered this has
- * already failed regardless and the cooldown only paces the *next* attempt
- * -- but bounded/best-effort are independent properties: this call always
- * returns within COOLDOWN_WRITE_DEADLINE_MS, whether or not the write
- * actually landed.
+ * Shared bounded implementation for both recordHostRateLimit (below, General
+ * Shadow + Sports Shadow's actual cooldown write) and recordHostRateLimitReporting
+ * (CODEX P2-2, Sports Shadow only) -- a real AbortController + postgrest-js's
+ * .abortSignal() cancels the underlying request at COOLDOWN_WRITE_DEADLINE_MS
+ * instead of merely abandoning it, so a stalled RPC can never hold either caller
+ * open. Always returns within COOLDOWN_WRITE_DEADLINE_MS, whether or not the
+ * write actually landed -- reports the outcome instead of swallowing it, so a
+ * caller that cares (recordHostRateLimitReporting) can surface a persistence
+ * failure as its own telemetry/alert signal.
  */
-export async function recordHostRateLimit(
+async function recordHostRateLimitInternal(
   host: string,
   retryAfterMs: number | null,
-): Promise<void> {
+): Promise<{ ok: boolean; error: string | null }> {
   const durationMs = clampCooldownMs(retryAfterMs);
   const until = new Date(Date.now() + durationMs).toISOString();
   const controller = new AbortController();
@@ -154,7 +152,7 @@ export async function recordHostRateLimit(
     // Cast: record_http_rate_limit is defined in this session's migration;
     // generated Supabase types are refreshed only after the migration is
     // applied (same pattern as release_reconcile_lease in shadow.server.ts).
-    await supabaseAdmin
+    const { error } = await supabaseAdmin
       .rpc(
         "record_http_rate_limit" as never,
         {
@@ -165,12 +163,48 @@ export async function recordHostRateLimit(
         } as never,
       )
       .abortSignal(controller.signal);
-  } catch {
-    // Best-effort only -- see doc comment above. Covers both a genuine RPC
-    // failure and the deadline-triggered abort.
+    if (error) return { ok: false, error: error.message };
+    return { ok: true, error: null };
+  } catch (err) {
+    // Covers both a genuine RPC failure and the deadline-triggered abort.
+    return { ok: false, error: err instanceof Error ? err.message : "unknown error" };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Records (extends, never shortens) a cooldown for a host after observing a
+ * 429. Still best-effort in outcome for General Shadow's own callers (a
+ * failure is swallowed rather than thrown, since the request that triggered
+ * this has already failed regardless and the cooldown only paces the *next*
+ * attempt) -- unchanged contract/behavior from before CODEX P2-2. Sports
+ * Shadow's own network modules use recordHostRateLimitReporting below instead,
+ * specifically so a persistence failure is NOT silently swallowed for them.
+ */
+export async function recordHostRateLimit(
+  host: string,
+  retryAfterMs: number | null,
+): Promise<void> {
+  await recordHostRateLimitInternal(host, retryAfterMs);
+}
+
+/**
+ * CODEX P2-2: same bounded write as recordHostRateLimit above, but reports
+ * success/failure instead of swallowing it. Used ONLY as the innermost dependency
+ * behind Sports Shadow's wrapRecordHostRateLimitWithTelemetry (telemetry.server.ts),
+ * so that a genuine persistence failure -- the cooldown/429 fact never actually
+ * reaching durable state -- becomes its own alertable NETWORK telemetry event
+ * rather than disappearing silently. Never throws (mirrors recordHostRateLimit's
+ * own never-throws contract): a caller in the middle of handling an already-
+ * observed 429 must never have that handling replaced by a persistence-layer
+ * exception.
+ */
+export async function recordHostRateLimitReporting(
+  host: string,
+  retryAfterMs: number | null,
+): Promise<{ ok: boolean; error: string | null }> {
+  return recordHostRateLimitInternal(host, retryAfterMs);
 }
 
 /**

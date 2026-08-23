@@ -40,7 +40,12 @@ class FakeRepo implements PollRepository {
   episodesById = new Map<string, { row: NewSignalRow; state: OpenEpisodeState }>();
   nextId = 1;
   findLatestEpisodeCalls = 0;
-  updateEpisodeAtomicCalls: Array<{ fillId: string; signalId: string; state: OpenEpisodeState }> = [];
+  updateEpisodeAtomicCalls: Array<{
+    fillId: string;
+    signalId: string;
+    state: OpenEpisodeState;
+    lifecycleTrigger: { triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; addFraction: number | null; price: number; sourceTs: number } | undefined;
+  }> = [];
   sellEventsByFillId = new Map<string, { signalId: string | null; shares: number; price: number; notional: number; sourceTs: number }>();
   markFillCompleteCalls: string[] = [];
   markFillTerminalCalls: Array<{ fillId: string; status: string }> = [];
@@ -52,6 +57,21 @@ class FakeRepo implements PollRepository {
   throwOnUpdateEpisodeAtomic: Error | null = null;
   throwOnCountDurableOrdinal: Error | null = null;
   throwOnFindPendingDownstreamFills: Error | null = null;
+  /**
+   * CODEX P1-1: explicit per-wallet override so tests can exercise "coverage not yet
+   * proven" against a wallet that already has history (the exact recovery scenario), or
+   * "a watermark exists from a previous ranOutOfPages poll." When unset for a wallet,
+   * getWalletCoverage defaults to mirroring hasAnyFillsForWallet -- i.e. `coverageComplete
+   * = hasHistory` -- so every PRE-EXISTING test in this file (written before this field
+   * existed, all of which implicitly relied on `!hasHistory` alone gating bootstrap vs.
+   * steady-state pagination) continues to see byte-identical behavior without being
+   * touched. Real production defaults differently (missing row = NOT yet proven) -- see
+   * supabasePollRepository.getWalletCoverage's own doc comment for why that asymmetry is
+   * deliberate.
+   */
+  coverageOverride = new Map<string, { coveredThroughTs: number | null; coverageComplete: boolean; incompleteReason: string | null }>();
+  upsertWalletCoverageCalls: Array<{ wallet: string; coveredThroughTs: number | null; coverageComplete: boolean; incompleteReason: string | null }> = [];
+  throwOnUpsertWalletCoverage: Error | null = null;
 
   async hasAnyFillsForWallet(wallet: string): Promise<boolean> {
     if (this.throwOnHasAny) throw this.throwOnHasAny;
@@ -59,6 +79,19 @@ class FakeRepo implements PollRepository {
       if (row.wallet === wallet) return true;
     }
     return false;
+  }
+
+  async getWalletCoverage(wallet: string): Promise<{ coveredThroughTs: number | null; coverageComplete: boolean; incompleteReason: string | null } | null> {
+    const override = this.coverageOverride.get(wallet);
+    if (override) return override;
+    const hasHistory = await this.hasAnyFillsForWallet(wallet);
+    return { coveredThroughTs: null, coverageComplete: hasHistory, incompleteReason: null };
+  }
+
+  async upsertWalletCoverage(wallet: string, coveredThroughTs: number | null, coverageComplete: boolean, incompleteReason: string | null): Promise<void> {
+    this.upsertWalletCoverageCalls.push({ wallet, coveredThroughTs, coverageComplete, incompleteReason });
+    if (this.throwOnUpsertWalletCoverage) throw this.throwOnUpsertWalletCoverage;
+    this.coverageOverride.set(wallet, { coveredThroughTs, coverageComplete, incompleteReason });
   }
 
   async findExistingEventKeys(wallet: string, eventKeys: string[]): Promise<Set<string>> {
@@ -168,6 +201,8 @@ class FakeRepo implements PollRepository {
       sellCount: 0,
       sellShares: 0,
       sellNotional: 0,
+      untrackedSellShares: 0,
+      untrackedSellNotional: 0,
       triggered: true,
       processedEventKeys: new Set([row.episodeKey]),
     };
@@ -182,20 +217,34 @@ class FakeRepo implements PollRepository {
     signalId: string,
     state: OpenEpisodeState,
     sellEvent?: { shares: number; price: number; notional: number; sourceTs: number },
+    lifecycleTrigger?: { triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; addFraction: number | null; price: number; sourceTs: number },
   ): Promise<void> {
     if (this.throwOnUpdateEpisodeAtomic) throw this.throwOnUpdateEpisodeAtomic;
-    this.updateEpisodeAtomicCalls.push({ fillId, signalId, state });
+    if (lifecycleTrigger && this.throwOnRecordLifecycleTrigger) throw this.throwOnRecordLifecycleTrigger;
+    this.updateEpisodeAtomicCalls.push({ fillId, signalId, state, lifecycleTrigger });
     const existing = this.episodesById.get(signalId);
     if (existing) existing.state = state;
     const fill = this.fillsById.get(fillId);
     if (fill) fill.downstreamStatus = "COMPLETE";
     if (sellEvent) this.sellEventsByFillId.set(fillId, { signalId, ...sellEvent });
+    if (lifecycleTrigger && !this.lifecycleTriggersByFillId.has(fillId)) {
+      this.lifecycleTriggersByFillId.set(fillId, { signalId, sourceFillId: fillId, ...lifecycleTrigger });
+    }
   }
 
   async recordPreEpochSell(fillId: string, shares: number, price: number, notional: number, sourceTs: number): Promise<void> {
     this.sellEventsByFillId.set(fillId, { signalId: null, shares, price, notional, sourceTs });
     const fill = this.fillsById.get(fillId);
     if (fill) fill.downstreamStatus = "COMPLETE";
+  }
+
+  /** CODEX P1-3 (follower lifecycle): idempotent via a Map keyed by sourceFillId, mirroring the real UNIQUE(source_fill_id) constraint. */
+  lifecycleTriggersByFillId = new Map<string, { signalId: string; sourceFillId: string; triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; addFraction: number | null; price: number; sourceTs: number }>();
+  throwOnRecordLifecycleTrigger: Error | null = null;
+  async recordLifecycleTrigger(signalId: string, sourceFillId: string, triggerType: "ADD" | "EXIT", trackedShares: number, exitFraction: number | null, addFraction: number | null, price: number, sourceTs: number): Promise<void> {
+    if (this.throwOnRecordLifecycleTrigger) throw this.throwOnRecordLifecycleTrigger;
+    if (this.lifecycleTriggersByFillId.has(sourceFillId)) return; // idempotent no-op, mirrors ON CONFLICT DO UPDATE (no-op) in the real RPC
+    this.lifecycleTriggersByFillId.set(sourceFillId, { signalId, sourceFillId, triggerType, trackedShares, exitFraction, addFraction, price, sourceTs });
   }
 
   async markFillComplete(fillId: string): Promise<void> {
@@ -260,6 +309,7 @@ const ELIGIBLE_METADATA: SourceMarketMetadata = {
   sourceGameId: "game-1",
   eventSlug: "yankees-vs-red-sox-2026-08-19",
   marketSlug: "yankees-moneyline",
+  sourceRulesDescription: null,
 };
 
 function makeNetworkDeps(pages: Record<number, unknown> | ((offset: number) => unknown)): SourcePollNetworkDeps {
@@ -416,6 +466,220 @@ describe("pollSportsShadowWallet — pagination", () => {
     // gapless range in one pass.
     expect(result.newRows).toBe(0);
     expect(repo.fillsByEventKey.size).toBe(1); // only the pre-seeded row, nothing new
+  });
+});
+
+describe("CODEX P1-1: durable source-coverage watermark -- the /trades offset ceiling can no longer be silently treated as verified-complete", () => {
+  const SHARED_FULL_PAGE = Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `cov-window1-${i}`, transactionHash: `0xtx-cov-w1-${i}`, timestamp: 1_700_000_000 }));
+
+  /** Keys responses by BOTH the `end` window boundary and `offset`, so window-1 vs. window-2+ content can differ -- makeNetworkDeps only keys by offset, which cannot express this. */
+  function makeWindowedNetworkDeps(byWindow: Record<string, Record<number, unknown> | ((offset: number) => unknown)>): SourcePollNetworkDeps {
+    return {
+      fetchImpl: (async (url: string | URL) => {
+        const u = new URL(String(url));
+        const offset = Number(u.searchParams.get("offset"));
+        const end = u.searchParams.get("end") ?? "none";
+        const pages = byWindow[end];
+        if (!pages) throw new Error(`unexpected window end=${end} (offset=${offset})`);
+        const body = typeof pages === "function" ? pages(offset) : pages[offset];
+        if (body instanceof Error) throw body;
+        return new Response(JSON.stringify(body ?? []), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch,
+      reserveRequestSlot: async () => 0,
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      recordHostRateLimit: async () => {},
+    };
+  }
+
+  it("a bootstrap scan that exhausts MAX_PAGES_PER_WALLET without crossing go-live advances the watermark instead of persisting a false completeness boundary", async () => {
+    const repo = new FakeRepo();
+    const goLiveAtMs = 1_699_999_000_000; // well before every mocked row -- nothing here is pre-go-live
+    const { deps } = makeDeps({ repo, network: makeWindowedNetworkDeps({ none: () => SHARED_FULL_PAGE }) });
+    const result = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps);
+
+    expect(result.pagesFetched).toBe(MAX_PAGES_PER_WALLET);
+    expect(result.backlogTruncated).toBe(true);
+    // The central fix: this scan is NOT treated as coverage-complete merely because it
+    // hit the offset ceiling -- a later poll must keep trying, not stop here forever.
+    expect(result.sourceCoverageComplete).toBe(false);
+    expect(repo.upsertWalletCoverageCalls).toHaveLength(1);
+    expect(repo.upsertWalletCoverageCalls[0]?.coverageComplete).toBe(false);
+    expect(repo.upsertWalletCoverageCalls[0]?.coveredThroughTs).toBe(1_700_000_000); // oldest ts actually observed this window
+  });
+
+  it("a SECOND poll resumes from the durable watermark (via the Data API's own `end` parameter) and eventually proves coverage complete once it crosses go-live -- no data loss, no permanent false boundary", async () => {
+    const repo = new FakeRepo();
+    const goLiveAtMs = 1_699_999_000_000;
+    const network = makeWindowedNetworkDeps({
+      none: () => SHARED_FULL_PAGE,
+      // Window 2 opens with end=1700000000 (the watermark poll 1 persisted) and
+      // immediately finds a fill strictly before goLiveAtMs -- proving the boundary crossed.
+      "1700000000": { 0: [trade({ id: "pre-go-live", transactionHash: "0xtx-pre-go-live", timestamp: 1_699_998_000 })] },
+    });
+    const { deps } = makeDeps({ repo, network });
+
+    const first = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps);
+    expect(first.sourceCoverageComplete).toBe(false);
+    expect(repo.coverageOverride.get(WALLET.toLowerCase())?.coveredThroughTs).toBe(1_700_000_000);
+
+    const second = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps);
+    expect(second.pagesFetched).toBe(1); // window 2's very first page already crosses go-live
+    expect(second.sourceCoverageComplete).toBe(true);
+    expect(repo.coverageOverride.get(WALLET.toLowerCase())?.coverageComplete).toBe(true);
+
+    // Once complete, a THIRD poll must never re-walk the windowed recovery path again --
+    // steady-state's plain overlap-based polling takes over permanently.
+    const overlapTrade = trade({ id: "steady-state-new", transactionHash: "0xtx-steady-state-new" });
+    const { deps: thirdDeps } = makeDeps({
+      repo,
+      network: {
+        fetchImpl: (async (url: string | URL) => {
+          const u = new URL(String(url));
+          expect(u.searchParams.has("end")).toBe(false); // no window boundary once coverage is complete
+          const offset = Number(u.searchParams.get("offset"));
+          return new Response(JSON.stringify(offset === 0 ? [overlapTrade] : []), { status: 200, headers: { "content-type": "application/json" } });
+        }) as typeof fetch,
+        reserveRequestSlot: async () => 0,
+        getHostCooldown: async () => ({ blocked: false, reason: null }),
+        recordHostRateLimit: async () => {},
+      },
+    });
+    const third = await pollSportsShadowWallet(WALLET, goLiveAtMs, thirdDeps);
+    expect(third.sourceCoverageComplete).toBe(true);
+  });
+
+  it("a deadline-interrupted window does NOT advance the watermark -- only a fully fetched AND fully persisted window ever does", async () => {
+    const repo = new FakeRepo();
+    const goLiveAtMs = 1_699_999_000_000;
+    let now = 1_700_000_500_000;
+    const { deps } = makeDeps({
+      repo,
+      now: () => now,
+      network: makeWindowedNetworkDeps({
+        none: () => {
+          now += 1_000; // each page consumes real time -- always a FULL page, so only the deadline (never a natural end) can stop this scan
+          return SHARED_FULL_PAGE;
+        },
+      }),
+    });
+    // A tight deadline that allows only a couple of pages before tripping -- well short of
+    // ever reaching a natural end or crossing go-live.
+    const result = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps, 1_700_000_501_500);
+    expect(result.backlogTruncated).toBe(true);
+    expect(result.sourceCoverageComplete).toBe(false);
+    expect(repo.upsertWalletCoverageCalls).toHaveLength(0); // never advanced -- this scan was never confirmed complete
+  });
+
+  it("an already-durable wallet with an explicitly PRE-EXISTING coverage gap (coverageComplete=false despite having history) resumes recovery via the watermark exactly like a first-ever bootstrap would", async () => {
+    const repo = new FakeRepo();
+    repo.fillsByEventKey.set("sid:preexisting", { id: "fill-pre", row: { eventKey: "sid:preexisting", wallet: WALLET.toLowerCase() } as RawFillRow, downstreamStatus: "COMPLETE" });
+    repo.coverageOverride.set(WALLET.toLowerCase(), { coveredThroughTs: 1_700_000_000, coverageComplete: false, incompleteReason: "pre-existing gap" });
+    const goLiveAtMs = 1_699_999_000_000;
+    const network = makeWindowedNetworkDeps({
+      "1700000000": { 0: [trade({ id: "pre-go-live-2", transactionHash: "0xtx-pre-go-live-2", timestamp: 1_699_998_000 })] },
+    });
+    const { deps } = makeDeps({ repo, network });
+    const result = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps);
+    expect(result.isBootstrap).toBe(false); // hasHistory=true -- this is resumption, not bootstrap
+    expect(result.sourceCoverageComplete).toBe(true); // recovery completes via the SAME windowed mechanism
+  });
+});
+
+describe("CODEX P1-1 (round 2): source coverage is a CONTINUOUS invariant -- a wallet already proven complete can be downgraded back to incomplete", () => {
+  it("REQUIRED TEST: >10,000 unread trades after simulated downtime -- steady-state overlap search exhausts the offset ceiling without finding overlap, coverage downgrades to incomplete, never silently stays complete", async () => {
+    const repo = new FakeRepo();
+    // Coverage was already durably proven complete by an earlier poll.
+    repo.coverageOverride.set(WALLET.toLowerCase(), { coveredThroughTs: 1_699_000_000, coverageComplete: true, incompleteReason: null });
+    const goLiveAtMs = 1_699_999_000_000;
+    // Simulates extended scheduler downtime: every page, at every offset up through the
+    // ceiling, is a FULL page of brand-new trades this wallet has never seen before --
+    // overlap can never be found, exactly like more than MAX_TRADES_OFFSET new activity
+    // having accumulated since the last poll.
+    const network = makeNetworkDeps((offset) =>
+      Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `gap-${offset}-${i}`, transactionHash: `0xtx-gap-${offset}-${i}`, timestamp: 1_700_100_000 - offset })),
+    );
+    const { deps } = makeDeps({ repo, network });
+
+    const result = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps);
+
+    // A. never silently stays complete.
+    expect(result.sourceCoverageComplete).toBe(false);
+    expect(result.sourceCoverageIncompleteReason).toMatch(/steady-state/);
+    expect(result.backlogTruncated).toBe(true);
+    // B. explicitly persisted, with a reason, and the ORIGINAL watermark preserved
+    // (never re-derived from this scan's own newest-page-first, non-continuity-proving
+    // fetch) -- the next poll resumes windowed catch-up from exactly this point.
+    const lastCall = repo.upsertWalletCoverageCalls.at(-1);
+    expect(lastCall?.coverageComplete).toBe(false);
+    expect(lastCall?.coveredThroughTs).toBe(1_699_000_000);
+    expect(lastCall?.incompleteReason).toMatch(/offset ceiling/);
+    expect(repo.coverageOverride.get(WALLET.toLowerCase())?.coverageComplete).toBe(false);
+  });
+
+  it("REQUIRED TEST (continued): the very next poll automatically re-enters windowed catch-up recovery (provingCoverage) and can eventually re-prove completeness -- A. eventual recovery", async () => {
+    const repo = new FakeRepo();
+    repo.coverageOverride.set(WALLET.toLowerCase(), { coveredThroughTs: 1_699_000_000, coverageComplete: true, incompleteReason: null });
+    const goLiveAtMs = 1_699_999_000_000;
+    const gapNetwork = makeNetworkDeps((offset) =>
+      Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `gap2-${offset}-${i}`, transactionHash: `0xtx-gap2-${offset}-${i}`, timestamp: 1_700_100_000 - offset })),
+    );
+    const { deps: gapDeps } = makeDeps({ repo, network: gapNetwork });
+    const first = await pollSportsShadowWallet(WALLET, goLiveAtMs, gapDeps);
+    expect(first.sourceCoverageComplete).toBe(false);
+    const watermark = repo.coverageOverride.get(WALLET.toLowerCase())?.coveredThroughTs;
+    expect(watermark).toBe(1_699_000_000);
+
+    // Recovery poll: windowed catch-up (end=<watermark>) immediately finds a fill strictly
+    // before go-live -- proving the boundary crossed, exactly like bootstrap recovery.
+    const recoveryNetwork: SourcePollNetworkDeps = {
+      fetchImpl: (async (url: string | URL) => {
+        const u = new URL(String(url));
+        expect(u.searchParams.get("end")).toBe(String(watermark)); // resumes from the PRESERVED watermark, not a fresh "from now" scan
+        return new Response(JSON.stringify([trade({ id: "pre-go-live-recovery", transactionHash: "0xtx-pre-go-live-recovery", timestamp: 1_699_998_000 })]), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as typeof fetch,
+      reserveRequestSlot: async () => 0,
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      recordHostRateLimit: async () => {},
+    };
+    const { deps: recoveryDeps } = makeDeps({ repo, network: recoveryNetwork });
+    const second = await pollSportsShadowWallet(WALLET, goLiveAtMs, recoveryDeps);
+    expect(second.sourceCoverageComplete).toBe(true);
+    expect(second.sourceCoverageIncompleteReason).toBeNull();
+    expect(repo.coverageOverride.get(WALLET.toLowerCase())?.coverageComplete).toBe(true);
+  });
+
+  it("REQUIRED TEST (continued): B. if the gap never resolves, coverage explicitly remains incomplete across repeated polls -- never silently completes", async () => {
+    const repo = new FakeRepo();
+    repo.coverageOverride.set(WALLET.toLowerCase(), { coveredThroughTs: 1_699_000_000, coverageComplete: true, incompleteReason: null });
+    const goLiveAtMs = 1_699_999_000_000;
+    // Every window this wallet is ever polled in returns a full page of brand-new trades
+    // that never reach go-live and never find overlap -- an interval that, in this test,
+    // never actually resolves (analogous to a persistently unrecoverable upstream gap).
+    const network: SourcePollNetworkDeps = {
+      fetchImpl: (async (url: string | URL) => {
+        const u = new URL(String(url));
+        const offset = Number(u.searchParams.get("offset"));
+        const end = u.searchParams.get("end") ?? "top";
+        return new Response(
+          JSON.stringify(Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `stuck-${end}-${offset}-${i}`, transactionHash: `0xtx-stuck-${end}-${offset}-${i}`, timestamp: 1_700_050_000 - offset }))),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }) as typeof fetch,
+      reserveRequestSlot: async () => 0,
+      getHostCooldown: async () => ({ blocked: false, reason: null }),
+      recordHostRateLimit: async () => {},
+    };
+    const { deps } = makeDeps({ repo, network });
+
+    for (let i = 0; i < 3; i += 1) {
+      const result = await pollSportsShadowWallet(WALLET, goLiveAtMs, deps);
+      // Never silently complete, no matter how many polls: fail CLOSED, not fail OPEN.
+      expect(result.sourceCoverageComplete).toBe(false);
+    }
+    expect(repo.coverageOverride.get(WALLET.toLowerCase())?.coverageComplete).toBe(false);
   });
 });
 
@@ -756,6 +1020,125 @@ describe("pollSportsShadowWallet — episode engine integration", () => {
     const [sellEvent] = [...repo.sellEventsByFillId.values()];
     expect(sellEvent?.signalId).toBeNull(); // never fabricates a position/signal
     expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("COMPLETE");
+  });
+
+  describe("CODEX P1-3: follower lifecycle triggers -- ADD/EXIT reactions durably recorded for later scheduling", () => {
+    it("an AGGREGATED_BUY (DCA into an already-open episode) records an ADD trigger with the source DCA fraction", async () => {
+      const repo = new FakeRepo();
+      const { deps } = makeDeps({
+        repo,
+        network: makeNetworkDeps({
+          0: [
+            trade({ transactionHash: "0xtx-a", timestamp: 1_700_000_000, size: 10, price: 0.5 }),
+            trade({ transactionHash: "0xtx-b", timestamp: 1_700_000_500, size: 7, price: 0.6 }),
+          ],
+        }),
+      });
+      const result = await pollSportsShadowWallet(WALLET, 0, deps);
+      expect(result.aggregatedCount).toBe(1);
+      expect(repo.lifecycleTriggersByFillId.size).toBe(1);
+      const [trigger] = [...repo.lifecycleTriggersByFillId.values()];
+      expect(trigger?.triggerType).toBe("ADD");
+      expect(trigger?.trackedShares).toBe(7); // the NEW fill's own shares, not the episode's cumulative total
+      expect(trigger?.exitFraction).toBeNull();
+      expect(trigger?.addFraction).toBeCloseTo(7 / 10, 9); // 7 new shares over 10 source shares remaining before the DCA
+    });
+
+    it("a NEW_EPISODE (the very first BUY) records NO lifecycle trigger -- that is the existing ENTRY burst's own job, not a lifecycle reaction", async () => {
+      const repo = new FakeRepo();
+      const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ transactionHash: "0xtx-a", timestamp: 1_700_000_000 })] }) });
+      await pollSportsShadowWallet(WALLET, 0, deps);
+      expect(repo.lifecycleTriggersByFillId.size).toBe(0);
+    });
+
+    it("a SELL_RECORDED partial exit against an open episode records an EXIT trigger with the correct proportional exitFraction", async () => {
+      const repo = new FakeRepo();
+      const { deps } = makeDeps({
+        repo,
+        network: makeNetworkDeps({
+          0: [
+            trade({ transactionHash: "0xtx-a", side: "BUY", timestamp: 1_700_000_000, size: 20, price: 0.5 }),
+            trade({ transactionHash: "0xtx-b", side: "SELL", timestamp: 1_700_000_100, size: 5 }),
+          ],
+        }),
+      });
+      const result = await pollSportsShadowWallet(WALLET, 0, deps);
+      expect(result.sellRecordedCount).toBe(1);
+      expect(repo.lifecycleTriggersByFillId.size).toBe(1);
+      const [trigger] = [...repo.lifecycleTriggersByFillId.values()];
+      expect(trigger?.triggerType).toBe("EXIT");
+      expect(trigger?.trackedShares).toBe(5);
+      expect(trigger?.exitFraction).toBeCloseTo(5 / 20, 9); // 20 remaining before this sell, 5 sold -> 25%
+      expect(trigger?.addFraction).toBeNull();
+    });
+
+    it("a FULL exit (sell reduces remaining tracked inventory to exactly zero) records exitFraction=1 exactly", async () => {
+      const repo = new FakeRepo();
+      const { deps } = makeDeps({
+        repo,
+        network: makeNetworkDeps({
+          0: [
+            trade({ transactionHash: "0xtx-a", side: "BUY", timestamp: 1_700_000_000, size: 10, price: 0.5 }),
+            trade({ transactionHash: "0xtx-b", side: "SELL", timestamp: 1_700_000_100, size: 10 }),
+          ],
+        }),
+      });
+      await pollSportsShadowWallet(WALLET, 0, deps);
+      const [trigger] = [...repo.lifecycleTriggersByFillId.values()];
+      expect(trigger?.triggerType).toBe("EXIT");
+      expect(trigger?.exitFraction).toBe(1);
+    });
+
+    it("an oversell (SELL exceeds remaining tracked inventory) records the trigger against only the TRACKED portion, never the untracked excess", async () => {
+      const repo = new FakeRepo();
+      const { deps } = makeDeps({
+        repo,
+        network: makeNetworkDeps({
+          0: [
+            trade({ transactionHash: "0xtx-a", side: "BUY", timestamp: 1_700_000_000, size: 5, price: 0.5 }),
+            trade({ transactionHash: "0xtx-b", side: "SELL", timestamp: 1_700_000_100, size: 12 }), // 5 tracked + 7 untracked
+          ],
+        }),
+      });
+      await pollSportsShadowWallet(WALLET, 0, deps);
+      const [trigger] = [...repo.lifecycleTriggersByFillId.values()];
+      expect(trigger?.trackedShares).toBe(5);
+      expect(trigger?.exitFraction).toBe(1); // fully exits the tracked position
+    });
+
+    it("a pre-epoch sell (no open position at all) records NO lifecycle trigger -- nothing tracked to exit", async () => {
+      const repo = new FakeRepo();
+      const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ side: "SELL" })] }) });
+      await pollSportsShadowWallet(WALLET, 0, deps);
+      expect(repo.lifecycleTriggersByFillId.size).toBe(0);
+    });
+
+    it("lifecycle trigger failure rolls back the episode update and leaves the fill PENDING for retry", async () => {
+      const repo = new FakeRepo();
+      repo.throwOnRecordLifecycleTrigger = new Error("simulated trigger-recording failure");
+      const { deps } = makeDeps({
+        repo,
+        network: makeNetworkDeps({
+          0: [
+            trade({ transactionHash: "0xtx-a", timestamp: 1_700_000_000, size: 10, price: 0.5 }),
+            trade({ transactionHash: "0xtx-b", timestamp: 1_700_000_500, size: 7, price: 0.6 }),
+          ],
+        }),
+      });
+      const result = await pollSportsShadowWallet(WALLET, 0, deps);
+      expect(result.error).toContain("simulated trigger-recording failure");
+      expect(result.aggregatedCount).toBe(1); // decision was computed, but the atomic write rolled back
+      expect(repo.lifecycleTriggersByFillId.size).toBe(0); // the trigger genuinely wasn't recorded
+      expect([...repo.fillsByEventKey.values()].filter((f) => f.downstreamStatus === "PENDING")).toHaveLength(1);
+      expect([...repo.episodesById.values()][0]!.state.totalShares).toBe(10); // second BUY did not commit without its trigger
+
+      repo.throwOnRecordLifecycleTrigger = null;
+      const { deps: retryDeps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [] }) });
+      const retry = await pollSportsShadowWallet(WALLET, 0, retryDeps);
+      expect(retry.orphanedFillsRecovered).toBe(1);
+      expect(repo.lifecycleTriggersByFillId.size).toBe(1);
+      expect([...repo.episodesById.values()][0]!.state.totalShares).toBe(17);
+    });
   });
 
   it("counts an INVALID_FILL from decideFill (e.g. zero shares) without crashing the poll, and marks the fill TERMINAL_INVALID (its own immutable data will never validate)", async () => {
@@ -1554,7 +1937,7 @@ describe("Task 13I / P1-T: pacedFetchTradesPage threads the caller's deadline in
     expect(capturedDeadline).toBeUndefined();
   });
 
-  it("Codex re-review: a 429 whose cooldown recording would start AFTER the caller's deadline skips recordHostRateLimit entirely, but still surfaces the genuine 429 failure as result.error", async () => {
+  it("CODEX P2-2 (round 2): a 429 whose cooldown recording would start AFTER the caller's deadline is STILL recorded -- an already-observed 429 fact must never be silently discarded just because the caller's own deadline has since passed", async () => {
     const repo = new FakeRepo();
     const base = 1_700_000_500_000;
     let now = base;
@@ -1571,7 +1954,7 @@ describe("Task 13I / P1-T: pacedFetchTradesPage threads the caller's deadline in
     };
     const result = await pollSportsShadowWallet(WALLET, 0, { repo, now: () => now, network }, deadlineAtMs);
     expect(result.error).toMatch(/429/);
-    expect(recordHostRateLimit).not.toHaveBeenCalled();
+    expect(recordHostRateLimit).toHaveBeenCalledWith(DATA_API_HOST, 30_000);
   });
 
   it("a 429 that returns comfortably within the caller's deadline still records the cooldown normally -- bounded recording is preserved when time remains", async () => {
@@ -2405,63 +2788,114 @@ describe("RECONCILIATION FIX (2026-08-22): mergePendingFillSlices -- pending-fil
 });
 
 describe("RECONCILIATION FIX (2026-08-22): findPendingDownstreamFills issues two bounded, deterministic slices instead of one oldest-first query", () => {
-  it("queries both an oldest-first and a newest-first slice, each bounded, and merges them via mergePendingFillSlices", async () => {
-    const calls: { ascending: boolean; limit: number }[] = [];
+  /** Mocks the two chained `.order()` calls (source_ts, then id) findPendingDownstreamFills now issues, resolving each slice via `respond(callIndex)`. */
+  function mockSupabaseTwoOrderChain(calls: { col: string; ascending: boolean; limit: number }[], respond: (callIndex: number) => { data: unknown[]; error: null }) {
     let call = 0;
-    const supabaseAdminMock = {
+    return {
       from: () => ({
         select: () => ({
           eq: () => ({
             eq: () => ({
-              order: (_col: string, opts: { ascending: boolean }) => ({
-                limit: (n: number) => {
-                  calls.push({ ascending: opts.ascending, limit: n });
-                  call += 1;
-                  // First call (oldest-first) returns a full oldest slice; second (newest-first) returns two fresh rows.
-                  if (call === 1) {
-                    return Promise.resolve({
-                      data: Array.from({ length: PENDING_FILLS_OLDEST_SHARE }, (_, i) => ({
-                        id: `old-${i}`,
-                        event_key: `k-old-${i}`,
-                        wallet_handle: null,
-                        condition_id: null,
-                        asset: "0xasset",
-                        outcome: null,
-                        event_slug: null,
-                        market_slug: null,
-                        side: "BUY",
-                        shares: 1,
-                        price: 0.5,
-                        source_ts: i,
-                      })),
-                      error: null,
-                    });
-                  }
-                  return Promise.resolve({
-                    data: [
-                      { id: "fresh-2", event_key: "k-fresh-2", wallet_handle: null, condition_id: null, asset: "0xasset", outcome: null, event_slug: null, market_slug: null, side: "BUY", shares: 1, price: 0.5, source_ts: 999999 },
-                      { id: "fresh-1", event_key: "k-fresh-1", wallet_handle: null, condition_id: null, asset: "0xasset", outcome: null, event_slug: null, market_slug: null, side: "BUY", shares: 1, price: 0.5, source_ts: 999998 },
-                    ],
-                    error: null,
-                  });
-                },
+              order: (col1: string, opts1: { ascending: boolean }) => ({
+                order: (col2: string, opts2: { ascending: boolean }) => ({
+                  limit: (n: number) => {
+                    if (opts2.ascending !== opts1.ascending) throw new Error("tie-break direction must match primary direction");
+                    calls.push({ col: `${col1},${col2}`, ascending: opts1.ascending, limit: n });
+                    call += 1;
+                    return Promise.resolve(respond(call));
+                  },
+                }),
               }),
             }),
           }),
         }),
       }),
     };
+  }
+
+  it("queries both an oldest-first and a newest-first slice, each bounded, both with an `id` tie-breaker, and merges them via mergePendingFillSlices", async () => {
+    const calls: { col: string; ascending: boolean; limit: number }[] = [];
+    const supabaseAdminMock = mockSupabaseTwoOrderChain(calls, (callIndex) => {
+      // First call (oldest-first) returns a full oldest slice; second (newest-first) returns two fresh rows.
+      if (callIndex === 1) {
+        return {
+          data: Array.from({ length: PENDING_FILLS_OLDEST_SHARE }, (_, i) => ({
+            id: `old-${i}`,
+            event_key: `k-old-${i}`,
+            wallet_handle: null,
+            condition_id: null,
+            asset: "0xasset",
+            outcome: null,
+            event_slug: null,
+            market_slug: null,
+            side: "BUY",
+            shares: 1,
+            price: 0.5,
+            source_ts: i,
+          })),
+          error: null,
+        };
+      }
+      return {
+        data: [
+          { id: "fresh-2", event_key: "k-fresh-2", wallet_handle: null, condition_id: null, asset: "0xasset", outcome: null, event_slug: null, market_slug: null, side: "BUY", shares: 1, price: 0.5, source_ts: 999999 },
+          { id: "fresh-1", event_key: "k-fresh-1", wallet_handle: null, condition_id: null, asset: "0xasset", outcome: null, event_slug: null, market_slug: null, side: "BUY", shares: 1, price: 0.5, source_ts: 999998 },
+        ],
+        error: null,
+      };
+    });
     vi.doMock("@/integrations/supabase/client.server", () => ({ supabaseAdmin: supabaseAdminMock }));
     vi.resetModules();
     const { supabasePollRepository } = await import("./source-poll.server");
     const rows = await supabasePollRepository.findPendingDownstreamFills("0xwallet", MAX_PENDING_FILLS_PER_POLL);
     expect(calls).toEqual([
-      { ascending: true, limit: PENDING_FILLS_OLDEST_SHARE },
-      { ascending: false, limit: MAX_PENDING_FILLS_PER_POLL - PENDING_FILLS_OLDEST_SHARE },
+      { col: "source_ts,id", ascending: true, limit: PENDING_FILLS_OLDEST_SHARE },
+      { col: "source_ts,id", ascending: false, limit: MAX_PENDING_FILLS_PER_POLL - PENDING_FILLS_OLDEST_SHARE },
     ]);
     expect(rows.map((r) => r.id)).toContain("fresh-1");
     expect(rows.map((r) => r.id)).toContain("fresh-2");
     expect(rows).toHaveLength(PENDING_FILLS_OLDEST_SHARE + 2);
+    vi.doUnmock("@/integrations/supabase/client.server");
+    vi.resetModules();
+  });
+
+  it("CODEX P2-1: a large group of rows sharing an IDENTICAL source_ts is still returned in a fully deterministic order (id tie-break) -- repeated calls never reshuffle which rows win a bounded slice", async () => {
+    const tiedRows = Array.from({ length: PENDING_FILLS_OLDEST_SHARE + 50 }, (_, i) => ({
+      id: `tied-${String(i).padStart(3, "0")}`,
+      event_key: `k-tied-${i}`,
+      wallet_handle: null,
+      condition_id: null,
+      asset: "0xasset",
+      outcome: null,
+      event_slug: null,
+      market_slug: null,
+      side: "BUY",
+      shares: 1,
+      price: 0.5,
+      source_ts: 1_700_000_000, // every row shares the SAME source_ts
+    }));
+    const calls: { col: string; ascending: boolean; limit: number }[] = [];
+    const supabaseAdminMock = mockSupabaseTwoOrderChain(calls, (callIndex) => {
+      // Real Postgres applies the query's own ORDER BY -- simulate that here rather than
+      // returning insertion order, so this test actually exercises the tie-break, not just
+      // records that the column was requested.
+      const isOldestQuery = callIndex % 2 === 1; // each findPendingDownstreamFills call issues exactly 2 queries (oldest, then newest), so parity cycles regardless of how many times it's invoked overall
+      const sorted = [...tiedRows].sort((a, b) => (isOldestQuery ? a.id.localeCompare(b.id) : b.id.localeCompare(a.id)));
+      return { data: sorted.slice(0, isOldestQuery ? PENDING_FILLS_OLDEST_SHARE : MAX_PENDING_FILLS_PER_POLL - PENDING_FILLS_OLDEST_SHARE), error: null };
+    });
+    vi.doMock("@/integrations/supabase/client.server", () => ({ supabaseAdmin: supabaseAdminMock }));
+    vi.resetModules();
+    const { supabasePollRepository } = await import("./source-poll.server");
+    const first = await supabasePollRepository.findPendingDownstreamFills("0xwallet", MAX_PENDING_FILLS_PER_POLL);
+    const second = await supabasePollRepository.findPendingDownstreamFills("0xwallet", MAX_PENDING_FILLS_PER_POLL);
+    // Same tied input, same query -> byte-identical selection and order every time.
+    expect(second.map((r) => r.id)).toEqual(first.map((r) => r.id));
+    // The oldest slice deterministically wins the lexicographically-smallest ids; the
+    // newest slice (reversed by mergePendingFillSlices) contributes the remaining
+    // lexicographically-largest ids -- together, a stable, non-overlapping partition of
+    // the tied group rather than an arbitrary/reshuffling one.
+    expect(first[0]?.id).toBe("tied-000");
+    expect(first.at(-1)?.id).toBe(`tied-${PENDING_FILLS_OLDEST_SHARE + 49}`);
     vi.doUnmock("@/integrations/supabase/client.server");
     vi.resetModules();
   });

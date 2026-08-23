@@ -1,5 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
-import { DUE_BATCH_LIMIT, persistVenueMatch, takeDueSportsShadowObservations, type DueObservationRow, type ExistingMatch, type ObservationDeps, type ObservationRepository } from "./observation.server";
+import {
+  DUE_BATCH_LIMIT,
+  persistVenueMatch,
+  scheduleLifecycleObservations,
+  takeDueSportsShadowObservations,
+  type DueObservationRow,
+  type ExistingMatch,
+  type ObservationDeps,
+  type ObservationRepository,
+  type PendingLifecycleObservationTarget,
+} from "./observation.server";
 import type { MatchRow, ObservationCapturePatch, ObservationScheduleRow } from "./observation";
 import type { VenueMatchResult } from "./resolver";
 import type { KalshiBookSnapshot } from "./kalshi";
@@ -15,12 +25,16 @@ type StoredObservation = {
   fireAt: string;
   observedAt: string | null;
   patch?: ObservationCapturePatch;
+  triggerSourceFillId: string | null;
 };
+
+const LIFECYCLE_DELAYS = [0, 5_000, 10_000, 30_000, 60_000] as const;
 
 /** In-memory fake implementing the exact CAS/idempotency semantics the real repository provides, without touching Supabase. */
 function makeFakeRepo() {
   const matches = new Map<string, StoredMatch>(); // key: signalId|venue
   const observations = new Map<string, StoredObservation>(); // key: id
+  const lifecycleTriggers = new Map<string, { id: string; signalId: string; sourceFillId: string; detectedAtMs: number; sourceTimestampIso: string }>();
   let nextId = 1;
 
   const repo: ObservationRepository = {
@@ -38,10 +52,12 @@ function makeFakeRepo() {
     async scheduleObservations(rows: ObservationScheduleRow[]) {
       let inserted = 0;
       for (const r of rows) {
-        const dupKey = [...observations.values()].find((o) => o.signalId === r.signalId && o.venue === r.venue && o.requestedDelayMs === r.requestedDelayMs);
+        const dupKey = [...observations.values()].find(
+          (o) => o.signalId === r.signalId && o.venue === r.venue && o.requestedDelayMs === r.requestedDelayMs && o.triggerSourceFillId === r.triggerSourceFillId,
+        );
         if (dupKey) continue; // ON CONFLICT DO NOTHING
         const id = `obs-${nextId++}`;
-        observations.set(id, { id, signalId: r.signalId, matchId: r.matchId, venue: r.venue, requestedDelayMs: r.requestedDelayMs, fireAt: r.fireAt, observedAt: null });
+        observations.set(id, { id, signalId: r.signalId, matchId: r.matchId, venue: r.venue, requestedDelayMs: r.requestedDelayMs, fireAt: r.fireAt, observedAt: null, triggerSourceFillId: r.triggerSourceFillId });
         inserted += 1;
       }
       return inserted;
@@ -63,9 +79,36 @@ function makeFakeRepo() {
       row.patch = patch;
       return true;
     },
+    async findExactMatchedVenues(signalId) {
+      return [...matches.values()]
+        .filter((m) => m.signalId === signalId && m.matchStatus === "EXACT" && m.targetMarketId !== null && m.selectedSide !== null)
+        .map((m) => ({ venue: m.venue, matchId: m.id }));
+    },
+    async findUnscheduledLifecycleObservationTargets(limit) {
+      const targets: PendingLifecycleObservationTarget[] = [];
+      const exactMatches = [...matches.values()]
+        .filter((m) => m.matchStatus === "EXACT" && m.targetMarketId !== null && m.selectedSide !== null)
+        .sort((a, b) => {
+          const signalCmp = a.signalId.localeCompare(b.signalId);
+          if (signalCmp !== 0) return signalCmp;
+          const venueOrder = (v: string) => (v === "PMUS" ? 0 : v === "KALSHI" ? 1 : 2);
+          const venueCmp = venueOrder(a.venue) - venueOrder(b.venue);
+          return venueCmp !== 0 ? venueCmp : a.id.localeCompare(b.id);
+        });
+      for (const trigger of [...lifecycleTriggers.values()].sort((a, b) => a.detectedAtMs - b.detectedAtMs || a.id.localeCompare(b.id))) {
+        for (const match of exactMatches.filter((m) => m.signalId === trigger.signalId)) {
+          const hasEveryDelay = LIFECYCLE_DELAYS.every((delay) => [...observations.values()].some((o) => o.triggerSourceFillId === trigger.id && o.venue === match.venue && o.requestedDelayMs === delay));
+          if (!hasEveryDelay) {
+            targets.push({ ...trigger, venue: match.venue, matchId: match.id });
+            if (targets.length >= limit) return targets;
+          }
+        }
+      }
+      return targets;
+    },
   };
 
-  return { repo, matches, observations };
+  return { repo, matches, observations, lifecycleTriggers };
 }
 
 function exactResult(overrides: Partial<VenueMatchResult> = {}): VenueMatchResult {
@@ -563,6 +606,20 @@ describe("takeDueSportsShadowObservations — due queue", () => {
     expect([...observations.values()].every((o) => o.observedAt === null)).toBe(true);
   });
 
+  it("CODEX P2-6: the lane's own deadlineAtMs is threaded into onObservationClaimed -- a slow paper-routing dependency can no longer extend one row's hold time uncounted against the observation lane's own worst-case bound", async () => {
+    const { repo } = makeFakeRepo();
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
+    const fetchPmusBook = vi.fn(async (): Promise<BookSnapshot> => ({ venue: "PMUS", marketId: "x", bestBid: 0.5, bestAsk: 0.51, bidLevels: [], askLevels: [], marketStatus: null, observedAt: DETECTED_AT_MS, staleReason: null }));
+    const claimedDeadlines: (number | undefined)[] = [];
+    const onObservationClaimed = vi.fn(async (_id: string, deadlineAtMs?: number) => {
+      claimedDeadlines.push(deadlineAtMs);
+    });
+    const laneDeadline = DETECTED_AT_MS + 20_000;
+    await takeDueSportsShadowObservations("PMUS", { repo, fetchPmusBook, onObservationClaimed, now: () => DETECTED_AT_MS }, 5, laneDeadline);
+    expect(claimedDeadlines.length).toBeGreaterThan(0);
+    expect(claimedDeadlines.every((d) => d === laneDeadline)).toBe(true); // the SAME absolute deadline the lane itself was given, not an unbounded/omitted one
+  });
+
   it("25. oldest fire_at is handled first", async () => {
     const { repo } = makeFakeRepo();
     await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
@@ -831,5 +888,110 @@ describe("auth / safety", () => {
     // supabaseAdmin proves this; this test documents that guarantee directly.
     const result = await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
     expect(result.matchId).toBeDefined();
+  });
+});
+
+describe("CODEX P1-3 (follower lifecycle): scheduleLifecycleObservations", () => {
+  it("schedules a 5-row burst for every EXACT-matched venue of an unscheduled lifecycle trigger", async () => {
+    const { repo, lifecycleTriggers, observations } = makeFakeRepo();
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
+    lifecycleTriggers.set("trigger-1", { id: "trigger-1", signalId: "sig-1", sourceFillId: "fill-1", detectedAtMs: DETECTED_AT_MS, sourceTimestampIso: SOURCE_TS });
+
+    const scheduled = await scheduleLifecycleObservations({ repo, now: () => DETECTED_AT_MS });
+    expect(scheduled).toBe(5);
+    const lifecycleRows = [...observations.values()].filter((o) => o.triggerSourceFillId === "trigger-1");
+    expect(lifecycleRows).toHaveLength(5);
+    expect(lifecycleRows.map((r) => r.requestedDelayMs).sort((a, b) => a - b)).toEqual([0, 5_000, 10_000, 30_000, 60_000]);
+  });
+
+  it("is idempotent -- a second call for the SAME trigger schedules nothing further once every venue burst is complete", async () => {
+    const { repo, lifecycleTriggers } = makeFakeRepo();
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
+    lifecycleTriggers.set("trigger-1", { id: "trigger-1", signalId: "sig-1", sourceFillId: "fill-1", detectedAtMs: DETECTED_AT_MS, sourceTimestampIso: SOURCE_TS });
+
+    const first = await scheduleLifecycleObservations({ repo, now: () => DETECTED_AT_MS });
+    const second = await scheduleLifecycleObservations({ repo, now: () => DETECTED_AT_MS });
+    expect(first).toBe(5);
+    expect(second).toBe(0);
+  });
+
+  it("schedules for BOTH venues when a signal is EXACT-matched on both", async () => {
+    const { repo, lifecycleTriggers, observations } = makeFakeRepo();
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
+    await persistVenueMatch(
+      "sig-1",
+      { ...exactResult(), venue: "KALSHI", targetSide: { kind: "YES" }, targetFetchKey: "kalshi-ticker", targetPmusOrientation: null },
+      DETECTED_AT_MS - 120_000,
+      SOURCE_TS,
+      null,
+      { repo, now: () => DETECTED_AT_MS },
+    );
+    lifecycleTriggers.set("trigger-1", { id: "trigger-1", signalId: "sig-1", sourceFillId: "fill-1", detectedAtMs: DETECTED_AT_MS, sourceTimestampIso: SOURCE_TS });
+
+    const scheduled = await scheduleLifecycleObservations({ repo, now: () => DETECTED_AT_MS });
+    expect(scheduled).toBe(10); // 5 rows x 2 venues
+    const venuesScheduled = new Set([...observations.values()].filter((o) => o.triggerSourceFillId === "trigger-1").map((o) => o.venue));
+    expect(venuesScheduled).toEqual(new Set(["PMUS", "KALSHI"]));
+  });
+
+  it("venue-complete retry: PM-US success plus Kalshi transient failure retries only missing Kalshi rows on the next pass", async () => {
+    const { repo, lifecycleTriggers, observations } = makeFakeRepo();
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
+    await persistVenueMatch(
+      "sig-1",
+      { ...exactResult(), venue: "KALSHI", targetSide: { kind: "YES" }, targetFetchKey: "kalshi-ticker", targetPmusOrientation: null },
+      DETECTED_AT_MS - 120_000,
+      SOURCE_TS,
+      null,
+      { repo, now: () => DETECTED_AT_MS },
+    );
+    lifecycleTriggers.set("trigger-1", { id: "trigger-1", signalId: "sig-1", sourceFillId: "fill-1", detectedAtMs: DETECTED_AT_MS, sourceTimestampIso: SOURCE_TS });
+
+    let failKalshiOnce = true;
+    const flakyRepo: ObservationRepository = {
+      ...repo,
+      async scheduleObservations(rows) {
+        if (rows[0]?.triggerSourceFillId === "trigger-1" && rows[0]?.venue === "KALSHI" && failKalshiOnce) {
+          failKalshiOnce = false;
+          throw new Error("simulated Kalshi scheduling failure");
+        }
+        return repo.scheduleObservations(rows);
+      },
+    };
+
+    const first = await scheduleLifecycleObservations({ repo: flakyRepo, now: () => DETECTED_AT_MS });
+    expect(first).toBe(5);
+    expect([...observations.values()].filter((o) => o.triggerSourceFillId === "trigger-1" && o.venue === "PMUS")).toHaveLength(5);
+    expect([...observations.values()].filter((o) => o.triggerSourceFillId === "trigger-1" && o.venue === "KALSHI")).toHaveLength(0);
+
+    const second = await scheduleLifecycleObservations({ repo: flakyRepo, now: () => DETECTED_AT_MS });
+    expect(second).toBe(5);
+    expect([...observations.values()].filter((o) => o.triggerSourceFillId === "trigger-1" && o.venue === "PMUS")).toHaveLength(5);
+    expect([...observations.values()].filter((o) => o.triggerSourceFillId === "trigger-1" && o.venue === "KALSHI")).toHaveLength(5);
+  });
+
+  it("a signal with no EXACT match at all schedules nothing for its trigger, without throwing", async () => {
+    const { repo, lifecycleTriggers } = makeFakeRepo();
+    lifecycleTriggers.set("trigger-1", { id: "trigger-1", signalId: "sig-unmatched", sourceFillId: "fill-1", detectedAtMs: DETECTED_AT_MS, sourceTimestampIso: SOURCE_TS });
+    const scheduled = await scheduleLifecycleObservations({ repo, now: () => DETECTED_AT_MS });
+    expect(scheduled).toBe(0);
+  });
+
+  it("one trigger/venue target failure does not block scheduling for the rest of the batch", async () => {
+    const { repo, lifecycleTriggers } = makeFakeRepo();
+    await persistVenueMatch("sig-1", exactResult(), DETECTED_AT_MS - 120_000, SOURCE_TS, null, { repo, now: () => DETECTED_AT_MS });
+    lifecycleTriggers.set("trigger-bad", { id: "trigger-bad", signalId: "sig-1", sourceFillId: "fill-bad", detectedAtMs: DETECTED_AT_MS, sourceTimestampIso: SOURCE_TS });
+    lifecycleTriggers.set("trigger-good", { id: "trigger-good", signalId: "sig-1", sourceFillId: "fill-good", detectedAtMs: DETECTED_AT_MS, sourceTimestampIso: SOURCE_TS });
+    let calls = 0;
+    const flakyRepo: ObservationRepository = {
+      ...repo,
+      scheduleObservations: async (rows) => {
+        calls += 1;
+        if (calls === 1) throw new Error("simulated failure for the first trigger processed");
+        return repo.scheduleObservations(rows);
+      },
+    };
+    const scheduled = await scheduleLifecycleObservations({ repo: flakyRepo, now: () => DETECTED_AT_MS });
+    expect(scheduled).toBe(5); // the second (good) trigger still scheduled successfully
   });
 });

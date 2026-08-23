@@ -42,6 +42,18 @@ export type StageTransitionInput = {
    * drawdown, liquidity, integrity, confidence, ...) must also pass.
    */
   oosClassification?: "KILL" | "CONTINUE_RESEARCH" | "NEW_EPOCH_REQUIRED" | "LIVE_PILOT_REVIEW_READY" | null;
+  /**
+   * CODEX P1-1 (round 2): true when at least one tracked wallet currently has a durably-
+   * proven, unresolved source-coverage gap (source-poll.server.ts's continuous coverage
+   * invariant -- a wallet's steady-state overlap search exhausting the /trades offset
+   * ceiling without finding overlap, or a bootstrap/catch-up scan not yet reaching
+   * go-live/history-start). An ABSOLUTE rule, independent of which specific gate would
+   * otherwise pass: "No experiment may progress while a tracked wallet has an unresolved
+   * source-coverage gap" -- blocks every transition past OPERATIONAL_SOAK, not merely the
+   * soak health gate (soakHealthPassed also folds this in separately, for soak's own
+   * detailed health report -- this is the cross-stage enforcement of the same signal).
+   */
+  sourceCoverageGapDetected?: boolean;
 };
 
 export type StageTransition = {
@@ -57,6 +69,20 @@ export type StageTransition = {
  */
 export function evaluateStageTransition(input: StageTransitionInput): StageTransition {
   const { epoch, nowMs } = input;
+  // CODEX P1-1 (round 2): checked BEFORE any per-stage logic, for every stage EXCEPT the
+  // initial epoch-activation transition (PRE_SOAK -> OPERATIONAL_SOAK is bootstrapping,
+  // not "progression past soak") and the terminal stages (which already never transition
+  // out automatically). A coverage gap discovered mid-CALIBRATION or mid-OOS must block
+  // progression exactly the same as one discovered during soak itself.
+  if (
+    (input.sourceCoverageGapDetected ?? false) &&
+    epoch.stage !== "PRE_SOAK" &&
+    epoch.stage !== "FAILED" &&
+    epoch.stage !== "PAUSED" &&
+    epoch.stage !== "LIVE_PILOT_REVIEW_READY"
+  ) {
+    return { nextStage: null, reason: "blocked: at least one tracked wallet has an unresolved source-coverage gap" };
+  }
   switch (epoch.stage) {
     case "PRE_SOAK":
       return { nextStage: "OPERATIONAL_SOAK", reason: "epoch created -- soak begins immediately" };

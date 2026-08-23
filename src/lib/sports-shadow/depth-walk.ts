@@ -23,6 +23,16 @@ export type SportsShadowNotionalUsd = (typeof SPORTS_SHADOW_NOTIONALS_USD)[numbe
 
 export type ExecutionStatus = "FULL" | "PARTIAL" | "NONE" | "INVALID";
 
+/**
+ * CODEX P1-5: one price level's own contribution to a walked fill -- price and contracts
+ * consumed AT THAT price specifically, never blended. Both venues' documented fee
+ * formulas (fees.ts) are NONLINEAR in price (Θ × C × p × (1-p)), so summing fees computed
+ * per-level is NOT the same number as computing one fee against the blended VWAP -- see
+ * fees.ts's computeTakerFeeForFills, the only fee entry point that should ever consume
+ * this array for a multi-level fill.
+ */
+export type ConsumedLevel = { price: number; contracts: number };
+
 export type DepthWalkResult = {
   status: ExecutionStatus;
   requestedNotionalUsd: number;
@@ -31,7 +41,7 @@ export type DepthWalkResult = {
   /** filledNotionalUsd / requestedNotionalUsd. 0 for NONE/INVALID. */
   fillRatio: number;
   contractsFilled: number;
-  /** VWAP over the amount actually filled: filledNotionalUsd / contractsFilled. null for NONE/INVALID. */
+  /** VWAP over the amount actually filled: filledNotionalUsd / contractsFilled. null for NONE/INVALID. Diagnostic/display only -- NEVER fed into fee computation (see `fills` + CODEX P1-5). */
   averageExecutionPrice: number | null;
   /** The lowest valid ask price in the depth, before walking. null only when depth is empty or evidence is INVALID. */
   bestAvailablePrice: number | null;
@@ -39,6 +49,8 @@ export type DepthWalkResult = {
   worstExecutionPrice: number | null;
   /** Count of distinct (post price-aggregation) price levels actually touched by the walk. */
   levelsConsumed: number;
+  /** CODEX P1-5: every price level actually consumed, in the order walked (best price first), each with its own contracts -- the execution-granularity record fees.ts's computeTakerFeeForFills requires. Empty for NONE/INVALID. */
+  fills: readonly ConsumedLevel[];
   /** Raw PRE-FEE execution impact: averageExecutionPrice - bestAvailablePrice. Never fee-adjusted. null for NONE/INVALID. */
   priceImpact: number | null;
   /** priceImpact * 100 — sub-cent precision preserved, never rounded. null for NONE/INVALID. */
@@ -75,6 +87,7 @@ function invalidResult(requestedNotionalUsd: number, reason: string): DepthWalkR
     bestAvailablePrice: null,
     worstExecutionPrice: null,
     levelsConsumed: 0,
+    fills: [],
     priceImpact: null,
     priceImpactCents: null,
     invalidReason: reason,
@@ -137,6 +150,7 @@ export function walkBuyDepth(levels: readonly DepthLevel[], requestedNotionalUsd
       bestAvailablePrice: null,
       worstExecutionPrice: null,
       levelsConsumed: 0,
+      fills: [],
       priceImpact: null,
       priceImpactCents: null,
       invalidReason: null,
@@ -148,6 +162,10 @@ export function walkBuyDepth(levels: readonly DepthLevel[], requestedNotionalUsd
   let totalSpend = 0;
   let levelsConsumed = 0;
   let worstExecutionPrice: number | null = null;
+  // CODEX P1-5: preserved so fees.ts can compute the fee AT EACH level's own price
+  // (both venues' fee formulas are nonlinear in price -- see fees.ts's own doc comment)
+  // instead of collapsing to one blended VWAP before the fee is ever computed.
+  const fills: ConsumedLevel[] = [];
 
   for (const level of sorted) {
     if (remainingNotional <= EPSILON) break;
@@ -159,6 +177,7 @@ export function walkBuyDepth(levels: readonly DepthLevel[], requestedNotionalUsd
     remainingNotional -= spendAtLevel;
     levelsConsumed += 1;
     worstExecutionPrice = level.price;
+    fills.push({ price: level.price, contracts: contractsAtLevel });
   }
 
   if (totalContracts <= 0) {
@@ -173,6 +192,7 @@ export function walkBuyDepth(levels: readonly DepthLevel[], requestedNotionalUsd
       bestAvailablePrice,
       worstExecutionPrice: null,
       levelsConsumed: 0,
+      fills: [],
       priceImpact: null,
       priceImpactCents: null,
       invalidReason: null,
@@ -204,6 +224,7 @@ export function walkBuyDepth(levels: readonly DepthLevel[], requestedNotionalUsd
     bestAvailablePrice,
     worstExecutionPrice,
     levelsConsumed,
+    fills,
     priceImpact: Math.max(0, priceImpact),
     priceImpactCents: Math.max(0, priceImpact) * 100,
     invalidReason: null,
@@ -225,4 +246,166 @@ export function evaluateNotionalTiers(levels: readonly DepthLevel[]): NotionalTi
     results[notional] = walkBuyDepth(levels, notional);
   }
   return results;
+}
+
+/**
+ * CODEX P1-3: EXIT-side result -- a follower EXIT/partial-EXIT sells a specific number
+ * of CONTRACTS it already holds (proportional to the source's own sell fraction), never
+ * "as much as $X buys." Denominated in contracts, not USD -- a deliberately DISTINCT
+ * type from DepthWalkResult (not a reused/reinterpreted field) so a reader can never
+ * mistake `requestedContracts` for a dollar amount. `fills`/`averageExecutionPrice`/
+ * `bestAvailablePrice`/`worstExecutionPrice`/`priceImpact*`/`invalidReason` carry the
+ * SAME meaning as walkBuyDepth's (price received, not paid), and `fills` is directly
+ * consumable by fees.ts's computeTakerFeeForFills exactly like an ENTRY/ADD walk's own.
+ */
+export type ExitDepthWalkResult = {
+  status: ExecutionStatus;
+  requestedContracts: number;
+  filledContracts: number;
+  unfilledContracts: number;
+  /** filledContracts / requestedContracts. 0 for NONE/INVALID. */
+  fillRatio: number;
+  /** Total USD received for filledContracts, BEFORE fees. */
+  proceedsUsd: number;
+  averageExecutionPrice: number | null;
+  /** The highest valid bid price in the depth, before walking. null only when depth is empty or evidence is INVALID. */
+  bestAvailablePrice: number | null;
+  /** The lowest-price level actually consumed. null for NONE/INVALID. */
+  worstExecutionPrice: number | null;
+  levelsConsumed: number;
+  fills: readonly ConsumedLevel[];
+  /** Raw PRE-FEE execution impact: bestAvailablePrice - averageExecutionPrice (a seller receives LESS as they walk down the book, the mirror of a buyer paying MORE). Never fee-adjusted. null for NONE/INVALID. */
+  priceImpact: number | null;
+  priceImpactCents: number | null;
+  invalidReason: string | null;
+};
+
+function invalidExitResult(requestedContracts: number, reason: string): ExitDepthWalkResult {
+  return {
+    status: "INVALID",
+    requestedContracts,
+    filledContracts: 0,
+    unfilledContracts: 0,
+    fillRatio: 0,
+    proceedsUsd: 0,
+    averageExecutionPrice: null,
+    bestAvailablePrice: null,
+    worstExecutionPrice: null,
+    levelsConsumed: 0,
+    fills: [],
+    priceImpact: null,
+    priceImpactCents: null,
+    invalidReason: reason,
+  };
+}
+
+/**
+ * CODEX P1-3: walks SELL-side executable BID depth for a requested CONTRACT COUNT.
+ * `levels` must be the BID levels for the already-resolved target side (the price a
+ * taker RECEIVES when selling into the book) -- the mirror image of walkBuyDepth's
+ * ask-side walk. Sorted DESCENDING by price (best bid -- the HIGHEST price -- first,
+ * consuming progressively worse/lower bids), the opposite order from walkBuyDepth's
+ * ascending ask sort, since the best price for a SELLER is the highest bid, not the
+ * lowest ask.
+ *
+ * Never mutates `levels`. Fails closed to INVALID on any malformed level or requested
+ * contract count, exactly like walkBuyDepth.
+ */
+export function walkSellDepth(levels: readonly DepthLevel[], requestedContracts: number): ExitDepthWalkResult {
+  if (!Number.isFinite(requestedContracts) || requestedContracts <= 0) {
+    return invalidExitResult(requestedContracts, `requested contracts must be a finite positive number, got ${requestedContracts}`);
+  }
+
+  for (let i = 0; i < levels.length; i += 1) {
+    const level = levels[i]!;
+    if (!isValidPrice(level.price)) return invalidExitResult(requestedContracts, `level ${i}: invalid price ${level.price} (must be finite, >0, <=1)`);
+    if (!isValidSize(level.size)) return invalidExitResult(requestedContracts, `level ${i}: invalid size ${level.size} (must be finite and >0)`);
+  }
+
+  const sorted = aggregateByPrice(levels).sort((a, b) => b.price - a.price);
+  const bestAvailablePrice = sorted.length > 0 ? sorted[0]!.price : null;
+
+  if (sorted.length === 0) {
+    return {
+      status: "NONE",
+      requestedContracts,
+      filledContracts: 0,
+      unfilledContracts: requestedContracts,
+      fillRatio: 0,
+      proceedsUsd: 0,
+      averageExecutionPrice: null,
+      bestAvailablePrice: null,
+      worstExecutionPrice: null,
+      levelsConsumed: 0,
+      fills: [],
+      priceImpact: null,
+      priceImpactCents: null,
+      invalidReason: null,
+    };
+  }
+
+  let remainingContracts = requestedContracts;
+  let totalContracts = 0;
+  let totalProceeds = 0;
+  let levelsConsumed = 0;
+  let worstExecutionPrice: number | null = null;
+  const fills: ConsumedLevel[] = [];
+
+  for (const level of sorted) {
+    if (remainingContracts <= EPSILON) break;
+    const contractsAtLevel = Math.min(remainingContracts, level.size);
+    totalContracts += contractsAtLevel;
+    totalProceeds += contractsAtLevel * level.price;
+    remainingContracts -= contractsAtLevel;
+    levelsConsumed += 1;
+    worstExecutionPrice = level.price;
+    fills.push({ price: level.price, contracts: contractsAtLevel });
+  }
+
+  if (totalContracts <= 0) {
+    return {
+      status: "NONE",
+      requestedContracts,
+      filledContracts: 0,
+      unfilledContracts: requestedContracts,
+      fillRatio: 0,
+      proceedsUsd: 0,
+      averageExecutionPrice: null,
+      bestAvailablePrice,
+      worstExecutionPrice: null,
+      levelsConsumed: 0,
+      fills: [],
+      priceImpact: null,
+      priceImpactCents: null,
+      invalidReason: null,
+    };
+  }
+
+  const rawUnfilled = requestedContracts - totalContracts;
+  const isFull = rawUnfilled <= EPSILON;
+  const filledContracts = isFull ? requestedContracts : totalContracts;
+  const unfilledContracts = isFull ? 0 : Math.max(0, rawUnfilled);
+  const averageExecutionPrice = totalProceeds / totalContracts;
+  const priceImpact = bestAvailablePrice! - averageExecutionPrice; // a seller receives LESS as depth worsens -- mirror sign of walkBuyDepth's
+
+  if (priceImpact < -EPSILON) {
+    return invalidExitResult(requestedContracts, `invariant violated: negative price impact (${priceImpact}) walking a sorted-descending bid book`);
+  }
+
+  return {
+    status: isFull ? "FULL" : "PARTIAL",
+    requestedContracts,
+    filledContracts,
+    unfilledContracts,
+    fillRatio: filledContracts / requestedContracts,
+    proceedsUsd: totalProceeds,
+    averageExecutionPrice,
+    bestAvailablePrice,
+    worstExecutionPrice,
+    levelsConsumed,
+    fills,
+    priceImpact: Math.max(0, priceImpact),
+    priceImpactCents: Math.max(0, priceImpact) * 100,
+    invalidReason: null,
+  };
 }

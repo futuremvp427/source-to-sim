@@ -54,16 +54,23 @@ export type DueObservationRow = {
   selectedSide: string | null;
 };
 
+/** CODEX P1-3 (follower lifecycle): one missing lifecycle trigger/venue observation burst. */
+export type PendingLifecycleObservationTarget = { id: string; signalId: string; sourceFillId: string; venue: Venue; matchId: string; detectedAtMs: number; sourceTimestampIso: string };
+
 /** Repository abstraction — the ONLY thing that talks to Postgres. Swappable in tests for an in-memory fake; the default (see supabaseObservationRepository) is the real Supabase-backed implementation. */
 export type ObservationRepository = {
   getExistingMatch(signalId: string, venue: Venue): Promise<ExistingMatch | null>;
   upsertMatch(row: MatchRow): Promise<{ id: string }>;
-  /** Idempotent insert (ON CONFLICT (signal_id, venue, requested_delay_ms) DO NOTHING). Returns the count actually inserted (0 on a pure retry). */
+  /** Idempotent insert (ON CONFLICT ... DO NOTHING against the table's UNIQUE NULLS NOT DISTINCT logical-key constraint). Returns the count actually inserted (0 on a pure retry). */
   scheduleObservations(rows: ObservationScheduleRow[]): Promise<number>;
   /** Task 12H / P1-N: scoped to ONE venue — see worker.server.ts's per-venue observation lane doc comment for why a shared cross-venue query is unsafe. */
   findDueObservations(venue: Venue, nowIso: string, limit: number): Promise<DueObservationRow[]>;
   /** CAS: only a row still `observed_at IS NULL` may transition. Returns whether THIS call won. */
   claimObservationTerminal(id: string, patch: ObservationCapturePatch): Promise<boolean>;
+  /** CODEX P1-3: every EXACT-matched, schedulable venue for a signal -- the lifecycle scheduler's own "which venue(s) could this reaction possibly apply to" lookup (a tier/venue with no OPEN position for it is filtered later, at paper-decision time, not here). */
+  findExactMatchedVenues(signalId: string): Promise<{ venue: Venue; matchId: string }[]>;
+  /** CODEX P1-3: bounded, oldest-first -- missing lifecycle trigger/venue observation bursts. */
+  findUnscheduledLifecycleObservationTargets(limit: number): Promise<PendingLifecycleObservationTarget[]>;
 };
 
 function toDbPatch(patch: ObservationCapturePatch): Record<string, unknown> {
@@ -138,6 +145,11 @@ export const supabaseObservationRepository: ObservationRepository = {
 
   async scheduleObservations(rows) {
     if (rows.length === 0) return 0;
+    // CODEX P1-3: onConflict now includes trigger_source_fill_id, matching the
+    // table's UNIQUE NULLS NOT DISTINCT (signal_id, venue, requested_delay_ms,
+    // trigger_source_fill_id) constraint -- ONE constraint correctly enforces both
+    // the ENTRY plan (trigger_source_fill_id null across the whole batch) and a
+    // lifecycle-reaction plan (the same trigger id across the whole batch).
     const { data, error } = await supabaseAdmin
       .from("sports_quote_observations" as never)
       .upsert(
@@ -148,12 +160,40 @@ export const supabaseObservationRepository: ObservationRepository = {
           requested_delay_ms: r.requestedDelayMs,
           source_timestamp: r.sourceTimestamp,
           fire_at: r.fireAt,
+          trigger_source_fill_id: r.triggerSourceFillId,
         })) as never,
-        { onConflict: "signal_id,venue,requested_delay_ms", ignoreDuplicates: true },
+        { onConflict: "signal_id,venue,requested_delay_ms,trigger_source_fill_id", ignoreDuplicates: true },
       )
       .select("id");
     if (error) throw new Error(error.message);
     return (data as unknown[] | null)?.length ?? 0;
+  },
+
+  async findExactMatchedVenues(signalId) {
+    const { data, error } = await supabaseAdmin
+      .from("sports_market_matches" as never)
+      .select("id, venue, target_market_id, selected_side")
+      .eq("signal_id", signalId)
+      .eq("match_status", "EXACT")
+      .not("target_market_id", "is", null)
+      .not("selected_side", "is", null);
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as unknown as { id: string; venue: Venue }[]).map((r) => ({ venue: r.venue, matchId: r.id }));
+  },
+
+  async findUnscheduledLifecycleObservationTargets(limit) {
+    const { data, error } = await supabaseAdmin.rpc("find_unscheduled_sports_shadow_lifecycle_triggers" as never, { p_limit: limit } as never);
+    if (error) throw new Error(error.message);
+    type Row = { id: string; signal_id: string; source_fill_id: string; venue: Venue; match_id: string; detected_at: string; source_ts: number };
+    return ((data ?? []) as unknown as Row[]).map((r) => ({
+      id: r.id,
+      signalId: r.signal_id,
+      sourceFillId: r.source_fill_id,
+      venue: r.venue,
+      matchId: r.match_id,
+      detectedAtMs: Date.parse(r.detected_at),
+      sourceTimestampIso: new Date(r.source_ts * 1000).toISOString(),
+    }));
   },
 
   async findDueObservations(venue, nowIso, limit) {
@@ -215,7 +255,16 @@ export type ObservationDeps = {
    * otherwise-successful book capture into a reported failure for THIS function's own
    * captured/failed/skipped accounting.
    */
-  onObservationClaimed: (observationId: string) => Promise<void>;
+  /**
+   * CODEX P2-6: `deadlineAtMs` (optional; the SAME absolute deadline this observation
+   * lane call itself was given) threads through to paper.server.ts's
+   * computePaperFillsForObservation -- confirmed during the P2-6 full-route timing
+   * analysis that its per-tier routing-decision RPC round trips had NO deadline of their
+   * own, so a slow/backed-up Postgres could extend ONE row's already-awaited
+   * onObservationClaimed call well beyond what OBSERVATION_STAGE_DEADLINE_MS's own
+   * worst-case bound assumed, uncounted by the loop's own between-row deadline check.
+   */
+  onObservationClaimed: (observationId: string, deadlineAtMs?: number) => Promise<void>;
 };
 
 const defaultDeps: ObservationDeps = {
@@ -223,9 +272,9 @@ const defaultDeps: ObservationDeps = {
   fetchPmusBook,
   fetchKalshiBook,
   now: () => Date.now(),
-  onObservationClaimed: async (observationId) => {
+  onObservationClaimed: async (observationId, deadlineAtMs) => {
     const { computePaperFillsForObservation } = await import("./paper.server");
-    await computePaperFillsForObservation(observationId);
+    await computePaperFillsForObservation(observationId, {}, deadlineAtMs);
   },
 };
 
@@ -295,6 +344,39 @@ export async function persistVenueMatch(
 
   const scheduled = await d.repo.scheduleObservations(scheduleRows);
   return { matchId, scheduled, downgradeSkipped: false };
+}
+
+/**
+ * CODEX P1-3 (follower lifecycle): schedules the observation-capture burst for every
+ * missing lifecycle trigger/venue pair (a source DCA buy or partial/full sell against
+ * an already-open episode) -- the periodic maintenance-task counterpart to
+ * persistVenueMatch's own ENTRY-time scheduling, run from worker.server.ts's
+ * onCycleComplete exactly like maybeDecideExpiredRoutingCutoffs. The DB query returns
+ * missing venue pairs rather than whole triggers, so if PM-US scheduling succeeds and
+ * Kalshi fails transiently, the next pass retries only Kalshi and never duplicates PM-US.
+ * paper.server.ts's own lifecycle decision filters to whichever venue/tier actually has
+ * an OPEN position once each observation is captured; a venue/tier with none is simply
+ * skipped there, never a fabricated reaction.
+ * `detectedAtMs` is the trigger's OWN creation time (never the fill's historical
+ * sourceTs) -- the fire_at anchor, mirroring persistVenueMatch's identical rule for
+ * ENTRY. Bounded and idempotent (scheduleObservations' own ON CONFLICT DO NOTHING);
+ * best-effort per-trigger, one bad trigger must not block the rest of the batch.
+ */
+export async function scheduleLifecycleObservations(deps: Partial<ObservationDeps> = {}, limit = 20): Promise<number> {
+  const d: ObservationDeps = { ...defaultDeps, ...deps };
+  const pending = await d.repo.findUnscheduledLifecycleObservationTargets(limit);
+  let scheduled = 0;
+  for (const target of pending) {
+    try {
+      const rows = buildObservationRows(target.signalId, target.matchId, target.venue, target.detectedAtMs, target.sourceTimestampIso, target.id);
+      if (rows === null) continue;
+      scheduled += await d.repo.scheduleObservations(rows);
+    } catch {
+      // Best-effort: one bad trigger/venue target must not block the rest of the batch
+      // -- left unscheduled, retried identically next cycle.
+    }
+  }
+  return scheduled;
 }
 
 export type DueCollectionResult = { captured: number; failed: number; skipped: number };
@@ -403,7 +485,7 @@ export async function takeDueSportsShadowObservations(
         if (patch.errorCode) failed += 1;
         else captured += 1;
         try {
-          await d.onObservationClaimed(row.id);
+          await d.onObservationClaimed(row.id, deadlineAtMs ?? undefined);
         } catch {
           // Best-effort: a paper-execution trigger failure must never turn an
           // otherwise-successful book capture into a reported failure here.
@@ -441,7 +523,7 @@ export async function takeDueSportsShadowObservations(
       if (patch.errorCode) failed += 1;
       else captured += 1;
       try {
-        await d.onObservationClaimed(row.id);
+        await d.onObservationClaimed(row.id, deadlineAtMs ?? undefined);
       } catch {
         // Best-effort -- see the identical PM-US branch above for the full rationale.
       }

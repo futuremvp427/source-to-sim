@@ -137,31 +137,96 @@ BEGIN
   END;
 
   ------------------------------------------------------------------
-  -- E1. Paper fills idempotency: UNIQUE(observation_id, notional_tier_usd) prevents a
-  -- retried/duplicate trigger for the SAME observation from creating two routing
-  -- decisions for the same tier.
+  -- E1. Paper fills idempotency: UNIQUE(signal_id, requested_delay_ms,
+  -- notional_tier_usd) prevents two routing decisions for the SAME logical routing
+  -- opportunity (CODEX P1-2 fix -- previously keyed by the PHYSICAL observation_id,
+  -- which let PM-US's and Kalshi's independently-completing observations each create
+  -- their own duplicate row for what should be exactly one decision). Also proves the
+  -- decide-once provenance protocol: record_sports_shadow_routing_provenance_ladder
+  -- (CODEX P1-2 round 2: creates the COMPLETE 5-tier ladder in ONE call, replacing the
+  -- old per-tier RPC) never overwrites an already-known observation id, and
+  -- finalize_sports_shadow_routing_decision's WHERE decided_at IS NULL guard lets
+  -- exactly one caller win.
   ------------------------------------------------------------------
+  INSERT INTO public.sports_shadow_paper_fills (signal_id, requested_delay_ms, notional_tier_usd, fill_status)
+  VALUES (v_signal_id, 0, 10, 'FULL');
+  BEGIN
+    INSERT INTO public.sports_shadow_paper_fills (signal_id, requested_delay_ms, notional_tier_usd, fill_status)
+    VALUES (v_signal_id, 0, 10, 'FULL');
+    RAISE EXCEPTION 'expected a duplicate (signal_id, requested_delay_ms, notional_tier_usd) paper fill to violate UNIQUE';
+  EXCEPTION
+    WHEN unique_violation THEN NULL; -- expected
+  END;
+
   DECLARE
-    v_observation_id uuid;
+    v_match_id uuid;
+    v_obs_pmus uuid;
+    v_obs_kalshi uuid;
+    v_won boolean;
   BEGIN
     INSERT INTO public.sports_market_matches (signal_id, venue, match_status, first_match_status)
     VALUES (v_signal_id, 'PMUS', 'EXACT', 'EXACT')
-    RETURNING id INTO v_observation_id; -- reused var, actually match id here for the FK below
-
+    RETURNING id INTO v_match_id;
     INSERT INTO public.sports_quote_observations (signal_id, match_id, venue, requested_delay_ms, source_timestamp, fire_at)
-    VALUES (v_signal_id, v_observation_id, 'PMUS', 0, now(), now())
-    RETURNING id INTO v_observation_id;
+    VALUES (v_signal_id, v_match_id, 'PMUS', 30000, now(), now())
+    RETURNING id INTO v_obs_pmus;
 
-    INSERT INTO public.sports_shadow_paper_fills (signal_id, observation_id, side, notional_tier_usd, routing_timestamp, fill_status)
-    VALUES (v_signal_id, v_observation_id, 'ENTRY', 10, now(), 'FULL');
+    INSERT INTO public.sports_market_matches (signal_id, venue, match_status, first_match_status)
+    VALUES (v_signal_id, 'KALSHI', 'EXACT', 'EXACT')
+    RETURNING id INTO v_match_id;
+    INSERT INTO public.sports_quote_observations (signal_id, match_id, venue, requested_delay_ms, source_timestamp, fire_at)
+    VALUES (v_signal_id, v_match_id, 'KALSHI', 30000, now(), now())
+    RETURNING id INTO v_obs_kalshi;
 
-    BEGIN
-      INSERT INTO public.sports_shadow_paper_fills (signal_id, observation_id, side, notional_tier_usd, routing_timestamp, fill_status)
-      VALUES (v_signal_id, v_observation_id, 'ENTRY', 10, now(), 'FULL');
-      RAISE EXCEPTION 'expected a duplicate (observation_id, notional_tier_usd) paper fill to violate UNIQUE';
-    EXCEPTION
-      WHEN unique_violation THEN NULL; -- expected
-    END;
+    PERFORM public.record_sports_shadow_routing_provenance_ladder(v_signal_id, 30000, 'PMUS', v_obs_pmus, now());
+    PERFORM public.record_sports_shadow_routing_provenance_ladder(v_signal_id, 30000, 'KALSHI', v_obs_kalshi, now());
+
+    -- CODEX P1-2 (round 2): ONE call already created the COMPLETE 5-tier ladder -- never
+    -- just the caller's own single tier of interest. A deadline firing right after this
+    -- call can no longer leave any tier with NO durable row at all.
+    IF (SELECT count(*) FROM public.sports_shadow_paper_fills WHERE signal_id = v_signal_id AND requested_delay_ms = 30000) <> 5 THEN
+      RAISE EXCEPTION 'expected record_sports_shadow_routing_provenance_ladder to create all 5 canonical tiers in one call, got %',
+        (SELECT count(*) FROM public.sports_shadow_paper_fills WHERE signal_id = v_signal_id AND requested_delay_ms = 30000);
+    END IF;
+
+    -- Re-recording PMUS's provenance with a bogus id must NOT clobber the already-known
+    -- one (COALESCE guard) -- a retried/duplicate call is always safe.
+    PERFORM public.record_sports_shadow_routing_provenance_ladder(v_signal_id, 30000, 'PMUS', gen_random_uuid(), now());
+    IF NOT EXISTS (
+      SELECT 1 FROM public.sports_shadow_paper_fills
+      WHERE signal_id = v_signal_id AND requested_delay_ms = 30000 AND notional_tier_usd = 25
+        AND pmus_observation_id = v_obs_pmus AND kalshi_observation_id = v_obs_kalshi
+    ) THEN
+      RAISE EXCEPTION 'expected record_sports_shadow_routing_provenance_ladder to preserve already-known observation ids via COALESCE';
+    END IF;
+
+    SELECT public.finalize_sports_shadow_routing_decision(
+      v_signal_id, 30000, 25, now(), 'BOTH_COMPLETE', 'PMUS', 'FULL', 20, 0.5, 0.1, 'v1', true, 10.1, NULL,
+      '{}'::jsonb, '{}'::jsonb, 'mkt-1', 'YES', 'ENTRY', NULL, v_epoch_id_2
+    ) INTO v_won;
+    IF NOT v_won THEN
+      RAISE EXCEPTION 'expected the first finalize_sports_shadow_routing_decision call to win (decided_at was NULL)';
+    END IF;
+
+    -- "No later quote can alter a +0 decision" is a DB-enforced invariant: a second
+    -- finalize call for the same logical row must lose, not silently overwrite.
+    SELECT public.finalize_sports_shadow_routing_decision(
+      v_signal_id, 30000, 25, now(), 'BOTH_COMPLETE', 'KALSHI', 'FULL', 20, 0.5, 0.1, 'v1', true, 10.1, NULL,
+      '{}'::jsonb, '{}'::jsonb, 'mkt-2', 'NO', 'ENTRY', NULL, v_epoch_id_2
+    ) INTO v_won;
+    IF v_won THEN
+      RAISE EXCEPTION 'expected the second finalize_sports_shadow_routing_decision call for an already-decided row to lose';
+    END IF;
+
+    -- CODEX P1-7 foundation: a winning ENTRY/FULL finalize atomically opens the
+    -- corresponding sports_shadow_paper_positions row in the SAME transaction.
+    IF NOT EXISTS (
+      SELECT 1 FROM public.sports_shadow_paper_positions
+      WHERE signal_id = v_signal_id AND venue = 'PMUS' AND notional_tier_usd = 25
+        AND contracts_open = 20 AND remaining_cost_basis_usd = 10.1 AND total_fees_usd = 0.1
+    ) THEN
+      RAISE EXCEPTION 'expected finalize_sports_shadow_routing_decision to atomically open a paper position with nonzero cost basis/fees on ENTRY/FULL';
+    END IF;
   END;
 
   ------------------------------------------------------------------

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateNotionalTiers, SPORTS_SHADOW_NOTIONALS_USD, walkBuyDepth } from "./depth-walk";
+import { evaluateNotionalTiers, SPORTS_SHADOW_NOTIONALS_USD, walkBuyDepth, walkSellDepth } from "./depth-walk";
 import type { DepthLevel } from "./types";
 
 describe("walkBuyDepth — core walk", () => {
@@ -300,6 +300,70 @@ describe("evaluateNotionalTiers — tier evaluation", () => {
     // re-run and confirm identical results (no hidden state carried between calls)
     const results2 = evaluateNotionalTiers(levels);
     expect(results).toEqual(results2);
+  });
+});
+
+describe("CODEX P1-3: walkSellDepth -- EXIT-side bid walk, denominated in contracts not USD", () => {
+  it("single-level full fill: sells exactly the requested contracts at the best (highest) bid", () => {
+    const r = walkSellDepth([{ price: 0.5, size: 100 }], 10);
+    expect(r.status).toBe("FULL");
+    expect(r.filledContracts).toBeCloseTo(10, 9);
+    expect(r.proceedsUsd).toBeCloseTo(5, 9);
+    expect(r.averageExecutionPrice).toBeCloseTo(0.5, 9);
+  });
+
+  it("multi-level: walks the HIGHEST bid first, then progressively worse (lower) bids -- the mirror of walkBuyDepth's ascending ask sort", () => {
+    const r = walkSellDepth(
+      [
+        { price: 0.4, size: 100 }, // worse bid -- must NOT be consumed first
+        { price: 0.5, size: 5 }, // best bid -- consumed first
+      ],
+      10,
+    );
+    expect(r.status).toBe("FULL");
+    expect(r.fills).toEqual([
+      { price: 0.5, contracts: 5 },
+      { price: 0.4, contracts: 5 },
+    ]);
+    expect(r.proceedsUsd).toBeCloseTo(0.5 * 5 + 0.4 * 5, 9);
+  });
+
+  it("partial fill: insufficient bid depth for the requested contract count", () => {
+    const r = walkSellDepth([{ price: 0.5, size: 4 }], 10);
+    expect(r.status).toBe("PARTIAL");
+    expect(r.filledContracts).toBeCloseTo(4, 9);
+    expect(r.unfilledContracts).toBeCloseTo(6, 9);
+    expect(r.fillRatio).toBeCloseTo(0.4, 9);
+  });
+
+  it("no bid depth at all: NONE, never a fabricated fill", () => {
+    const r = walkSellDepth([], 10);
+    expect(r.status).toBe("NONE");
+    expect(r.proceedsUsd).toBe(0);
+  });
+
+  it("priceImpact is the mirror sign of walkBuyDepth's -- a seller RECEIVES LESS as depth worsens, never more", () => {
+    const r = walkSellDepth(
+      [
+        { price: 0.4, size: 100 },
+        { price: 0.5, size: 5 },
+      ],
+      10,
+    );
+    expect(r.bestAvailablePrice).toBe(0.5);
+    expect(r.averageExecutionPrice!).toBeLessThan(0.5);
+    expect(r.priceImpact).toBeGreaterThan(0);
+  });
+
+  it("fails closed to INVALID on a malformed level or non-positive requested contract count", () => {
+    expect(walkSellDepth([{ price: 1.5, size: 10 }], 5).status).toBe("INVALID");
+    expect(walkSellDepth([{ price: 0.5, size: 10 }], 0).status).toBe("INVALID");
+    expect(walkSellDepth([{ price: 0.5, size: 10 }], -5).status).toBe("INVALID");
+  });
+
+  it("fills are directly consumable by fees.ts's computeTakerFeeForFills -- same ConsumedLevel shape as walkBuyDepth", () => {
+    const r = walkSellDepth([{ price: 0.5, size: 100 }], 10);
+    expect(r.fills[0]).toEqual({ price: 0.5, contracts: 10 });
   });
 });
 

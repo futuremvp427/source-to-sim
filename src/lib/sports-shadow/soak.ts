@@ -34,14 +34,12 @@ export type SoakHealthInput = {
   integrityAuditsRun: number;
   /** Settlements still PENDING well past a reasonable settlement window -- see soak.server.ts's SETTLEMENT_STUCK_THRESHOLD_MS. */
   settlementStuckCount: number;
-  /**
-   * Not instrumented in this pass -- no 429/cooldown counter is currently recorded
-   * anywhere in telemetry.server.ts (http-rate-limit.server.ts enforces cooldowns but
-   * does not emit a durable event when one triggers). Always 0 until that
-   * instrumentation exists; documented here rather than silently omitted from the type,
-   * so the gap stays visible in every call site and test.
-   */
+  /** CODEX P2-5: real durable count of 429 events across the soak window (telemetry.server.ts's `rate_limited_429` NETWORK events) -- see soak.server.ts's own doc comment. */
   rateLimitStormCount: number;
+  /** CODEX P2-2: real durable count of 429-cooldown PERSISTENCE failures (telemetry.server.ts's `rate_limit_persist_failed` NETWORK events) across the soak window -- distinct from rateLimitStormCount: this measures OUR OWN durable coordination breaking, not upstream 429 volume. */
+  rateLimitPersistFailureCount: number;
+  /** CODEX P1-1 (round 2): number of tracked wallets currently in a durably-proven, unresolved source-coverage-gap state (sports_shadow_wallet_coverage.coverage_complete = false) -- a CURRENT snapshot, not a window-scoped count (an unresolved gap is a standing condition, not a discrete event to sum). Also enforced as an absolute cross-stage block in stage.ts, independent of this soak-specific health report. */
+  walletsWithIncompleteCoverageCount: number;
 };
 
 export const SOAK_HEALTH_THRESHOLDS = {
@@ -53,6 +51,8 @@ export const SOAK_HEALTH_THRESHOLDS = {
   maxSourceStarvationRatio: 0.3,
   maxLeaseLostRatio: 0.05,
   maxRateLimitStormCount: 0,
+  maxRateLimitPersistFailureCount: 0,
+  maxWalletsWithIncompleteCoverageCount: 0,
   maxSettlementStuckCount: 0,
 } as const;
 
@@ -109,6 +109,14 @@ export function evaluateSoakHealth(input: SoakHealthInput, thresholds = SOAK_HEA
 
   if (input.rateLimitStormCount > thresholds.maxRateLimitStormCount) {
     failedChecks.push(`${input.rateLimitStormCount} rate-limit storm event(s) recorded`);
+  }
+
+  if (input.rateLimitPersistFailureCount > thresholds.maxRateLimitPersistFailureCount) {
+    failedChecks.push(`${input.rateLimitPersistFailureCount} rate-limit-cooldown persistence failure(s) recorded -- durable rate-limit coordination was degraded`);
+  }
+
+  if (input.walletsWithIncompleteCoverageCount > thresholds.maxWalletsWithIncompleteCoverageCount) {
+    failedChecks.push(`${input.walletsWithIncompleteCoverageCount} wallet(s) have an unresolved source-coverage gap`);
   }
 
   return { passed: failedChecks.length === 0, failedChecks };

@@ -229,6 +229,8 @@ export type ObservationScheduleRow = {
   /** Preserved for schema NOT NULL + evidence purposes only — NEVER used to derive fireAt. */
   sourceTimestamp: string;
   fireAt: string;
+  /** CODEX P1-3 (follower lifecycle): null = the original ENTRY plan; set = a lifecycle (ADD/EXIT) reaction burst for that specific source fill. */
+  triggerSourceFillId: string | null;
 };
 
 /** Returns true only for a finite, positive epoch-ms value — used to fail closed on an invalid detection timestamp before scheduling anything. */
@@ -249,6 +251,7 @@ export function buildObservationRows(
   venue: Venue,
   detectedAtMs: number,
   sourceTimestampIso: string,
+  triggerSourceFillId: string | null = null,
 ): ObservationScheduleRow[] | null {
   if (!isValidDetectedAt(detectedAtMs)) return null;
   return SPORTS_SHADOW_DELAYS_MS.map((delayMs) => ({
@@ -258,6 +261,7 @@ export function buildObservationRows(
     requestedDelayMs: delayMs,
     sourceTimestamp: sourceTimestampIso,
     fireAt: new Date(detectedAtMs + delayMs).toISOString(),
+    triggerSourceFillId,
   }));
 }
 

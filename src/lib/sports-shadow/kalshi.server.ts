@@ -18,8 +18,9 @@
  * =================================================================================
  */
 
-import { DeadlineExceededError, getHostCooldown, parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "../http-rate-limit.server";
+import { DeadlineExceededError, getHostCooldown, parseRetryAfterMs, recordHostRateLimitReporting, reserveRequestSlot } from "../http-rate-limit.server";
 import { classifyKalshiMarket, normalizeKalshiBook, PHASE1_KALSHI_SERIES, type KalshiBookSnapshot, type KalshiCandidate, type KalshiRawEvent, type KalshiRawMarket } from "./kalshi";
+import { wrapRecordHostRateLimitWithTelemetry } from "./telemetry.server";
 import { runtimeFetch } from "./runtime-fetch.server";
 import { NO_OP_LEASE_CHECKPOINT, type LeaseCheckpoint } from "./sports-lease.server";
 
@@ -53,7 +54,7 @@ const defaultDeps: KalshiNetworkDeps = {
   fetchImpl: runtimeFetch,
   reserveRequestSlot,
   getHostCooldown,
-  recordHostRateLimit,
+  recordHostRateLimit: wrapRecordHostRateLimitWithTelemetry(recordHostRateLimitReporting),
   now: () => Date.now(),
   checkpointLease: NO_OP_LEASE_CHECKPOINT,
 };
@@ -93,13 +94,11 @@ async function pacedGetJson<T>(path: string, deps: KalshiNetworkDeps, deadlineAt
       signal: controller.signal,
     });
     if (response.status === 429) {
-      // Task 13I / P1-T (Codex re-review): see pmus.server.ts's identical pacedGetJson
-      // for the full rationale -- recordHostRateLimit is a NEW post-fetch operation with
-      // its own up-to-5s bound; skip it once the deadline is already gone rather than
-      // silently stacking it on top of the already-accepted fetch overrun.
-      if (deadlineAtMs === undefined || deps.now() < deadlineAtMs) {
-        await deps.recordHostRateLimit(KALSHI_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
-      }
+      // CODEX P2-2: see pmus.server.ts's identical pacedGetJson for the full rationale --
+      // recordHostRateLimit is already hard-bounded to 5s regardless of this caller's own
+      // deadline, so it is always recorded now rather than silently discarding an
+      // already-observed 429 fact once the deadline has passed.
+      await deps.recordHostRateLimit(KALSHI_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
       throw new Error(`${KALSHI_HOST} rate limited (429) on ${path}`);
     }
     if (!response.ok) {

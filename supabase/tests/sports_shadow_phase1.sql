@@ -163,16 +163,27 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'sports_market_matches must have UNIQUE (signal_id, venue)';
   END IF;
+  -- CODEX P1-3 (follower lifecycle): the ORIGINAL 3-column UNIQUE (signal_id, venue,
+  -- requested_delay_ms) was replaced by a 4-column `UNIQUE NULLS NOT DISTINCT
+  -- (signal_id, venue, requested_delay_ms, trigger_source_fill_id)` constraint
+  -- (sports_quote_observations_logical_key -- see migration
+  -- 20260825120000_sports_shadow_follower_lifecycle.sql's own doc comment) so an ENTRY
+  -- observation row (trigger_source_fill_id NULL) and a lifecycle ADD/EXIT observation
+  -- row for the SAME (signal, venue, delay) but a DIFFERENT trigger can coexist, while
+  -- still enforcing exactly one row per logical key. This assertion was updated to match
+  -- that intentional, already-Codex-reviewed schema change rather than the stale
+  -- 3-column shape.
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
     WHERE conrelid = 'public.sports_quote_observations'::regclass AND contype = 'u'
       AND conkey = ARRAY[
         (SELECT attnum FROM pg_attribute WHERE attrelid = 'public.sports_quote_observations'::regclass AND attname = 'signal_id'),
         (SELECT attnum FROM pg_attribute WHERE attrelid = 'public.sports_quote_observations'::regclass AND attname = 'venue'),
-        (SELECT attnum FROM pg_attribute WHERE attrelid = 'public.sports_quote_observations'::regclass AND attname = 'requested_delay_ms')
+        (SELECT attnum FROM pg_attribute WHERE attrelid = 'public.sports_quote_observations'::regclass AND attname = 'requested_delay_ms'),
+        (SELECT attnum FROM pg_attribute WHERE attrelid = 'public.sports_quote_observations'::regclass AND attname = 'trigger_source_fill_id')
       ]
   ) THEN
-    RAISE EXCEPTION 'sports_quote_observations must have UNIQUE (signal_id, venue, requested_delay_ms)';
+    RAISE EXCEPTION 'sports_quote_observations must have UNIQUE NULLS NOT DISTINCT (signal_id, venue, requested_delay_ms, trigger_source_fill_id)';
   END IF;
 
   -- F. FK / CASCADE CONTRACTS — validated as-is from Task 1 (documented, not "fixed"):

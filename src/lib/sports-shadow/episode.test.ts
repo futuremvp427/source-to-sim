@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AGGREGATION_WINDOW_SECONDS, decideFill, deriveEpisodeKey, processFillsForTest, type EligibleFill, type OpenEpisodeState } from "./episode";
+import { AGGREGATION_WINDOW_SECONDS, computeExitFraction, decideFill, deriveEpisodeKey, isEpisodeOpen, processFillsForTest, remainingShares, type EligibleFill, type OpenEpisodeState } from "./episode";
 
 function fill(overrides: Partial<EligibleFill> = {}): EligibleFill {
   return {
@@ -87,6 +87,8 @@ describe("decideFill — 30-minute aggregation window", () => {
     sellCount: 0,
     sellShares: 0,
     sellNotional: 0,
+    untrackedSellShares: 0,
+    untrackedSellNotional: 0,
     triggered: true,
     processedEventKeys: new Set(["tx:0xabc:0"]),
   };
@@ -183,6 +185,8 @@ describe("decideFill — SELL semantics", () => {
     sellCount: 0,
     sellShares: 0,
     sellNotional: 0,
+    untrackedSellShares: 0,
+    untrackedSellNotional: 0,
     triggered: true,
     processedEventKeys: new Set(["tx:0xabc:0"]),
   };
@@ -309,6 +313,8 @@ describe("decideFill — out-of-order fills", () => {
     sellCount: 0,
     sellShares: 0,
     sellNotional: 0,
+    untrackedSellShares: 0,
+    untrackedSellNotional: 0,
     triggered: true,
     processedEventKeys: new Set(["e1", "e2"]),
   };
@@ -409,5 +415,134 @@ describe("processFillsForTest — batch convenience", () => {
       fill({ eventKey: "e2", sourceTs: 1_000_060 }),
     ];
     expect(processFillsForTest(fills).map((d) => d.kind)).toEqual(processFillsForTest(fills).map((d) => d.kind));
+  });
+});
+
+describe("CODEX P1-3: source episode inventory lifecycle (open/closed) -- a BUY after full closure must never reopen the old episode", () => {
+  it("remainingShares/isEpisodeOpen are pure derived helpers over totalShares/sellShares", () => {
+    expect(remainingShares({ totalShares: 10, sellShares: 4 })).toBe(6);
+    expect(remainingShares({ totalShares: 10, sellShares: 10 })).toBe(0);
+    expect(isEpisodeOpen({ totalShares: 10, sellShares: 4 })).toBe(true);
+    expect(isEpisodeOpen({ totalShares: 10, sellShares: 10 })).toBe(false);
+  });
+
+  it("BUY 10 -> SELL 10 -> BUY again inside the 30-minute window starts a genuinely NEW episode, never reopening the closed one", () => {
+    const buy1 = fill({ eventKey: "buy1", side: "BUY", shares: 10, sourceTs: 1_000_000 });
+    const d1 = decideFill(buy1, null);
+    expect(d1.kind).toBe("NEW_EPISODE");
+    const afterBuy1 = "nextState" in d1 ? d1.nextState! : null;
+
+    const sell1 = fill({ eventKey: "sell1", side: "SELL", shares: 10, sourceTs: 1_000_100 });
+    const d2 = decideFill(sell1, afterBuy1);
+    expect(d2.kind).toBe("SELL_RECORDED");
+    if (d2.kind !== "SELL_RECORDED") throw new Error("unreachable");
+    expect(d2.isPreEpoch).toBe(false);
+    expect(d2.nextState).not.toBeNull();
+    const closedState = d2.nextState!;
+    expect(isEpisodeOpen(closedState)).toBe(false);
+    expect(remainingShares(closedState)).toBe(0);
+
+    // Well inside the 30-minute aggregation window relative to closedState.lastFillAt.
+    const buy2 = fill({ eventKey: "buy2", side: "BUY", shares: 5, sourceTs: 1_000_200 });
+    const d3 = decideFill(buy2, closedState);
+    expect(d3.kind).toBe("NEW_EPISODE"); // NOT AGGREGATED_BUY -- the old episode is closed
+    if (d3.kind !== "NEW_EPISODE") throw new Error("unreachable");
+    expect(d3.episodeKey).not.toBe(closedState.episodeKey);
+    expect(d3.nextState.totalShares).toBe(5); // a fresh episode, not 10+5
+  });
+
+  it("BUY 10 -> SELL 15 (oversell): tracked remaining is capped at 0, the extra 5 is recorded as untracked, never negative inventory", () => {
+    const buy = fill({ eventKey: "buy1", side: "BUY", shares: 10, sourceTs: 1_000_000 });
+    const d1 = decideFill(buy, null);
+    const afterBuy = "nextState" in d1 ? d1.nextState! : null;
+
+    const oversell = fill({ eventKey: "sell-over", side: "SELL", shares: 15, price: 0.6, sourceTs: 1_000_100 });
+    const d2 = decideFill(oversell, afterBuy);
+    expect(d2.kind).toBe("SELL_RECORDED");
+    if (d2.kind !== "SELL_RECORDED") throw new Error("unreachable");
+    expect(d2.trackedShares).toBe(10);
+    expect(d2.untrackedShares).toBe(5);
+    const state = d2.nextState!;
+    expect(state.sellShares).toBe(10); // capped at totalShares -- never exceeds it
+    expect(remainingShares(state)).toBe(0); // never negative
+    expect(state.untrackedSellShares).toBe(5);
+    expect(state.untrackedSellNotional).toBeCloseTo(0.6 * 5);
+    expect(isEpisodeOpen(state)).toBe(false);
+  });
+
+  it("a SELL against an already-fully-closed same-position episode is treated as pre-epoch/untracked, not folded into the closed episode's ledger", () => {
+    const buy = fill({ eventKey: "buy1", side: "BUY", shares: 10, sourceTs: 1_000_000 });
+    const afterBuy = decideFill(buy, null);
+    const closed = decideFill(fill({ eventKey: "sell1", side: "SELL", shares: 10, sourceTs: 1_000_050 }), "nextState" in afterBuy ? afterBuy.nextState! : null);
+    const closedState = closed.kind === "SELL_RECORDED" ? closed.nextState! : (() => { throw new Error("unreachable"); })();
+
+    const laterSell = fill({ eventKey: "sell2", side: "SELL", shares: 3, sourceTs: 1_000_100 });
+    const decision = decideFill(laterSell, closedState);
+    expect(decision.kind).toBe("SELL_RECORDED");
+    if (decision.kind !== "SELL_RECORDED") throw new Error("unreachable");
+    expect(decision.isPreEpoch).toBe(true);
+    expect(decision.nextState).toBeNull(); // never mutates the already-closed episode's ledger
+    expect(decision.untrackedShares).toBe(3);
+  });
+
+  it("partial SELL (does not fully close) followed by a BUY inside the DCA window still aggregates into the SAME still-open episode", () => {
+    const buy1 = fill({ eventKey: "buy1", side: "BUY", shares: 10, sourceTs: 1_000_000 });
+    const afterBuy1 = decideFill(buy1, null);
+    const state1 = "nextState" in afterBuy1 ? afterBuy1.nextState! : null;
+
+    const partialSell = fill({ eventKey: "sell1", side: "SELL", shares: 4, sourceTs: 1_000_100 });
+    const afterSell = decideFill(partialSell, state1);
+    expect(afterSell.kind).toBe("SELL_RECORDED");
+    const state2 = afterSell.kind === "SELL_RECORDED" ? afterSell.nextState! : (() => { throw new Error("unreachable"); })();
+    expect(isEpisodeOpen(state2)).toBe(true); // 10 - 4 = 6 remaining, still open
+    expect(remainingShares(state2)).toBe(6);
+
+    const buy2 = fill({ eventKey: "buy2", side: "BUY", shares: 5, sourceTs: 1_000_200 });
+    const d3 = decideFill(buy2, state2);
+    expect(d3.kind).toBe("AGGREGATED_BUY"); // folds into the SAME still-open episode
+    if (d3.kind !== "AGGREGATED_BUY") throw new Error("unreachable");
+    expect(d3.episodeKey).toBe(state2.episodeKey);
+    expect(d3.nextState.totalShares).toBe(15); // 10 (original BUY) + 5 (new BUY) -- SELL never reduces totalShares
+  });
+
+  it("restart-safety: replaying BUY->SELL->BUY through fresh decideFill calls (simulating a process restart between each event, state only threaded via the pure nextState/return value) produces an IDENTICAL result to one continuous run", () => {
+    function runSequence(): { kinds: string[]; finalTotalShares: number | null } {
+      let state: OpenEpisodeState | null = null;
+      const kinds: string[] = [];
+      for (const f of [
+        fill({ eventKey: "buy1", side: "BUY", shares: 10, sourceTs: 1_000_000 }),
+        fill({ eventKey: "sell1", side: "SELL", shares: 10, sourceTs: 1_000_100 }),
+        fill({ eventKey: "buy2", side: "BUY", shares: 7, sourceTs: 1_000_200 }),
+      ]) {
+        const decision = decideFill(f, state);
+        kinds.push(decision.kind);
+        state = "nextState" in decision ? decision.nextState : null;
+      }
+      return { kinds, finalTotalShares: state?.totalShares ?? null };
+    }
+    const first = runSequence();
+    const second = runSequence(); // simulates a fresh restart -- decideFill is pure, no module-level state
+    expect(second).toEqual(first);
+    expect(first.kinds).toEqual(["NEW_EPISODE", "SELL_RECORDED", "NEW_EPISODE"]); // second BUY starts fresh, not AGGREGATED_BUY
+    expect(first.finalTotalShares).toBe(7);
+  });
+});
+
+describe("CODEX P1-3 (follower lifecycle): computeExitFraction", () => {
+  it("a full exit (trackedShares === remainingBeforeSell) returns exactly 1", () => {
+    expect(computeExitFraction(10, 10)).toBe(1);
+  });
+
+  it("a partial exit returns the proportional fraction", () => {
+    expect(computeExitFraction(5, 20)).toBeCloseTo(0.25, 9);
+  });
+
+  it("never returns more than 1 even if trackedShares somehow exceeds remainingBeforeSell (defensive clamp)", () => {
+    expect(computeExitFraction(15, 10)).toBe(1);
+  });
+
+  it("returns null when there is no remaining inventory to reduce at all", () => {
+    expect(computeExitFraction(5, 0)).toBeNull();
+    expect(computeExitFraction(5, -1)).toBeNull();
   });
 });
