@@ -177,15 +177,24 @@ export async function countRecentRateLimitPersistFailures(nowMs: number = Date.n
  * only when no prior cycle telemetry exists at all (a genuinely fresh epoch, not a stall).
  * ================================================================================
  */
-export type SchedulerHeartbeatRepository = { latestCycleTelemetryAtIso(): Promise<string | null> };
+/**
+ * CODEX P2-1: `metric` was hardcoded to "cycle_duration_ms" -- the combined-cycle
+ * scheduler's own SYSTEM heartbeat. Now that the scheduler is split into independently
+ * leased/deadlined jobs (worker.server.ts's SOURCE/OBSERVATION/SETTLEMENT jobs), each
+ * job needs its OWN heartbeat metric so one job's staleness can never be masked by
+ * another job's healthy, unrelated cadence. Defaulted to the original metric name so
+ * every pre-existing caller (the source job, and every existing test's fake repo, which
+ * ignores the extra parameter under normal JS/TS structural typing) is unaffected.
+ */
+export type SchedulerHeartbeatRepository = { latestCycleTelemetryAtIso(metric?: string): Promise<string | null> };
 
 export const supabaseSchedulerHeartbeatRepository: SchedulerHeartbeatRepository = {
-  async latestCycleTelemetryAtIso() {
+  async latestCycleTelemetryAtIso(metric = "cycle_duration_ms") {
     const { data, error } = await supabaseAdmin
       .from("sports_shadow_telemetry_events" as never)
       .select("created_at")
       .eq("category", "SYSTEM")
-      .eq("metric", "cycle_duration_ms")
+      .eq("metric", metric)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -195,9 +204,13 @@ export const supabaseSchedulerHeartbeatRepository: SchedulerHeartbeatRepository 
 };
 
 /** Best-effort: a failure to READ the heartbeat must never itself look like a stall (fails to `null`, i.e. "cannot determine," never fabricates a large staleness value). */
-export async function computeSchedulerLastRunAgeMs(nowMs: number = Date.now(), repo: SchedulerHeartbeatRepository = supabaseSchedulerHeartbeatRepository): Promise<number | null> {
+export async function computeSchedulerLastRunAgeMs(
+  nowMs: number = Date.now(),
+  repo: SchedulerHeartbeatRepository = supabaseSchedulerHeartbeatRepository,
+  metric = "cycle_duration_ms",
+): Promise<number | null> {
   try {
-    const lastRunAtIso = await repo.latestCycleTelemetryAtIso();
+    const lastRunAtIso = await repo.latestCycleTelemetryAtIso(metric);
     if (lastRunAtIso === null) return null;
     return Math.max(0, nowMs - Date.parse(lastRunAtIso));
   } catch {

@@ -2,9 +2,9 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-const source = readFileSync(new URL("./sports-shadow.ts", import.meta.url), "utf8");
+const source = readFileSync(new URL("./sports-shadow-observation.ts", import.meta.url), "utf8");
 
-describe("sports shadow scheduler hook authorization contract", () => {
+describe("sports shadow OBSERVATION job scheduler hook authorization contract", () => {
   it("keeps the mutating scheduler hook POST-only", () => {
     expect(source).toMatch(/handlers:\s*\{[\s\S]*?POST:\s*\(\{\s*request\s*\}\)\s*=>\s*handle\(request\)/);
     expect(source).not.toMatch(/\bGET\s*:/);
@@ -12,7 +12,7 @@ describe("sports shadow scheduler hook authorization contract", () => {
 
   it("requires the dedicated SPORTS_SHADOW_HOOK_SECRET", () => {
     expect(source).toContain('process.env["SPORTS_SHADOW_HOOK_SECRET"]');
-    expect(source).toContain('status: 401');
+    expect(source).toContain("status: 401");
   });
 
   it("checks the secret via the dedicated fail-closed helper, not an inline comparison that could silently accept an empty/undefined expected value", () => {
@@ -30,7 +30,7 @@ describe("sports shadow scheduler hook authorization contract", () => {
     expect(source).not.toMatch(/PUBLIC_SUPABASE/);
   });
 
-  it("validates config and fails closed before invoking the cycle", () => {
+  it("validates config and fails closed before invoking the job", () => {
     expect(source).toContain("parseSportsShadowConfig(");
     expect(source).toMatch(/if\s*\(\s*!configResult\.ok\s*\)/);
   });
@@ -43,7 +43,7 @@ describe("sports shadow scheduler hook authorization contract", () => {
     expect(source).not.toMatch(/setInterval|while\s*\(\s*true\s*\)|setTimeout/);
   });
 
-  it("CODEX P2-1: invokes runSportsShadowCycle with the 'source' lane only -- observation and settlement now have their own independent scheduler hooks", () => {
-    expect(source).toMatch(/runSportsShadowCycle\(configResult\.config,\s*\{\},\s*"source"\)/);
+  it("CODEX P2-1: invokes runSportsShadowCycle with the 'observation' lane, never 'both' or 'source'", () => {
+    expect(source).toMatch(/runSportsShadowCycle\(configResult\.config,\s*\{\},\s*"observation"\)/);
   });
 });

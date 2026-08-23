@@ -251,17 +251,38 @@ export function computeNextSettlementCheckAtMs(nowMs: number, attemptCountAfterT
   return nowMs + Math.min(SETTLEMENT_RECHECK_MAX_MS, backoffMs);
 }
 
-/** Bounded batch: settles up to `limit` open positions in one call. Errors on one position never abort the batch for the rest. */
+/**
+ * CODEX P2-1: `runSettlementBatch` had NO call site anywhere in the app (confirmed while
+ * wiring the new independent settlement scheduler job) -- giving it one for the first
+ * time means it must be bounded exactly like every other scheduled lane in this
+ * package, not merely row-count-limited. Each position's own settlePosition call owns a
+ * fixed, un-preemptible ~10s upstream-fetch ceiling (settlement.server.ts's
+ * SETTLEMENT_TIMEOUT_MS) with no way to abort it from outside once started -- so, same
+ * pattern as source-poll.server.ts/observation.server.ts, `deadlineAtMs` is checked
+ * BEFORE each position (never mid-fetch): once reached, every remaining position is left
+ * completely untouched (still PENDING at its existing next_check_at), safely retried by
+ * a later invocation -- never a fabricated partial result. Defaults to `Infinity` (no
+ * bound) so every pre-existing caller/test keeps its exact current behavior; only the
+ * new settlement job (worker.server.ts) passes a real deadline.
+ */
 export async function runSettlementBatch(
   limit = 50,
   repo: SettlementRepository = supabaseSettlementRepository,
   fetchImpl?: typeof fetch,
   now: () => number = Date.now,
-): Promise<{ checked: number; settled: number; errors: number }> {
+  deadlineAtMs = Infinity,
+): Promise<{ checked: number; settled: number; errors: number; deadlineReached: boolean }> {
   const positions = await repo.findOpenPositions(limit);
   let settled = 0;
   let errors = 0;
+  let processed = 0;
+  let deadlineReached = false;
   for (const position of positions) {
+    if (now() >= deadlineAtMs) {
+      deadlineReached = true;
+      break;
+    }
+    processed += 1;
     try {
       const row = await settlePosition(position, fetchImpl);
       const checkAttemptCount = position.checkAttemptCount + 1;
@@ -275,5 +296,5 @@ export async function runSettlementBatch(
       errors += 1;
     }
   }
-  return { checked: positions.length, settled, errors };
+  return { checked: processed, settled, errors, deadlineReached };
 }

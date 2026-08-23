@@ -17,10 +17,16 @@ import {
   OBSERVATION_LOCK_ID_KALSHI,
   OBSERVATION_LOCK_ID_PMUS,
   OBSERVATION_STAGE_DEADLINE_MS,
+  SETTLEMENT_BATCH_BUDGET_MS,
+  SETTLEMENT_BATCH_LIMIT,
+  SETTLEMENT_LEASE_TTL_SECONDS,
+  SETTLEMENT_LOCK_ID,
   SOURCE_LANE_BUDGET_MS,
   sourceIngestDeadline,
   SOURCE_LOCK_ID,
   runSportsShadowCycle,
+  runSportsShadowSettlementJob,
+  type SettlementJobDeps,
   type SportsShadowWorkerDeps,
   type WorkerRepository,
 } from "./worker.server";
@@ -1459,5 +1465,141 @@ describe("FINAL BUILD Parts 25/27: onCycleComplete telemetry/alert hook", () => 
     const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ onCycleComplete }));
     expect(summary.configEnabled).toBe(true);
     expect(summary.errors).toEqual([]); // the hook's own failure never leaks into the cycle's reported errors
+  });
+});
+
+describe("CODEX P2-1: lanes selector -- independently schedulable jobs", () => {
+  it("defaults to 'both' when no lanes argument is passed -- byte-identical to the original combined-cycle behavior", async () => {
+    const takeDueSportsShadowObservations = vi.fn(async () => emptyObservationCollectionResult());
+    const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ takeDueSportsShadowObservations: takeDueSportsShadowObservations as unknown as SportsShadowWorkerDeps["takeDueSportsShadowObservations"] }));
+    expect(summary.lanes).toBe("both");
+    expect(summary.sourceLane).not.toBeNull();
+    // Two venues x two passes (main + final +0 catch) = 4 calls, exactly as before this pass.
+    expect(takeDueSportsShadowObservations).toHaveBeenCalledTimes(4);
+  });
+
+  it("lanes='source' skips BOTH observation passes entirely -- zero observation lease/lane calls", async () => {
+    const takeDueSportsShadowObservations = vi.fn(async () => emptyObservationCollectionResult());
+    const { repo: leaseRepo, acquireCalls } = makeFakeLeaseRepo();
+    const summary = await runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({ leaseRepo, takeDueSportsShadowObservations: takeDueSportsShadowObservations as unknown as SportsShadowWorkerDeps["takeDueSportsShadowObservations"] }),
+      "source",
+    );
+    expect(summary.lanes).toBe("source");
+    expect(takeDueSportsShadowObservations).not.toHaveBeenCalled();
+    expect(acquireCalls).not.toContain(OBSERVATION_LOCK_ID_PMUS);
+    expect(acquireCalls).not.toContain(OBSERVATION_LOCK_ID_KALSHI);
+    // The source lane itself is untouched -- still acquires its own lease and runs normally.
+    expect(acquireCalls).toContain(SOURCE_LOCK_ID);
+    expect(summary.sourceLane).not.toBeNull();
+    expect(summary.sourceLane?.acquired).toBe(true);
+  });
+
+  it("lanes='observation' skips the source lane entirely -- never even attempts SOURCE_LOCK_ID", async () => {
+    const { repo: leaseRepo, acquireCalls } = makeFakeLeaseRepo();
+    const pollSportsShadowWallet = vi.fn(async (wallet: string) => emptyWalletResult(wallet));
+    const summary = await runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({ leaseRepo, pollSportsShadowWallet: pollSportsShadowWallet as unknown as SportsShadowWorkerDeps["pollSportsShadowWallet"] }),
+      "observation",
+    );
+    expect(summary.lanes).toBe("observation");
+    expect(summary.sourceLane).toBeNull();
+    expect(pollSportsShadowWallet).not.toHaveBeenCalled();
+    expect(acquireCalls).not.toContain(SOURCE_LOCK_ID);
+  });
+
+  it("lanes='observation' runs the observation lane exactly ONCE per venue (no redundant final +0 pass)", async () => {
+    const takeDueSportsShadowObservations = vi.fn(async () => emptyObservationCollectionResult());
+    const summary = await runSportsShadowCycle(
+      enabledConfig(),
+      baseDeps({ takeDueSportsShadowObservations: takeDueSportsShadowObservations as unknown as SportsShadowWorkerDeps["takeDueSportsShadowObservations"] }),
+      "observation",
+    );
+    expect(summary.lanes).toBe("observation");
+    // One call per venue (PMUS, KALSHI), never the doubled main+final-pass count 'both' produces.
+    expect(takeDueSportsShadowObservations).toHaveBeenCalledTimes(2);
+  });
+
+  it("lanes='observation' on a disabled config still short-circuits exactly like every other lane mode", async () => {
+    const summary = await runSportsShadowCycle({ enabled: false, wallets: [], goLiveAtMs: null, gitSha: "test-sha" }, baseDeps(), "observation");
+    expect(summary.configEnabled).toBe(false);
+    expect(summary.lanes).toBe("observation");
+    expect(summary.sourceLane).toBeNull();
+  });
+});
+
+describe("CODEX P2-1: runSportsShadowSettlementJob -- independent bounded settlement job", () => {
+  function settlementDeps(overrides: Partial<SettlementJobDeps> = {}): Partial<SettlementJobDeps> {
+    const { repo: leaseRepo } = makeFakeLeaseRepo();
+    return {
+      leaseRepo,
+      runSettlementBatch: vi.fn(async () => ({ checked: 0, settled: 0, errors: 0, deadlineReached: false })) as unknown as SettlementJobDeps["runSettlementBatch"],
+      now: () => 1_700_000_100_000,
+      ...overrides,
+    };
+  }
+
+  it("acquires SETTLEMENT_LOCK_ID (never SOURCE_LOCK_ID or an observation lock) and reports acquired:true on success", async () => {
+    const { repo: leaseRepo, acquireCalls } = makeFakeLeaseRepo();
+    const summary = await runSportsShadowSettlementJob(settlementDeps({ leaseRepo }));
+    expect(acquireCalls).toEqual([SETTLEMENT_LOCK_ID]);
+    expect(summary.acquired).toBe(true);
+  });
+
+  it("passes SETTLEMENT_BATCH_LIMIT and an absolute deadline of now+SETTLEMENT_BATCH_BUDGET_MS through to runSettlementBatch", async () => {
+    const runSettlementBatchMock = vi.fn(async (..._args: unknown[]) => ({ checked: 3, settled: 1, errors: 0, deadlineReached: false }));
+    const nowMs = 1_700_000_100_000;
+    const summary = await runSportsShadowSettlementJob(
+      settlementDeps({ runSettlementBatch: runSettlementBatchMock as unknown as SettlementJobDeps["runSettlementBatch"], now: () => nowMs }),
+    );
+    expect(runSettlementBatchMock).toHaveBeenCalledTimes(1);
+    const call = runSettlementBatchMock.mock.calls[0]!;
+    expect(call[0]).toBe(SETTLEMENT_BATCH_LIMIT);
+    expect(call[3]).toBeInstanceOf(Function); // the `now` function is threaded through
+    expect(call[4]).toBe(nowMs + SETTLEMENT_BATCH_BUDGET_MS);
+    expect(summary.checked).toBe(3);
+    expect(summary.settled).toBe(1);
+  });
+
+  it("when the lease is held elsewhere, returns acquired:false WITHOUT ever calling runSettlementBatch", async () => {
+    const rows = new Map<string, { workerId: string; fence: number; expiresAtMs: number }>();
+    rows.set(SETTLEMENT_LOCK_ID, { workerId: "other-worker", fence: 1, expiresAtMs: Date.now() + 60_000 });
+    const leaseRepo: SportsLeaseRepository = {
+      async acquire(lockId) {
+        const existing = rows.get(lockId);
+        return existing && existing.expiresAtMs > Date.now() ? null : 1;
+      },
+      async release() {},
+      async renew() {
+        return false;
+      },
+    };
+    const runSettlementBatchMock = vi.fn(async () => ({ checked: 0, settled: 0, errors: 0, deadlineReached: false }));
+    const summary = await runSportsShadowSettlementJob(settlementDeps({ leaseRepo, runSettlementBatch: runSettlementBatchMock as unknown as SettlementJobDeps["runSettlementBatch"] }));
+    expect(summary.acquired).toBe(false);
+    expect(runSettlementBatchMock).not.toHaveBeenCalled();
+  });
+
+  it("a throwing runSettlementBatch never propagates -- lease is released with an error state and the job still returns a summary", async () => {
+    const runSettlementBatchMock = vi.fn(async () => {
+      throw new Error("settlement check exploded");
+    });
+    const summary = await runSportsShadowSettlementJob(settlementDeps({ runSettlementBatch: runSettlementBatchMock as unknown as SettlementJobDeps["runSettlementBatch"] }));
+    expect(summary.acquired).toBe(true);
+    expect(summary.errors).toBe(1);
+  });
+
+  it("SETTLEMENT_LEASE_TTL_SECONDS comfortably exceeds SETTLEMENT_BATCH_BUDGET_MS's own worst case (+ one in-flight ~10s settlement check)", () => {
+    const worstCaseMs = SETTLEMENT_BATCH_BUDGET_MS + 10_000;
+    expect(SETTLEMENT_LEASE_TTL_SECONDS * 1000).toBeGreaterThan(worstCaseMs);
+  });
+
+  it("passes settlementRepo through undefined by default -- runSettlementBatch's own supabaseSettlementRepository default applies, never silently substituting an empty fake", async () => {
+    const runSettlementBatchMock = vi.fn(async (..._args: unknown[]) => ({ checked: 0, settled: 0, errors: 0, deadlineReached: false }));
+    await runSportsShadowSettlementJob(settlementDeps({ runSettlementBatch: runSettlementBatchMock as unknown as SettlementJobDeps["runSettlementBatch"] }));
+    const call = runSettlementBatchMock.mock.calls[0]!;
+    expect(call[1]).toBeUndefined();
   });
 });

@@ -1,13 +1,21 @@
 import { createFileRoute } from "@tanstack/react-router";
 
 /**
- * Bounded scheduler hook for the Sports Forward Shadow worker (Task 11). Called by an
- * external scheduler repeatedly, tolerant of early/late/skipped/overlapping/retried
- * invocations — see src/lib/sports-shadow/worker.server.ts's own doc comment for the
- * two-lane lease design. Read-only against public PM-US/Kalshi endpoints and Task 10's
- * paced Polymarket trade history fetch; writes only to the sports_shadow_* tables. No
- * credentials, no signing, no order-placement path anywhere in this route or the modules
- * it calls.
+ * Bounded scheduler hook for the Sports Forward Shadow worker's SOURCE/MATCHING job
+ * (Task 11). CODEX P2-1: this route used to run the FULL combined cycle (observation +
+ * source + a final observation catch-pass) behind one HTTP call, whose worst case
+ * (~72s) could exceed both the cron cadence and pg_net's own per-invocation timeout --
+ * see the scheduler artifact's own doc comment for the full analysis. It now runs ONLY
+ * the source/matching lane (`lanes: "source"`, worst case ~42s) -- observation capture
+ * and settlement each have their own independently-scheduled route/lease/deadline/
+ * heartbeat (sports-shadow-observation.ts / sports-shadow-settlement.ts).
+ *
+ * Called by an external scheduler repeatedly, tolerant of early/late/skipped/
+ * overlapping/retried invocations — see src/lib/sports-shadow/worker.server.ts's own
+ * doc comment for the lease design. Read-only against public PM-US/Kalshi endpoints and
+ * Task 10's paced Polymarket trade history fetch; writes only to the sports_shadow_*
+ * tables. No credentials, no signing, no order-placement path anywhere in this route or
+ * the modules it calls.
  *
  * SPORTS_SHADOW_HOOK_SECRET is the ONLY accepted scheduler credential — dedicated to
  * this hook, never falls back to a Supabase anon/publishable/browser-visible key.
@@ -30,7 +38,7 @@ async function handle(request: Request): Promise<Response> {
 
   const { runSportsShadowCycle } = await import("@/lib/sports-shadow/worker.server");
   try {
-    const summary = await runSportsShadowCycle(configResult.config);
+    const summary = await runSportsShadowCycle(configResult.config, {}, "source");
     return Response.json({ ok: true, ...summary });
   } catch (err) {
     return Response.json({ ok: false, error: err instanceof Error ? err.message : "sports shadow cycle failed" }, { status: 500 });

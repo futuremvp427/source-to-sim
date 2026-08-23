@@ -45,6 +45,7 @@ import {
   type SportsLeaseRepository,
 } from "./sports-lease.server";
 import { ensureCurrentEpoch } from "./epoch.server";
+import { runSettlementBatch, type SettlementRepository } from "./settlement.orchestrator.server";
 import { pollSportsShadowWallet, supabasePollRepository, type WalletPollDeps, type WalletPollResult } from "./source-poll.server";
 import type { BetType, Venue } from "./types";
 import { PENDING_BATCH_SIZE, detectedAtMsFromSignal, nextRotationIndex, rotateWallets, toSourceSignal, type PendingSignal } from "./worker";
@@ -53,6 +54,8 @@ import { PENDING_BATCH_SIZE, detectedAtMsFromSignal, nextRotationIndex, rotateWa
 export const OBSERVATION_LOCK_ID_PMUS = "sports_shadow_observations_pmus";
 export const OBSERVATION_LOCK_ID_KALSHI = "sports_shadow_observations_kalshi";
 export const SOURCE_LOCK_ID = "sports_shadow_source";
+/** CODEX P2-1: independent lease for the new settlement job — see runSportsShadowSettlementJob's doc comment. */
+export const SETTLEMENT_LOCK_ID = "sports_shadow_settlement";
 
 /**
  * ============================== OBSERVATION-LANE LATENCY AUDIT ==============================
@@ -223,6 +226,26 @@ export function sourceIngestDeadline(laneStartMs: number): number {
   return laneStartMs + Math.max(0, SOURCE_LANE_BUDGET_MS - VENUE_MATCH_RESERVE_MS);
 }
 
+/**
+ * ============================== CODEX P2-1: SETTLEMENT JOB BOUNDS ==============================
+ * `runSettlementBatch` had NO call site anywhere before this pass (settlement.orchestrator.server.ts's
+ * own P2-1 doc comment) -- giving it one means it must be bounded exactly like every
+ * other scheduled lane: each position's own venue check (settlement.server.ts's
+ * SETTLEMENT_TIMEOUT_MS) owns a fixed, un-preemptible ~10s upstream-fetch ceiling.
+ * `SETTLEMENT_BATCH_BUDGET_MS` bounds how many NEW positions this job STARTS; the
+ * DEFENSIBLE WORST CASE for one invocation is therefore
+ * SETTLEMENT_BATCH_BUDGET_MS + ~10s (one already-started position's own ceiling) = 30s.
+ * `SETTLEMENT_LEASE_TTL_SECONDS` (60s) keeps the same generous, easy-to-reason-about
+ * margin over that worst case that SOURCE_LEASE_TTL_SECONDS already uses relative to its
+ * own ~42s worst case.
+ * ================================================================================
+ */
+export const SETTLEMENT_BATCH_BUDGET_MS = 20_000;
+export const SETTLEMENT_LEASE_TTL_SECONDS = 60;
+export const SETTLEMENT_BATCH_LIMIT = 50;
+/** 5 minutes -- same threshold SOURCE's own scheduler_stopped alert already uses (evaluateAlertConditions' schedulerStalledThresholdMs). */
+const JOB_STALLED_THRESHOLD_MS = 300_000;
+
 const WALLET_CURSOR_ID = "source_wallet_rotation";
 
 /* ------------------------------------------------------------------ */
@@ -341,7 +364,53 @@ export type SportsShadowWorkerDeps = {
   onCycleComplete: (summary: SportsShadowCycleSummary) => Promise<void>;
 };
 
+/**
+ * CODEX P2-1: the lightweight maintenance path for a lanes="observation" invocation --
+ * records ONLY this job's own telemetry/heartbeat and evaluates ONLY this job's own
+ * staleness alert. Deliberately skips every SOURCE-lane-scoped maintenance task
+ * (capability refresh, routing-cutoff sweep, lifecycle-observation scheduling, the full
+ * alert-condition sweep, stage transition) -- those remain on the SOURCE job's own
+ * cadence, completely unchanged from before this pass, so soak.server.ts's rollup
+ * (which counts SYSTEM/cycle_duration_ms rows as "cycles") is never double- or
+ * triple-counted by a much-more-frequent observation cadence.
+ */
+async function observationOnlyOnCycleComplete(summary: SportsShadowCycleSummary): Promise<void> {
+  try {
+    const { recordTelemetry, computeSchedulerLastRunAgeMs } = await import("./telemetry.server");
+    // Read BEFORE this cycle's own telemetry is recorded below -- same ordering
+    // requirement as the SOURCE job's own heartbeat (see computeSchedulerLastRunAgeMs's
+    // own doc comment): otherwise this would always see its own just-written row.
+    const schedulerLastRunAgeMs = await computeSchedulerLastRunAgeMs(Date.now(), undefined, "observation_cycle_duration_ms");
+    await recordTelemetry([
+      { category: "SYSTEM", metric: "observation_cycle_duration_ms", value: summary.durationMs, experimentEpochId: summary.epochId },
+      { category: "SYSTEM", metric: "observation_cycle_error_count", value: summary.errors.length, experimentEpochId: summary.epochId },
+      { category: "OBSERVATION", metric: "captured", value: summary.observationLane.pmus.captured, labels: { venue: "PMUS" }, experimentEpochId: summary.epochId },
+      { category: "OBSERVATION", metric: "captured", value: summary.observationLane.kalshi.captured, labels: { venue: "KALSHI" }, experimentEpochId: summary.epochId },
+      { category: "OBSERVATION", metric: "failed", value: summary.observationLane.pmus.failed, labels: { venue: "PMUS" }, experimentEpochId: summary.epochId },
+      { category: "OBSERVATION", metric: "failed", value: summary.observationLane.kalshi.failed, labels: { venue: "KALSHI" }, experimentEpochId: summary.epochId },
+      { category: "OBSERVATION", metric: "skipped", value: summary.observationLane.pmus.skipped, labels: { venue: "PMUS" }, experimentEpochId: summary.epochId },
+      { category: "OBSERVATION", metric: "skipped", value: summary.observationLane.kalshi.skipped, labels: { venue: "KALSHI" }, experimentEpochId: summary.epochId },
+    ]);
+    const { raiseAlert, resolveAlert } = await import("./alerts.server");
+    // Reuses the EXISTING "sports_shadow_scheduler_stopped" Telegram kind (already
+    // registered in notify.server.ts) under a job-specific alertKey, rather than
+    // registering a brand-new kind for what is semantically the identical condition
+    // (a scheduled job has stopped running) applied to a different job.
+    if (schedulerLastRunAgeMs !== null && schedulerLastRunAgeMs > JOB_STALLED_THRESHOLD_MS) {
+      await raiseAlert("scheduler_stopped:observation", "CRITICAL", `Observation job has not run in ${Math.round(schedulerLastRunAgeMs / 1000)}s`, "sports_shadow_scheduler_stopped");
+    } else {
+      await resolveAlert("scheduler_stopped:observation");
+    }
+  } catch {
+    // Best-effort by design -- see SportsShadowWorkerDeps.onCycleComplete's own doc comment.
+  }
+}
+
 async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promise<void> {
+  if (summary.lanes === "observation") {
+    await observationOnlyOnCycleComplete(summary);
+    return;
+  }
   try {
     // Soak-incident fix: bounded, cached venue-capability refresh. The probes previously
     // had NO call site anywhere, so the durable capability table stayed permanently empty
@@ -552,6 +621,17 @@ export type SourceLaneResult = {
   leaseLost: boolean;
 };
 
+/**
+ * CODEX P2-1: which independently-schedulable job this invocation is. "both" preserves
+ * the ORIGINAL combined-cycle behavior byte-for-byte (default, and the only value every
+ * pre-existing test exercises) -- "observation" and "source" let the production
+ * scheduler invoke each lane as its own bounded HTTP call with its own timeout, instead
+ * of one call whose worst case (observation + source + final-pass, ~72s) could exceed
+ * both the cron cadence and pg_net's own per-invocation timeout. See the scheduler
+ * artifact's own doc comment for the full worst-case analysis this fixes.
+ */
+export type SportsShadowLanes = "both" | "observation" | "source";
+
 export type SportsShadowCycleSummary = {
   startedAt: string;
   completedAt: string;
@@ -561,6 +641,8 @@ export type SportsShadowCycleSummary = {
   observationLane: PerVenueObservationResult;
   sourceLane: SourceLaneResult | null;
   finalObservationPass: PerVenueObservationResult;
+  /** CODEX P2-1: which lane(s) this invocation actually ran -- read by defaultOnCycleComplete to route to the right (lightweight vs full) maintenance path. */
+  lanes: SportsShadowLanes;
   errors: string[];
   /**
    * FINAL BUILD Part 6/repository-completion pass (Codex-caught P1): resolved ONCE per
@@ -967,7 +1049,7 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
  * === false` is the only "do nothing" path handled internally, so this function is safe
  * to call directly from tests with a hand-built config.
  */
-export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Partial<SportsShadowWorkerDeps> = {}): Promise<SportsShadowCycleSummary> {
+export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Partial<SportsShadowWorkerDeps> = {}, lanes: SportsShadowLanes = "both"): Promise<SportsShadowCycleSummary> {
   const d: SportsShadowWorkerDeps = { ...defaultDeps, ...deps };
   const startedAtMs = d.now();
   const errors: string[] = [];
@@ -983,6 +1065,7 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
       observationLane: emptyPerVenueObservationResult(),
       sourceLane: null,
       finalObservationPass: emptyPerVenueObservationResult(),
+      lanes,
       errors,
       epochId: null,
     };
@@ -1003,33 +1086,48 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
 
   // LANE A: observation, highest priority, always attempted first. Task 12H/P1-N: both
   // venues run with bounded (exactly-two-call) concurrency so neither can delay the other.
-  const observationLane = await runObservationLanesForBothVenues(d, OBSERVATION_STAGE_MAX_ROWS, OBSERVATION_STAGE_DEADLINE_MS, errors);
+  // CODEX P2-1: skipped entirely for a lanes="source" invocation -- that job now runs
+  // behind its own separately-scheduled, separately-timed-out HTTP call (see
+  // runSportsShadowSourceJob and the scheduler artifact).
+  const observationLane = lanes === "source" ? emptyPerVenueObservationResult() : await runObservationLanesForBothVenues(d, OBSERVATION_STAGE_MAX_ROWS, OBSERVATION_STAGE_DEADLINE_MS, errors);
 
-  // LANE B: source/matching, behind its own independent lease.
-  let sourceLane: SourceLaneResult;
-  const sourceLease = await acquireSportsLease(SOURCE_LOCK_ID, randomWorkerId("sports-source"), SOURCE_LEASE_TTL_SECONDS, d.leaseRepo);
-  if (sourceLease === null) {
-    sourceLane = emptySourceLaneResult(false);
-  } else {
-    // Task 12F / P1-G: one checkpoint, created fresh from THIS cycle's freshly-acquired
-    // lease/fence, shared across the entire source lane (every wallet poll + both venues'
-    // resolution) so its "time since last renewal" state is meaningful lane-wide, not
-    // reset per wallet.
-    const checkpoint = createLeaseCheckpoint(sourceLease, SOURCE_LEASE_TTL_SECONDS, d.leaseRepo, d.now);
-    try {
-      sourceLane = await runSourceLane(config, d, errors, checkpoint, epochId);
-      await releaseSportsLease(sourceLease, { state: "idle", lastError: null }, d.leaseRepo);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "unknown error";
-      errors.push(`source lane failed: ${message}`);
-      await releaseSportsLease(sourceLease, { state: "error", lastError: message }, d.leaseRepo);
-      sourceLane = emptySourceLaneResult(true);
+  // LANE B: source/matching, behind its own independent lease. CODEX P2-1: skipped
+  // entirely for a lanes="observation" invocation -- not even a lease is attempted, so an
+  // observation-only job can run at a much tighter cadence than the source lane's own
+  // (up to ~42s worst case) without ever contending for SOURCE_LOCK_ID.
+  let sourceLane: SourceLaneResult | null = null;
+  if (lanes !== "observation") {
+    const sourceLease = await acquireSportsLease(SOURCE_LOCK_ID, randomWorkerId("sports-source"), SOURCE_LEASE_TTL_SECONDS, d.leaseRepo);
+    if (sourceLease === null) {
+      sourceLane = emptySourceLaneResult(false);
+    } else {
+      // Task 12F / P1-G: one checkpoint, created fresh from THIS cycle's freshly-acquired
+      // lease/fence, shared across the entire source lane (every wallet poll + both venues'
+      // resolution) so its "time since last renewal" state is meaningful lane-wide, not
+      // reset per wallet.
+      const checkpoint = createLeaseCheckpoint(sourceLease, SOURCE_LEASE_TTL_SECONDS, d.leaseRepo, d.now);
+      try {
+        sourceLane = await runSourceLane(config, d, errors, checkpoint, epochId);
+        await releaseSportsLease(sourceLease, { state: "idle", lastError: null }, d.leaseRepo);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "unknown error";
+        errors.push(`source lane failed: ${message}`);
+        await releaseSportsLease(sourceLease, { state: "error", lastError: message }, d.leaseRepo);
+        sourceLane = emptySourceLaneResult(true);
+      }
     }
   }
 
   // Final +0 catch pass: an EXACT match may have just scheduled its +0 row. If a venue's
   // observation lease is held elsewhere, that venue simply returns without waiting/bypassing.
-  const finalObservationPass = await runObservationLanesForBothVenues(d, FINAL_OBSERVATION_STAGE_MAX_ROWS, FINAL_OBSERVATION_STAGE_DEADLINE_MS, errors);
+  // CODEX P2-1: ONLY runs for lanes="both" (preserving that mode's exact original
+  // behavior). Skipped for lanes="observation" (redundant -- no source lane ran in THIS
+  // call to create a fresh +0 row) AND for lanes="source" (this is exactly what keeps
+  // the source-only job's own worst case at ~42s rather than ~42s+14s -- the whole point
+  // of this finding: a slow/backlogged source-only job must never risk exceeding its own
+  // scheduler timeout for the sake of a catch-pass the SEPARATE, independently-scheduled
+  // observation job's own tight cadence already covers within a few seconds anyway).
+  const finalObservationPass = lanes === "both" ? await runObservationLanesForBothVenues(d, FINAL_OBSERVATION_STAGE_MAX_ROWS, FINAL_OBSERVATION_STAGE_DEADLINE_MS, errors) : emptyPerVenueObservationResult();
 
   const completedAtMs = d.now();
   const summary: SportsShadowCycleSummary = {
@@ -1041,6 +1139,7 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
     observationLane,
     sourceLane,
     finalObservationPass,
+    lanes,
     errors,
     epochId,
   };
@@ -1050,4 +1149,92 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
     // Best-effort -- see SportsShadowWorkerDeps.onCycleComplete's own doc comment.
   }
   return summary;
+}
+
+/* ------------------------------------------------------------------ */
+/* CODEX P2-1: independent settlement job                              */
+/* ------------------------------------------------------------------ */
+
+export type SettlementJobSummary = {
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  acquired: boolean;
+  checked: number;
+  settled: number;
+  errors: number;
+  deadlineReached: boolean;
+};
+
+export type SettlementJobDeps = {
+  leaseRepo: SportsLeaseRepository;
+  /** Omitted -> runSettlementBatch's own supabaseSettlementRepository default is used. */
+  settlementRepo?: SettlementRepository;
+  runSettlementBatch: typeof runSettlementBatch;
+  now: () => number;
+};
+
+const defaultSettlementJobDeps: SettlementJobDeps = {
+  leaseRepo: supabaseSportsLeaseRepository,
+  runSettlementBatch,
+  now: () => Date.now(),
+};
+
+/**
+ * CODEX P2-1: `runSettlementBatch` (settlement.orchestrator.server.ts) had NO call site
+ * anywhere in the app before this pass -- every settlement row was computed correctly
+ * once invoked directly by a test, but nothing in production ever invoked it. This is
+ * that call site: its own independent lease (SETTLEMENT_LOCK_ID, never contends with
+ * SOURCE_LOCK_ID or either OBSERVATION lock), its own bounded deadline
+ * (SETTLEMENT_BATCH_BUDGET_MS, see that constant's own doc comment), its own SETTLEMENT-
+ * category telemetry, and its own scheduler-stalled heartbeat/alert -- run behind its
+ * own scheduled HTTP call (see the scheduler artifact), never folded into the
+ * source/observation jobs' own cadences.
+ */
+export async function runSportsShadowSettlementJob(deps: Partial<SettlementJobDeps> = {}): Promise<SettlementJobSummary> {
+  const d: SettlementJobDeps = { ...defaultSettlementJobDeps, ...deps };
+  const startedAtMs = d.now();
+  const lease = await acquireSportsLease(SETTLEMENT_LOCK_ID, randomWorkerId("sports-settlement"), SETTLEMENT_LEASE_TTL_SECONDS, d.leaseRepo);
+  if (lease === null) {
+    const completedAtMs = d.now();
+    return { startedAt: new Date(startedAtMs).toISOString(), completedAt: new Date(completedAtMs).toISOString(), durationMs: completedAtMs - startedAtMs, acquired: false, checked: 0, settled: 0, errors: 0, deadlineReached: false };
+  }
+
+  const deadlineAtMs = startedAtMs + SETTLEMENT_BATCH_BUDGET_MS;
+  let result: { checked: number; settled: number; errors: number; deadlineReached: boolean };
+  try {
+    result = await d.runSettlementBatch(SETTLEMENT_BATCH_LIMIT, d.settlementRepo, undefined, d.now, deadlineAtMs);
+    await releaseSportsLease(lease, { state: "idle", lastError: null }, d.leaseRepo);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "unknown error";
+    await releaseSportsLease(lease, { state: "error", lastError: message }, d.leaseRepo);
+    result = { checked: 0, settled: 0, errors: 1, deadlineReached: false };
+  }
+
+  const completedAtMs = d.now();
+  const durationMs = completedAtMs - startedAtMs;
+
+  try {
+    const { recordTelemetry, computeSchedulerLastRunAgeMs } = await import("./telemetry.server");
+    // Read BEFORE this run's own telemetry is recorded below -- same ordering
+    // requirement as every other job's own heartbeat (see computeSchedulerLastRunAgeMs's
+    // own doc comment).
+    const schedulerLastRunAgeMs = await computeSchedulerLastRunAgeMs(Date.now(), undefined, "settlement_cycle_duration_ms");
+    await recordTelemetry([
+      { category: "SYSTEM", metric: "settlement_cycle_duration_ms", value: durationMs },
+      { category: "SETTLEMENT", metric: "checked", value: result.checked },
+      { category: "SETTLEMENT", metric: "settled", value: result.settled },
+      { category: "SETTLEMENT", metric: "errors", value: result.errors },
+    ]);
+    const { raiseAlert, resolveAlert } = await import("./alerts.server");
+    if (schedulerLastRunAgeMs !== null && schedulerLastRunAgeMs > JOB_STALLED_THRESHOLD_MS) {
+      await raiseAlert("scheduler_stopped:settlement", "CRITICAL", `Settlement job has not run in ${Math.round(schedulerLastRunAgeMs / 1000)}s`, "sports_shadow_scheduler_stopped");
+    } else {
+      await resolveAlert("scheduler_stopped:settlement");
+    }
+  } catch {
+    // Best-effort by design -- same contract as every other job's telemetry/alert hook.
+  }
+
+  return { startedAt: new Date(startedAtMs).toISOString(), completedAt: new Date(completedAtMs).toISOString(), durationMs, acquired: true, ...result };
 }

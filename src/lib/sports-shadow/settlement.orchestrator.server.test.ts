@@ -148,6 +148,69 @@ describe("FINAL BUILD Part 15: runSettlementBatch", () => {
     expect(upserted[0]?.nextCheckAtMs).toBeNull();
     expect(upserted[0]?.checkAttemptCount).toBe(6);
   });
+
+  it("CODEX P2-1 REQUIRED TEST: a deadline reached before a position starts leaves it (and everything after it) completely untouched, safely retryable", async () => {
+    const positions = [position({ signalId: "a" }), position({ signalId: "b" }), position({ signalId: "c" })];
+    const upserted: SettlementRow[] = [];
+    const repo: SettlementRepository = {
+      async findOpenPositions() {
+        return positions;
+      },
+      async upsertSettlement(row) {
+        upserted.push(row);
+      },
+    };
+    const fetchImpl = fetchReturning({ markets: [{ status: "MARKET_STATUS_RESOLVED", marketSides: [{ long: true, price: "1" }, { long: false, price: "0" }] }] });
+    const nowMs = 1_700_000_000_000;
+    // The deadline is already exhausted before the FIRST position is even started.
+    const summary = await runSettlementBatch(50, repo, fetchImpl, () => nowMs, nowMs);
+    expect(summary.deadlineReached).toBe(true);
+    expect(summary.checked).toBe(0);
+    expect(summary.settled).toBe(0);
+    expect(upserted).toHaveLength(0); // nothing persisted -- never a rushed/partial write
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("a deadline reached mid-batch stops starting NEW positions but never aborts one already in flight, and reports deadlineReached", async () => {
+    const positions = [position({ signalId: "a" }), position({ signalId: "b" })];
+    const upserted: SettlementRow[] = [];
+    const repo: SettlementRepository = {
+      async findOpenPositions() {
+        return positions;
+      },
+      async upsertSettlement(row) {
+        upserted.push(row);
+      },
+    };
+    const fetchImpl = fetchReturning({ markets: [{ status: "MARKET_STATUS_RESOLVED", marketSides: [{ long: true, price: "1" }, { long: false, price: "0" }] }] });
+    let calls = 0;
+    // Deadline is still in the future for the first call's pre-check, but has passed by
+    // the time the SECOND position's pre-check runs -- proves the check happens BEFORE
+    // each position, not merely once at the top of the batch.
+    const now = () => {
+      calls += 1;
+      return calls === 1 ? 0 : 1_000;
+    };
+    const summary = await runSettlementBatch(50, repo, fetchImpl, now, 500);
+    expect(summary.deadlineReached).toBe(true);
+    expect(summary.checked).toBe(1);
+    expect(upserted).toHaveLength(1);
+    expect(upserted[0]?.signalId).toBe("a");
+  });
+
+  it("no deadline passed (legacy default) never reports deadlineReached, even with many positions", async () => {
+    const positions = [position({ signalId: "a" }), position({ signalId: "b" })];
+    const repo: SettlementRepository = {
+      async findOpenPositions() {
+        return positions;
+      },
+      async upsertSettlement() {},
+    };
+    const fetchImpl = fetchReturning({ markets: [{ status: "MARKET_STATUS_ACTIVE" }] });
+    const summary = await runSettlementBatch(50, repo, fetchImpl);
+    expect(summary.deadlineReached).toBe(false);
+    expect(summary.checked).toBe(2);
+  });
 });
 
 describe("CODEX P2-3: computeNextSettlementCheckAtMs -- exponential backoff for a persistently-PENDING position", () => {
