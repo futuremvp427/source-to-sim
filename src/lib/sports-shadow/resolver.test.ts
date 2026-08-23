@@ -4,7 +4,7 @@ import type { KalshiCandidate } from "./kalshi";
 import type { PmusCandidate } from "./pmus";
 
 const COMPATIBLE_PMUS_RULES =
-  "This market will settle to the winner of the game. Extra innings are included if played. If the game is delayed, postponed, or suspended and not rescheduled within two weeks, the market will settle to the last fair market price.";
+  "This market will settle to the winner of the game. Extra innings are included if played. If the game is delayed, postponed, or suspended, this market will remain open until the game has been completed.";
 const COMPATIBLE_KALSHI_RULES =
   "If the named team wins the game, then the market resolves to Yes. Extra innings are included in this market. If this game is postponed or delayed, the market will remain open and close after the rescheduled game has finished.";
 /**
@@ -803,5 +803,63 @@ describe("CODEX P1-6: EXACT requires the SOURCE's own settlement rules to positi
     const r = resolveKalshiMatch(s, [kalshi]);
     expect(r.status).not.toBe("EXACT");
     expect(r.settlementProfile?.extraInnings).toBe("KNOWN_INCOMPATIBLE");
+  });
+});
+
+describe("CODEX P1-5: postponement/cancellation TREATMENT must be classified, not merely detected -- mentioning the topic is not proof of agreement", () => {
+  it("REQUIRED TEST: source 'remains open until completed' vs. target 'void/cancel if postponed' -- both mention postponement, but must NEVER produce EXACT", () => {
+    const s = source({
+      sourceRulesDescription: "This market resolves to the winner of the game. Extra innings are included. If the game is postponed, this market will remain open until the game has been completed.",
+    });
+    const target = pmusCandidate({
+      rulesDescription: "This market will settle to the winner of the game. Extra innings are included. This market will be void and cancelled if the game is postponed.",
+    });
+    const r = resolvePmusMatch(s, [target]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.settlementProfile?.postponement).toBe("KNOWN_INCOMPATIBLE");
+  });
+
+  it("adversarial pair 2: source void-on-postponement vs. target remains-open -- the reverse direction of the required test, same conclusion", () => {
+    const s = source({
+      sourceRulesDescription: "This market resolves to the winner of the game. Extra innings are included. This market is voided and all trades refunded if the game is postponed or suspended.",
+    });
+    const target = pmusCandidate({
+      rulesDescription: "This market will settle to the winner of the game. Extra innings are included. If the game is delayed or postponed, this market stays open until the game has been completed.",
+    });
+    const r = resolvePmusMatch(s, [target]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.settlementProfile?.postponement).toBe("KNOWN_INCOMPATIBLE");
+  });
+
+  it("adversarial pair 3: both sides genuinely agree on VOID -- correctly reaches EXACT_COMPATIBLE for postponement (the fix does not make agreement unreachable, only unearned)", () => {
+    const s = source({
+      sourceRulesDescription: "This market resolves to the winner of the game. Extra innings are included. This market will be void if the game is postponed and not completed.",
+    });
+    const target = pmusCandidate({
+      rulesDescription: "This market will settle to the winner of the game. Extra innings are included. This market is cancelled and refunded if the game is postponed.",
+    });
+    const r = resolvePmusMatch(s, [target]);
+    expect(r.settlementProfile?.postponement).toBe("EXACT_COMPATIBLE");
+    expect(r.status).toBe("EXACT");
+  });
+
+  it("adversarial pair 4: a called/shortened-game clause with no explicit void/remains-open language stays UNVERIFIED -- never guesses a treatment the text does not actually state", () => {
+    const s = source({ sourceRulesDescription: COMPATIBLE_SOURCE_RULES });
+    const target = pmusCandidate({
+      rulesDescription: "This market will settle to the winner of the game. Extra innings are included. If the game is called early due to weather, standard rules apply.",
+    });
+    const r = resolvePmusMatch(s, [target]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.settlementProfile?.postponement).toBe("UNVERIFIED");
+  });
+
+  it("adversarial pair 5: merely mentioning 'rescheduled' with no declared treatment (the OLD naive regex's exact false-positive trigger) stays UNVERIFIED, not EXACT_COMPATIBLE", () => {
+    const s = source({ sourceRulesDescription: COMPATIBLE_SOURCE_RULES });
+    const target = pmusCandidate({
+      rulesDescription: "This market will settle to the winner of the game. Extra innings are included. Games may be rescheduled by the league at any time.",
+    });
+    const r = resolvePmusMatch(s, [target]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.settlementProfile?.postponement).toBe("UNVERIFIED");
   });
 });

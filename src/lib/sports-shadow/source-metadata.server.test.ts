@@ -319,7 +319,7 @@ describe("fetchSourceMarketMetadata", () => {
       marketStatus: "MARKET_STATUS_OPEN",
       question: "New York Yankees vs. Baltimore Orioles",
       rulesDescription:
-        "This market will settle to the winner of the game. Extra innings are included if played. If the game is delayed, postponed, or suspended and not rescheduled within two weeks, the market will settle to the last fair market price.",
+        "This market will settle to the winner of the game. Extra innings are included if played. If the game is delayed, postponed, or suspended, this market will remain open until the game has been completed.",
       sides: [
         { description: "New York Yankees", teamAbbreviation: "nyy", long: true },
         { description: "Baltimore Orioles", teamAbbreviation: "bal", long: false },

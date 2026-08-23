@@ -157,10 +157,44 @@ function analyzeExtraInnings(text: string | null): RuleDimensionStatus {
   return "UNVERIFIED";
 }
 
-function analyzePostponement(text: string | null): RuleDimensionStatus {
+export type PostponementTreatment = "VOID_ON_POSTPONEMENT" | "REMAINS_OPEN_UNTIL_COMPLETED" | "UNVERIFIED";
+
+/**
+ * CODEX P1-5: previously, MERELY MENTIONING postponed/delayed/suspended/rescheduled was
+ * treated as proof of cross-venue compatibility -- two ECONOMICALLY OPPOSITE contracts
+ * both mention the topic and would both classify EXACT_COMPATIBLE. Example (adversarial,
+ * from the finding itself): source text "market remains open until completed" vs. target
+ * text "void/cancel if postponed" -- both plainly mention postponement, but describe
+ * OPPOSITE outcomes.
+ *
+ * Classifies the DECLARED TREATMENT instead of merely detecting the topic. A real,
+ * live-verified Gamma market description (source-metadata.server.ts's own doc comment)
+ * reads "If the game is postponed, this market will remain open until the game has been
+ * completed" -- REMAINS_OPEN_UNTIL_COMPLETED. VOID pattern is checked FIRST: a void/
+ * cancellation clause's own text often ALSO contains "postponed"/"delayed" as its
+ * triggering condition, which the remains-open pattern could otherwise false-match via
+ * mere trigger-word presence.
+ *
+ * Consolidates the mission's full postponement-family list into this ONE binary
+ * classification: cancellation/void/no-contest/shortened-or-called-game treatment all
+ * collapse to VOID_ON_POSTPONEMENT (the contract does not survive to a later completed
+ * game); reschedule window/make-up-game treatment/settlement timing/event identity
+ * after rescheduling all collapse to REMAINS_OPEN_UNTIL_COMPLETED (the contract survives
+ * to whichever game eventually happens, however delayed). There is no additional REAL,
+ * parseable signal in a plain-English market description to split these further without
+ * inventing distinctions the text itself does not actually draw -- doing so would
+ * fabricate metadata, which this codebase's own established discipline (P1-6's identical
+ * reasoning for pushRisk) explicitly refuses to do.
+ */
+function analyzePostponementTreatment(text: string | null): PostponementTreatment {
   if (!text) return "UNVERIFIED";
-  if (/(postpon|delay|suspend|resched)/i.test(text)) return "EXACT_COMPATIBLE";
-  return "UNVERIFIED";
+  const triggerPattern = /\b(postpon\w*|delay\w*|suspend\w*|resched\w*|call(?:ed)?\s+(?:game|off)|shorten\w*|make[\s-]?up\s+game)\b/i;
+  if (!triggerPattern.test(text)) return "UNVERIFIED"; // topic never even raised
+  const voidPattern = /\b(void\w*|cancel\w*|no[\s-]?contest|refund\w*)\b/i;
+  if (voidPattern.test(text)) return "VOID_ON_POSTPONEMENT";
+  const remainsOpenPattern = /\b(remains?|stays?)\s+(open|active)\b|will\s+remain\s+open|until\s+(?:the\s+)?game\s+(?:has\s+been\s+|is\s+)?complet\w*/i;
+  if (remainsOpenPattern.test(text)) return "REMAINS_OPEN_UNTIL_COMPLETED";
+  return "UNVERIFIED"; // topic raised, but no decisive declared treatment found -- fail closed, never guess
 }
 
 /**
@@ -183,9 +217,18 @@ function analyzePushRisk(line: number | null): RuleDimensionStatus {
  * confirm the SAME behavior -- same game/team/line alone proves nothing about whether,
  * say, a postponement or an extra-innings rule difference makes them different contracts.
  */
-function combineDimension(source: RuleDimensionStatus, target: RuleDimensionStatus): RuleDimensionStatus {
-  if (source === "UNVERIFIED" || target === "UNVERIFIED") return "UNVERIFIED"; // neither side positively proves anything -- never assume agreement from silence
-  return source === target ? "EXACT_COMPATIBLE" : "KNOWN_INCOMPATIBLE"; // both sides agree vs. a genuine confirmed MISMATCH (e.g. one includes extra innings, the other excludes them)
+/**
+ * Generic over any per-venue classification whose "no decisive signal" value is the
+ * literal string "UNVERIFIED" (RuleDimensionStatus itself, for extraInnings; or a
+ * richer classification like PostponementTreatment, for postponement -- CODEX P1-5).
+ * Same rule either way: neither side positively proving anything is UNVERIFIED (never
+ * assume agreement from silence); the two sides confirming the identical treatment is
+ * EXACT_COMPATIBLE; the two sides confirming DIFFERENT treatments is a genuine
+ * confirmed KNOWN_INCOMPATIBLE mismatch.
+ */
+function combineDimension<T extends string>(source: T, target: T): RuleDimensionStatus {
+  if (source === "UNVERIFIED" || target === "UNVERIFIED") return "UNVERIFIED";
+  return source === target ? "EXACT_COMPATIBLE" : "KNOWN_INCOMPATIBLE";
 }
 
 /**
@@ -201,7 +244,7 @@ function combineDimension(source: RuleDimensionStatus, target: RuleDimensionStat
 function buildSettlementProfile(targetRulesText: string | null, sourceRulesText: string | null, line: number | null): SettlementProfile {
   return {
     extraInnings: combineDimension(analyzeExtraInnings(sourceRulesText), analyzeExtraInnings(targetRulesText)),
-    postponement: combineDimension(analyzePostponement(sourceRulesText), analyzePostponement(targetRulesText)),
+    postponement: combineDimension(analyzePostponementTreatment(sourceRulesText), analyzePostponementTreatment(targetRulesText)),
     pushRisk: analyzePushRisk(line),
   };
 }
