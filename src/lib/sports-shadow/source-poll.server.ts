@@ -141,6 +141,14 @@ export const MAX_PAGES_PER_WALLET = Math.floor(MAX_TRADES_OFFSET / PAGE_SIZE) + 
 export const MAX_PENDING_FILLS_PER_POLL = 500;
 
 /**
+ * RECOVERY: pre-go-live fills are disposed of in bounded batches of this size (one lone,
+ * idempotent single-table UPDATE ... WHERE id IN (...) per flush), so a huge historical
+ * backlog drains without per-row round trips and without any network metadata call. Kept
+ * well under MAX_PENDING_FILLS_PER_POLL so each flush stays a small, fast statement.
+ */
+export const PRE_GO_LIVE_FLUSH_SIZE = 100;
+
+/**
  * ============ SOAK INCIDENT (2026-08-22): PHASE-2 DOWNSTREAM RESERVE ============
  * PROVEN production failure: Phase 1 (trade-page pagination + persistence) consumed the
  * whole poll deadline while catching up a heavy backlog, so the Phase-2 deadline guard
