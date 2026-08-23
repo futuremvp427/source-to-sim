@@ -253,6 +253,17 @@ class FakeRepo implements PollRepository {
     if (fill) fill.downstreamStatus = "COMPLETE";
   }
 
+  markFillsCompleteBatches: string[][] = [];
+
+  async markFillsComplete(fillIds: string[]): Promise<void> {
+    this.markFillsCompleteBatches.push([...fillIds]);
+    for (const fillId of fillIds) {
+      this.markFillCompleteCalls.push(fillId);
+      const fill = this.fillsById.get(fillId);
+      if (fill) fill.downstreamStatus = "COMPLETE";
+    }
+  }
+
   async markFillTerminal(fillId: string, status: "TERMINAL_INELIGIBLE" | "TERMINAL_INVALID"): Promise<void> {
     this.markFillTerminalCalls.push({ fillId, status });
     const fill = this.fillsById.get(fillId);

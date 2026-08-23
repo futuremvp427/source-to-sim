@@ -866,6 +866,15 @@ export const supabasePollRepository: PollRepository = {
     if (error) throw new Error(error.message);
   },
 
+  async markFillsComplete(fillIds) {
+    if (fillIds.length === 0) return;
+    const { error } = await supabaseAdmin
+      .from("sports_shadow_source_fills" as never)
+      .update({ downstream_status: "COMPLETE" } as never)
+      .in("id", fillIds);
+    if (error) throw new Error(error.message);
+  },
+
   async markFillTerminal(fillId, status) {
     const { error } = await supabaseAdmin
       .from("sports_shadow_source_fills" as never)
