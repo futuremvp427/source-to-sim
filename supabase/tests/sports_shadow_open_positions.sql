@@ -108,6 +108,111 @@ BEGIN
     RAISE EXCEPTION 'expected the dual-matched signal to settle against its ACTUAL chosen (Kalshi) target, not an ambiguous join result';
   END IF;
 
+  ------------------------------------------------------------------
+  -- CODEX P2-3 REQUIRED TEST: pending settlement rows can starve ready positions.
+  -- Seed 50 recently-checked PENDING positions (next_check_at far in the future, not yet
+  -- due) plus 1 later-created position that IS ready to settle (no settlement row at
+  -- all, i.e. never checked -- always due). The ready position must be selectable even
+  -- with a batch LIMIT far smaller than 51, and the 50 not-yet-due rows must be
+  -- EXCLUDED entirely (not merely lower priority) until their own next_check_at arrives.
+  ------------------------------------------------------------------
+  DECLARE
+    v_signal_ready uuid;
+    v_not_due_count integer;
+    v_ready_found boolean;
+    v_persisted_attempt_count integer;
+    v_persisted_next_check_at timestamptz;
+  BEGIN
+    FOR i IN 1..50 LOOP
+      DECLARE
+        v_fill_not_due uuid;
+        v_signal_not_due uuid;
+      BEGIN
+        INSERT INTO public.sports_shadow_source_fills (event_key, wallet, asset, side, identity_basis)
+        VALUES ('p23-fill-notdue-' || i, '0xwallet', '0xasset', 'BUY', 'source_id')
+        RETURNING id INTO v_fill_not_due;
+
+        INSERT INTO public.sports_shadow_signals (
+          episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at,
+          bet_type, selected_side, created_at
+        ) VALUES (
+          'p23-episode-notdue-' || i, '0xwallet', '0xasset', v_fill_not_due, now(), now(), 'MONEYLINE', 'TEAM:NYY:LONG',
+          now() - interval '1 day' -- OLDER than the ready position below -- would win a pure oldest-decided-first ordering
+        ) RETURNING id INTO v_signal_not_due;
+
+        INSERT INTO public.sports_shadow_paper_fills (
+          signal_id, requested_delay_ms, notional_tier_usd, decided_at, side, fill_status,
+          contracts, all_in_cost_usd, chosen_venue, target_market_id, selected_side
+        ) VALUES (
+          v_signal_not_due, 0, 5, now() - interval '1 day', 'ENTRY', 'FULL', 10, 5.10, 'PMUS', 'pmus-market-notdue-' || i, 'TEAM:NYY:LONG'
+        );
+
+        -- Recently checked, still PENDING, next check far in the future -- NOT due.
+        INSERT INTO public.sports_shadow_settlements (signal_id, venue, notional_tier_usd, settlement_status, next_check_at, check_attempt_count)
+        VALUES (v_signal_not_due, 'PMUS', 5, 'PENDING', now() + interval '1 hour', 3);
+      END;
+    END LOOP;
+
+    -- The ready position: created AFTER all 50 not-due rows, but has NO settlement row
+    -- at all (never checked) -- always due immediately, regardless of creation order.
+    INSERT INTO public.sports_shadow_source_fills (event_key, wallet, asset, side, identity_basis)
+    VALUES ('p23-fill-ready', '0xwallet', '0xasset', 'BUY', 'source_id')
+    RETURNING id INTO v_fill_id;
+
+    INSERT INTO public.sports_shadow_signals (
+      episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at,
+      bet_type, selected_side
+    ) VALUES (
+      'p23-episode-ready', '0xwallet', '0xasset', v_fill_id, now(), now(), 'MONEYLINE', 'TEAM:BOS:SHORT'
+    ) RETURNING id INTO v_signal_ready;
+
+    INSERT INTO public.sports_shadow_paper_fills (
+      signal_id, requested_delay_ms, notional_tier_usd, decided_at, side, fill_status,
+      contracts, all_in_cost_usd, chosen_venue, target_market_id, selected_side
+    ) VALUES (
+      v_signal_ready, 0, 5, now(), 'ENTRY', 'FULL', 10, 5.10, 'KALSHI', 'kalshi-market-ready', 'YES'
+    );
+
+    -- A batch limited to 10 (far fewer than the 50 not-due rows) must still surface the
+    -- ready position -- it is not competing with them at all, since they are excluded
+    -- entirely by the due-time filter, not merely deprioritized.
+    SELECT EXISTS (
+      SELECT 1 FROM public.find_open_sports_shadow_paper_positions(10) WHERE signal_id = v_signal_ready
+    ) INTO v_ready_found;
+    IF NOT v_ready_found THEN
+      RAISE EXCEPTION 'expected the ready position to be selectable within a small batch despite 50 older not-due PENDING rows existing';
+    END IF;
+
+    SELECT count(*) INTO v_not_due_count
+    FROM public.find_open_sports_shadow_paper_positions(1000)
+    WHERE target_market_id LIKE 'pmus-market-notdue-%';
+    IF v_not_due_count <> 0 THEN
+      RAISE EXCEPTION 'expected all 50 not-yet-due PENDING rows to be excluded entirely, got % selectable', v_not_due_count;
+    END IF;
+
+    -- Restart persistence: simulate runSettlementBatch's own post-check upsert (a real
+    -- check found this position still PENDING) and confirm a FRESH read (a new
+    -- transaction/process would see exactly this) recovers the same due-time/attempt
+    -- state -- durable, not merely in-memory.
+    INSERT INTO public.sports_shadow_settlements (signal_id, venue, notional_tier_usd, settlement_status, next_check_at, check_attempt_count)
+    VALUES (v_signal_ready, 'KALSHI', 5, 'PENDING', now() + interval '10 minutes', 1)
+    ON CONFLICT (signal_id, venue, notional_tier_usd) DO UPDATE SET
+      next_check_at = EXCLUDED.next_check_at,
+      check_attempt_count = EXCLUDED.check_attempt_count;
+
+    SELECT next_check_at, check_attempt_count INTO v_persisted_next_check_at, v_persisted_attempt_count
+    FROM public.sports_shadow_settlements
+    WHERE signal_id = v_signal_ready AND venue = 'KALSHI' AND notional_tier_usd = 5;
+    IF v_persisted_attempt_count <> 1 OR v_persisted_next_check_at IS NULL OR v_persisted_next_check_at <= now() THEN
+      RAISE EXCEPTION 'expected the backoff state to persist durably (attempt_count=1, next_check_at in the future), got attempt_count=% next_check_at=%', v_persisted_attempt_count, v_persisted_next_check_at;
+    END IF;
+
+    -- And now correctly excluded until that persisted next_check_at arrives.
+    IF EXISTS (SELECT 1 FROM public.find_open_sports_shadow_paper_positions(1000) WHERE signal_id = v_signal_ready) THEN
+      RAISE EXCEPTION 'expected the ready position to become NOT due after its own backoff was persisted';
+    END IF;
+  END;
+
   RAISE NOTICE 'sports_shadow_open_positions regression passed';
 END $$;
 

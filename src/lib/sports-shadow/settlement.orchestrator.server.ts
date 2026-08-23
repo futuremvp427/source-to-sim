@@ -48,6 +48,8 @@ export type OpenPaperPosition = {
   selectedSide: string; // "TEAM:...:LONG" / "TEAM:...:SHORT" / "YES" / "NO"
   entryContracts: number;
   entryAllInCostUsd: number;
+  /** CODEX P2-3: how many times this position has already been checked and found still-PENDING -- 0 for a position with no settlement row yet. Feeds computeNextSettlementCheckAtMs's exponential backoff. */
+  checkAttemptCount: number;
 };
 
 export type SettlementRow = {
@@ -61,6 +63,10 @@ export type SettlementRow = {
   grossPnlUsd: number | null;
   totalFeesUsd: number;
   netPnlUsd: number | null;
+  /** CODEX P2-3: when this position becomes eligible for another check -- null once terminal (no further checks needed). Set by runSettlementBatch, not settlePosition itself (settlePosition has no opinion on backoff timing). */
+  nextCheckAtMs: number | null;
+  /** CODEX P2-3: total times checked so far, INCLUDING this one -- persisted so the next call's backoff calculation has the correct count even after a process restart. */
+  checkAttemptCount: number;
 };
 
 export type SettlementRepository = {
@@ -92,6 +98,7 @@ export const supabaseSettlementRepository: SettlementRepository = {
       all_in_cost_usd: number | null;
       target_market_id: string | null;
       selected_side: string | null;
+      check_attempt_count: number;
     };
     const rows = (data ?? []) as unknown as Row[];
     const out: OpenPaperPosition[] = [];
@@ -107,6 +114,7 @@ export const supabaseSettlementRepository: SettlementRepository = {
         selectedSide: r.selected_side,
         entryContracts: r.contracts,
         entryAllInCostUsd: r.all_in_cost_usd,
+        checkAttemptCount: r.check_attempt_count,
       });
     }
     return out;
@@ -125,6 +133,8 @@ export const supabaseSettlementRepository: SettlementRepository = {
         gross_pnl_usd: row.grossPnlUsd,
         total_fees_usd: row.totalFeesUsd,
         net_pnl_usd: row.netPnlUsd,
+        next_check_at: row.nextCheckAtMs ? new Date(row.nextCheckAtMs).toISOString() : null,
+        check_attempt_count: row.checkAttemptCount,
         updated_at: new Date().toISOString(),
       } as never,
       { onConflict: "signal_id,venue,notional_tier_usd" },
@@ -167,6 +177,12 @@ export async function settlePosition(position: OpenPaperPosition, fetchImpl?: ty
       grossPnlUsd: null,
       totalFeesUsd: 0,
       netPnlUsd: null,
+      // CODEX P2-3: placeholder -- runSettlementBatch overrides both fields with the
+      // real computed backoff before persisting. settlePosition itself has no opinion
+      // on recheck timing (it doesn't know `now`, and testing its own PENDING/resolved
+      // classification shouldn't require reasoning about backoff too).
+      nextCheckAtMs: null,
+      checkAttemptCount: position.checkAttemptCount,
     };
   }
 
@@ -191,6 +207,8 @@ export async function settlePosition(position: OpenPaperPosition, fetchImpl?: ty
     grossPnlUsd,
     totalFeesUsd: 0, // entry fee is already netted into entryAllInCostUsd; no exit fee for a held-to-resolution position
     netPnlUsd: grossPnlUsd,
+    nextCheckAtMs: null, // terminal -- runSettlementBatch confirms and persists null; no further checks needed
+    checkAttemptCount: position.checkAttemptCount,
   };
 }
 
@@ -206,19 +224,53 @@ function unresolvableRow(position: OpenPaperPosition, reason: string): Settlemen
     grossPnlUsd: null,
     totalFeesUsd: 0,
     netPnlUsd: null,
+    nextCheckAtMs: null, // terminal
+    checkAttemptCount: position.checkAttemptCount,
   };
 }
 
+/** 10-minute base, doubling per attempt, capped at 6 hours -- see computeNextSettlementCheckAtMs's own doc comment. */
+export const SETTLEMENT_RECHECK_BASE_MS = 10 * 60 * 1000;
+export const SETTLEMENT_RECHECK_MAX_MS = 6 * 60 * 60 * 1000;
+/** 10min * 2^6 = 640min already exceeds the 6h cap -- higher attempt counts are clamped here so the exponent itself never grows unbounded. */
+const SETTLEMENT_RECHECK_MAX_BACKOFF_EXPONENT = 6;
+
+/**
+ * CODEX P2-3: pure exponential backoff for a position still PENDING after a REAL venue
+ * check. A persistently-PENDING position (a future game, genuinely nothing wrong) is
+ * rechecked less and less often instead of consuming a bounded batch slot every single
+ * cycle -- but a position new to the queue (attemptCountAfterThisCheck=1, its first-ever
+ * check) is still rechecked within the 10-minute base window, never starved by an
+ * aggressive ceiling. Reasonable backoff based on known game/market lifecycle: capped at
+ * 6 hours so a genuinely-settled market is never delayed excessively even after many
+ * PENDING attempts.
+ */
+export function computeNextSettlementCheckAtMs(nowMs: number, attemptCountAfterThisCheck: number): number {
+  const exponent = Math.min(Math.max(0, attemptCountAfterThisCheck - 1), SETTLEMENT_RECHECK_MAX_BACKOFF_EXPONENT);
+  const backoffMs = SETTLEMENT_RECHECK_BASE_MS * 2 ** exponent;
+  return nowMs + Math.min(SETTLEMENT_RECHECK_MAX_MS, backoffMs);
+}
+
 /** Bounded batch: settles up to `limit` open positions in one call. Errors on one position never abort the batch for the rest. */
-export async function runSettlementBatch(limit = 50, repo: SettlementRepository = supabaseSettlementRepository, fetchImpl?: typeof fetch): Promise<{ checked: number; settled: number; errors: number }> {
+export async function runSettlementBatch(
+  limit = 50,
+  repo: SettlementRepository = supabaseSettlementRepository,
+  fetchImpl?: typeof fetch,
+  now: () => number = Date.now,
+): Promise<{ checked: number; settled: number; errors: number }> {
   const positions = await repo.findOpenPositions(limit);
   let settled = 0;
   let errors = 0;
   for (const position of positions) {
     try {
       const row = await settlePosition(position, fetchImpl);
-      await repo.upsertSettlement(row);
-      if (row.settlementStatus !== "PENDING") settled += 1;
+      const checkAttemptCount = position.checkAttemptCount + 1;
+      const finalRow: SettlementRow =
+        row.settlementStatus === "PENDING"
+          ? { ...row, checkAttemptCount, nextCheckAtMs: computeNextSettlementCheckAtMs(now(), checkAttemptCount) }
+          : { ...row, checkAttemptCount, nextCheckAtMs: null };
+      await repo.upsertSettlement(finalRow);
+      if (finalRow.settlementStatus !== "PENDING") settled += 1;
     } catch {
       errors += 1;
     }
