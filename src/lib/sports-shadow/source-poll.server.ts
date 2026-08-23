@@ -464,6 +464,16 @@ export type PollRepository = {
   recordPreEpochSell(fillId: string, shares: number, price: number, notional: number, sourceTs: number): Promise<void>;
   /** Marks a fill COMPLETE with no paired episode mutation — safe as a lone single-table write (see this module's terminal-classification doc comment). */
   markFillComplete(fillId: string): Promise<void>;
+  /**
+   * RECOVERY (pre-go-live backlog drain): bulk form of markFillComplete for the ONE
+   * disposition that is provably decidable from immutable local data alone --
+   * `isEligibleForEpisodeTrigger(sourceTs, goLiveAtMs) === false` (see this module's
+   * terminal-classification doc comment: pre-go-live suppression -> COMPLETE). Bounded
+   * (called with at most PRE_GO_LIVE_FLUSH_SIZE ids) and idempotent (re-running the same
+   * update is a no-op), a lone single-table write requiring no episode mutation and no
+   * network metadata, so a large historical backlog can never consume Gamma/venue budget.
+   */
+  markFillsComplete(fillIds: string[]): Promise<void>;
   /** Marks a fill permanently terminal — its own immutable data will never produce a different outcome on retry. */
   markFillTerminal(fillId: string, status: "TERMINAL_INELIGIBLE" | "TERMINAL_INVALID"): Promise<void>;
   /** Task 12F / P1-H: marks a fill TERMINAL_UNVERIFIED, durably retaining the exact classifier reason code for later audit/accounting -- distinct from TERMINAL_INELIGIBLE (a positive ineligibility determination) since "could not verify" and "determined ineligible" remain different outcomes. */
