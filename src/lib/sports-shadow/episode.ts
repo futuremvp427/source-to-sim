@@ -94,6 +94,22 @@ export function isEpisodeOpen(state: Pick<OpenEpisodeState, "totalShares" | "sel
   return remainingShares(state) > 0;
 }
 
+/**
+ * CODEX P1-3 (follower lifecycle): fraction of the follower's OWN remaining tracked
+ * inventory a SELL_RECORDED decision's trackedShares represents -- what a per-tier
+ * EXIT should sell (fraction * that tier's own contracts_open), never the source's own
+ * absolute share count (each tier's follower position size is independent of the
+ * source's). 1.0 exactly (never >1 from float drift) for a full exit -- trackedShares
+ * is always <= remainingBeforeSell by decideFill's own construction, but this is
+ * clamped defensively rather than trusted blindly. Returns null when there was no
+ * remaining inventory to reduce at all (should not happen for a genuine EXIT trigger
+ * derived from an open episode -- defensive only, never a division by zero).
+ */
+export function computeExitFraction(trackedShares: number, remainingBeforeSell: number): number | null {
+  if (!(remainingBeforeSell > 0)) return null;
+  return Math.min(1, trackedShares / remainingBeforeSell);
+}
+
 export type EpisodeDecision =
   | { kind: "NEW_EPISODE"; episodeKey: string; anchorEventKey: string; fill: EligibleFill; shouldTriggerBurst: true; nextState: OpenEpisodeState }
   | { kind: "NEW_EPISODE_AFTER_30M"; episodeKey: string; anchorEventKey: string; fill: EligibleFill; shouldTriggerBurst: true; nextState: OpenEpisodeState }

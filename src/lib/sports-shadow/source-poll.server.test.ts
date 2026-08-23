@@ -228,6 +228,15 @@ class FakeRepo implements PollRepository {
     if (fill) fill.downstreamStatus = "COMPLETE";
   }
 
+  /** CODEX P1-3 (follower lifecycle): idempotent via a Map keyed by sourceFillId, mirroring the real UNIQUE(source_fill_id) constraint. */
+  lifecycleTriggersByFillId = new Map<string, { signalId: string; sourceFillId: string; triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; price: number; sourceTs: number }>();
+  throwOnRecordLifecycleTrigger: Error | null = null;
+  async recordLifecycleTrigger(signalId: string, sourceFillId: string, triggerType: "ADD" | "EXIT", trackedShares: number, exitFraction: number | null, price: number, sourceTs: number): Promise<void> {
+    if (this.throwOnRecordLifecycleTrigger) throw this.throwOnRecordLifecycleTrigger;
+    if (this.lifecycleTriggersByFillId.has(sourceFillId)) return; // idempotent no-op, mirrors ON CONFLICT DO UPDATE (no-op) in the real RPC
+    this.lifecycleTriggersByFillId.set(sourceFillId, { signalId, sourceFillId, triggerType, trackedShares, exitFraction, price, sourceTs });
+  }
+
   async markFillComplete(fillId: string): Promise<void> {
     this.markFillCompleteCalls.push(fillId);
     const fill = this.fillsById.get(fillId);
@@ -1001,6 +1010,114 @@ describe("pollSportsShadowWallet — episode engine integration", () => {
     const [sellEvent] = [...repo.sellEventsByFillId.values()];
     expect(sellEvent?.signalId).toBeNull(); // never fabricates a position/signal
     expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("COMPLETE");
+  });
+
+  describe("CODEX P1-3: follower lifecycle triggers -- ADD/EXIT reactions durably recorded for later scheduling", () => {
+    it("an AGGREGATED_BUY (DCA into an already-open episode) records an ADD trigger for the new fill's own shares", async () => {
+      const repo = new FakeRepo();
+      const { deps } = makeDeps({
+        repo,
+        network: makeNetworkDeps({
+          0: [
+            trade({ transactionHash: "0xtx-a", timestamp: 1_700_000_000, size: 10, price: 0.5 }),
+            trade({ transactionHash: "0xtx-b", timestamp: 1_700_000_500, size: 7, price: 0.6 }),
+          ],
+        }),
+      });
+      const result = await pollSportsShadowWallet(WALLET, 0, deps);
+      expect(result.aggregatedCount).toBe(1);
+      expect(repo.lifecycleTriggersByFillId.size).toBe(1);
+      const [trigger] = [...repo.lifecycleTriggersByFillId.values()];
+      expect(trigger?.triggerType).toBe("ADD");
+      expect(trigger?.trackedShares).toBe(7); // the NEW fill's own shares, not the episode's cumulative total
+      expect(trigger?.exitFraction).toBeNull();
+    });
+
+    it("a NEW_EPISODE (the very first BUY) records NO lifecycle trigger -- that is the existing ENTRY burst's own job, not a lifecycle reaction", async () => {
+      const repo = new FakeRepo();
+      const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ transactionHash: "0xtx-a", timestamp: 1_700_000_000 })] }) });
+      await pollSportsShadowWallet(WALLET, 0, deps);
+      expect(repo.lifecycleTriggersByFillId.size).toBe(0);
+    });
+
+    it("a SELL_RECORDED partial exit against an open episode records an EXIT trigger with the correct proportional exitFraction", async () => {
+      const repo = new FakeRepo();
+      const { deps } = makeDeps({
+        repo,
+        network: makeNetworkDeps({
+          0: [
+            trade({ transactionHash: "0xtx-a", side: "BUY", timestamp: 1_700_000_000, size: 20, price: 0.5 }),
+            trade({ transactionHash: "0xtx-b", side: "SELL", timestamp: 1_700_000_100, size: 5 }),
+          ],
+        }),
+      });
+      const result = await pollSportsShadowWallet(WALLET, 0, deps);
+      expect(result.sellRecordedCount).toBe(1);
+      expect(repo.lifecycleTriggersByFillId.size).toBe(1);
+      const [trigger] = [...repo.lifecycleTriggersByFillId.values()];
+      expect(trigger?.triggerType).toBe("EXIT");
+      expect(trigger?.trackedShares).toBe(5);
+      expect(trigger?.exitFraction).toBeCloseTo(5 / 20, 9); // 20 remaining before this sell, 5 sold -> 25%
+    });
+
+    it("a FULL exit (sell reduces remaining tracked inventory to exactly zero) records exitFraction=1 exactly", async () => {
+      const repo = new FakeRepo();
+      const { deps } = makeDeps({
+        repo,
+        network: makeNetworkDeps({
+          0: [
+            trade({ transactionHash: "0xtx-a", side: "BUY", timestamp: 1_700_000_000, size: 10, price: 0.5 }),
+            trade({ transactionHash: "0xtx-b", side: "SELL", timestamp: 1_700_000_100, size: 10 }),
+          ],
+        }),
+      });
+      await pollSportsShadowWallet(WALLET, 0, deps);
+      const [trigger] = [...repo.lifecycleTriggersByFillId.values()];
+      expect(trigger?.triggerType).toBe("EXIT");
+      expect(trigger?.exitFraction).toBe(1);
+    });
+
+    it("an oversell (SELL exceeds remaining tracked inventory) records the trigger against only the TRACKED portion, never the untracked excess", async () => {
+      const repo = new FakeRepo();
+      const { deps } = makeDeps({
+        repo,
+        network: makeNetworkDeps({
+          0: [
+            trade({ transactionHash: "0xtx-a", side: "BUY", timestamp: 1_700_000_000, size: 5, price: 0.5 }),
+            trade({ transactionHash: "0xtx-b", side: "SELL", timestamp: 1_700_000_100, size: 12 }), // 5 tracked + 7 untracked
+          ],
+        }),
+      });
+      await pollSportsShadowWallet(WALLET, 0, deps);
+      const [trigger] = [...repo.lifecycleTriggersByFillId.values()];
+      expect(trigger?.trackedShares).toBe(5);
+      expect(trigger?.exitFraction).toBe(1); // fully exits the tracked position
+    });
+
+    it("a pre-epoch sell (no open position at all) records NO lifecycle trigger -- nothing tracked to exit", async () => {
+      const repo = new FakeRepo();
+      const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [trade({ side: "SELL" })] }) });
+      await pollSportsShadowWallet(WALLET, 0, deps);
+      expect(repo.lifecycleTriggersByFillId.size).toBe(0);
+    });
+
+    it("recordLifecycleTrigger failure is best-effort -- never fails the fill's own already-successful episode write", async () => {
+      const repo = new FakeRepo();
+      repo.throwOnRecordLifecycleTrigger = new Error("simulated trigger-recording failure");
+      const { deps } = makeDeps({
+        repo,
+        network: makeNetworkDeps({
+          0: [
+            trade({ transactionHash: "0xtx-a", timestamp: 1_700_000_000, size: 10, price: 0.5 }),
+            trade({ transactionHash: "0xtx-b", timestamp: 1_700_000_500, size: 7, price: 0.6 }),
+          ],
+        }),
+      });
+      const result = await pollSportsShadowWallet(WALLET, 0, deps);
+      expect(result.error).toBeNull(); // best-effort -- not surfaced as a poll error
+      expect(result.aggregatedCount).toBe(1); // the episode write itself still succeeded
+      expect(repo.lifecycleTriggersByFillId.size).toBe(0); // the trigger genuinely wasn't recorded
+    });
   });
 
   it("counts an INVALID_FILL from decideFill (e.g. zero shares) without crashing the poll, and marks the fill TERMINAL_INVALID (its own immutable data will never validate)", async () => {

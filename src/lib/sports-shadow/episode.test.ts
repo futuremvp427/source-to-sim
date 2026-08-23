@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AGGREGATION_WINDOW_SECONDS, decideFill, deriveEpisodeKey, isEpisodeOpen, processFillsForTest, remainingShares, type EligibleFill, type OpenEpisodeState } from "./episode";
+import { AGGREGATION_WINDOW_SECONDS, computeExitFraction, decideFill, deriveEpisodeKey, isEpisodeOpen, processFillsForTest, remainingShares, type EligibleFill, type OpenEpisodeState } from "./episode";
 
 function fill(overrides: Partial<EligibleFill> = {}): EligibleFill {
   return {
@@ -525,5 +525,24 @@ describe("CODEX P1-3: source episode inventory lifecycle (open/closed) -- a BUY 
     expect(second).toEqual(first);
     expect(first.kinds).toEqual(["NEW_EPISODE", "SELL_RECORDED", "NEW_EPISODE"]); // second BUY starts fresh, not AGGREGATED_BUY
     expect(first.finalTotalShares).toBe(7);
+  });
+});
+
+describe("CODEX P1-3 (follower lifecycle): computeExitFraction", () => {
+  it("a full exit (trackedShares === remainingBeforeSell) returns exactly 1", () => {
+    expect(computeExitFraction(10, 10)).toBe(1);
+  });
+
+  it("a partial exit returns the proportional fraction", () => {
+    expect(computeExitFraction(5, 20)).toBeCloseTo(0.25, 9);
+  });
+
+  it("never returns more than 1 even if trackedShares somehow exceeds remainingBeforeSell (defensive clamp)", () => {
+    expect(computeExitFraction(15, 10)).toBe(1);
+  });
+
+  it("returns null when there is no remaining inventory to reduce at all", () => {
+    expect(computeExitFraction(5, 0)).toBeNull();
+    expect(computeExitFraction(5, -1)).toBeNull();
   });
 });

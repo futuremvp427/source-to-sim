@@ -119,7 +119,7 @@ import {
 import { buildTradesUrl, MAX_TRADES_OFFSET, PAGE_SIZE } from "../shadow.server";
 import { normalizeSourceEvents, type NormalizedEvent, type RawTrade } from "../shadow-core";
 import { classifyUnverifiedDisposition, type UnverifiedReasonCode } from "./eligibility";
-import { decideFill, type EligibleFill, type OpenEpisodeState } from "./episode";
+import { computeExitFraction, decideFill, remainingShares, type EligibleFill, type OpenEpisodeState } from "./episode";
 import { computeClusterKey } from "./independence";
 import { wrapRecordHostRateLimitWithTelemetry } from "./telemetry.server";
 import { runtimeFetch } from "./runtime-fetch.server";
@@ -433,6 +433,16 @@ export type PollRepository = {
   countDurableOrdinalFills(wallet: string, tuplePrefixes: string[], deadline?: { now: () => number; deadlineAtMs: number }): Promise<Map<string, number>>;
   /** Most recent episode (by source_last_fill_at) for this exact position, if any. */
   findLatestEpisode(wallet: string, conditionId: string, asset: string): Promise<EpisodeCacheEntry | null>;
+  /**
+   * CODEX P1-3 (follower lifecycle): records a durable "this source fill requires a
+   * follower ADD/EXIT reaction" event, idempotently (UNIQUE(source_fill_id) -- a
+   * crashed/retried poll recovers the SAME row rather than creating a duplicate
+   * reaction). Best-effort at the call site: a failure here must never fail the fill's
+   * own already-successful episode-aggregation write (the fill still completes; the
+   * lifecycle reaction is simply missed for this fill, exactly like any other
+   * best-effort maintenance write in this module).
+   */
+  recordLifecycleTrigger(signalId: string, sourceFillId: string, triggerType: "ADD" | "EXIT", trackedShares: number, exitFraction: number | null, price: number, sourceTs: number): Promise<void>;
   /** Bounded, oldest-source_ts-first: every fill for this wallet whose downstream processing has not yet safely completed. Includes fills inserted THIS poll and any orphaned by an earlier failure/crash — see this module's Task 12D/P1-A doc comment. */
   findPendingDownstreamFills(wallet: string, limit: number): Promise<PendingDownstreamFillRow[]>;
   /** Atomically inserts the new episode row AND marks fillId's downstream_status COMPLETE in one transaction. */
@@ -696,6 +706,19 @@ export const supabasePollRepository: PollRepository = {
         processedEventKeys: new Set(anchorEventKey ? [anchorEventKey] : []),
       },
     };
+  },
+
+  async recordLifecycleTrigger(signalId, sourceFillId, triggerType, trackedShares, exitFraction, price, sourceTs) {
+    const { error } = await supabaseAdmin.rpc("record_sports_shadow_lifecycle_trigger" as never, {
+      p_signal_id: signalId,
+      p_source_fill_id: sourceFillId,
+      p_trigger_type: triggerType,
+      p_tracked_shares: trackedShares,
+      p_exit_fraction: exitFraction,
+      p_price: price,
+      p_source_ts: sourceTs,
+    } as never);
+    if (error) throw new Error(error.message);
   },
 
   async findPendingDownstreamFills(wallet, limit) {
@@ -1957,6 +1980,22 @@ export async function pollSportsShadowWallet(
             untrackedShares: decision.untrackedShares,
           });
           positionCache.set(positionKey, { id: cacheEntry.id, state: decision.nextState });
+          // CODEX P1-3 (follower lifecycle): a genuine reduction of TRACKED inventory
+          // (never the untracked/oversell portion) against an already-open episode is a
+          // real source EXIT action -- durably recorded so a later maintenance pass can
+          // schedule the follower's own contemporaneous EXIT reaction. Best-effort: this
+          // must never fail the episode write that already succeeded above.
+          if (decision.trackedShares > 0) {
+            const remainingBeforeSell = remainingShares(cacheEntry.state);
+            const exitFraction = computeExitFraction(decision.trackedShares, remainingBeforeSell);
+            if (exitFraction !== null) {
+              try {
+                await d.repo.recordLifecycleTrigger(cacheEntry.id, fill.id, "EXIT", decision.trackedShares, exitFraction, fill.price, fill.sourceTs);
+              } catch {
+                // Best-effort -- see this module's own P1-3 doc comment on recordLifecycleTrigger.
+              }
+            }
+          }
         } catch (err) {
           result.error = result.error ?? `updateEpisodeAtomic (SELL_RECORDED) failed: ${err instanceof Error ? err.message : "unknown error"}`;
           // stays PENDING
@@ -1995,6 +2034,18 @@ export async function pollSportsShadowWallet(
         try {
           await d.repo.updateEpisodeAtomic(fill.id, cacheEntry.id, decision.nextState);
           positionCache.set(positionKey, { id: cacheEntry.id, state: decision.nextState });
+          // CODEX P1-3 (follower lifecycle): a DCA buy into an already-open episode
+          // (AGGREGATED_BUY) or a late-discovered one folded into it (LATE_RECONCILIATION)
+          // is a real source ADD action -- both only ever reach this branch when
+          // `episodeOpen` was already true BEFORE this fill (decideFill's own gate), so
+          // `cacheEntry` is always a genuinely pre-existing open position here, never the
+          // fill that just opened it. Best-effort, same reasoning as the SELL_RECORDED
+          // branch above.
+          try {
+            await d.repo.recordLifecycleTrigger(cacheEntry.id, fill.id, "ADD", fill.shares, null, fill.price, fill.sourceTs);
+          } catch {
+            // Best-effort -- see this module's own P1-3 doc comment on recordLifecycleTrigger.
+          }
         } catch (err) {
           result.error = result.error ?? `updateEpisodeAtomic failed: ${err instanceof Error ? err.message : "unknown error"}`;
           // stays PENDING
