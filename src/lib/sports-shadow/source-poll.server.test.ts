@@ -781,6 +781,90 @@ describe("pollSportsShadowWallet — eligibility routing", () => {
     expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("PENDING");
   });
 
+  /**
+   * RECOVERY (round 2) regressions reproducing production canary 2 (2026-08-23T16:15Z):
+   * `gamma-api.polymarket.com request skipped: caller deadline reached after cooldown check`
+   * was reported as a wallet-level `error`, which raised the source_unhealthy WARNING alert
+   * even though nothing had actually failed -- the cycle's own Phase 2 budget had simply run out.
+   */
+  it("RECOVERY round 2: a DeadlineExceededError from the metadata fetch is a bounded stop -- no wallet error, no metadataFetchFailures, fill stays PENDING", async () => {
+    const repo = new FakeRepo();
+    const { deps } = makeDeps({
+      repo,
+      network: makeNetworkDeps({ 0: [trade()] }),
+      fetchSourceMarketMetadata: vi.fn(async () => {
+        throw new DeadlineExceededError("gamma-api.polymarket.com request skipped: caller deadline reached after cooldown check");
+      }) as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
+    });
+    const result = await pollSportsShadowWallet(WALLET, 0, deps);
+    expect(result.error).toBeNull();
+    expect(result.metadataFetchFailures).toBe(0);
+    expect(result.metadataDeadlineReached).toBe(true);
+    expect([...repo.fillsByEventKey.values()][0]?.downstreamStatus).toBe("PENDING");
+  });
+
+  it("RECOVERY round 2: a metadata deadline STOPS Phase 2 rather than re-attempting the already-passed deadline on every remaining fill", async () => {
+    const fetchSourceMarketMetadata = vi.fn(async () => {
+      throw new DeadlineExceededError("gamma-api.polymarket.com request skipped: caller deadline already reached");
+    });
+    const { deps } = makeDeps({
+      network: makeNetworkDeps({
+        0: [
+          trade({ transactionHash: "0xtx-a", asset: "0xasset-away" }),
+          trade({ transactionHash: "0xtx-b", asset: "0xasset-home", timestamp: 1_700_000_100 }),
+          trade({ transactionHash: "0xtx-c", asset: "0xasset-away", timestamp: 1_700_000_200 }),
+        ],
+      }),
+      fetchSourceMarketMetadata: fetchSourceMarketMetadata as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
+    });
+    const result = await pollSportsShadowWallet(WALLET, 0, deps);
+    expect(fetchSourceMarketMetadata).toHaveBeenCalledTimes(1);
+    expect(result.error).toBeNull();
+    expect(result.metadataDeadlineReached).toBe(true);
+  });
+
+  it("RECOVERY round 2: a genuine (non-deadline) metadata failure keeps its original error/counter/continue semantics", async () => {
+    const fetchSourceMarketMetadata = vi.fn(async () => {
+      throw new Error("gamma-api 500");
+    });
+    const { deps } = makeDeps({
+      network: makeNetworkDeps({
+        0: [
+          trade({ transactionHash: "0xtx-a", asset: "0xasset-away" }),
+          trade({ transactionHash: "0xtx-b", asset: "0xasset-home", timestamp: 1_700_000_100 }),
+        ],
+      }),
+      fetchSourceMarketMetadata: fetchSourceMarketMetadata as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
+    });
+    const result = await pollSportsShadowWallet(WALLET, 0, deps);
+    expect(fetchSourceMarketMetadata).toHaveBeenCalledTimes(2);
+    expect(result.metadataFetchFailures).toBe(2);
+    expect(result.metadataDeadlineReached).toBe(false);
+    expect(result.error).toContain("gamma-api 500");
+  });
+
+  it("RECOVERY round 2: pre-go-live rows already buffered before a metadata deadline are still flushed to COMPLETE", async () => {
+    const repo = new FakeRepo();
+    const { deps } = makeDeps({
+      repo,
+      network: makeNetworkDeps({
+        0: [
+          trade({ transactionHash: "0xtx-old", asset: "0xasset-away", timestamp: 1_700_000_000 }),
+          trade({ transactionHash: "0xtx-new", asset: "0xasset-home", timestamp: 1_700_000_200 }),
+        ],
+      }),
+      fetchSourceMarketMetadata: vi.fn(async () => {
+        throw new DeadlineExceededError("gamma-api.polymarket.com request skipped: caller deadline already reached");
+      }) as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
+    });
+    const result = await pollSportsShadowWallet(WALLET, 1_700_000_150_000, deps);
+    expect(result.suppressedPreGoLive).toBe(1);
+    expect(result.error).toBeNull();
+    const statuses = [...repo.fillsByEventKey.values()].map((f) => f.downstreamStatus);
+    expect(statuses).toContain("COMPLETE");
+    expect(statuses).toContain("PENDING");
+  });
+
   it("caches metadata by conditionId — two fills sharing a conditionId only fetch metadata once", async () => {
     const fetchSourceMarketMetadata = vi.fn(async () => ELIGIBLE_METADATA);
     const { deps } = makeDeps({
@@ -3003,7 +3087,11 @@ describe("pollSportsShadowWallet — pre-go-live backlog drain (recovery regress
 
     // The eligible fill safely stays PENDING (retried next poll) -- but the historical
     // backlog is durably drained anyway, which is exactly what used to be impossible.
-    expect(result.metadataFetchFailures).toBe(1);
+    // RECOVERY round 2: a deadline is a bounded stop, so it is reported as
+    // metadataDeadlineReached (NOT as a failure/error that would raise source_unhealthy).
+    expect(result.metadataFetchFailures).toBe(0);
+    expect(result.metadataDeadlineReached).toBe(true);
+    expect(result.error).toBeNull();
     expect(result.suppressedPreGoLive).toBe(120);
     for (const id of backlogIds) expect(repo.fillsById.get(id)?.downstreamStatus).toBe("COMPLETE");
   });
