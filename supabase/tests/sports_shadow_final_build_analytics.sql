@@ -70,12 +70,14 @@ BEGIN
   -- persists onto sports_shadow_signals.experiment_epoch_id (the bug this pass fixed --
   -- previously always NULL regardless of what was passed).
   ------------------------------------------------------------------
-  v_oid := 'public.insert_sports_shadow_episode(uuid, text, text, text, text, text, text, text, text, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, text, timestamptz, text, text, text, text, numeric, text, uuid)'::regprocedure;
+  -- CODEX P1-6 appended a 26th trailing parameter (p_source_rules_description text)
+  -- via DROP+CREATE, so the exact-signature regprocedure cast below must match it.
+  v_oid := 'public.insert_sports_shadow_episode(uuid, text, text, text, text, text, text, text, text, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, text, timestamptz, text, text, text, text, numeric, text, uuid, text)'::regprocedure;
   IF NOT has_function_privilege('service_role', v_oid, 'EXECUTE') THEN
-    RAISE EXCEPTION 'service_role must have EXECUTE on insert_sports_shadow_episode(...25 args)';
+    RAISE EXCEPTION 'service_role must have EXECUTE on insert_sports_shadow_episode(...26 args)';
   END IF;
   IF has_function_privilege('anon', v_oid, 'EXECUTE') THEN
-    RAISE EXCEPTION 'anon must not have EXECUTE on insert_sports_shadow_episode(...25 args)';
+    RAISE EXCEPTION 'anon must not have EXECUTE on insert_sports_shadow_episode(...26 args)';
   END IF;
 
   INSERT INTO public.sports_shadow_source_fills (event_key, wallet, asset, side, source_ts, identity_basis)
@@ -175,11 +177,14 @@ BEGIN
   RETURNING id INTO v_obs_late;
 
   -- Earlier routing_timestamp, contracts = 7 -- this is the one that must win.
-  INSERT INTO public.sports_shadow_paper_fills (signal_id, experiment_epoch_id, observation_id, side, notional_tier_usd, routing_timestamp, chosen_venue, fill_status, contracts)
-  VALUES (v_signal_a, v_epoch_id, v_obs_early, 'ENTRY', 25, v_cal_start + interval '1 day', 'PMUS', 'FULL', 7);
+  -- pmus_observation_id set (not a bare observation_id -- CODEX P1-2 replaced the
+  -- single ambiguous column with per-venue provenance) and chosen_venue = 'PMUS' so
+  -- get_sports_shadow_episode_outcomes' CASE join picks v_obs_early's own spread.
+  INSERT INTO public.sports_shadow_paper_fills (signal_id, experiment_epoch_id, requested_delay_ms, pmus_observation_id, side, notional_tier_usd, routing_timestamp, chosen_venue, fill_status, contracts)
+  VALUES (v_signal_a, v_epoch_id, 0, v_obs_early, 'ENTRY', 25, v_cal_start + interval '1 day', 'PMUS', 'FULL', 7);
   -- Later routing_timestamp, contracts = 99 -- must be excluded by DISTINCT ON.
-  INSERT INTO public.sports_shadow_paper_fills (signal_id, experiment_epoch_id, observation_id, side, notional_tier_usd, routing_timestamp, chosen_venue, fill_status, contracts)
-  VALUES (v_signal_a, v_epoch_id, v_obs_late, 'ENTRY', 25, v_cal_start + interval '1 day 1 hour', 'PMUS', 'FULL', 99);
+  INSERT INTO public.sports_shadow_paper_fills (signal_id, experiment_epoch_id, requested_delay_ms, pmus_observation_id, side, notional_tier_usd, routing_timestamp, chosen_venue, fill_status, contracts)
+  VALUES (v_signal_a, v_epoch_id, 60000, v_obs_late, 'ENTRY', 25, v_cal_start + interval '1 day 1 hour', 'PMUS', 'FULL', 99);
 
   -- Settlement for the WRONG venue at the same tier -- must NOT join.
   INSERT INTO public.sports_shadow_settlements (signal_id, venue, notional_tier_usd, settlement_status, net_pnl_usd)
