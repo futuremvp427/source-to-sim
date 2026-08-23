@@ -238,4 +238,28 @@ describe("FINAL BUILD Part 5/8/10: OUT_OF_SAMPLE gate -- classification-gated pr
     expect(base.oosSnapshots).toBe(0);
     expect(classificationCalls).toBe(0);
   });
+
+  it("source-coverage gaps block OOS promotion before classification, snapshots, or readiness alerts can emit side effects", async () => {
+    let classificationCalls = 0;
+    const base = fakeRepo(
+      epoch({ stage: "OUT_OF_SAMPLE", oosStartedAtIso: new Date(oosStart).toISOString() }),
+      200,
+      { passed: true, failedChecks: [] },
+      "LIVE_PILOT_REVIEW_READY",
+      true,
+    );
+    const repo: StageRepository = {
+      ...base,
+      async evaluateOosClassification() {
+        classificationCalls += 1;
+        return "LIVE_PILOT_REVIEW_READY";
+      },
+    };
+    const outcome = await evaluateAndApplyStageTransition(() => gateMetNow, repo);
+    expect(outcome?.nextStage).toBeNull();
+    expect(outcome?.reason).toMatch(/source-coverage gap/);
+    expect(classificationCalls).toBe(0);
+    expect(base.oosSnapshots).toBe(0);
+    expect(base.notifications).toHaveLength(0);
+  });
 });

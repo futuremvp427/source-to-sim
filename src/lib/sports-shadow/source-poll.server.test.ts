@@ -40,7 +40,12 @@ class FakeRepo implements PollRepository {
   episodesById = new Map<string, { row: NewSignalRow; state: OpenEpisodeState }>();
   nextId = 1;
   findLatestEpisodeCalls = 0;
-  updateEpisodeAtomicCalls: Array<{ fillId: string; signalId: string; state: OpenEpisodeState }> = [];
+  updateEpisodeAtomicCalls: Array<{
+    fillId: string;
+    signalId: string;
+    state: OpenEpisodeState;
+    lifecycleTrigger: { triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; addFraction: number | null; price: number; sourceTs: number } | undefined;
+  }> = [];
   sellEventsByFillId = new Map<string, { signalId: string | null; shares: number; price: number; notional: number; sourceTs: number }>();
   markFillCompleteCalls: string[] = [];
   markFillTerminalCalls: Array<{ fillId: string; status: string }> = [];
@@ -212,14 +217,19 @@ class FakeRepo implements PollRepository {
     signalId: string,
     state: OpenEpisodeState,
     sellEvent?: { shares: number; price: number; notional: number; sourceTs: number },
+    lifecycleTrigger?: { triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; addFraction: number | null; price: number; sourceTs: number },
   ): Promise<void> {
     if (this.throwOnUpdateEpisodeAtomic) throw this.throwOnUpdateEpisodeAtomic;
-    this.updateEpisodeAtomicCalls.push({ fillId, signalId, state });
+    if (lifecycleTrigger && this.throwOnRecordLifecycleTrigger) throw this.throwOnRecordLifecycleTrigger;
+    this.updateEpisodeAtomicCalls.push({ fillId, signalId, state, lifecycleTrigger });
     const existing = this.episodesById.get(signalId);
     if (existing) existing.state = state;
     const fill = this.fillsById.get(fillId);
     if (fill) fill.downstreamStatus = "COMPLETE";
     if (sellEvent) this.sellEventsByFillId.set(fillId, { signalId, ...sellEvent });
+    if (lifecycleTrigger && !this.lifecycleTriggersByFillId.has(fillId)) {
+      this.lifecycleTriggersByFillId.set(fillId, { signalId, sourceFillId: fillId, ...lifecycleTrigger });
+    }
   }
 
   async recordPreEpochSell(fillId: string, shares: number, price: number, notional: number, sourceTs: number): Promise<void> {
@@ -229,12 +239,12 @@ class FakeRepo implements PollRepository {
   }
 
   /** CODEX P1-3 (follower lifecycle): idempotent via a Map keyed by sourceFillId, mirroring the real UNIQUE(source_fill_id) constraint. */
-  lifecycleTriggersByFillId = new Map<string, { signalId: string; sourceFillId: string; triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; price: number; sourceTs: number }>();
+  lifecycleTriggersByFillId = new Map<string, { signalId: string; sourceFillId: string; triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; addFraction: number | null; price: number; sourceTs: number }>();
   throwOnRecordLifecycleTrigger: Error | null = null;
-  async recordLifecycleTrigger(signalId: string, sourceFillId: string, triggerType: "ADD" | "EXIT", trackedShares: number, exitFraction: number | null, price: number, sourceTs: number): Promise<void> {
+  async recordLifecycleTrigger(signalId: string, sourceFillId: string, triggerType: "ADD" | "EXIT", trackedShares: number, exitFraction: number | null, addFraction: number | null, price: number, sourceTs: number): Promise<void> {
     if (this.throwOnRecordLifecycleTrigger) throw this.throwOnRecordLifecycleTrigger;
     if (this.lifecycleTriggersByFillId.has(sourceFillId)) return; // idempotent no-op, mirrors ON CONFLICT DO UPDATE (no-op) in the real RPC
-    this.lifecycleTriggersByFillId.set(sourceFillId, { signalId, sourceFillId, triggerType, trackedShares, exitFraction, price, sourceTs });
+    this.lifecycleTriggersByFillId.set(sourceFillId, { signalId, sourceFillId, triggerType, trackedShares, exitFraction, addFraction, price, sourceTs });
   }
 
   async markFillComplete(fillId: string): Promise<void> {
@@ -1013,7 +1023,7 @@ describe("pollSportsShadowWallet — episode engine integration", () => {
   });
 
   describe("CODEX P1-3: follower lifecycle triggers -- ADD/EXIT reactions durably recorded for later scheduling", () => {
-    it("an AGGREGATED_BUY (DCA into an already-open episode) records an ADD trigger for the new fill's own shares", async () => {
+    it("an AGGREGATED_BUY (DCA into an already-open episode) records an ADD trigger with the source DCA fraction", async () => {
       const repo = new FakeRepo();
       const { deps } = makeDeps({
         repo,
@@ -1031,6 +1041,7 @@ describe("pollSportsShadowWallet — episode engine integration", () => {
       expect(trigger?.triggerType).toBe("ADD");
       expect(trigger?.trackedShares).toBe(7); // the NEW fill's own shares, not the episode's cumulative total
       expect(trigger?.exitFraction).toBeNull();
+      expect(trigger?.addFraction).toBeCloseTo(7 / 10, 9); // 7 new shares over 10 source shares remaining before the DCA
     });
 
     it("a NEW_EPISODE (the very first BUY) records NO lifecycle trigger -- that is the existing ENTRY burst's own job, not a lifecycle reaction", async () => {
@@ -1058,6 +1069,7 @@ describe("pollSportsShadowWallet — episode engine integration", () => {
       expect(trigger?.triggerType).toBe("EXIT");
       expect(trigger?.trackedShares).toBe(5);
       expect(trigger?.exitFraction).toBeCloseTo(5 / 20, 9); // 20 remaining before this sell, 5 sold -> 25%
+      expect(trigger?.addFraction).toBeNull();
     });
 
     it("a FULL exit (sell reduces remaining tracked inventory to exactly zero) records exitFraction=1 exactly", async () => {
@@ -1101,7 +1113,7 @@ describe("pollSportsShadowWallet — episode engine integration", () => {
       expect(repo.lifecycleTriggersByFillId.size).toBe(0);
     });
 
-    it("recordLifecycleTrigger failure is best-effort -- never fails the fill's own already-successful episode write", async () => {
+    it("lifecycle trigger failure rolls back the episode update and leaves the fill PENDING for retry", async () => {
       const repo = new FakeRepo();
       repo.throwOnRecordLifecycleTrigger = new Error("simulated trigger-recording failure");
       const { deps } = makeDeps({
@@ -1114,9 +1126,18 @@ describe("pollSportsShadowWallet — episode engine integration", () => {
         }),
       });
       const result = await pollSportsShadowWallet(WALLET, 0, deps);
-      expect(result.error).toBeNull(); // best-effort -- not surfaced as a poll error
-      expect(result.aggregatedCount).toBe(1); // the episode write itself still succeeded
+      expect(result.error).toContain("simulated trigger-recording failure");
+      expect(result.aggregatedCount).toBe(1); // decision was computed, but the atomic write rolled back
       expect(repo.lifecycleTriggersByFillId.size).toBe(0); // the trigger genuinely wasn't recorded
+      expect([...repo.fillsByEventKey.values()].filter((f) => f.downstreamStatus === "PENDING")).toHaveLength(1);
+      expect([...repo.episodesById.values()][0]!.state.totalShares).toBe(10); // second BUY did not commit without its trigger
+
+      repo.throwOnRecordLifecycleTrigger = null;
+      const { deps: retryDeps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [] }) });
+      const retry = await pollSportsShadowWallet(WALLET, 0, retryDeps);
+      expect(retry.orphanedFillsRecovered).toBe(1);
+      expect(repo.lifecycleTriggersByFillId.size).toBe(1);
+      expect([...repo.episodesById.values()][0]!.state.totalShares).toBe(17);
     });
   });
 

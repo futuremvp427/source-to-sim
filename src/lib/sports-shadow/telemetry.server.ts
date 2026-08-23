@@ -227,6 +227,7 @@ export function cycleSummaryToTelemetryEvents(summary: {
   durationMs: number;
   observationLane: { pmus: { attempted: number; captured: number; failed: number; skipped: number }; kalshi: { attempted: number; captured: number; failed: number; skipped: number } };
   sourceLane: {
+    acquired?: boolean;
     walletsAttempted: number;
     newSignalsCreated: number;
     leaseLost: boolean;
@@ -259,8 +260,17 @@ export function cycleSummaryToTelemetryEvents(summary: {
     { category: "OBSERVATION", metric: "skipped", value: summary.observationLane.kalshi.skipped, labels: { venue: "KALSHI" } },
   ];
   if (summary.sourceLane) {
+    const sourceAcquired = summary.sourceLane.acquired !== false;
+    events.push(
+      { category: "SOURCE", metric: "source_lease_acquired", value: sourceAcquired ? 1 : 0 },
+      { category: "SOURCE", metric: "source_lease_skipped", value: sourceAcquired ? 0 : 1 },
+    );
+    if (!sourceAcquired) {
+      return events.map((e) => ({ ...e, experimentEpochId: summary.epochId }));
+    }
     events.push(
       { category: "SOURCE", metric: "wallets_attempted", value: summary.sourceLane.walletsAttempted },
+      { category: "SOURCE", metric: "source_starved", value: summary.sourceLane.walletsAttempted === 0 ? 1 : 0 },
       { category: "SOURCE", metric: "new_signals", value: summary.sourceLane.newSignalsCreated },
       { category: "SOURCE", metric: "lease_lost", value: summary.sourceLane.leaseLost ? 1 : 0 },
       // CODEX P1-1 (round 2): durable per-cycle visibility into the continuous

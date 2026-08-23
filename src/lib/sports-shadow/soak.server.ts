@@ -16,16 +16,11 @@ import { evaluateSoakHealth, type SoakHealthInput, type SoakHealthResult } from 
 import { countRecentRateLimitEvents, countRecentRateLimitPersistFailures } from "./telemetry.server";
 
 /**
- * The external scheduler's actual cadence is not configured anywhere in this repo (the
- * hook route tolerates arbitrary invocation timing by design -- see
- * sports-shadow.ts's own doc comment). This is a DOCUMENTED ASSUMPTION, not a measured
- * fact: if the real external cron is materially slower than once a minute, the
- * completion-ratio check will under-count expected cycles and could fail health for a
- * healthy-but-slower-than-assumed scheduler. Tune this constant once the real external
- * cadence is known; until then, soak.ts's own 50% floor (not 90%+) is deliberately
- * forgiving of this uncertainty.
+ * Matches sports_shadow_pg_cron.sql's source-lane cadence. The scheduler is now split
+ * into independent jobs, but source progress is still expected once per 30-second
+ * source invocation; observation/settlement heartbeats have separate alert checks.
  */
-export const EXPECTED_CYCLE_INTERVAL_MS = 60_000;
+export const EXPECTED_CYCLE_INTERVAL_MS = 30_000;
 
 /** A settlement still PENDING this long after its paper fill is considered stuck -- generous relative to any real sports settlement (games resolve in hours, not days). */
 export const SETTLEMENT_STUCK_THRESHOLD_MS = 48 * 60 * 60 * 1000;
@@ -42,6 +37,7 @@ type RawTelemetryRollup = {
   kalshi_discovery_attempted_cycles: number;
   source_lane_acquired_cycles: number;
   source_starved_cycles: number;
+  source_lease_skipped_count: number;
   lease_lost_count: number;
 };
 

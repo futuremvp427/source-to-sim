@@ -93,6 +93,28 @@ describe("FINAL BUILD Part 25: cycleSummaryToTelemetryEvents", () => {
     expect(events.find((e) => e.metric === "lease_lost")?.value).toBe(1);
   });
 
+  it("CODEX P2-6: a source lease skip is distinct from acquired-but-starved source work", () => {
+    const events = cycleSummaryToTelemetryEvents({
+      durationMs: 100,
+      observationLane: { pmus: { attempted: 0, captured: 0, failed: 0, skipped: 0 }, kalshi: { attempted: 0, captured: 0, failed: 0, skipped: 0 } },
+      sourceLane: {
+        acquired: false,
+        walletsAttempted: 0,
+        newSignalsCreated: 0,
+        leaseLost: false,
+        walletSummaries: [],
+        pmus: { attempted: 0, exact: 0, discoveryFailed: false, deadlineReached: false },
+        kalshi: { attempted: 0, exact: 0, discoveryFailed: false, deadlineReached: false },
+      },
+      errors: [],
+      epochId: "epoch-1",
+    });
+    expect(events.find((e) => e.metric === "source_lease_acquired")?.value).toBe(0);
+    expect(events.find((e) => e.metric === "source_lease_skipped")?.value).toBe(1);
+    expect(events.some((e) => e.metric === "wallets_attempted")).toBe(false);
+    expect(events.some((e) => e.metric === "source_starved")).toBe(false);
+  });
+
   it("omits SOURCE/VENUE events entirely when sourceLane is null (lane not acquired this cycle)", () => {
     const events = cycleSummaryToTelemetryEvents({
       durationMs: 100,

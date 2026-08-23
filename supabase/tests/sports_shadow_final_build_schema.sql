@@ -222,9 +222,10 @@ BEGIN
     -- corresponding sports_shadow_paper_positions row in the SAME transaction.
     IF NOT EXISTS (
       SELECT 1 FROM public.sports_shadow_paper_positions
-      WHERE signal_id = v_signal_id AND venue = 'PMUS' AND notional_tier_usd = 25 AND contracts_open = 20
+      WHERE signal_id = v_signal_id AND venue = 'PMUS' AND notional_tier_usd = 25
+        AND contracts_open = 20 AND remaining_cost_basis_usd = 10.1 AND total_fees_usd = 0.1
     ) THEN
-      RAISE EXCEPTION 'expected finalize_sports_shadow_routing_decision to atomically open a paper position on ENTRY/FULL';
+      RAISE EXCEPTION 'expected finalize_sports_shadow_routing_decision to atomically open a paper position with nonzero cost basis/fees on ENTRY/FULL';
     END IF;
   END;
 

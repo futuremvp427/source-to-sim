@@ -124,6 +124,28 @@ export async function evaluateAndApplyStageTransition(now: () => number = Date.n
   // soak's own health gate.
   const sourceCoverageGapDetected = await repo.hasUnresolvedSourceCoverageGap();
 
+  // A source-coverage gap is an absolute research-validity block. The pure state machine
+  // already prevents promotion/advancement, but milestone snapshots/classification/alerts
+  // below are side effects too; fail closed before any of them can run.
+  if (
+    sourceCoverageGapDetected &&
+    epoch.stage !== "PRE_SOAK" &&
+    epoch.stage !== "FAILED" &&
+    epoch.stage !== "PAUSED" &&
+    epoch.stage !== "LIVE_PILOT_REVIEW_READY"
+  ) {
+    const transition = evaluateStageTransition({
+      epoch: epochState,
+      nowMs,
+      independentSettledSinceCalibrationStart,
+      independentSettledSinceOosStart,
+      soakHealthPassed,
+      oosClassification: null,
+      sourceCoverageGapDetected,
+    });
+    return { epochId: epoch.id, previousStage: epoch.stage, nextStage: null, reason: transition.reason, soakFailedChecks };
+  }
+
   // FINAL BUILD Part 8: CALIBRATION's gate has exactly one outcome once reached (always
   // transitions to OUT_OF_SAMPLE -- see stage.ts), so it's safe to snapshot BEFORE
   // computing the transition below; nothing about the transition depends on the snapshot.

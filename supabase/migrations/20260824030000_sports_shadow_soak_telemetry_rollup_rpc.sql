@@ -15,6 +15,7 @@ RETURNS TABLE (
   kalshi_discovery_attempted_cycles bigint,
   source_lane_acquired_cycles bigint,
   source_starved_cycles bigint,
+  source_lease_skipped_count numeric,
   lease_lost_count numeric
 )
 LANGUAGE sql
@@ -31,8 +32,9 @@ AS $$
     count(*) FILTER (WHERE category = 'VENUE' AND metric = 'discovery_failed' AND labels->>'venue' = 'PMUS')::bigint AS pmus_discovery_attempted_cycles,
     COALESCE(sum(value) FILTER (WHERE category = 'VENUE' AND metric = 'discovery_failed' AND labels->>'venue' = 'KALSHI'), 0) AS kalshi_discovery_failed_count,
     count(*) FILTER (WHERE category = 'VENUE' AND metric = 'discovery_failed' AND labels->>'venue' = 'KALSHI')::bigint AS kalshi_discovery_attempted_cycles,
-    count(*) FILTER (WHERE category = 'SOURCE' AND metric = 'wallets_attempted')::bigint AS source_lane_acquired_cycles,
-    count(*) FILTER (WHERE category = 'SOURCE' AND metric = 'wallets_attempted' AND value = 0)::bigint AS source_starved_cycles,
+    COALESCE(sum(value) FILTER (WHERE category = 'SOURCE' AND metric = 'source_lease_acquired'), (count(*) FILTER (WHERE category = 'SOURCE' AND metric = 'wallets_attempted'))::numeric, 0)::bigint AS source_lane_acquired_cycles,
+    COALESCE(sum(value) FILTER (WHERE category = 'SOURCE' AND metric = 'source_starved'), (count(*) FILTER (WHERE category = 'SOURCE' AND metric = 'wallets_attempted' AND value = 0))::numeric, 0)::bigint AS source_starved_cycles,
+    COALESCE(sum(value) FILTER (WHERE category = 'SOURCE' AND metric = 'source_lease_skipped'), 0) AS source_lease_skipped_count,
     COALESCE(sum(value) FILTER (WHERE category = 'SOURCE' AND metric = 'lease_lost'), 0) AS lease_lost_count
   FROM public.sports_shadow_telemetry_events
   WHERE experiment_epoch_id = p_epoch_id AND created_at >= p_since;

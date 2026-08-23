@@ -32,11 +32,12 @@ BEGIN
   -- (p_cluster_key / sell-ledger params) -- see 20260823110000/20260823100000's own
   -- doc comments for why the old signature was explicitly DROPped, not just replaced.
   -- CODEX P1-6 appended insert_sports_shadow_episode's 26th param (p_source_rules_
-  -- description text) and CODEX P1-3 appended update_sports_shadow_episode's 16th-18th
-  -- params (untracked-sell-shares inventory lifecycle) -- both via the same DROP+CREATE
-  -- pattern, so both exact-signature casts below must match the new arg lists.
+  -- description text), CODEX P1-3 appended update_sports_shadow_episode's 16th-18th
+  -- params (untracked-sell-shares inventory lifecycle), and the PR #55 final gate
+  -- appended atomic lifecycle-trigger params -- all via DROP+CREATE, so both exact-
+  -- signature casts below must match the new arg lists.
   v_oid_insert := 'public.insert_sports_shadow_episode(uuid, text, text, text, text, text, text, text, text, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, text, timestamptz, text, text, text, text, numeric, text, uuid, text)'::regprocedure;
-  v_oid_update := 'public.update_sports_shadow_episode(uuid, uuid, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, numeric, numeric, numeric, numeric, numeric, bigint, numeric, numeric, numeric)'::regprocedure;
+  v_oid_update := 'public.update_sports_shadow_episode(uuid, uuid, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, numeric, numeric, numeric, numeric, numeric, bigint, numeric, numeric, numeric, text, numeric, numeric, numeric, numeric, bigint)'::regprocedure;
 
   SELECT EXISTS (
     SELECT 1 FROM pg_proc p, LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a
@@ -125,6 +126,44 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM public.sports_shadow_signals WHERE id = v_signal_id AND source_shares = 20 AND source_sell_seen = true) THEN
     RAISE EXCEPTION 'expected update_sports_shadow_episode to have applied the new aggregate fields';
+  END IF;
+
+  ------------------------------------------------------------------
+  -- 5. Atomic lifecycle trigger: a trigger constraint failure rolls back BOTH the
+  -- episode update and the fill completion, so the source fill can be retried.
+  ------------------------------------------------------------------
+  INSERT INTO public.sports_shadow_source_fills (event_key, wallet, asset, side, source_ts, identity_basis)
+  VALUES ('rpc-test-fill-3', '0xtest', '0xasset', 'BUY', 3, 'source_id')
+  RETURNING id INTO v_fill_id;
+
+  BEGIN
+    PERFORM public.update_sports_shadow_episode(
+      v_fill_id, v_signal_id, now(), now(), 0.7, 30, 21, 3, true,
+      0, 0, NULL, NULL, NULL, NULL, 0, 0, 0,
+      'ADD', 10, NULL, NULL, 0.7, 3
+    );
+    RAISE EXCEPTION 'expected invalid ADD lifecycle trigger without add_fraction to fail';
+  EXCEPTION WHEN check_violation THEN
+    NULL; -- expected: sports_shadow_lifecycle_triggers_type_fraction_check
+  END;
+  SELECT downstream_status INTO v_status FROM public.sports_shadow_source_fills WHERE id = v_fill_id;
+  IF v_status <> 'PENDING' THEN
+    RAISE EXCEPTION 'expected invalid lifecycle trigger to leave fill PENDING, got %', v_status;
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.sports_shadow_signals WHERE id = v_signal_id AND source_shares = 30) THEN
+    RAISE EXCEPTION 'expected invalid lifecycle trigger to roll back signal aggregate mutation';
+  END IF;
+
+  PERFORM public.update_sports_shadow_episode(
+    v_fill_id, v_signal_id, now(), now(), 0.7, 30, 21, 3, true,
+    0, 0, NULL, NULL, NULL, NULL, 0, 0, 0,
+    'ADD', 10, NULL, 0.5, 0.7, 3
+  );
+  IF NOT EXISTS (
+    SELECT 1 FROM public.sports_shadow_lifecycle_triggers
+    WHERE source_fill_id = v_fill_id AND trigger_type = 'ADD' AND add_fraction = 0.5
+  ) THEN
+    RAISE EXCEPTION 'expected valid update_sports_shadow_episode call to record ADD lifecycle trigger atomically';
   END IF;
 
   RAISE NOTICE 'sports_shadow_fill_retry_rpcs contract passed';

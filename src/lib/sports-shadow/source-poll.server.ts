@@ -434,15 +434,11 @@ export type PollRepository = {
   /** Most recent episode (by source_last_fill_at) for this exact position, if any. */
   findLatestEpisode(wallet: string, conditionId: string, asset: string): Promise<EpisodeCacheEntry | null>;
   /**
-   * CODEX P1-3 (follower lifecycle): records a durable "this source fill requires a
-   * follower ADD/EXIT reaction" event, idempotently (UNIQUE(source_fill_id) -- a
-   * crashed/retried poll recovers the SAME row rather than creating a duplicate
-   * reaction). Best-effort at the call site: a failure here must never fail the fill's
-   * own already-successful episode-aggregation write (the fill still completes; the
-   * lifecycle reaction is simply missed for this fill, exactly like any other
-   * best-effort maintenance write in this module).
+   * CODEX P1-3 (follower lifecycle): legacy direct writer retained for tests/tools, but
+   * the production source-poll path now records lifecycle triggers through
+   * updateEpisodeAtomic so the fill completion and follower reaction commit together.
    */
-  recordLifecycleTrigger(signalId: string, sourceFillId: string, triggerType: "ADD" | "EXIT", trackedShares: number, exitFraction: number | null, price: number, sourceTs: number): Promise<void>;
+  recordLifecycleTrigger(signalId: string, sourceFillId: string, triggerType: "ADD" | "EXIT", trackedShares: number, exitFraction: number | null, addFraction: number | null, price: number, sourceTs: number): Promise<void>;
   /** Bounded, oldest-source_ts-first: every fill for this wallet whose downstream processing has not yet safely completed. Includes fills inserted THIS poll and any orphaned by an earlier failure/crash — see this module's Task 12D/P1-A doc comment. */
   findPendingDownstreamFills(wallet: string, limit: number): Promise<PendingDownstreamFillRow[]>;
   /** Atomically inserts the new episode row AND marks fillId's downstream_status COMPLETE in one transaction. */
@@ -453,9 +449,17 @@ export type PollRepository = {
    * SELL_RECORDED update against a KNOWN open episode), ALSO atomically inserts the
    * individual auditable sell-event row in the SAME transaction (FINAL BUILD Part 5/14)
    * -- omitted entirely for a plain BUY aggregation update (AGGREGATED_BUY/
-   * LATE_RECONCILIATION), which never touches the sell ledger.
+   * LATE_RECONCILIATION), which never touches the sell ledger. `lifecycleTrigger`, when
+   * provided, is inserted in that same transaction as well; a trigger insert failure must
+   * leave the source fill PENDING so the follower ADD/EXIT reaction is never lost.
    */
-  updateEpisodeAtomic(fillId: string, signalId: string, state: OpenEpisodeState, sellEvent?: { shares: number; price: number; notional: number; sourceTs: number; untrackedShares: number }): Promise<void>;
+  updateEpisodeAtomic(
+    fillId: string,
+    signalId: string,
+    state: OpenEpisodeState,
+    sellEvent?: { shares: number; price: number; notional: number; sourceTs: number; untrackedShares: number },
+    lifecycleTrigger?: { triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; addFraction: number | null; price: number; sourceTs: number },
+  ): Promise<void>;
   /** FINAL BUILD Part 5: records a sell fill with NO known forward open position (pre-epoch/untracked -- Part 5's explicit case) and marks the fill COMPLETE, atomically. Never fabricates a signal_id. */
   recordPreEpochSell(fillId: string, shares: number, price: number, notional: number, sourceTs: number): Promise<void>;
   /** Marks a fill COMPLETE with no paired episode mutation — safe as a lone single-table write (see this module's terminal-classification doc comment). */
@@ -708,13 +712,14 @@ export const supabasePollRepository: PollRepository = {
     };
   },
 
-  async recordLifecycleTrigger(signalId, sourceFillId, triggerType, trackedShares, exitFraction, price, sourceTs) {
+  async recordLifecycleTrigger(signalId, sourceFillId, triggerType, trackedShares, exitFraction, addFraction, price, sourceTs) {
     const { error } = await supabaseAdmin.rpc("record_sports_shadow_lifecycle_trigger" as never, {
       p_signal_id: signalId,
       p_source_fill_id: sourceFillId,
       p_trigger_type: triggerType,
       p_tracked_shares: trackedShares,
       p_exit_fraction: exitFraction,
+      p_add_fraction: addFraction,
       p_price: price,
       p_source_ts: sourceTs,
     } as never);
@@ -802,7 +807,7 @@ export const supabasePollRepository: PollRepository = {
     return { id: data as unknown as string };
   },
 
-  async updateEpisodeAtomic(fillId, signalId, state, sellEvent) {
+  async updateEpisodeAtomic(fillId, signalId, state, sellEvent, lifecycleTrigger) {
     const { error } = await supabaseAdmin.rpc("update_sports_shadow_episode" as never, {
       p_fill_id: fillId,
       p_signal_id: signalId,
@@ -822,6 +827,12 @@ export const supabasePollRepository: PollRepository = {
       p_untracked_sell_shares: state.untrackedSellShares,
       p_untracked_sell_notional: state.untrackedSellNotional,
       p_sell_event_untracked_shares: sellEvent?.untrackedShares ?? 0,
+      p_lifecycle_trigger_type: lifecycleTrigger?.triggerType ?? null,
+      p_lifecycle_trigger_tracked_shares: lifecycleTrigger?.trackedShares ?? null,
+      p_lifecycle_trigger_exit_fraction: lifecycleTrigger?.exitFraction ?? null,
+      p_lifecycle_trigger_add_fraction: lifecycleTrigger?.addFraction ?? null,
+      p_lifecycle_trigger_price: lifecycleTrigger?.price ?? null,
+      p_lifecycle_trigger_source_ts: lifecycleTrigger?.sourceTs ?? null,
     } as never);
     if (error) throw new Error(error.message);
   },
@@ -1972,30 +1983,29 @@ export async function pollSportsShadowWallet(
         // metadata-fetch call sites).
         if (d.now() >= deadlineAtMs) break;
         try {
+          let lifecycleTrigger: { triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; addFraction: number | null; price: number; sourceTs: number } | undefined;
+          if (decision.trackedShares > 0) {
+            const remainingBeforeSell = remainingShares(cacheEntry.state);
+            const exitFraction = computeExitFraction(decision.trackedShares, remainingBeforeSell);
+            if (exitFraction !== null) {
+              lifecycleTrigger = {
+                triggerType: "EXIT",
+                trackedShares: decision.trackedShares,
+                exitFraction,
+                addFraction: null,
+                price: fill.price,
+                sourceTs: fill.sourceTs,
+              };
+            }
+          }
           await d.repo.updateEpisodeAtomic(fill.id, cacheEntry.id, decision.nextState, {
             shares: fill.shares,
             price: fill.price,
             notional: fill.price * fill.shares,
             sourceTs: fill.sourceTs,
             untrackedShares: decision.untrackedShares,
-          });
+          }, lifecycleTrigger);
           positionCache.set(positionKey, { id: cacheEntry.id, state: decision.nextState });
-          // CODEX P1-3 (follower lifecycle): a genuine reduction of TRACKED inventory
-          // (never the untracked/oversell portion) against an already-open episode is a
-          // real source EXIT action -- durably recorded so a later maintenance pass can
-          // schedule the follower's own contemporaneous EXIT reaction. Best-effort: this
-          // must never fail the episode write that already succeeded above.
-          if (decision.trackedShares > 0) {
-            const remainingBeforeSell = remainingShares(cacheEntry.state);
-            const exitFraction = computeExitFraction(decision.trackedShares, remainingBeforeSell);
-            if (exitFraction !== null) {
-              try {
-                await d.repo.recordLifecycleTrigger(cacheEntry.id, fill.id, "EXIT", decision.trackedShares, exitFraction, fill.price, fill.sourceTs);
-              } catch {
-                // Best-effort -- see this module's own P1-3 doc comment on recordLifecycleTrigger.
-              }
-            }
-          }
         } catch (err) {
           result.error = result.error ?? `updateEpisodeAtomic (SELL_RECORDED) failed: ${err instanceof Error ? err.message : "unknown error"}`;
           // stays PENDING
@@ -2032,20 +2042,25 @@ export async function pollSportsShadowWallet(
         // branch above.
         if (d.now() >= deadlineAtMs) break;
         try {
-          await d.repo.updateEpisodeAtomic(fill.id, cacheEntry.id, decision.nextState);
+          const remainingBeforeAdd = remainingShares(cacheEntry.state);
+          const addFraction = remainingBeforeAdd > 0 ? fill.shares / remainingBeforeAdd : null;
+          await d.repo.updateEpisodeAtomic(
+            fill.id,
+            cacheEntry.id,
+            decision.nextState,
+            undefined,
+            addFraction !== null
+              ? {
+                  triggerType: "ADD",
+                  trackedShares: fill.shares,
+                  exitFraction: null,
+                  addFraction,
+                  price: fill.price,
+                  sourceTs: fill.sourceTs,
+                }
+              : undefined,
+          );
           positionCache.set(positionKey, { id: cacheEntry.id, state: decision.nextState });
-          // CODEX P1-3 (follower lifecycle): a DCA buy into an already-open episode
-          // (AGGREGATED_BUY) or a late-discovered one folded into it (LATE_RECONCILIATION)
-          // is a real source ADD action -- both only ever reach this branch when
-          // `episodeOpen` was already true BEFORE this fill (decideFill's own gate), so
-          // `cacheEntry` is always a genuinely pre-existing open position here, never the
-          // fill that just opened it. Best-effort, same reasoning as the SELL_RECORDED
-          // branch above.
-          try {
-            await d.repo.recordLifecycleTrigger(cacheEntry.id, fill.id, "ADD", fill.shares, null, fill.price, fill.sourceTs);
-          } catch {
-            // Best-effort -- see this module's own P1-3 doc comment on recordLifecycleTrigger.
-          }
         } catch (err) {
           result.error = result.error ?? `updateEpisodeAtomic failed: ${err instanceof Error ? err.message : "unknown error"}`;
           // stays PENDING

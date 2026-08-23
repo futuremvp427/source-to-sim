@@ -189,7 +189,7 @@ describe("CODEX P1-2: computePaperFillsForObservation -- exactly ONE determinist
 
   it("Kalshi arrives LATER (before cutoff) via its OWN call -- decides then, using BOTH final same-delay observations, exactly once per tier, no duplicate ladder", async () => {
     const pmus = obs({ id: "obs-pmus", venue: "PMUS" });
-    const kalshi = obs({ id: "obs-kalshi", venue: "KALSHI", askDepth: [{ price: 0.4, size: 1000 }] }); // better price -- should be chosen if both are considered
+    const kalshi = obs({ id: "obs-kalshi", venue: "KALSHI", askDepth: [{ price: 0.4, size: 1000 }] }); // better base price, but incomplete net fees fail closed
     // Kalshi's row genuinely does not exist yet at the time of PM-US's own call --
     // the SAME mutable Map is used for both calls, so adding Kalshi's row in between
     // faithfully simulates it "arriving later," not merely being pre-seeded.
@@ -202,7 +202,8 @@ describe("CODEX P1-2: computePaperFillsForObservation -- exactly ONE determinist
     observations.set("obs-kalshi", kalshi);
     const second = await computePaperFillsForObservation("obs-kalshi", { repo, now: () => pmus.fireAtMs + 2_000 });
     expect(second).toHaveLength(5); // Kalshi's own call is what triggers the (now-complete) decision
-    expect(second.every((r) => r.chosenVenue === "KALSHI")).toBe(true); // the objectively better price wins because BOTH were actually considered
+    expect(second.every((r) => r.chosenVenue === "PMUS")).toBe(true); // Kalshi was considered but fails closed on incomplete net fees
+    expect(second.every((r) => r.kalshiResult.fee?.valid === false)).toBe(true);
     expect(repo.decisions.size).toBe(5);
 
     // No duplicate ladder: re-invoking PM-US's own observation again changes nothing.
@@ -253,7 +254,8 @@ describe("CODEX P1-2: computePaperFillsForObservation -- exactly ONE determinist
     observations.set("obs-kalshi", kalshi);
     const second = await computePaperFillsForObservation("obs-kalshi", { repo, now: () => pmusFailed.fireAtMs + 200 });
     expect(second).toHaveLength(5); // now both known -> decides
-    expect(second.every((r) => r.chosenVenue === "KALSHI")).toBe(true);
+    expect(second.every((r) => r.chosenVenue === null)).toBe(true); // PM-US failed and Kalshi's incomplete net fee is not routable
+    expect(second.every((r) => r.fillStatus === "REJECTED")).toBe(true);
     expect(second.every((r) => r.pmusResult.available === false)).toBe(true);
   });
 
@@ -299,12 +301,13 @@ describe("CODEX P1-2: computePaperFillsForObservation -- exactly ONE determinist
     }
   });
 
-  it("empty ask depth on the triggering venue results in NONE for it, routed to the OTHER venue if it qualifies", async () => {
+  it("empty ask depth on the triggering venue rejects when the other venue has only incomplete net fees", async () => {
     const pmusEmpty = obs({ id: "obs-pmus", venue: "PMUS", askDepth: [] });
     const kalshiGood = obs({ id: "obs-kalshi", venue: "KALSHI" });
     const repo = fakeRepo({ observations: seedObservations(pmusEmpty, kalshiGood) });
     const rows = await computePaperFillsForObservation("obs-pmus", { repo, now: () => 1_700_000_000_500 });
-    expect(rows.every((r) => r.chosenVenue === "KALSHI")).toBe(true);
+    expect(rows.every((r) => r.chosenVenue === null)).toBe(true);
+    expect(rows.every((r) => r.rejectReason?.includes("KALSHI fee UNVERIFIED"))).toBe(true);
   });
 });
 
@@ -421,17 +424,17 @@ describe("CODEX P2-6: computePaperFillsForObservation respects an external deadl
 describe("CODEX P1-3: follower lifecycle -- ADD/EXIT decisions", () => {
   const TIER = 10;
 
-  it("ADD: adds to an existing OPEN position via weighted-average cost basis, using the SAME fixed-notional-tier sizing methodology as ENTRY", async () => {
+  it("ADD: adds to an existing OPEN position using the source DCA fraction, not a fresh full-tier buy", async () => {
     const repo = fakeRepo({
       positions: new Map([[`sig-1:PMUS:${TIER}`, { contractsOpen: 20, avgEntryPrice: 0.5 }]]),
-      lifecycleTriggers: new Map([["trigger-add", { signalId: "sig-1", triggerType: "ADD", trackedShares: 10, exitFraction: null, price: 0.55, sourceTs: 1_700_000_100 }]]),
+      lifecycleTriggers: new Map([["trigger-add", { signalId: "sig-1", triggerType: "ADD", trackedShares: 1, exitFraction: null, addFraction: 0.1, price: 0.55, sourceTs: 1_700_000_100 }]]),
       observations: seedObservations(obs({ id: "obs-add", triggerSourceFillId: "trigger-add", askDepth: [{ price: 0.55, size: 1000 }] })),
     });
     const rows = await computePaperFillsForObservation("obs-add", { repo });
     const row = rows.find((r) => r.notionalTierUsd === TIER)!;
     expect(row.side).toBe("ADD");
     expect(row.fillStatus).toBe("FULL");
-    const addedContracts = TIER / 0.55;
+    const addedContracts = (TIER * 0.1) / 0.55;
     expect(row.contracts).toBeCloseTo(addedContracts, 6);
 
     const after = repo.positions.get(`sig-1:PMUS:${TIER}`)!;
@@ -441,7 +444,7 @@ describe("CODEX P1-3: follower lifecycle -- ADD/EXIT decisions", () => {
 
   it("ADD is REJECTED (never fabricated) when there is no existing OPEN position for this tier -- nothing to add to", async () => {
     const repo = fakeRepo({
-      lifecycleTriggers: new Map([["trigger-add", { signalId: "sig-1", triggerType: "ADD", trackedShares: 10, exitFraction: null, price: 0.55, sourceTs: 1_700_000_100 }]]),
+      lifecycleTriggers: new Map([["trigger-add", { signalId: "sig-1", triggerType: "ADD", trackedShares: 10, exitFraction: null, addFraction: 1, price: 0.55, sourceTs: 1_700_000_100 }]]),
       observations: seedObservations(obs({ id: "obs-add", triggerSourceFillId: "trigger-add" })),
     });
     const rows = await computePaperFillsForObservation("obs-add", { repo });
@@ -454,7 +457,7 @@ describe("CODEX P1-3: follower lifecycle -- ADD/EXIT decisions", () => {
   it("EXIT: sells the proportional share of THIS TIER's own contracts_open against BID depth, realizing P&L against avg_entry_price", async () => {
     const repo = fakeRepo({
       positions: new Map([[`sig-1:PMUS:${TIER}`, { contractsOpen: 20, avgEntryPrice: 0.5 }]]),
-      lifecycleTriggers: new Map([["trigger-exit", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 5, exitFraction: 0.5, price: 0.5, sourceTs: 1_700_000_200 }]]),
+      lifecycleTriggers: new Map([["trigger-exit", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 5, exitFraction: 0.5, addFraction: null, price: 0.5, sourceTs: 1_700_000_200 }]]),
       observations: seedObservations(obs({ id: "obs-exit", triggerSourceFillId: "trigger-exit", bidDepth: [{ price: 0.6, size: 1000 }] })),
     });
     const rows = await computePaperFillsForObservation("obs-exit", { repo });
@@ -478,7 +481,7 @@ describe("CODEX P1-3: follower lifecycle -- ADD/EXIT decisions", () => {
   it("a FULL exit (exitFraction=1) drains contracts_open to exactly zero, leaving no open position for a later tier check", async () => {
     const repo = fakeRepo({
       positions: new Map([[`sig-1:PMUS:${TIER}`, { contractsOpen: 20, avgEntryPrice: 0.5 }]]),
-      lifecycleTriggers: new Map([["trigger-exit-full", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 20, exitFraction: 1, price: 0.5, sourceTs: 1_700_000_300 }]]),
+      lifecycleTriggers: new Map([["trigger-exit-full", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 20, exitFraction: 1, addFraction: null, price: 0.5, sourceTs: 1_700_000_300 }]]),
       observations: seedObservations(obs({ id: "obs-exit-full", triggerSourceFillId: "trigger-exit-full", bidDepth: [{ price: 0.5, size: 1000 }] })),
     });
     await computePaperFillsForObservation("obs-exit-full", { repo });
@@ -489,7 +492,7 @@ describe("CODEX P1-3: follower lifecycle -- ADD/EXIT decisions", () => {
   it("restart idempotency: re-running the SAME captured lifecycle observation never double-applies the position mutation", async () => {
     const repo = fakeRepo({
       positions: new Map([[`sig-1:PMUS:${TIER}`, { contractsOpen: 20, avgEntryPrice: 0.5 }]]),
-      lifecycleTriggers: new Map([["trigger-exit", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 5, exitFraction: 0.5, price: 0.5, sourceTs: 1_700_000_200 }]]),
+      lifecycleTriggers: new Map([["trigger-exit", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 5, exitFraction: 0.5, addFraction: null, price: 0.5, sourceTs: 1_700_000_200 }]]),
       observations: seedObservations(obs({ id: "obs-exit", triggerSourceFillId: "trigger-exit", bidDepth: [{ price: 0.5, size: 1000 }] })),
     });
     const first = await computePaperFillsForObservation("obs-exit", { repo });
@@ -510,9 +513,9 @@ describe("CODEX P1-3: follower lifecycle -- ADD/EXIT decisions", () => {
         [`sig-1:PMUS:${OTHER_TIER}`, { contractsOpen: 50, avgEntryPrice: 0.5 }],
       ]),
       lifecycleTriggers: new Map([
-        ["trigger-add", { signalId: "sig-1", triggerType: "ADD", trackedShares: 10, exitFraction: null, price: 0.55, sourceTs: 1_700_000_100 }],
-        ["trigger-exit-partial", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 5, exitFraction: 0.5, price: 0.5, sourceTs: 1_700_000_200 }],
-        ["trigger-exit-full", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 5, exitFraction: 1, price: 0.45, sourceTs: 1_700_000_300 }],
+        ["trigger-add", { signalId: "sig-1", triggerType: "ADD", trackedShares: 10, exitFraction: null, addFraction: 0.5, price: 0.55, sourceTs: 1_700_000_100 }],
+        ["trigger-exit-partial", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 5, exitFraction: 0.5, addFraction: null, price: 0.5, sourceTs: 1_700_000_200 }],
+        ["trigger-exit-full", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 5, exitFraction: 1, addFraction: null, price: 0.45, sourceTs: 1_700_000_300 }],
       ]),
       observations: seedObservations(
         obs({ id: "obs-add", triggerSourceFillId: "trigger-add", askDepth: [{ price: 0.55, size: 1000 }] }),
@@ -522,14 +525,14 @@ describe("CODEX P1-3: follower lifecycle -- ADD/EXIT decisions", () => {
     });
 
     // ADD -- both tiers get their own independent ADD (isolated: TIER and OTHER_TIER
-    // never share state), sized by the SAME fixed-notional methodology as ENTRY.
+    // never share state), scaled by the source DCA fraction.
     const addRows = await computePaperFillsForObservation("obs-add", { repo });
     const addTier = addRows.find((r) => r.notionalTierUsd === TIER)!;
     const addOtherTier = addRows.find((r) => r.notionalTierUsd === OTHER_TIER)!;
     expect(addTier.side).toBe("ADD");
     expect(addOtherTier.side).toBe("ADD");
-    const addedContractsTier = TIER / 0.55;
-    const addedContractsOtherTier = OTHER_TIER / 0.55;
+    const addedContractsTier = (TIER * 0.5) / 0.55;
+    const addedContractsOtherTier = (OTHER_TIER * 0.5) / 0.55;
     expect(repo.positions.get(`sig-1:PMUS:${TIER}`)!.contractsOpen).toBeCloseTo(20 + addedContractsTier, 6);
     expect(repo.positions.get(`sig-1:PMUS:${OTHER_TIER}`)!.contractsOpen).toBeCloseTo(50 + addedContractsOtherTier, 6);
 

@@ -55,10 +55,11 @@ describe("FINAL BUILD Part 11: PM-US taker fee (Fee = 0.06 * C * p * (1-p), bank
 });
 
 describe("FINAL BUILD Part 11: Kalshi taker fee (fees = round_up(0.07 * C * P * (1-P)) to the nearest $0.0001)", () => {
-  it("computes the documented formula and rounds UP to the nearest centicent, never down", () => {
+  it("computes the documented base formula but marks it invalid for routing/P&L until complete net fees are modeled", () => {
     // 0.07 * 100 * 0.5 * 0.5 = 1.75 exactly (already a whole centicent multiple)
     const exact = computeKalshiTakerFee(100, 0.5);
-    expect(exact.valid).toBe(true);
+    expect(exact.valid).toBe(false);
+    expect(exact.netFeeComplete).toBe(false);
     expect(exact.feeUsd).toBeCloseTo(1.75, 6);
     expect(exact.feeModelVersion).toBe(KALSHI_FEE_MODEL_VERSION);
   });
@@ -67,7 +68,7 @@ describe("FINAL BUILD Part 11: Kalshi taker fee (fees = round_up(0.07 * C * P * 
     // 0.07 * 3 * 0.5 * 0.5 = 0.0525 -> rounds up to 0.0525 exactly already a centicent
     // multiple; use a price that produces a non-centicent-aligned raw value instead.
     const result = computeKalshiTakerFee(1, 0.13); // 0.07*1*0.13*0.87 = 0.0079170...
-    expect(result.valid).toBe(true);
+    expect(result.valid).toBe(false);
     // Raw = 0.00791700..., next centicent multiple at or above it is 0.0080.
     expect(result.feeUsd).toBeCloseTo(0.008, 6);
     expect(result.feeUsd).toBeGreaterThanOrEqual(0.07 * 1 * 0.13 * 0.87);
@@ -107,6 +108,7 @@ describe("CODEX P1-5: computeTakerFeeForFills -- execution-granularity fee compu
     const kalshiSingle = computeTakerFeeForFills("KALSHI", [{ price: 0.5, contracts: 100 }]);
     const kalshiDirect = computeKalshiTakerFee(100, 0.5);
     expect(kalshiSingle.feeUsd).toBe(kalshiDirect.feeUsd);
+    expect(kalshiSingle.valid).toBe(false);
   });
 
   it("multi-level fill: per-level fee is PROVABLY different from fee(VWAP) -- the exact discrepancy this fix closes, not a rounding nuance", () => {
@@ -145,14 +147,15 @@ describe("CODEX P1-5: computeTakerFeeForFills -- execution-granularity fee compu
     expect(result.valid).toBe(false);
   });
 
-  it("CODEX P1-5: a market whose fee cannot be proven (no known multiplier/schedule signal) must never silently fall back to the standard formula as if verified -- this module's own single documented Kalshi formula is the ONLY schedule this codebase can currently prove (live-confirmed: Kalshi's public market API exposes no per-market fee-multiplier field at all), so computeTakerFeeForFills cannot silently apply an override it has no way to detect. This test documents that boundary rather than asserting a fabricated multiplier.", () => {
+  it("CODEX P1-5: Kalshi's incomplete net fee model fails closed instead of silently falling back to a routable default", () => {
     // Confirms the dispatcher does not invent per-market fee metadata that does not
     // exist anywhere in this codebase's Kalshi discovery layer (KalshiCandidate has no
     // fee-multiplier field -- see kalshi.ts) -- the standard schedule is applied because
     // it is the only one this system can prove, not because a differing one was ignored.
     const result = computeTakerFeeForFills("KALSHI", [{ price: 0.5, contracts: 100 }]);
     expect(result.feeModelVersion).toBe(KALSHI_FEE_MODEL_VERSION);
-    expect(result.valid).toBe(true);
+    expect(result.valid).toBe(false);
+    expect(result.reason).toMatch(/complete net fee/i);
   });
 });
 
@@ -162,21 +165,21 @@ describe("CODEX P1-4 (round 2): net fee model re-investigation", () => {
     expect(computeKalshiTakerFee(100, 0.5).effectiveDate).toBe("2026-07-07");
   });
 
-  it("official worked rounding example: 1 contract at $0.33 rounds UP from a genuinely non-centicent-aligned raw fee", () => {
+  it("official worked rounding example: 1 contract at $0.33 rounds UP from a genuinely non-centicent-aligned raw fee but remains unroutable", () => {
     // 0.07 * 1 * 0.33 * 0.67 = 0.0154770 -- the next centicent multiple at or above it is 0.0155.
     const result = computeKalshiTakerFee(1, 0.33);
-    expect(result.valid).toBe(true);
+    expect(result.valid).toBe(false);
     expect(result.feeUsd).toBeCloseTo(0.0155, 6);
     expect(result.feeUsd).toBeGreaterThanOrEqual(0.07 * 1 * 0.33 * 0.67);
   });
 
-  it("netFeeComplete: PM-US's model is complete (no undocumented cross-fill mechanism); Kalshi's is a documented, bounded, safe upper bound (the balance-rounding/rebate accumulator is not modeled)", () => {
+  it("netFeeComplete: PM-US's model is complete; Kalshi's incomplete net model is explicitly invalid for routing/P&L", () => {
     const pmus = computePmusTakerFee(100, 0.5);
     const kalshi = computeKalshiTakerFee(100, 0.5);
     expect(pmus.netFeeComplete).toBe(true);
     expect(pmus.reason).toBeNull();
     expect(kalshi.netFeeComplete).toBe(false);
-    expect(kalshi.valid).toBe(true); // still a REAL, documented, currently-in-force formula -- not unverified
+    expect(kalshi.valid).toBe(false);
     expect(kalshi.reason).toMatch(/rebate|balance-rounding/i);
   });
 
@@ -192,7 +195,7 @@ describe("CODEX P1-4 (round 2): net fee model re-investigation", () => {
     expect(computeTakerFeeForFills("KALSHI", []).netFeeComplete).toBe(false); // invalid, but the venue's own model completeness is still an honest false, not a placeholder true
   });
 
-  it("Kalshi's multiplier M=1 applies to every market this system's own BetType can ever describe -- MONEYLINE/SPREAD/TOTAL are all team/game-level markets, never the player-prop exception the documented non-default multiplier names. A fee computed for any of these is the correctly-applicable schedule, not an unjustified guess.", () => {
+  it("Kalshi base multiplier remains documented, but the incomplete net fee still cannot be treated as valid", () => {
     // This module's fee functions take no betType parameter at all (contracts/price
     // only) -- the guarantee comes from the TYPE SYSTEM (types.ts's BetType union),
     // not a runtime check, exactly like this codebase's own established pattern of
@@ -202,7 +205,7 @@ describe("CODEX P1-4 (round 2): net fee model re-investigation", () => {
     // public market API exposes no per-market fee-multiplier field -- see the test
     // immediately above this describe block).
     const result = computeKalshiTakerFee(100, 0.5);
-    expect(result.valid).toBe(true);
+    expect(result.valid).toBe(false);
     expect(result.feeUsd).toBeCloseTo(0.07 * 100 * 0.5 * 0.5, 6); // M=1 -- unmultiplied base formula
   });
 });

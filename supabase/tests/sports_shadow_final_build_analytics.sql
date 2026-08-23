@@ -13,9 +13,11 @@ DECLARE
   v_fill_a uuid;
   v_fill_b uuid;
   v_fill_c uuid;
+  v_fill_d uuid;
   v_signal_a uuid;
   v_signal_b uuid;
   v_signal_c uuid;
+  v_signal_d uuid;
   v_match_id uuid;
   v_obs_early uuid;
   v_obs_late uuid;
@@ -223,6 +225,43 @@ BEGIN
   END IF;
 
   ------------------------------------------------------------------
+  -- D3. Lifecycle-aware outcomes: a follower position fully closed by EXIT rows has
+  -- terminal realized P&L even without a venue settlement row, and the reported capital
+  -- includes ENTRY plus ADD cost.
+  ------------------------------------------------------------------
+  INSERT INTO public.sports_shadow_source_fills (event_key, wallet, asset, side, source_ts, identity_basis)
+  VALUES ('ab-fill-d', v_wallet, '0xasset4', 'BUY', 4, 'source_id') RETURNING id INTO v_fill_d;
+  v_signal_d := public.insert_sports_shadow_episode(
+    v_fill_d, 'ab-episode-d', v_wallet, NULL, '0xcondition4', '0xasset4', 'AWY', NULL, NULL,
+    v_cal_start + interval '3 days', v_cal_start + interval '3 days', 0.5, 10, 5, 1, false,
+    'MLB', NULL, 'AwayFour', 'HomeFour', 'MONEYLINE', 'AWY', NULL, 'game-4', v_epoch_id
+  );
+  INSERT INTO public.sports_shadow_paper_fills (
+    signal_id, experiment_epoch_id, requested_delay_ms, side, notional_tier_usd,
+    routing_timestamp, chosen_venue, fill_status, contracts, vwap, fee_usd, all_in_cost_usd
+  ) VALUES (
+    v_signal_d, v_epoch_id, 0, 'ENTRY', 25, v_cal_start + interval '3 days', 'PMUS', 'FULL', 20, 0.5, 0.10, 10.10
+  );
+  INSERT INTO public.sports_shadow_paper_positions (
+    signal_id, venue, notional_tier_usd, contracts_open, avg_entry_price, realized_pnl_usd,
+    status, contracts_added, contracts_exited, add_cost_usd, exit_proceeds_usd, total_fees_usd, remaining_cost_basis_usd
+  ) VALUES (
+    v_signal_d, 'PMUS', 25, 0, 0.5, 2.50,
+    'CLOSED', 5, 25, 5.00, 17.60, 0.30, 0
+  );
+  -- A stale pending settlement check must not mask a follower position that was fully
+  -- closed by source EXITs before venue settlement.
+  INSERT INTO public.sports_shadow_settlements (signal_id, venue, notional_tier_usd, settlement_status)
+  VALUES (v_signal_d, 'PMUS', 25, 'PENDING');
+  SELECT * INTO v_row FROM public.get_sports_shadow_episode_outcomes(v_epoch_id) WHERE signal_id = v_signal_d AND notional_tier_usd = 25;
+  IF v_row.settlement_status <> 'SETTLED_WIN' OR v_row.net_pnl_usd <> 2.50 THEN
+    RAISE EXCEPTION 'expected closed lifecycle position to surface realized P&L as terminal outcome, got status=% net=%', v_row.settlement_status, v_row.net_pnl_usd;
+  END IF;
+  IF v_row.total_fees_usd <> 0.30 OR v_row.all_in_cost_usd <> 15.10 THEN
+    RAISE EXCEPTION 'expected lifecycle fees/capital to include ENTRY plus ADD, got fees=% capital=%', v_row.total_fees_usd, v_row.all_in_cost_usd;
+  END IF;
+
+  ------------------------------------------------------------------
   -- E. get_sports_shadow_soak_telemetry_rollup: sums are correctly scoped by epoch AND
   -- by the p_since cutoff (an event before the cutoff must be excluded).
   ------------------------------------------------------------------
@@ -241,6 +280,10 @@ BEGIN
     (now() - interval '1 hour', 'OBSERVATION', 'skipped', 5, '{"venue":"PMUS"}'::jsonb, v_epoch_id),
     (now() - interval '1 hour', 'VENUE', 'discovery_failed', 1, '{"venue":"KALSHI"}'::jsonb, v_epoch_id),
     (now() - interval '1 hour', 'SOURCE', 'wallets_attempted', 0, '{}'::jsonb, v_epoch_id),
+    (now() - interval '1 hour', 'SOURCE', 'source_lease_acquired', 1, '{}'::jsonb, v_epoch_id),
+    (now() - interval '1 hour', 'SOURCE', 'source_starved', 1, '{}'::jsonb, v_epoch_id),
+    (now() - interval '1 hour', 'SOURCE', 'source_lease_acquired', 0, '{}'::jsonb, v_epoch_id),
+    (now() - interval '1 hour', 'SOURCE', 'source_lease_skipped', 1, '{}'::jsonb, v_epoch_id),
     (now() - interval '1 hour', 'SOURCE', 'lease_lost', 1, '{}'::jsonb, v_epoch_id),
     -- BEFORE the cutoff below -- must be excluded entirely.
     (now() - interval '10 hours', 'SYSTEM', 'cycle_duration_ms', 1000, '{}'::jsonb, v_epoch_id);
@@ -260,6 +303,9 @@ BEGIN
   END IF;
   IF v_row.source_lane_acquired_cycles <> 1 OR v_row.source_starved_cycles <> 1 THEN
     RAISE EXCEPTION 'expected source_lane_acquired_cycles=1/source_starved_cycles=1 (wallets_attempted=0), got acquired=% starved=%', v_row.source_lane_acquired_cycles, v_row.source_starved_cycles;
+  END IF;
+  IF v_row.source_lease_skipped_count <> 1 THEN
+    RAISE EXCEPTION 'expected source_lease_skipped_count = 1, got %', v_row.source_lease_skipped_count;
   END IF;
   IF v_row.lease_lost_count <> 1 THEN
     RAISE EXCEPTION 'expected lease_lost_count = 1, got %', v_row.lease_lost_count;

@@ -159,13 +159,11 @@ export function computePmusTakerFee(contracts: number, priceUsd: number): FeeRes
  * this system's current scope). Modeling it would mean fabricating account state that
  * does not exist, exactly the "do not invent unavailable metadata" instruction this
  * codebase already follows elsewhere (P1-6's identical reasoning for settlement rules).
- * Known-direction, bounded omission (not an unknown-direction guess): a rebate can only
- * ever REDUCE what is owed, so omitting it means this module's feeUsd is a safe,
- * conservative UPPER BOUND on Kalshi's true net cost -- callers must treat
- * netFeeComplete=false as "fee-inclusive but not rebate-adjusted," not as "unverified."
- * `valid` (this IS a real, documented, currently-in-force formula) is therefore still
- * true; `netFeeComplete=false` is the separate, honest signal for the gap Codex's
- * finding names.
+ * The research router/P&L layer requires complete net fees, not a known-direction upper
+ * bound: even conservative fee overstatement can change venue choice and distort
+ * reported Kalshi economics. Therefore Kalshi returns the documented base fee for audit
+ * visibility but `valid=false` and `netFeeComplete=false`; callers must reject it until
+ * a complete account-tier/order-level net fee model exists.
  * ================================================================================
  */
 export const KALSHI_FEE_MODEL_VERSION = "KALSHI_FEE_V2_2026-07-07";
@@ -188,9 +186,9 @@ export function computeKalshiTakerFee(contracts: number, priceUsd: number): FeeR
   const feeUsd = Math.ceil(rawFee / CENTICENT_USD - 1e-9) * CENTICENT_USD;
   return {
     feeUsd: Math.round(feeUsd * 1e6) / 1e6, // strip float noise beyond centicent precision, never rounds the VALUE itself
-    valid: true,
+    valid: false,
     netFeeComplete: false, // see doc comment above -- base trade fee only, a conservative upper bound
-    reason: "base trade fee only -- Kalshi's documented balance-rounding/rebate accumulator is not modeled (requires unknowable real account-tier state); this is a safe, known-direction upper bound, never an underestimate",
+    reason: "base trade fee only -- Kalshi's documented balance-rounding/rebate accumulator is not modeled (requires unknowable real account-tier state); complete net fee is required for routing/P&L",
     feeModelVersion: KALSHI_FEE_MODEL_VERSION,
     effectiveDate: KALSHI_EFFECTIVE_DATE,
   };
@@ -234,12 +232,28 @@ export function computeTakerFeeForFills(venue: Venue, fills: readonly ConsumedLe
     return invalidFee(version, effectiveDate, "no consumed price levels to compute a fee against", netFeeComplete);
   }
   let totalFeeUsd = 0;
+  let incompleteNetFeeReason: string | null = null;
   for (const level of fills) {
     const result = computeTakerFee(venue, level.contracts, level.price);
     if (!result.valid) {
-      return invalidFee(version, effectiveDate, `level at price ${level.price}: ${result.reason}`, netFeeComplete);
+      if (venue === "KALSHI" && !result.netFeeComplete && result.feeUsd > 0) {
+        totalFeeUsd += result.feeUsd;
+        incompleteNetFeeReason = incompleteNetFeeReason ?? result.reason;
+        continue;
+      }
+      return { feeUsd: result.feeUsd, valid: false, netFeeComplete: result.netFeeComplete, reason: `level at price ${level.price}: ${result.reason}`, feeModelVersion: version, effectiveDate };
     }
     totalFeeUsd += result.feeUsd;
+  }
+  if (incompleteNetFeeReason !== null) {
+    return {
+      feeUsd: Math.round(totalFeeUsd * 1e6) / 1e6,
+      valid: false,
+      netFeeComplete: false,
+      reason: incompleteNetFeeReason,
+      feeModelVersion: version,
+      effectiveDate,
+    };
   }
   return {
     feeUsd: Math.round(totalFeeUsd * 1e6) / 1e6, // strip float summation noise beyond centicent precision, never rounds the VALUE itself

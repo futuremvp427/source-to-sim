@@ -113,7 +113,7 @@ export type PaperFillRow = {
 export type OpenPosition = { contractsOpen: number; avgEntryPrice: number | null };
 
 /** CODEX P1-3: the recorded "this fill requires a follower reaction" fact -- see source-poll.server.ts's own doc comment for how/when it's created. */
-export type LifecycleTrigger = { signalId: string; triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; price: number; sourceTs: number };
+export type LifecycleTrigger = { signalId: string; triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; addFraction: number | null; price: number; sourceTs: number };
 
 export type PaperRepository = {
   getObservation(id: string): Promise<CapturedObservation | null>;
@@ -285,13 +285,13 @@ export const supabasePaperRepository: PaperRepository = {
   async getLifecycleTrigger(triggerId) {
     const { data, error } = await supabaseAdmin
       .from("sports_shadow_lifecycle_triggers" as never)
-      .select("signal_id, trigger_type, tracked_shares, exit_fraction, price, source_ts")
+      .select("signal_id, trigger_type, tracked_shares, exit_fraction, add_fraction, price, source_ts")
       .eq("id", triggerId)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return null;
-    const row = data as unknown as { signal_id: string; trigger_type: "ADD" | "EXIT"; tracked_shares: number; exit_fraction: number | null; price: number; source_ts: number };
-    return { signalId: row.signal_id, triggerType: row.trigger_type, trackedShares: row.tracked_shares, exitFraction: row.exit_fraction, price: row.price, sourceTs: row.source_ts };
+    const row = data as unknown as { signal_id: string; trigger_type: "ADD" | "EXIT"; tracked_shares: number; exit_fraction: number | null; add_fraction: number | null; price: number; source_ts: number };
+    return { signalId: row.signal_id, triggerType: row.trigger_type, trackedShares: row.tracked_shares, exitFraction: row.exit_fraction, addFraction: row.add_fraction, price: row.price, sourceTs: row.source_ts };
   },
 
   async finalizeLifecycleDecision(signalId, requestedDelayMs, notionalTierUsd, triggerSourceFillId, observationId, decidedAtMs, venue, row) {
@@ -542,10 +542,10 @@ export async function computePaperFillsForObservation(observationId: string, dep
  *     rejected: there is no logical opportunity here at all (either this tier never
  *     entered, or it entered via the OTHER venue -- observations are scheduled for
  *     every EXACT-matched venue, not only whichever one ends up holding a position).
- *   - ADD: same FROZEN fixed-notional-tier sizing methodology ENTRY already uses
- *     (never proportional to the source's own DCA size) -- a fresh mini-ENTRY
- *     evaluation against the CURRENT ask depth, added to the existing position via a
- *     weighted-average cost basis (finalize_sports_shadow_lifecycle_decision).
+ *   - ADD: the reporting tier remains fixed, but executable size is scaled by the
+ *     source DCA fraction recorded with the trigger (new source shares divided by
+ *     remaining source inventory before the DCA). A 1% source DCA therefore adds 1% of
+ *     the tier, not a fresh full-tier buy.
  *   - EXIT: sells contracts_open * trigger.exitFraction contracts (this tier's own
  *     remaining inventory, proportional to how much of the source's OWN tracked
  *     position this sell represents) against the CURRENT bid depth
@@ -571,7 +571,7 @@ async function computeLifecycleFillsForObservation(obs: CapturedObservation, d: 
 
     const row =
       trigger.triggerType === "ADD"
-        ? buildAddDecisionRow(trigger.signalId, obs, tier, signalProvenance)
+        ? buildAddDecisionRow(trigger.signalId, obs, tier, trigger, signalProvenance)
         : buildExitDecisionRow(trigger.signalId, obs, tier, trigger, position, signalProvenance);
 
     const won = await d.repo.finalizeLifecycleDecision(trigger.signalId, obs.requestedDelayMs, tier, obs.triggerSourceFillId!, obs.id, d.now(), obs.venue, row);
@@ -587,9 +587,10 @@ function unavailableLifecycleReason(obs: CapturedObservation): string | null {
   return null;
 }
 
-function buildAddDecisionRow(signalId: string, obs: CapturedObservation, tier: number, signalProvenance: SignalProvenance): PaperFillRow {
+function buildAddDecisionRow(signalId: string, obs: CapturedObservation, tier: number, trigger: LifecycleTrigger, signalProvenance: SignalProvenance): PaperFillRow {
   const unavailable = unavailableLifecycleReason(obs);
-  const depthWalk = unavailable ? null : walkBuyDepth(obs.askDepth, tier);
+  const requestedNotionalUsd = trigger.addFraction !== null && Number.isFinite(trigger.addFraction) && trigger.addFraction > 0 ? tier * trigger.addFraction : 0;
+  const depthWalk = unavailable || requestedNotionalUsd <= 0 ? null : walkBuyDepth(obs.askDepth, requestedNotionalUsd);
   const fee = depthWalk && depthWalk.contractsFilled > 0 && depthWalk.fills.length > 0 ? computeTakerFeeForFills(obs.venue, depthWalk.fills) : null;
 
   let fillStatus: PaperFillRow["fillStatus"];
@@ -601,6 +602,9 @@ function buildAddDecisionRow(signalId: string, obs: CapturedObservation, tier: n
   if (unavailable) {
     fillStatus = "REJECTED";
     rejectReason = `${obs.venue} capability unavailable this cycle: ${unavailable}`;
+  } else if (requestedNotionalUsd <= 0) {
+    fillStatus = "REJECTED";
+    rejectReason = "invalid source ADD fraction";
   } else if (depthWalk === null || (depthWalk.status !== "FULL" && depthWalk.status !== "PARTIAL")) {
     fillStatus = "REJECTED";
     rejectReason = `${obs.venue} depth-walk status ${depthWalk?.status ?? "NONE"}${depthWalk?.invalidReason ? `: ${depthWalk.invalidReason}` : ""}`;

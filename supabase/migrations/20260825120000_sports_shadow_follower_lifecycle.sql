@@ -29,10 +29,12 @@ CREATE TABLE public.sports_shadow_lifecycle_triggers (
   -- shares this sell fill reduced (episode.ts's own trackedShares, never untracked
   -- oversell -- see episode.ts's own P1-3 doc comment for that distinction).
   tracked_shares numeric NOT NULL CHECK (tracked_shares > 0),
+  -- ADD only: what fraction of the follower tier to add, computed as source DCA shares
+  -- divided by source remaining tracked inventory immediately before the DCA.
+  add_fraction numeric CHECK (add_fraction IS NULL OR add_fraction > 0),
   -- EXIT only: what fraction of the follower's OWN remaining tracked inventory (at
   -- each open tier independently) this sell represents -- 1.0 exactly for a full
-  -- exit. NULL for ADD (sizing is the SAME frozen fixed-notional methodology ENTRY
-  -- already uses, never proportional to the source's own DCA size).
+  -- exit.
   exit_fraction numeric CHECK (exit_fraction IS NULL OR (exit_fraction > 0 AND exit_fraction <= 1)),
   price numeric NOT NULL,
   source_ts bigint NOT NULL,
@@ -42,11 +44,108 @@ CREATE TABLE public.sports_shadow_lifecycle_triggers (
   -- exists rather than creating a duplicate reaction to the identical fill).
   UNIQUE (source_fill_id),
   CONSTRAINT sports_shadow_lifecycle_triggers_type_fraction_check
-    CHECK ((trigger_type = 'ADD' AND exit_fraction IS NULL) OR (trigger_type = 'EXIT' AND exit_fraction IS NOT NULL))
+    CHECK (
+      (trigger_type = 'ADD' AND add_fraction IS NOT NULL AND exit_fraction IS NULL) OR
+      (trigger_type = 'EXIT' AND add_fraction IS NULL AND exit_fraction IS NOT NULL)
+    )
 );
 CREATE INDEX sports_shadow_lifecycle_triggers_signal_idx ON public.sports_shadow_lifecycle_triggers (signal_id);
 GRANT ALL ON public.sports_shadow_lifecycle_triggers TO service_role;
 ALTER TABLE public.sports_shadow_lifecycle_triggers ENABLE ROW LEVEL SECURITY;
+
+-- Source episode updates that require a follower ADD/EXIT trigger must write that
+-- trigger in the same transaction as the episode mutation and fill completion. This
+-- replacement intentionally lives after sports_shadow_lifecycle_triggers exists.
+DROP FUNCTION IF EXISTS public.update_sports_shadow_episode(
+  uuid, uuid, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, numeric, numeric, numeric, numeric, numeric, bigint, numeric, numeric, numeric
+);
+DROP FUNCTION IF EXISTS public.update_sports_shadow_episode(
+  uuid, uuid, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, numeric, numeric, numeric, numeric, numeric, bigint, numeric, numeric, numeric, text, numeric, numeric, numeric, numeric, bigint
+);
+
+CREATE OR REPLACE FUNCTION public.update_sports_shadow_episode(
+  p_fill_id uuid,
+  p_signal_id uuid,
+  p_source_first_fill_at timestamptz,
+  p_source_last_fill_at timestamptz,
+  p_source_vwap numeric,
+  p_source_shares numeric,
+  p_source_notional numeric,
+  p_source_fill_count integer,
+  p_source_sell_seen boolean,
+  p_source_sell_shares numeric DEFAULT 0,
+  p_source_sell_notional numeric DEFAULT 0,
+  p_sell_event_shares numeric DEFAULT NULL,
+  p_sell_event_price numeric DEFAULT NULL,
+  p_sell_event_notional numeric DEFAULT NULL,
+  p_sell_event_source_ts bigint DEFAULT NULL,
+  p_untracked_sell_shares numeric DEFAULT 0,
+  p_untracked_sell_notional numeric DEFAULT 0,
+  p_sell_event_untracked_shares numeric DEFAULT 0,
+  p_lifecycle_trigger_type text DEFAULT NULL,
+  p_lifecycle_trigger_tracked_shares numeric DEFAULT NULL,
+  p_lifecycle_trigger_exit_fraction numeric DEFAULT NULL,
+  p_lifecycle_trigger_add_fraction numeric DEFAULT NULL,
+  p_lifecycle_trigger_price numeric DEFAULT NULL,
+  p_lifecycle_trigger_source_ts bigint DEFAULT NULL
+) RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  IF auth.role() IS NOT NULL AND auth.role() <> 'service_role' THEN
+    RAISE EXCEPTION 'update_sports_shadow_episode: service_role required, got %', auth.role()
+      USING ERRCODE = '42501';
+  END IF;
+
+  UPDATE public.sports_shadow_signals
+  SET
+    source_first_fill_at = p_source_first_fill_at,
+    source_last_fill_at = p_source_last_fill_at,
+    source_vwap = p_source_vwap,
+    source_shares = p_source_shares,
+    source_notional = p_source_notional,
+    source_fill_count = p_source_fill_count,
+    source_sell_seen = p_source_sell_seen,
+    source_sell_shares = p_source_sell_shares,
+    source_sell_notional = p_source_sell_notional,
+    source_sell_vwap = CASE WHEN p_source_sell_shares > 0 THEN p_source_sell_notional / p_source_sell_shares ELSE NULL END,
+    untracked_sell_shares = p_untracked_sell_shares,
+    untracked_sell_notional = p_untracked_sell_notional,
+    updated_at = now()
+  WHERE id = p_signal_id;
+
+  UPDATE public.sports_shadow_source_fills
+  SET downstream_status = 'COMPLETE'
+  WHERE id = p_fill_id;
+
+  IF p_sell_event_shares IS NOT NULL THEN
+    INSERT INTO public.sports_shadow_source_sell_events (signal_id, source_fill_id, shares, price, notional, source_ts, is_pre_epoch, untracked_shares)
+    VALUES (p_signal_id, p_fill_id, p_sell_event_shares, p_sell_event_price, p_sell_event_notional, p_sell_event_source_ts, false, p_sell_event_untracked_shares)
+    ON CONFLICT (source_fill_id) DO NOTHING;
+  END IF;
+
+  IF p_lifecycle_trigger_type IS NOT NULL THEN
+    INSERT INTO public.sports_shadow_lifecycle_triggers (
+      signal_id, source_fill_id, trigger_type, tracked_shares, add_fraction, exit_fraction, price, source_ts
+    ) VALUES (
+      p_signal_id, p_fill_id, p_lifecycle_trigger_type, p_lifecycle_trigger_tracked_shares,
+      p_lifecycle_trigger_add_fraction, p_lifecycle_trigger_exit_fraction,
+      p_lifecycle_trigger_price, p_lifecycle_trigger_source_ts
+    )
+    ON CONFLICT (source_fill_id) DO UPDATE SET source_fill_id = EXCLUDED.source_fill_id;
+  END IF;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.update_sports_shadow_episode(
+  uuid, uuid, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, numeric, numeric, numeric, numeric, numeric, bigint, numeric, numeric, numeric, text, numeric, numeric, numeric, numeric, bigint
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.update_sports_shadow_episode(
+  uuid, uuid, timestamptz, timestamptz, numeric, numeric, numeric, integer, boolean, numeric, numeric, numeric, numeric, numeric, bigint, numeric, numeric, numeric, text, numeric, numeric, numeric, numeric, bigint
+) TO service_role;
 
 -- sports_quote_observations: trigger_source_fill_id links a lifecycle-reaction
 -- observation plan to the fill that caused it; NULL = the original ENTRY plan.
@@ -121,6 +220,40 @@ ALTER TABLE public.sports_shadow_paper_positions
   -- settlement's own remaining-inventory valuation both stay exact across any number
   -- of partial ADDs/EXITs, never merely approximated via contracts * avg_entry_price.
   ADD COLUMN IF NOT EXISTS remaining_cost_basis_usd numeric NOT NULL DEFAULT 0;
+
+-- Replay-safe backfill for databases that already have ENTRY-opened positions before
+-- this lifecycle migration is applied. An open positive-inventory position with a zero
+-- basis would make future settlement/P&L look artificially profitable, so fail closed
+-- if no matching ENTRY fill can provide the basis.
+UPDATE public.sports_shadow_paper_positions p
+SET
+  remaining_cost_basis_usd = f.all_in_cost_usd,
+  total_fees_usd = COALESCE(f.fee_usd, 0),
+  updated_at = now()
+FROM public.sports_shadow_paper_fills f
+WHERE p.signal_id = f.signal_id
+  AND p.venue = f.chosen_venue
+  AND p.notional_tier_usd = f.notional_tier_usd
+  AND f.side = 'ENTRY'
+  AND f.trigger_source_fill_id IS NULL
+  AND f.fill_status IN ('FULL', 'PARTIAL')
+  AND f.all_in_cost_usd IS NOT NULL
+  AND p.status = 'OPEN'
+  AND p.contracts_open > 0
+  AND p.remaining_cost_basis_usd = 0;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM public.sports_shadow_paper_positions p
+    WHERE p.status = 'OPEN'
+      AND p.contracts_open > 0
+      AND p.remaining_cost_basis_usd = 0
+  ) THEN
+    RAISE EXCEPTION 'sports_shadow_follower_lifecycle: existing OPEN paper positions remain with zero cost basis after backfill';
+  END IF;
+END $$;
 
 -- ============================== RPCs ==============================
 
@@ -264,12 +397,13 @@ BEGIN
     -- CODEX P1-3: remaining_cost_basis_usd starts as the ENTRY's own fee-inclusive
     -- all_in_cost_usd -- see the column's own doc comment for why this (not
     -- contracts * avg_entry_price) is the authoritative basis ADD/EXIT maintain.
-    INSERT INTO public.sports_shadow_paper_positions (signal_id, venue, notional_tier_usd, contracts_open, avg_entry_price, remaining_cost_basis_usd, status)
-    VALUES (p_signal_id, p_chosen_venue, p_notional_tier_usd, p_contracts, p_vwap, p_all_in_cost_usd, 'OPEN')
+    INSERT INTO public.sports_shadow_paper_positions (signal_id, venue, notional_tier_usd, contracts_open, avg_entry_price, remaining_cost_basis_usd, total_fees_usd, status)
+    VALUES (p_signal_id, p_chosen_venue, p_notional_tier_usd, p_contracts, p_vwap, p_all_in_cost_usd, COALESCE(p_fee_usd, 0), 'OPEN')
     ON CONFLICT (signal_id, venue, notional_tier_usd) DO UPDATE SET
       contracts_open = EXCLUDED.contracts_open,
       avg_entry_price = EXCLUDED.avg_entry_price,
       remaining_cost_basis_usd = EXCLUDED.remaining_cost_basis_usd,
+      total_fees_usd = EXCLUDED.total_fees_usd,
       status = 'OPEN',
       updated_at = now();
   END IF;
@@ -289,12 +423,16 @@ GRANT EXECUTE ON FUNCTION public.finalize_sports_shadow_routing_decision(
 -- crashed/retried poll that already recorded this fill's reaction gets back the SAME
 -- row, never a duplicate). Returns the row so the caller can schedule its
 -- observation plan.
+DROP FUNCTION IF EXISTS public.record_sports_shadow_lifecycle_trigger(uuid, uuid, text, numeric, numeric, numeric, bigint);
+DROP FUNCTION IF EXISTS public.record_sports_shadow_lifecycle_trigger(uuid, uuid, text, numeric, numeric, numeric, numeric, bigint);
+
 CREATE OR REPLACE FUNCTION public.record_sports_shadow_lifecycle_trigger(
   p_signal_id uuid,
   p_source_fill_id uuid,
   p_trigger_type text,
   p_tracked_shares numeric,
   p_exit_fraction numeric,
+  p_add_fraction numeric,
   p_price numeric,
   p_source_ts bigint
 ) RETURNS uuid
@@ -311,8 +449,8 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  INSERT INTO public.sports_shadow_lifecycle_triggers (signal_id, source_fill_id, trigger_type, tracked_shares, exit_fraction, price, source_ts)
-  VALUES (p_signal_id, p_source_fill_id, p_trigger_type, p_tracked_shares, p_exit_fraction, p_price, p_source_ts)
+  INSERT INTO public.sports_shadow_lifecycle_triggers (signal_id, source_fill_id, trigger_type, tracked_shares, add_fraction, exit_fraction, price, source_ts)
+  VALUES (p_signal_id, p_source_fill_id, p_trigger_type, p_tracked_shares, p_add_fraction, p_exit_fraction, p_price, p_source_ts)
   ON CONFLICT (source_fill_id) DO UPDATE SET source_fill_id = EXCLUDED.source_fill_id -- no-op update, forces RETURNING on conflict too
   RETURNING id INTO v_id;
 
@@ -320,8 +458,8 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.record_sports_shadow_lifecycle_trigger(uuid, uuid, text, numeric, numeric, numeric, bigint) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.record_sports_shadow_lifecycle_trigger(uuid, uuid, text, numeric, numeric, numeric, bigint) TO service_role;
+REVOKE ALL ON FUNCTION public.record_sports_shadow_lifecycle_trigger(uuid, uuid, text, numeric, numeric, numeric, numeric, bigint) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.record_sports_shadow_lifecycle_trigger(uuid, uuid, text, numeric, numeric, numeric, numeric, bigint) TO service_role;
 
 -- Finalizes an ADD or EXIT decision DIRECTLY (no separate provenance-then-finalize
 -- protocol needed -- unlike ENTRY, an ADD/EXIT is always scoped to the ONE venue the
