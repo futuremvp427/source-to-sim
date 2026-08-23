@@ -975,6 +975,8 @@ export type WalletPollResult = {
   duplicateRows: number;
   invalidRows: number;
   metadataFetchFailures: number;
+  /** RECOVERY (round 2): true when Phase 2 stopped because this cycle's own metadata budget was exhausted (DeadlineExceededError). A bounded, expected stop -- NOT an error, and never a source_unhealthy trigger; remaining fills stay PENDING and retry next poll. */
+  metadataDeadlineReached: boolean;
   ineligibleRows: number;
   unverifiedRows: number;
   /** Task 12F / P1-H: the subset of unverifiedRows classified TERMINAL (see eligibility.ts's classifyUnverifiedDisposition) and marked TERMINAL_UNVERIFIED rather than left PENDING. */
@@ -1008,6 +1010,7 @@ function emptyResult(wallet: string): WalletPollResult {
     duplicateRows: 0,
     invalidRows: 0,
     metadataFetchFailures: 0,
+    metadataDeadlineReached: false,
     ineligibleRows: 0,
     unverifiedRows: 0,
     terminalUnverifiedRows: 0,
@@ -1911,6 +1914,22 @@ export async function pollSportsShadowWallet(
         // fetchSourceMarketMetadata's own doc comment).
         metadata = await d.fetchSourceMarketMetadata(fill.conditionId, {}, deadlineAtMs);
       } catch (err) {
+        /**
+         * RECOVERY (round 2). A DeadlineExceededError here is NOT a failure of this wallet's
+         * poll -- it is this cycle's own bounded Phase 2 budget running out, exactly like the
+         * `d.now() >= deadlineAtMs` breaks above/below. Treating it as `result.error` made a
+         * routine budget exhaustion surface as a wallet-level error and raise the
+         * `source_unhealthy` WARNING alert (observed in production canary 2), while `continue`
+         * kept re-attempting a host whose deadline had already passed for every remaining row.
+         * Break instead -- matching the established convention in observation.server.ts and
+         * worker.server.ts -- so remaining fills simply stay PENDING and are retried, byte
+         * identically, by the next cycle. A genuine (non-deadline) metadata failure keeps its
+         * original error/metadataFetchFailures + continue semantics unchanged.
+         */
+        if (err instanceof DeadlineExceededError) {
+          result.metadataDeadlineReached = true;
+          break; // remaining fills stay PENDING, retried next poll
+        }
         result.error = result.error ?? `fetchSourceMarketMetadata failed: ${err instanceof Error ? err.message : "unknown error"}`;
         result.metadataFetchFailures += 1;
         continue; // stays PENDING
