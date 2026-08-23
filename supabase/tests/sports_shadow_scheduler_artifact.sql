@@ -86,8 +86,10 @@ BEGIN
     RAISE EXCEPTION 'expected exactly 1 scheduled job named sports-shadow-cycle-settlement after applying the artifact twice, got %', v_job_count;
   END IF;
   SELECT schedule INTO v_schedule FROM cron.job WHERE jobname = 'sports-shadow-cycle-settlement';
-  IF v_schedule <> '60 seconds' THEN
-    RAISE EXCEPTION 'expected sports-shadow-cycle-settlement schedule ''60 seconds'', got %', v_schedule;
+  -- pg_cron's 'N seconds' interval syntax only accepts 1-59 -- standard cron syntax
+  -- '* * * * *' is how the artifact expresses "once a minute" for this job.
+  IF v_schedule <> '* * * * *' THEN
+    RAISE EXCEPTION 'expected sports-shadow-cycle-settlement schedule ''* * * * *'', got %', v_schedule;
   END IF;
   SELECT command INTO v_body FROM cron.job WHERE jobname = 'sports-shadow-cycle-settlement';
   IF v_body NOT LIKE '%/api/public/hooks/sports-shadow-settlement%' THEN

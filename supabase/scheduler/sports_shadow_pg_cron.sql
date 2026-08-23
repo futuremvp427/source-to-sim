@@ -138,12 +138,14 @@ SELECT cron.schedule(
 
 -- JOB 3: SETTLEMENT (worst case ~30s, new). A settled/PENDING position's own recheck
 -- backoff (10min-6h, see computeNextSettlementCheckAtMs) already spaces individual
--- positions out generously -- a 60s cadence is conservative headroom for a lane that has
--- never run in production before, matching SOURCE_LEASE_TTL_SECONDS's own cadence.
+-- positions out generously -- a once-a-minute cadence is conservative headroom for a
+-- lane that has never run in production before, matching SOURCE_LEASE_TTL_SECONDS's own
+-- cadence. pg_cron's 'N seconds' interval syntax only accepts 1-59 -- standard cron
+-- syntax '* * * * *' is the correct way to express exactly once per minute.
 -- timeout_milliseconds (40000ms) gives headroom over the ~30s worst case.
 SELECT cron.schedule(
   'sports-shadow-cycle-settlement',
-  '60 seconds',
+  '* * * * *',
   $$
   SELECT net.http_post(
     url := (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'sports_shadow_project_url')
