@@ -847,7 +847,6 @@ describe("pollSportsShadowWallet — eligibility routing", () => {
     const repo = new FakeRepo();
     const { deps } = makeDeps({
       repo,
-      goLiveAtMs: 1_700_000_150_000,
       network: makeNetworkDeps({
         0: [
           trade({ transactionHash: "0xtx-old", asset: "0xasset-away", timestamp: 1_700_000_000 }),
@@ -858,7 +857,7 @@ describe("pollSportsShadowWallet — eligibility routing", () => {
         throw new DeadlineExceededError("gamma-api.polymarket.com request skipped: caller deadline already reached");
       }) as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
     });
-    const result = await pollSportsShadowWallet(WALLET, 0, deps);
+    const result = await pollSportsShadowWallet(WALLET, 1_700_000_150_000, deps);
     expect(result.suppressedPreGoLive).toBe(1);
     expect(result.error).toBeNull();
     const statuses = [...repo.fillsByEventKey.values()].map((f) => f.downstreamStatus);
