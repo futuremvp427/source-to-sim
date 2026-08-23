@@ -141,6 +141,14 @@ export const MAX_PAGES_PER_WALLET = Math.floor(MAX_TRADES_OFFSET / PAGE_SIZE) + 
 export const MAX_PENDING_FILLS_PER_POLL = 500;
 
 /**
+ * RECOVERY: pre-go-live fills are disposed of in bounded batches of this size (one lone,
+ * idempotent single-table UPDATE ... WHERE id IN (...) per flush), so a huge historical
+ * backlog drains without per-row round trips and without any network metadata call. Kept
+ * well under MAX_PENDING_FILLS_PER_POLL so each flush stays a small, fast statement.
+ */
+export const PRE_GO_LIVE_FLUSH_SIZE = 100;
+
+/**
  * ============ SOAK INCIDENT (2026-08-22): PHASE-2 DOWNSTREAM RESERVE ============
  * PROVEN production failure: Phase 1 (trade-page pagination + persistence) consumed the
  * whole poll deadline while catching up a heavy backlog, so the Phase-2 deadline guard
@@ -464,6 +472,16 @@ export type PollRepository = {
   recordPreEpochSell(fillId: string, shares: number, price: number, notional: number, sourceTs: number): Promise<void>;
   /** Marks a fill COMPLETE with no paired episode mutation — safe as a lone single-table write (see this module's terminal-classification doc comment). */
   markFillComplete(fillId: string): Promise<void>;
+  /**
+   * RECOVERY (pre-go-live backlog drain): bulk form of markFillComplete for the ONE
+   * disposition that is provably decidable from immutable local data alone --
+   * `isEligibleForEpisodeTrigger(sourceTs, goLiveAtMs) === false` (see this module's
+   * terminal-classification doc comment: pre-go-live suppression -> COMPLETE). Bounded
+   * (called with at most PRE_GO_LIVE_FLUSH_SIZE ids) and idempotent (re-running the same
+   * update is a no-op), a lone single-table write requiring no episode mutation and no
+   * network metadata, so a large historical backlog can never consume Gamma/venue budget.
+   */
+  markFillsComplete(fillIds: string[]): Promise<void>;
   /** Marks a fill permanently terminal — its own immutable data will never produce a different outcome on retry. */
   markFillTerminal(fillId: string, status: "TERMINAL_INELIGIBLE" | "TERMINAL_INVALID"): Promise<void>;
   /** Task 12F / P1-H: marks a fill TERMINAL_UNVERIFIED, durably retaining the exact classifier reason code for later audit/accounting -- distinct from TERMINAL_INELIGIBLE (a positive ineligibility determination) since "could not verify" and "determined ineligible" remain different outcomes. */
@@ -853,6 +871,15 @@ export const supabasePollRepository: PollRepository = {
       .from("sports_shadow_source_fills" as never)
       .update({ downstream_status: "COMPLETE" } as never)
       .eq("id", fillId);
+    if (error) throw new Error(error.message);
+  },
+
+  async markFillsComplete(fillIds) {
+    if (fillIds.length === 0) return;
+    const { error } = await supabaseAdmin
+      .from("sports_shadow_source_fills" as never)
+      .update({ downstream_status: "COMPLETE" } as never)
+      .in("id", fillIds);
     if (error) throw new Error(error.message);
   },
 
@@ -1805,7 +1832,44 @@ export async function pollSportsShadowWallet(
   const positionCache = new Map<string, EpisodeCacheEntry | null>();
   const metadataCache = new Map<string, SourceMarketMetadata>();
 
+  /**
+   * RECOVERY (structural backlog drain). The captured production failure was:
+   *   "fetchSourceMarketMetadata failed: gamma-api.polymarket.com reservation RPC aborted:
+   *    caller deadline reached mid-request"
+   * Pre-go-live suppression used to be evaluated AFTER the metadata fetch, so ~33k
+   * historical PENDING rows each had to obtain Gamma metadata before they could be disposed
+   * of -- the first reservation consumed the whole Phase 2 budget and every remaining row
+   * stayed PENDING forever (zero durable progress, every cycle).
+   *
+   * `isEligibleForEpisodeTrigger(sourceTs, goLiveAtMs) === false` is decidable from
+   * immutable local data ALONE (this fill's own sourceTs vs the fixed durable goLiveAtMs --
+   * see isEligibleForEpisodeTrigger and this module's terminal-classification doc comment,
+   * where pre-go-live suppression is canonically COMPLETE). It needs no metadata, so it is
+   * hoisted ahead of every network call and batched into bounded, idempotent flushes.
+   */
+  const preGoLiveBuffer: string[] = [];
+  const flushPreGoLive = async (): Promise<void> => {
+    if (preGoLiveBuffer.length === 0) return;
+    const batch = preGoLiveBuffer.splice(0, preGoLiveBuffer.length);
+    try {
+      await d.repo.markFillsComplete(batch);
+    } catch {
+      // Best-effort: these fills simply stay PENDING and receive the identical (still
+      // false) decision next poll -- no stranding, no fabricated disposition.
+    }
+  };
+
   for (const fill of pendingFills) {
+    // RECOVERY fast path: costs no network and no per-row round trip, so it is evaluated
+    // BEFORE the deadline/lease checks below -- a large historical backlog can therefore
+    // never block the post-go-live rows behind it, and the drain still makes bounded
+    // durable progress in a cycle whose network budget is already exhausted.
+    if (!isEligibleForEpisodeTrigger(fill.sourceTs, goLiveAtMs)) {
+      result.suppressedPreGoLive += 1;
+      preGoLiveBuffer.push(fill.id);
+      if (preGoLiveBuffer.length >= PRE_GO_LIVE_FLUSH_SIZE) await flushPreGoLive();
+      continue;
+    }
     // Task 13F: checked BEFORE every iteration's own (up to 10s) metadata fetch -- once
     // the deadline is reached, the remaining batch is abandoned exactly like a lease loss
     // below: every unprocessed fill simply stays PENDING, re-evaluated identically next
@@ -1908,18 +1972,9 @@ export async function pollSportsShadowWallet(
       detectedAt: detectedAtMs,
     };
 
-    if (!isEligibleForEpisodeTrigger(fill.sourceTs, goLiveAtMs)) {
-      result.suppressedPreGoLive += 1;
-      try {
-        await d.repo.markFillComplete(fill.id);
-      } catch {
-        // Best-effort; stays PENDING and is re-evaluated identically next poll. Task 12E/P1-F:
-        // this stays safe under retry because the decision depends ONLY on this fill's own
-        // immutable sourceTs and the fixed, durable goLiveAtMs -- never on wallet-history
-        // state -- so it is guaranteed to still be false next time.
-      }
-      continue;
-    }
+    // RECOVERY: pre-go-live suppression now happens at the TOP of this loop (see the
+    // fast-path drain there) -- BEFORE any metadata fetch -- so historical rows can no
+    // longer consume Gamma/venue network budget. Nothing is decided here anymore.
 
     const positionKey = `${normalizedWallet}:${fill.conditionId}:${fill.asset}`;
     let cacheEntry: EpisodeCacheEntry | null;
@@ -2135,6 +2190,14 @@ export async function pollSportsShadowWallet(
       // stays PENDING
     }
   }
+
+  // RECOVERY: final flush of the pre-go-live drain buffer. Runs after every loop exit path
+  // (normal end, deadline break, lease-loss break) because it is a lone, bounded,
+  // idempotent single-table write of a disposition already decided from immutable local
+  // data -- skipping it would strand the whole batch as PENDING again, which is exactly the
+  // stall this recovery fixes. A failure is best-effort: those fills simply stay PENDING and
+  // get the identical decision next poll.
+  await flushPreGoLive();
 
   return result;
 }

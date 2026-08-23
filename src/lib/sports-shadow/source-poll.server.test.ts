@@ -7,6 +7,7 @@ import {
   MAX_PAGES_PER_WALLET,
   MAX_PENDING_FILLS_PER_POLL,
   PENDING_FILLS_OLDEST_SHARE,
+  PRE_GO_LIVE_FLUSH_SIZE,
   mergePendingFillSlices,
   pollSportsShadowWallet,
   type EpisodeCacheEntry,
@@ -251,6 +252,17 @@ class FakeRepo implements PollRepository {
     this.markFillCompleteCalls.push(fillId);
     const fill = this.fillsById.get(fillId);
     if (fill) fill.downstreamStatus = "COMPLETE";
+  }
+
+  markFillsCompleteBatches: string[][] = [];
+
+  async markFillsComplete(fillIds: string[]): Promise<void> {
+    this.markFillsCompleteBatches.push([...fillIds]);
+    for (const fillId of fillIds) {
+      this.markFillCompleteCalls.push(fillId);
+      const fill = this.fillsById.get(fillId);
+      if (fill) fill.downstreamStatus = "COMPLETE";
+    }
   }
 
   async markFillTerminal(fillId: string, status: "TERMINAL_INELIGIBLE" | "TERMINAL_INVALID"): Promise<void> {
@@ -844,25 +856,23 @@ describe("pollSportsShadowWallet — bootstrap go-live gating", () => {
     const goLiveAtMs = 1_700_000_000_000 + 3_600_000; // one hour after the pre-go-live fill below
     const preGoLiveTrade = trade({ timestamp: 1_700_000_000, id: "pre-go-live-fill" });
 
-    // First poll: markFillComplete fails, so the correctly-suppressed fill stays PENDING
+    // First poll: the pre-go-live completion write fails (RECOVERY: suppression now uses
+    // the batched markFillsComplete drain), so the correctly-suppressed fill stays PENDING
     // instead of becoming the normal terminal COMPLETE.
     const { deps: firstDeps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [preGoLiveTrade] }) });
-    repo.markFillComplete = async (fillId: string) => {
-      repo.markFillCompleteCalls.push(fillId);
-      throw new Error("simulated transient markFillComplete failure");
+    const workingMarkFillsComplete = repo.markFillsComplete.bind(repo);
+    repo.markFillsComplete = async (fillIds: string[]) => {
+      repo.markFillsCompleteBatches.push([...fillIds]);
+      throw new Error("simulated transient markFillsComplete failure");
     };
     const firstResult = await pollSportsShadowWallet(WALLET, goLiveAtMs, firstDeps);
     expect(firstResult.isBootstrap).toBe(false); // unrelated-history fill already made this a resumption poll
     expect(firstResult.suppressedPreGoLive).toBe(1);
     expect([...repo.fillsByEventKey.values()].find((f) => f.row.eventKey.includes("pre-go-live-fill"))?.downstreamStatus).toBe("PENDING");
 
-    // Restore a working markFillComplete and poll again with an EMPTY page (nothing new to
-    // fetch) -- the only thing this second poll has to do is retry the durably-PENDING fill.
-    repo.markFillComplete = async (fillId: string) => {
-      repo.markFillCompleteCalls.push(fillId);
-      const entry = repo.fillsById.get(fillId);
-      if (entry) entry.downstreamStatus = "COMPLETE";
-    };
+    // Restore a working writer and poll again with an EMPTY page (nothing new to fetch) --
+    // the only thing this second poll has to do is retry the durably-PENDING fill.
+    repo.markFillsComplete = workingMarkFillsComplete;
     const { deps: secondDeps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [] }) });
     const secondResult = await pollSportsShadowWallet(WALLET, goLiveAtMs, secondDeps);
     expect(secondResult.isBootstrap).toBe(false); // resumption mode, exactly the condition the old bug required
@@ -2898,5 +2908,156 @@ describe("RECONCILIATION FIX (2026-08-22): findPendingDownstreamFills issues two
     expect(first.at(-1)?.id).toBe(`tied-${PENDING_FILLS_OLDEST_SHARE + 49}`);
     vi.doUnmock("@/integrations/supabase/client.server");
     vi.resetModules();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* RECOVERY REGRESSIONS — pre-go-live backlog drain.                    */
+/*                                                                     */
+/* Reproduces the exact captured production failure (2026-08-23):       */
+/*   "fetchSourceMarketMetadata failed: gamma-api.polymarket.com        */
+/*    reservation RPC aborted: caller deadline reached mid-request"     */
+/* with ~33.6k PENDING historical fills and ZERO durable progress per   */
+/* cycle, because pre-go-live suppression used to be evaluated only     */
+/* AFTER a network metadata fetch.                                      */
+/* ------------------------------------------------------------------ */
+
+describe("pollSportsShadowWallet — pre-go-live backlog drain (recovery regressions)", () => {
+  const GO_LIVE_AT_MS = 1_700_000_000_000;
+
+  function seedPending(repo: FakeRepo, count: number, sourceTsBase: number, prefix: string): string[] {
+    const ids: string[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const eventKey = `sid:${prefix}-${i}`;
+      const id = `fill-${prefix}-${i}`;
+      const entry = {
+        id,
+        row: {
+          eventKey,
+          wallet: WALLET.toLowerCase(),
+          walletHandle: "Talvez10",
+          conditionId: "0xcondition-1",
+          asset: "asset-1",
+          marketTitle: null,
+          outcome: "Yankees",
+          eventSlug: null,
+          marketSlug: null,
+          side: "BUY",
+          shares: 10,
+          price: 0.55,
+          sourceTs: sourceTsBase + i,
+          identityBasis: "native_id",
+          identityDegraded: false,
+          raw: null,
+        } as unknown as RawFillRow,
+        downstreamStatus: "PENDING" as DownstreamStatus,
+      };
+      repo.fillsByEventKey.set(eventKey, entry);
+      repo.fillsById.set(id, entry);
+      ids.push(id);
+    }
+    return ids;
+  }
+
+  it("a large historical PENDING backlog spends ZERO metadata network calls and does not block a post-go-live eligible fill", async () => {
+    const repo = new FakeRepo();
+    // 250 rows strictly BEFORE the fixed go-live boundary (the real backlog shape).
+    const backlogIds = seedPending(repo, 250, Math.floor(GO_LIVE_AT_MS / 1000) - 100_000, "pre");
+    // ...plus one genuinely eligible post-go-live fill, ordered LAST by source_ts so the
+    // pre-fix code would never reach it.
+    seedPending(repo, 1, Math.floor(GO_LIVE_AT_MS / 1000) + 60, "post");
+
+    const metadataSpy = vi.fn(async () => ELIGIBLE_METADATA);
+    const { deps } = makeDeps({
+      repo,
+      network: makeNetworkDeps({ 0: [] }),
+      fetchSourceMarketMetadata: metadataSpy as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
+    });
+    const result = await pollSportsShadowWallet(WALLET, GO_LIVE_AT_MS, deps);
+
+    expect(result.suppressedPreGoLive).toBe(250);
+    // The ONLY metadata call is for the single eligible post-go-live fill.
+    expect(metadataSpy).toHaveBeenCalledTimes(1);
+    // Every historical row reached its canonical terminal disposition (COMPLETE).
+    for (const id of backlogIds) expect(repo.fillsById.get(id)?.downstreamStatus).toBe("COMPLETE");
+    // ...and the eligible fill still reached downstream processing in the SAME poll.
+    expect(result.newSignals).toHaveLength(1);
+    // Bounded, batched writes: no per-row round trip, no unbounded statement.
+    expect(repo.markFillsCompleteBatches.length).toBeGreaterThan(1);
+    for (const batch of repo.markFillsCompleteBatches) expect(batch.length).toBeLessThanOrEqual(PRE_GO_LIVE_FLUSH_SIZE);
+  });
+
+  it("today's exact failure (metadata reservation aborted at the deadline) no longer prevents durable backlog progress", async () => {
+    const repo = new FakeRepo();
+    const backlogIds = seedPending(repo, 120, Math.floor(GO_LIVE_AT_MS / 1000) - 100_000, "pre");
+    seedPending(repo, 1, Math.floor(GO_LIVE_AT_MS / 1000) + 60, "post");
+
+    const { deps } = makeDeps({
+      repo,
+      network: makeNetworkDeps({ 0: [] }),
+      fetchSourceMarketMetadata: (async () => {
+        throw new DeadlineExceededError(`${DATA_API_HOST} reservation RPC aborted: caller deadline reached mid-request`);
+      }) as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
+    });
+    const result = await pollSportsShadowWallet(WALLET, GO_LIVE_AT_MS, deps);
+
+    // The eligible fill safely stays PENDING (retried next poll) -- but the historical
+    // backlog is durably drained anyway, which is exactly what used to be impossible.
+    expect(result.metadataFetchFailures).toBe(1);
+    expect(result.suppressedPreGoLive).toBe(120);
+    for (const id of backlogIds) expect(repo.fillsById.get(id)?.downstreamStatus).toBe("COMPLETE");
+  });
+
+  it("a failed batch flush strands nothing: the rows stay PENDING and receive the identical decision next poll", async () => {
+    const repo = new FakeRepo();
+    const backlogIds = seedPending(repo, 5, Math.floor(GO_LIVE_AT_MS / 1000) - 100_000, "pre");
+    const working = repo.markFillsComplete.bind(repo);
+    repo.markFillsComplete = async () => {
+      throw new Error("simulated transient batch failure");
+    };
+    const { deps: firstDeps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [] }) });
+    const first = await pollSportsShadowWallet(WALLET, GO_LIVE_AT_MS, firstDeps);
+    expect(first.suppressedPreGoLive).toBe(5);
+    for (const id of backlogIds) expect(repo.fillsById.get(id)?.downstreamStatus).toBe("PENDING");
+
+    repo.markFillsComplete = working;
+    const { deps: secondDeps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [] }) });
+    const second = await pollSportsShadowWallet(WALLET, GO_LIVE_AT_MS, secondDeps);
+    expect(second.suppressedPreGoLive).toBe(5);
+    for (const id of backlogIds) expect(repo.fillsById.get(id)?.downstreamStatus).toBe("COMPLETE");
+  });
+
+  it("phase 2 makes bounded durable progress even when the poll's network budget is already spent", async () => {
+    const repo = new FakeRepo();
+    const backlogIds = seedPending(repo, 150, Math.floor(GO_LIVE_AT_MS / 1000) - 100_000, "pre");
+    let clock = 1_700_000_500_000;
+    const { deps } = makeDeps({
+      repo,
+      network: makeNetworkDeps({ 0: [] }),
+      now: () => clock,
+    });
+    // Deadline lands just after Phase 2 is entered: every network-bearing step below the
+    // fast path is skipped, yet the fast path still drains.
+    const deadlineAtMs = clock + 5;
+    const result = await pollSportsShadowWallet(WALLET, GO_LIVE_AT_MS, deps, deadlineAtMs);
+    clock += 1;
+    expect(result.suppressedPreGoLive).toBe(150);
+    for (const id of backlogIds) expect(repo.fillsById.get(id)?.downstreamStatus).toBe("COMPLETE");
+  });
+
+  it("SAFETY: draining the backlog reaches no trading path -- no episode lookups, no signals, no orders", async () => {
+    const repo = new FakeRepo();
+    seedPending(repo, 30, Math.floor(GO_LIVE_AT_MS / 1000) - 100_000, "pre");
+    const metadataSpy = vi.fn(async () => ELIGIBLE_METADATA);
+    const { deps } = makeDeps({
+      repo,
+      network: makeNetworkDeps({ 0: [] }),
+      fetchSourceMarketMetadata: metadataSpy as unknown as WalletPollDeps["fetchSourceMarketMetadata"],
+    });
+    const result = await pollSportsShadowWallet(WALLET, GO_LIVE_AT_MS, deps);
+    expect(result.newSignals).toHaveLength(0);
+    expect(repo.findLatestEpisodeCalls).toBe(0);
+    expect(repo.episodesById.size).toBe(0);
+    expect(metadataSpy).not.toHaveBeenCalled();
   });
 });
