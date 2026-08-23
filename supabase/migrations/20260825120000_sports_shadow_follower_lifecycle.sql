@@ -145,6 +145,17 @@ VOLATILE
 SECURITY DEFINER
 SET search_path = public
 AS $$
+-- CODEX (final cleanup pass): the RETURNS TABLE clause's own `notional_tier_usd` OUT
+-- column is registered as a PL/pgSQL variable of that exact name in this function's
+-- scope -- the bare `notional_tier_usd` inside the INSERT's ON CONFLICT target list
+-- below is genuinely ambiguous against it ("It could refer to either a PL/pgSQL
+-- variable or a table column", confirmed via a real Postgres runtime error). This
+-- pragma is Postgres's own documented fix for exactly this class of collision: prefer
+-- the table column whenever a bare identifier could mean either, for the rest of this
+-- function -- correct here since every such bare reference in this function's body
+-- (the INSERT target list, the ON CONFLICT target list) is always meant as the column,
+-- never the OUT parameter.
+#variable_conflict use_column
 BEGIN
   IF auth.role() IS NOT NULL AND auth.role() <> 'service_role' THEN
     RAISE EXCEPTION 'record_sports_shadow_routing_provenance_ladder: service_role required, got %', auth.role()
