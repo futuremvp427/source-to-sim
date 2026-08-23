@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   computeSchedulerLastRunAgeMs,
   countRecentRateLimitEvents,
+  countRecentRateLimitPersistFailures,
   cycleSummaryToTelemetryEvents,
+  RATE_LIMIT_PERSIST_FAILURE_THRESHOLD,
   RATE_LIMIT_STORM_THRESHOLD,
   recordTelemetry,
   wrapRecordHostRateLimitWithTelemetry,
@@ -112,6 +114,7 @@ describe("CODEX P2-5: wrapRecordHostRateLimitWithTelemetry -- every 429 becomes 
     const innerCalls: { host: string; retryAfterMs: number | null }[] = [];
     const inner = async (host: string, retryAfterMs: number | null) => {
       innerCalls.push({ host, retryAfterMs });
+      return { ok: true, error: null };
     };
     const recorded: TelemetryEvent[] = [];
     const repo: TelemetryRepository = { async record(events) { recorded.push(...events); } };
@@ -124,14 +127,18 @@ describe("CODEX P2-5: wrapRecordHostRateLimitWithTelemetry -- every 429 becomes 
     void repo;
   });
 
-  it("never throws even if the inner cooldown write fails -- a caller relying on this as its recordHostRateLimit dependency must not see a NEW failure mode introduced by telemetry wrapping", async () => {
+  it("CODEX P2-2: never throws even if the inner cooldown write reports a persistence failure -- a caller relying on this as its recordHostRateLimit dependency must not see a NEW failure mode (or have its own 429 error masked) by telemetry wrapping", async () => {
+    const inner = async () => ({ ok: false, error: "cooldown RPC unavailable" });
+    const wrapped = wrapRecordHostRateLimitWithTelemetry(inner);
+    await expect(wrapped("data-api.polymarket.com", null)).resolves.toBeUndefined();
+  });
+
+  it("CODEX P2-2: never throws even if the inner function itself throws (defensive -- recordHostRateLimitReporting never throws by construction, but the wrapper must not propagate one if it somehow did)", async () => {
     const inner = async () => {
-      throw new Error("cooldown RPC unavailable");
+      throw new Error("unexpected inner exception");
     };
     const wrapped = wrapRecordHostRateLimitWithTelemetry(inner);
-    await expect(wrapped("data-api.polymarket.com", null)).rejects.toThrow("cooldown RPC unavailable");
-    // The inner failure propagates (unchanged behavior for callers already handling it) --
-    // this test documents that telemetry wrapping does not SWALLOW a genuine inner failure.
+    await expect(wrapped("data-api.polymarket.com", null)).resolves.toBeUndefined();
   });
 });
 
@@ -152,6 +159,24 @@ describe("CODEX P2-5: countRecentRateLimitEvents -- real rate-limit-storm signal
     const repo: RateLimitTelemetryRepository = { async countSince() { return RATE_LIMIT_STORM_THRESHOLD; } };
     const count = await countRecentRateLimitEvents(1_700_000_000_000, 5 * 60 * 1000, repo);
     expect(count).toBeGreaterThanOrEqual(RATE_LIMIT_STORM_THRESHOLD);
+  });
+});
+
+describe("CODEX P2-2: countRecentRateLimitPersistFailures -- real persistence-failure signal, distinct from raw 429 volume", () => {
+  it("returns the repository's own count for the computed window", async () => {
+    const repo: RateLimitTelemetryRepository = { async countSince() { return 3; } };
+    const count = await countRecentRateLimitPersistFailures(1_700_000_000_000, 5 * 60 * 1000, repo);
+    expect(count).toBe(3);
+  });
+
+  it("fails to 0 (never fabricates a failure) when the repository read itself fails", async () => {
+    const repo: RateLimitTelemetryRepository = { async countSince() { throw new Error("query failed"); } };
+    const count = await countRecentRateLimitPersistFailures(1_700_000_000_000, 5 * 60 * 1000, repo);
+    expect(count).toBe(0);
+  });
+
+  it("even a single persist failure is at/above RATE_LIMIT_PERSIST_FAILURE_THRESHOLD -- unlike a 429 storm, one persistence failure is already worth alerting on", async () => {
+    expect(RATE_LIMIT_PERSIST_FAILURE_THRESHOLD).toBe(1);
   });
 });
 

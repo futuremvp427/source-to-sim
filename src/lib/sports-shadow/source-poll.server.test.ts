@@ -1701,7 +1701,7 @@ describe("Task 13I / P1-T: pacedFetchTradesPage threads the caller's deadline in
     expect(capturedDeadline).toBeUndefined();
   });
 
-  it("Codex re-review: a 429 whose cooldown recording would start AFTER the caller's deadline skips recordHostRateLimit entirely, but still surfaces the genuine 429 failure as result.error", async () => {
+  it("CODEX P2-2 (round 2): a 429 whose cooldown recording would start AFTER the caller's deadline is STILL recorded -- an already-observed 429 fact must never be silently discarded just because the caller's own deadline has since passed", async () => {
     const repo = new FakeRepo();
     const base = 1_700_000_500_000;
     let now = base;
@@ -1718,7 +1718,7 @@ describe("Task 13I / P1-T: pacedFetchTradesPage threads the caller's deadline in
     };
     const result = await pollSportsShadowWallet(WALLET, 0, { repo, now: () => now, network }, deadlineAtMs);
     expect(result.error).toMatch(/429/);
-    expect(recordHostRateLimit).not.toHaveBeenCalled();
+    expect(recordHostRateLimit).toHaveBeenCalledWith(DATA_API_HOST, 30_000);
   });
 
   it("a 429 that returns comfortably within the caller's deadline still records the cooldown normally -- bounded recording is preserved when time remains", async () => {

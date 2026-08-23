@@ -17,6 +17,7 @@ function baseInput() {
     rateLimitStormDetected: false,
     settlementStuckCount: 0,
     sourceCoverageGap: false,
+    rateLimitPersistFailureDetected: false,
   };
 }
 
@@ -60,6 +61,14 @@ describe("FINAL BUILD Part 27: evaluateAlertConditions", () => {
     const alerts = evaluateAlertConditions({ ...baseInput(), sourceCoverageGap: true });
     expect(alerts).toHaveLength(1);
     expect(alerts[0]?.kind).toBe("sports_shadow_source_coverage_gap");
+  });
+
+  it("CODEX P2-2: raises a distinct rate_limit_persist_failed alert when persistence itself has failed, independent of rateLimitStormDetected", () => {
+    const alerts = evaluateAlertConditions({ ...baseInput(), rateLimitPersistFailureDetected: true });
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.alertKey).toBe("rate_limit_persist_failed");
+    const both = evaluateAlertConditions({ ...baseInput(), rateLimitPersistFailureDetected: true, rateLimitStormDetected: true });
+    expect(both).toHaveLength(2);
   });
 
   it("multiple simultaneous conditions all surface independently", () => {

@@ -1,4 +1,4 @@
-import { DeadlineExceededError, getHostCooldown, parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "../http-rate-limit.server";
+import { DeadlineExceededError, getHostCooldown, parseRetryAfterMs, recordHostRateLimitReporting, reserveRequestSlot } from "../http-rate-limit.server";
 import { classifyGammaMarket, type GammaMarket } from "./eligibility";
 import { wrapRecordHostRateLimitWithTelemetry } from "./telemetry.server";
 import { runtimeFetch } from "./runtime-fetch.server";
@@ -38,7 +38,7 @@ const defaultDeps: GammaNetworkDeps = {
   fetchImpl: runtimeFetch,
   reserveRequestSlot,
   getHostCooldown,
-  recordHostRateLimit: wrapRecordHostRateLimitWithTelemetry(recordHostRateLimit),
+  recordHostRateLimit: wrapRecordHostRateLimitWithTelemetry(recordHostRateLimitReporting),
   now: () => Date.now(),
 };
 
@@ -116,9 +116,9 @@ async function pacedGetGamma(conditionId: string, deps: GammaNetworkDeps, deadli
       signal: controller.signal,
     });
     if (response.status === 429) {
-      if (deadlineAtMs === undefined || deps.now() < deadlineAtMs) {
-        await deps.recordHostRateLimit(GAMMA_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
-      }
+      // CODEX P2-2 (round 2): always recorded now, regardless of the caller's own
+      // deadline -- see pmus.server.ts's identical pacedGetJson for the full rationale.
+      await deps.recordHostRateLimit(GAMMA_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
       throw new Error(`${GAMMA_HOST} rate limited (429) on /markets?condition_ids=${conditionId}`);
     }
     if (!response.ok) {

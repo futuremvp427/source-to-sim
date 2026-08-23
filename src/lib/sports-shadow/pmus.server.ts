@@ -10,7 +10,7 @@
  * normalization/classification this module delegates to.
  */
 
-import { DeadlineExceededError, getHostCooldown, parseRetryAfterMs, recordHostRateLimit, reserveRequestSlot } from "../http-rate-limit.server";
+import { DeadlineExceededError, getHostCooldown, parseRetryAfterMs, recordHostRateLimitReporting, reserveRequestSlot } from "../http-rate-limit.server";
 import { PMUS_PUBLIC_BASE } from "../pmus/us-markets.server";
 import { wrapRecordHostRateLimitWithTelemetry } from "./telemetry.server";
 import { eventToCandidates, normalizePmusBook, type PmusCandidate, type PmusRawEvent } from "./pmus";
@@ -47,7 +47,7 @@ const defaultDeps: PmusNetworkDeps = {
   fetchImpl: runtimeFetch,
   reserveRequestSlot,
   getHostCooldown,
-  recordHostRateLimit: wrapRecordHostRateLimitWithTelemetry(recordHostRateLimit),
+  recordHostRateLimit: wrapRecordHostRateLimitWithTelemetry(recordHostRateLimitReporting),
   now: () => Date.now(),
   checkpointLease: NO_OP_LEASE_CHECKPOINT,
 };
@@ -101,17 +101,18 @@ async function pacedGetJson<T>(path: string, deps: PmusNetworkDeps, deadlineAtMs
       signal: controller.signal,
     });
     if (response.status === 429) {
-      // Task 13I / P1-T (Codex re-review): the fetch that just returned 429 was already
-      // in flight (an accepted overrun -- see this module's own worst-case contract), but
-      // recordHostRateLimit is a NEW operation starting AFTER it, with its own up-to-5s
-      // internal bound. Starting it unconditionally could silently add a second
-      // uncapped-by-deadline stage on top of the already-accepted fetch overrun. Skipped
-      // entirely once the deadline is already gone -- this is best-effort cooldown
-      // bookkeeping, not evidence about the market, so losing it costs nothing beyond a
-      // missed cooldown write; the genuine 429 fact below is still always thrown either way.
-      if (deadlineAtMs === undefined || deps.now() < deadlineAtMs) {
-        await deps.recordHostRateLimit(PMUS_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
-      }
+      // CODEX P2-2: the fetch that just returned 429 was already in flight (an accepted
+      // overrun -- see this module's own worst-case contract). recordHostRateLimit IS a
+      // new operation starting after it, but it is already hard-bounded to
+      // COOLDOWN_WRITE_DEADLINE_MS (5s, via a real AbortController in
+      // http-rate-limit.server.ts) regardless of THIS caller's own deadline -- there was
+      // never an unbounded-wait reason to skip it. Previously skipped entirely once
+      // deadlineAtMs had passed, which silently discarded an ALREADY-OBSERVED 429 fact
+      // (no cooldown written, no telemetry recorded) -- the very next cycle could
+      // immediately re-hit a host known to be rate-limiting this application. Always
+      // recorded now; a genuine persistence failure surfaces as its own NETWORK telemetry
+      // event (see wrapRecordHostRateLimitWithTelemetry) rather than disappearing.
+      await deps.recordHostRateLimit(PMUS_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
       throw new Error(`${PMUS_HOST} rate limited (429) on ${path}`);
     }
     if (!response.ok) {

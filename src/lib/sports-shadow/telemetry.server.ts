@@ -62,23 +62,54 @@ export async function recordTelemetry(events: TelemetryEvent[], repo: TelemetryR
  * regardless of how severe.
  *
  * FIX: every Sports Shadow network module's `recordHostRateLimit` default dependency
- * wraps the shared cooldown write (unchanged, still General Shadow's own mechanism) with
- * a durable Sports-Shadow-owned NETWORK telemetry event per 429 -- see
- * wrapRecordHostRateLimitWithTelemetry below, used as the DEFAULT dependency in
- * pmus.server.ts/kalshi.server.ts/source-poll.server.ts/source-metadata.server.ts (never
- * touches their own call sites, so existing tests injecting their own
+ * wraps the shared cooldown write with a durable Sports-Shadow-owned NETWORK telemetry
+ * event per 429 -- see wrapRecordHostRateLimitWithTelemetry below, used as the DEFAULT
+ * dependency in pmus.server.ts/kalshi.server.ts/source-poll.server.ts/source-metadata.server.ts
+ * (never touches their own call sites, so existing tests injecting their own
  * recordHostRateLimit mock are completely unaffected). countRecentRateLimitEvents then
  * gives both the per-cycle alert check and the soak rollup a genuine, queryable rate.
+ *
+ * ============ CODEX P2-2: PERSISTENCE FAILURE MUST NOT DISAPPEAR SILENTLY ============
+ * PROVEN root cause: pmus.server.ts/kalshi.server.ts/source-poll.server.ts/
+ * source-metadata.server.ts all SKIPPED calling recordHostRateLimit entirely once the
+ * caller's own deadline had already passed by the time a 429 response arrived -- an
+ * already-COMPLETED HTTP response's cooldown/telemetry fact was thrown away instead of
+ * persisted, and the next cycle could immediately re-hit the same host with zero memory
+ * of the just-observed 429. The underlying write (recordHostRateLimitInternal in
+ * http-rate-limit.server.ts) was ALREADY hard-bounded to COOLDOWN_WRITE_DEADLINE_MS
+ * (5s, via a real AbortController) regardless of the caller's own deadline -- there was
+ * never an unbounded-wait reason to skip it, only a mistaken belief that a bounded 5s
+ * write was an unacceptable "new" overrun. FIX: those four call sites now ALWAYS call
+ * this, and the inner dependency is recordHostRateLimitReporting (not the plain
+ * recordHostRateLimit), so a genuine PERSISTENCE failure -- the write itself erroring or
+ * hitting its own 5s abort -- is surfaced as its own `rate_limit_persist_failed` NETWORK
+ * event (see countRecentRateLimitPersistFailures below) instead of vanishing into a
+ * swallowed catch block the way General Shadow's own recordHostRateLimit still does.
  * ================================================================================
  */
-export function wrapRecordHostRateLimitWithTelemetry(inner: (host: string, retryAfterMs: number | null) => Promise<void>): (host: string, retryAfterMs: number | null) => Promise<void> {
+export function wrapRecordHostRateLimitWithTelemetry(
+  inner: (host: string, retryAfterMs: number | null) => Promise<{ ok: boolean; error: string | null }>,
+): (host: string, retryAfterMs: number | null) => Promise<void> {
   return async (host, retryAfterMs) => {
-    await inner(host, retryAfterMs);
+    let result: { ok: boolean; error: string | null };
+    try {
+      result = await inner(host, retryAfterMs);
+    } catch (err) {
+      // Defensive only -- recordHostRateLimitReporting never throws by construction. A
+      // caller mid-way through handling an already-observed 429 must never have that
+      // handling replaced by a persistence-layer exception (CODEX P2-2's own explicit
+      // "do not continue additional business requests" / "never throws" requirement).
+      result = { ok: false, error: err instanceof Error ? err.message : "unknown error" };
+    }
     // Fire-and-forget, deliberately NOT awaited on the caller's own critical path beyond
     // this point -- recordTelemetry is already internally best-effort/non-throwing, but
     // this still lets the paced-fetch caller's own already-bounded deadline continue
     // without waiting on a second network round trip for a diagnostic write.
-    void recordTelemetry([{ category: "NETWORK", metric: "rate_limited_429", value: 1, labels: { host, retryAfterMs } }]);
+    const events: TelemetryEvent[] = [{ category: "NETWORK", metric: "rate_limited_429", value: 1, labels: { host, retryAfterMs } }];
+    if (!result.ok) {
+      events.push({ category: "NETWORK", metric: "rate_limit_persist_failed", value: 1, labels: { host, error: result.error } });
+    }
+    void recordTelemetry(events);
   };
 }
 
@@ -86,24 +117,44 @@ export function wrapRecordHostRateLimitWithTelemetry(inner: (host: string, retry
 export const RATE_LIMIT_STORM_THRESHOLD = 5;
 /** Matches the scheduler's own justified cadence (~30s) at roughly one full lane's worth of cycles -- a burst within one or two cycles, not a slow trickle across hours. */
 export const RATE_LIMIT_STORM_WINDOW_MS = 5 * 60 * 1000;
+/** CODEX P2-2: even a single persistence failure is worth surfacing -- unlike a 429 storm (an upstream condition we can only pace around), a persist failure means OUR OWN durable coordination is degraded. */
+export const RATE_LIMIT_PERSIST_FAILURE_THRESHOLD = 1;
 
 export type RateLimitTelemetryRepository = { countSince(sinceIso: string): Promise<number> };
 
-export const supabaseRateLimitTelemetryRepository: RateLimitTelemetryRepository = {
-  async countSince(sinceIso) {
+function countByMetricSince(metric: string) {
+  return async (sinceIso: string): Promise<number> => {
     const { count, error } = await supabaseAdmin
       .from("sports_shadow_telemetry_events" as never)
       .select("id", { count: "exact", head: true })
       .eq("category", "NETWORK")
-      .eq("metric", "rate_limited_429")
+      .eq("metric", metric)
       .gte("created_at", sinceIso);
     if (error) throw new Error(error.message);
     return count ?? 0;
-  },
+  };
+}
+
+export const supabaseRateLimitTelemetryRepository: RateLimitTelemetryRepository = {
+  countSince: countByMetricSince("rate_limited_429"),
+};
+
+/** CODEX P2-2: same shape as supabaseRateLimitTelemetryRepository, counting `rate_limit_persist_failed` instead of `rate_limited_429`. */
+export const supabaseRateLimitPersistFailureRepository: RateLimitTelemetryRepository = {
+  countSince: countByMetricSince("rate_limit_persist_failed"),
 };
 
 /** Best-effort: a failure to READ the rate-limit history must never itself look like a storm (fails to `0`, never fabricates a positive count). */
 export async function countRecentRateLimitEvents(nowMs: number = Date.now(), windowMs: number = RATE_LIMIT_STORM_WINDOW_MS, repo: RateLimitTelemetryRepository = supabaseRateLimitTelemetryRepository): Promise<number> {
+  try {
+    return await repo.countSince(new Date(nowMs - windowMs).toISOString());
+  } catch {
+    return 0;
+  }
+}
+
+/** CODEX P2-2: mirrors countRecentRateLimitEvents, over the same window, for persist failures instead of raw 429s -- fails to 0, never fabricates a positive count. */
+export async function countRecentRateLimitPersistFailures(nowMs: number = Date.now(), windowMs: number = RATE_LIMIT_STORM_WINDOW_MS, repo: RateLimitTelemetryRepository = supabaseRateLimitPersistFailureRepository): Promise<number> {
   try {
     return await repo.countSince(new Date(nowMs - windowMs).toISOString());
   } catch {

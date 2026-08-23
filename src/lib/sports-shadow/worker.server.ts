@@ -364,13 +364,25 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
     } catch {
       // Best-effort by design -- see maybeDecideExpiredRoutingCutoffs's own doc comment.
     }
-    const { cycleSummaryToTelemetryEvents, recordTelemetry, computeSchedulerLastRunAgeMs, countRecentRateLimitEvents, RATE_LIMIT_STORM_THRESHOLD } = await import("./telemetry.server");
+    const {
+      cycleSummaryToTelemetryEvents,
+      recordTelemetry,
+      computeSchedulerLastRunAgeMs,
+      countRecentRateLimitEvents,
+      countRecentRateLimitPersistFailures,
+      RATE_LIMIT_STORM_THRESHOLD,
+      RATE_LIMIT_PERSIST_FAILURE_THRESHOLD,
+    } = await import("./telemetry.server");
     // CODEX P2-5/P2-6: read the PREVIOUS cycle's own heartbeat BEFORE this cycle's own
     // telemetry is recorded below -- otherwise this would always see its own just-written
     // row and report ~0ms staleness, defeating the entire point. null only when no prior
     // cycle telemetry exists at all (a genuinely fresh epoch, not a stall).
     const schedulerLastRunAgeMs = await computeSchedulerLastRunAgeMs();
     const recentRateLimitEvents = await countRecentRateLimitEvents();
+    // CODEX P2-2: same lookback window, counting genuine persistence failures instead of
+    // raw 429s -- see telemetry.server.ts's own doc comment for why this is a distinct
+    // signal from rateLimitStormDetected.
+    const recentRateLimitPersistFailures = await countRecentRateLimitPersistFailures();
     await recordTelemetry(cycleSummaryToTelemetryEvents(summary));
     const { evaluateAlertConditions, raiseAlert, resolveAlert } = await import("./alerts.server");
     const alerts = evaluateAlertConditions({
@@ -397,13 +409,14 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
         }
       })(),
       sourceCoverageGap: summary.sourceLane !== null && summary.walletCount > 0 && summary.sourceLane.walletsAttempted === 0,
+      rateLimitPersistFailureDetected: recentRateLimitPersistFailures >= RATE_LIMIT_PERSIST_FAILURE_THRESHOLD,
     });
     const activeKeys = new Set(alerts.map((a) => a.alertKey));
     for (const a of alerts) await raiseAlert(a.alertKey, a.severity, a.message, a.kind);
     // Resolve any of THIS cycle's monitored conditions that are no longer active --
     // keeps the dashboard's "currently unresolved" view accurate without a separate
     // sweep job.
-    for (const key of ["venue_discovery_failed:PMUS", "venue_discovery_failed:KALSHI", "lease_lost:PMUS", "lease_lost:KALSHI", "observation_backlog", "source_unhealthy", "settlement_stuck", "source_coverage_gap"]) {
+    for (const key of ["venue_discovery_failed:PMUS", "venue_discovery_failed:KALSHI", "lease_lost:PMUS", "lease_lost:KALSHI", "observation_backlog", "source_unhealthy", "settlement_stuck", "source_coverage_gap", "rate_limit_persist_failed"]) {
       if (!activeKeys.has(key)) await resolveAlert(key);
     }
 

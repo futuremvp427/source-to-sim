@@ -158,6 +158,8 @@ export function evaluateAlertConditions(input: {
   settlementStuckCount: number;
   /** The source lane was acquired and wallets ARE configured, but zero wallets were attempted this cycle -- a coverage gap distinct from a single wallet's poll failing. */
   sourceCoverageGap: boolean;
+  /** CODEX P2-2: at least one 429-cooldown persistence write has genuinely failed (not merely a 429 itself) within the lookback window -- durable rate-limit coordination is degraded, distinct from rateLimitStormDetected (an upstream condition, not a failure of OUR OWN persistence). */
+  rateLimitPersistFailureDetected: boolean;
 }): AlertCondition[] {
   const alerts: AlertCondition[] = [];
   if (input.pmusDiscoveryFailed) alerts.push({ alertKey: "venue_discovery_failed:PMUS", severity: "WARNING", message: "PM-US discovery has failed", kind: "sports_shadow_venue_starved" });
@@ -190,6 +192,9 @@ export function evaluateAlertConditions(input: {
   }
   if (input.sourceCoverageGap) {
     alerts.push({ alertKey: "source_coverage_gap", severity: "WARNING", message: "Source lane ran but attempted zero configured wallets this cycle", kind: "sports_shadow_source_coverage_gap" });
+  }
+  if (input.rateLimitPersistFailureDetected) {
+    alerts.push({ alertKey: "rate_limit_persist_failed", severity: "WARNING", message: "A 429-cooldown persistence write has failed -- durable rate-limit coordination is degraded", kind: "sports_shadow_rate_limit_storm" });
   }
   return alerts;
 }

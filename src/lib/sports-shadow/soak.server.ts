@@ -13,7 +13,7 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 import { evaluateSoakHealth, type SoakHealthInput, type SoakHealthResult } from "./soak";
-import { countRecentRateLimitEvents } from "./telemetry.server";
+import { countRecentRateLimitEvents, countRecentRateLimitPersistFailures } from "./telemetry.server";
 
 /**
  * The external scheduler's actual cadence is not configured anywhere in this repo (the
@@ -85,11 +85,13 @@ export async function computeSoakHealthRollup(epochId: string, soakStartedAtIso:
   // slice) -- see telemetry.server.ts's own doc comment for why this table (unlike the
   // shared http_rate_limits current-cooldown snapshot) is the durable, queryable history
   // this rollup needs.
-  const [telemetry, integrity, stuckSettlements, rateLimitStormCount] = await Promise.all([
+  const [telemetry, integrity, stuckSettlements, rateLimitStormCount, rateLimitPersistFailureCount] = await Promise.all([
     fetchTelemetryRollup(epochId, soakStartedAtIso),
     countIntegrityAudits(soakStartedAtIso),
     countStuckSettlements(now),
     countRecentRateLimitEvents(now, Math.max(0, now - Date.parse(soakStartedAtIso))),
+    // CODEX P2-2: same whole-soak-window treatment as rateLimitStormCount above.
+    countRecentRateLimitPersistFailures(now, Math.max(0, now - Date.parse(soakStartedAtIso))),
   ]);
 
   const expectedCycleCount = Math.max(0, Math.floor((now - Date.parse(soakStartedAtIso)) / EXPECTED_CYCLE_INTERVAL_MS));
@@ -111,6 +113,7 @@ export async function computeSoakHealthRollup(epochId: string, soakStartedAtIso:
     integrityAuditsRun: integrity.run,
     settlementStuckCount: stuckSettlements,
     rateLimitStormCount,
+    rateLimitPersistFailureCount,
   };
 
   return { ...evaluateSoakHealth(input), input };

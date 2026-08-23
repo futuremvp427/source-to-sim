@@ -280,7 +280,7 @@ describe("fetchPmusBook", () => {
     expect(recordHostRateLimit).toHaveBeenCalled();
   });
 
-  it("Codex re-review: a 429 whose cooldown recording would start AFTER the caller's deadline skips recordHostRateLimit entirely, but still captures the genuine 429 failure (never silently dropped)", async () => {
+  it("CODEX P2-2 (round 2): a 429 whose cooldown recording would start AFTER the caller's deadline is STILL recorded -- an already-observed 429 fact must never be silently discarded just because the caller's own deadline has since passed", async () => {
     let now = 1_700_000_000_000;
     const deadlineAtMs = now + 100;
     const recordHostRateLimit = vi.fn(async () => {});
@@ -290,7 +290,7 @@ describe("fetchPmusBook", () => {
     });
     const snap = await fetchPmusBook("some-slug", okDeps({ fetchImpl, recordHostRateLimit, now: () => now }), deadlineAtMs);
     expect(snap.staleReason).toMatch(/429/);
-    expect(recordHostRateLimit).not.toHaveBeenCalled();
+    expect(recordHostRateLimit).toHaveBeenCalledWith(PMUS_HOST, 30_000);
   });
 
   it("a 429 that returns comfortably within the caller's deadline still records the cooldown normally -- bounded recording is preserved when time remains", async () => {
