@@ -52,7 +52,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
-import { evaluateNotionalTiers, SPORTS_SHADOW_NOTIONALS_USD, type DepthWalkResult } from "./depth-walk";
+import { evaluateNotionalTiers, type DepthWalkResult } from "./depth-walk";
 import { computeTakerFeeForFills, type FeeResult } from "./fees";
 import { routeExecution, type RoutingDecision } from "./router";
 import type { DepthLevel, Venue } from "./types";
@@ -70,6 +70,7 @@ export type CapturedObservation = {
 };
 
 export type RoutingProvenance = {
+  notionalTierUsd: number;
   pmusObservationId: string | null;
   kalshiObservationId: string | null;
   decidedAt: string | null;
@@ -109,8 +110,15 @@ export type PaperRepository = {
   getObservationForVenue(signalId: string, venue: Venue, requestedDelayMs: number): Promise<CapturedObservation | null>;
   getSignalProvenance(signalId: string): Promise<SignalProvenance | null>;
   getVenueMatch(signalId: string, venue: Venue): Promise<VenueMatchProvenance | null>;
-  /** Step 1 of the two-step protocol -- see this module's own P1-2 doc comment. */
-  recordRoutingProvenance(signalId: string, requestedDelayMs: number, notionalTierUsd: number, venue: Venue, observationId: string, fireAtMs: number): Promise<RoutingProvenance>;
+  /**
+   * Step 1 of the two-step protocol -- see this module's own P1-2 doc comment. CODEX P1-2
+   * (round 2): creates/updates the COMPLETE 5-tier ladder for (signalId, requestedDelayMs)
+   * in ONE bounded, idempotent round trip -- returned in canonical tier order (matches
+   * SPORTS_SHADOW_NOTIONALS_USD) -- rather than one RPC call per tier, so a deadline
+   * firing partway through the caller's own per-tier evaluation loop can never leave a
+   * later tier with no durable row at all.
+   */
+  recordRoutingProvenanceLadder(signalId: string, requestedDelayMs: number, venue: Venue, observationId: string, fireAtMs: number): Promise<RoutingProvenance[]>;
   /** Step 2 -- returns true only if THIS call actually won the decision (decided_at was NULL beforehand). */
   finalizeRoutingDecision(signalId: string, requestedDelayMs: number, notionalTierUsd: number, row: PaperFillRow, decidedAtMs: number): Promise<boolean>;
   /** Bounded: rows whose cutoff window has expired without ever being decided -- see maybeDecideExpiredRoutingCutoffs. */
@@ -163,18 +171,23 @@ export const supabasePaperRepository: PaperRepository = {
     return { targetMarketId: row.target_market_id, selectedSide: row.selected_side };
   },
 
-  async recordRoutingProvenance(signalId, requestedDelayMs, notionalTierUsd, venue, observationId, fireAtMs) {
-    const { data, error } = await supabaseAdmin.rpc("record_sports_shadow_routing_provenance" as never, {
+  async recordRoutingProvenanceLadder(signalId, requestedDelayMs, venue, observationId, fireAtMs) {
+    const { data, error } = await supabaseAdmin.rpc("record_sports_shadow_routing_provenance_ladder" as never, {
       p_signal_id: signalId,
       p_requested_delay_ms: requestedDelayMs,
-      p_notional_tier_usd: notionalTierUsd,
       p_venue: venue,
       p_observation_id: observationId,
       p_fire_at: new Date(fireAtMs).toISOString(),
     } as never);
     if (error) throw new Error(error.message);
-    const row = (Array.isArray(data) ? data[0] : data) as unknown as { pmus_observation_id: string | null; kalshi_observation_id: string | null; decided_at: string | null; fire_at: string };
-    return { pmusObservationId: row.pmus_observation_id, kalshiObservationId: row.kalshi_observation_id, decidedAt: row.decided_at, fireAtMs: Date.parse(row.fire_at) };
+    const rows = (data ?? []) as unknown as { notional_tier_usd: number; pmus_observation_id: string | null; kalshi_observation_id: string | null; decided_at: string | null; fire_at: string }[];
+    return rows.map((row) => ({
+      notionalTierUsd: row.notional_tier_usd,
+      pmusObservationId: row.pmus_observation_id,
+      kalshiObservationId: row.kalshi_observation_id,
+      decidedAt: row.decided_at,
+      fireAtMs: Date.parse(row.fire_at),
+    }));
   },
 
   async finalizeRoutingDecision(signalId, requestedDelayMs, notionalTierUsd, row, decidedAtMs) {
@@ -362,20 +375,29 @@ export async function computePaperFillsForObservation(observationId: string, dep
   const signalProvenance = await d.repo.getSignalProvenance(obs.signalId);
   if (!signalProvenance) return [];
 
-  // Provenance is recorded (and a decision attempted) for all five canonical tiers
-  // regardless of whether THIS venue's own capture succeeded -- a failed/stale capture
-  // is still real evidence ("this venue is known, and unavailable") that the sibling
-  // venue's own eventual call needs to see via the SAME (signal, delay, tier) row.
+  // CODEX P1-2 (round 2): the COMPLETE 5-tier ladder is created/updated in ONE bounded,
+  // idempotent round trip PER known venue, entirely BEFORE any expensive per-tier
+  // evaluation begins below -- never one RPC call per tier interleaved with that
+  // evaluation. Even if the deadline fires immediately after this, every tier already
+  // has a durable row (this call's own venue's observation recorded as provenance), so
+  // maybeDecideExpiredRoutingCutoffs can still find and eventually terminalize EVERY
+  // tier -- a missing DB row can no longer mean a silently missing experiment
+  // opportunity. Provenance is recorded regardless of whether THIS venue's own capture
+  // succeeded -- a failed/stale capture is still real evidence ("this venue is known,
+  // and unavailable") that the sibling venue's own eventual call needs to see.
+  let ladder = await d.repo.recordRoutingProvenanceLadder(obs.signalId, obs.requestedDelayMs, obs.venue, observationId, obs.fireAtMs);
+  if (siblingObs?.observed) {
+    ladder = await d.repo.recordRoutingProvenanceLadder(obs.signalId, obs.requestedDelayMs, otherVenue, siblingObs.id, obs.fireAtMs);
+  }
+
   const decided: PaperFillRow[] = [];
-  for (const tier of SPORTS_SHADOW_NOTIONALS_USD) {
-    // CODEX P2-6: checked BEFORE each tier's own RPC round trips -- an already-exhausted
-    // deadline stops here, leaving this and every remaining tier's decision untouched
-    // this call (safe -- see this function's own doc comment).
+  for (const provenance of ladder) {
+    // CODEX P2-6: checked BEFORE each tier's own expensive evaluation -- an already-
+    // exhausted deadline stops here, leaving this and every remaining tier's decision
+    // untouched this call. Safe: every tier's own durable row already exists (created
+    // above), so an untouched tier is simply left pending for the sibling's own eventual
+    // call or the periodic cutoff sweep, never a lost or corrupted decision.
     if (deadlineAtMs !== undefined && d.now() >= deadlineAtMs) break;
-    let provenance = await d.repo.recordRoutingProvenance(obs.signalId, obs.requestedDelayMs, tier, obs.venue, observationId, obs.fireAtMs);
-    if (siblingObs?.observed) {
-      provenance = await d.repo.recordRoutingProvenance(obs.signalId, obs.requestedDelayMs, tier, otherVenue, siblingObs.id, obs.fireAtMs);
-    }
     if (provenance.decidedAt !== null) continue; // no-hindsight: already decided, this call changes nothing
 
     const bothKnown = provenance.pmusObservationId !== null && provenance.kalshiObservationId !== null;
@@ -383,7 +405,7 @@ export async function computePaperFillsForObservation(observationId: string, dep
     const cutoffExpired = now - provenance.fireAtMs >= ROUTING_DECISION_CUTOFF_MS;
     if (!bothKnown && !cutoffExpired) continue; // wait for the sibling or a later cutoff sweep
 
-    const row = await decideOneTier(obs.signalId, obs.requestedDelayMs, tier, provenance, obs, otherVenue, signalProvenance, bothKnown ? "BOTH_COMPLETE" : "CUTOFF_EXPIRED", d);
+    const row = await decideOneTier(obs.signalId, obs.requestedDelayMs, provenance.notionalTierUsd, provenance, obs, otherVenue, signalProvenance, bothKnown ? "BOTH_COMPLETE" : "CUTOFF_EXPIRED", d);
     if (row) decided.push(row);
   }
   return decided;
@@ -441,7 +463,17 @@ export async function maybeDecideExpiredRoutingCutoffs(deps: Partial<PaperDeps> 
         const signalProvenance = await d.repo.getSignalProvenance(pending.signalId);
         if (!signalProvenance) continue;
         const otherVenue: Venue = knownVenue === "PMUS" ? "KALSHI" : "PMUS";
-        const row = await decideOneTier(pending.signalId, pending.requestedDelayMs, pending.notionalTierUsd, { pmusObservationId: pending.pmusObservationId, kalshiObservationId: pending.kalshiObservationId, decidedAt: null, fireAtMs: cutoffAtMs }, obs, otherVenue, signalProvenance, "CUTOFF_EXPIRED", d);
+        const row = await decideOneTier(
+          pending.signalId,
+          pending.requestedDelayMs,
+          pending.notionalTierUsd,
+          { notionalTierUsd: pending.notionalTierUsd, pmusObservationId: pending.pmusObservationId, kalshiObservationId: pending.kalshiObservationId, decidedAt: null, fireAtMs: cutoffAtMs },
+          obs,
+          otherVenue,
+          signalProvenance,
+          "CUTOFF_EXPIRED",
+          d,
+        );
         if (row) decided += 1;
       } catch {
         // Per-row best-effort: one bad row must not block the rest of the sweep.

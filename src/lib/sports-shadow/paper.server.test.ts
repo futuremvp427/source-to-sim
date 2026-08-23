@@ -18,6 +18,9 @@ function key(signalId: string, requestedDelayMs: number, tier: number): Key {
   return `${signalId}:${requestedDelayMs}:${tier}`;
 }
 
+/** Mirrors depth-walk.ts's SPORTS_SHADOW_NOTIONALS_USD -- not imported directly to keep this fake self-contained. */
+const CANONICAL_TIERS = [5, 10, 25, 50, 100] as const;
+
 /**
  * Simulates the real DB's two-step provenance/finalize protocol (see the migration's own
  * doc comment) in-memory: `provenance` mirrors the durable
@@ -51,22 +54,31 @@ function fakeRepo(config: {
     async getVenueMatch(signalId, venue) {
       return config.venueMatches?.get(`${signalId}:${venue}`) ?? { targetMarketId: `${venue.toLowerCase()}-market`, selectedSide: "YES" };
     },
-    async recordRoutingProvenance(signalId, requestedDelayMs, notionalTierUsd, venue, observationId, fireAtMs) {
-      const k = key(signalId, requestedDelayMs, notionalTierUsd);
-      const existing = provenance.get(k) ?? { pmusObservationId: null, kalshiObservationId: null, decidedAt: null, fireAtMs };
-      const updated: RoutingProvenance = {
-        ...existing,
-        pmusObservationId: venue === "PMUS" ? (existing.pmusObservationId ?? observationId) : existing.pmusObservationId,
-        kalshiObservationId: venue === "KALSHI" ? (existing.kalshiObservationId ?? observationId) : existing.kalshiObservationId,
-      };
-      provenance.set(k, updated);
-      return updated;
+    async recordRoutingProvenanceLadder(signalId, requestedDelayMs, venue, observationId, fireAtMs) {
+      // CODEX P1-2 (round 2): mirrors the real ladder RPC -- ONE call creates/updates ALL
+      // canonical tiers atomically, returned in canonical tier order.
+      const results: RoutingProvenance[] = [];
+      for (const notionalTierUsd of CANONICAL_TIERS) {
+        const k = key(signalId, requestedDelayMs, notionalTierUsd);
+        const existing = provenance.get(k) ?? { notionalTierUsd, pmusObservationId: null, kalshiObservationId: null, decidedAt: null, fireAtMs };
+        const updated: RoutingProvenance = {
+          ...existing,
+          pmusObservationId: venue === "PMUS" ? (existing.pmusObservationId ?? observationId) : existing.pmusObservationId,
+          kalshiObservationId: venue === "KALSHI" ? (existing.kalshiObservationId ?? observationId) : existing.kalshiObservationId,
+        };
+        provenance.set(k, updated);
+        results.push(updated);
+      }
+      return results;
     },
     async finalizeRoutingDecision(signalId, requestedDelayMs, notionalTierUsd, row, decidedAtMs) {
       const k = key(signalId, requestedDelayMs, notionalTierUsd);
       const existing = provenance.get(k);
       if (existing?.decidedAt) return false; // already decided -- the DB-level guard this mirrors
-      provenance.set(k, { ...(existing ?? { pmusObservationId: null, kalshiObservationId: null, fireAtMs: decidedAtMs }), decidedAt: new Date(decidedAtMs).toISOString() });
+      provenance.set(k, {
+        ...(existing ?? { notionalTierUsd, pmusObservationId: null, kalshiObservationId: null, fireAtMs: decidedAtMs }),
+        decidedAt: new Date(decidedAtMs).toISOString(),
+      });
       decisions.set(k, row);
       return true;
     },
@@ -299,21 +311,63 @@ describe("CODEX P2-6: computePaperFillsForObservation respects an external deadl
     expect(later).toHaveLength(5);
   });
 
-  it("a slow dependency (simulated by a repo call that advances the clock) is interrupted mid-way through the five tiers rather than running unbounded -- proves the P2-6 fix: a backed-up Postgres can no longer extend one observation's onObservationClaimed call past its own deadline uncounted", async () => {
+  it("a slow dependency (simulated by a repo call that advances the clock during per-tier decision-making) is interrupted mid-way through the five tiers rather than running unbounded -- proves the P2-6 fix: a backed-up Postgres can no longer extend one observation's onObservationClaimed call past its own deadline uncounted", async () => {
     const pmus = obs({ id: "obs-pmus", venue: "PMUS" });
     const kalshi = obs({ id: "obs-kalshi", venue: "KALSHI" });
     let now = pmus.fireAtMs;
     const deadline = pmus.fireAtMs + 250; // tight -- allows roughly one tier's worth of "slow" round trips
     const repo = fakeRepo({ observations: seedObservations(pmus, kalshi) });
-    const originalRecord = repo.recordRoutingProvenance.bind(repo);
+    // CODEX P1-2 (round 2): provenance for all 5 tiers is now created in ONE upfront
+    // ladder call, entirely BEFORE the deadline-bound per-tier loop begins -- the
+    // deadline can only ever interrupt the per-tier DECISION step (finalizeRoutingDecision
+    // and everything decideOneTier does before it), not provenance creation itself.
+    const originalFinalize = repo.finalizeRoutingDecision.bind(repo);
     let callCount = 0;
-    repo.recordRoutingProvenance = async (...args) => {
+    repo.finalizeRoutingDecision = async (...args) => {
       callCount += 1;
       now += 200; // simulates a slow/backed-up Postgres round trip
-      return originalRecord(...args);
+      return originalFinalize(...args);
     };
     const rows = await computePaperFillsForObservation("obs-pmus", { repo, now: () => now }, deadline);
-    expect(rows.length).toBeLessThan(5); // interrupted -- did NOT run all 5 tiers unbounded
+    expect(rows.length).toBeLessThan(5); // interrupted -- did NOT decide all 5 tiers unbounded
     expect(callCount).toBeLessThan(10); // bounded, not an unbounded/runaway loop
+    // The central P1-2 (round 2) guarantee: every tier -- decided or not -- already has a
+    // durable provenance row, created upfront before this loop ever started. A missing DB
+    // row can no longer mean a silently missing experiment opportunity.
+    expect(repo.provenance.size).toBe(5);
+  });
+
+  it("REQUIRED TEST (CODEX P1-2 round 2): one-venue +0 observation, deadline fires after the $5 tier's own decision -- the periodic cutoff sweep still decides all 5 tiers on restart, none disappear", async () => {
+    const pmus = obs({ id: "obs-pmus", venue: "PMUS", fireAtMs: 1_700_000_000_000 });
+    // No Kalshi observation is ever captured for this (signal, delay) -- the common
+    // single-venue-schedulable case Codex's finding specifically names.
+    const repo = fakeRepo({ observations: seedObservations(pmus) });
+    // No sibling venue is ever captured, so tiers can only ever decide via CUTOFF_EXPIRED
+    // -- start already past ROUTING_DECISION_CUTOFF_MS so the per-tier loop actually
+    // attempts decisions (rather than waiting) from its very first tier.
+    const startNow = pmus.fireAtMs + ROUTING_DECISION_CUTOFF_MS + 1;
+    let now = startNow;
+    const deadline = startNow + 250; // tight -- allows roughly one tier's own decision before interruption
+    const originalFinalize = repo.finalizeRoutingDecision.bind(repo);
+    repo.finalizeRoutingDecision = async (...args) => {
+      now += 200; // simulates a slow/backed-up Postgres round trip
+      return originalFinalize(...args);
+    };
+
+    const firstCallRows = await computePaperFillsForObservation("obs-pmus", { repo, now: () => now }, deadline);
+    expect(firstCallRows.length).toBeGreaterThan(0);
+    expect(firstCallRows.length).toBeLessThan(5); // interrupted before every tier could be decided
+    // The core P1-2 (round 2) guarantee that makes recovery possible at all: every tier
+    // already has a durable row, even the ones this call never got to decide.
+    expect(repo.provenance.size).toBe(5);
+
+    // Simulate a restart well past the cutoff window, with no deadline of its own --
+    // exactly what worker.server.ts's onCycleComplete invokes every cycle.
+    const laterNow = pmus.fireAtMs + ROUTING_DECISION_CUTOFF_MS + 1_000;
+    const decidedBySweep = await maybeDecideExpiredRoutingCutoffs({ repo, now: () => laterNow });
+
+    expect(decidedBySweep).toBe(5 - firstCallRows.length); // exactly the tiers left over
+    expect(repo.decisions.size).toBe(5); // ALL FIVE tiers terminally decided -- none disappeared
+    expect([...repo.decisions.values()].every((r) => r.chosenVenue === "PMUS" && r.cutoffReason !== undefined)).toBe(true);
   });
 });

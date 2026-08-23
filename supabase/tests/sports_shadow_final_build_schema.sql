@@ -142,9 +142,11 @@ BEGIN
   -- opportunity (CODEX P1-2 fix -- previously keyed by the PHYSICAL observation_id,
   -- which let PM-US's and Kalshi's independently-completing observations each create
   -- their own duplicate row for what should be exactly one decision). Also proves the
-  -- decide-once provenance protocol: record_sports_shadow_routing_provenance never
-  -- overwrites an already-known observation id, and finalize_sports_shadow_routing_
-  -- decision's WHERE decided_at IS NULL guard lets exactly one caller win.
+  -- decide-once provenance protocol: record_sports_shadow_routing_provenance_ladder
+  -- (CODEX P1-2 round 2: creates the COMPLETE 5-tier ladder in ONE call, replacing the
+  -- old per-tier RPC) never overwrites an already-known observation id, and
+  -- finalize_sports_shadow_routing_decision's WHERE decided_at IS NULL guard lets
+  -- exactly one caller win.
   ------------------------------------------------------------------
   INSERT INTO public.sports_shadow_paper_fills (signal_id, requested_delay_ms, notional_tier_usd, fill_status)
   VALUES (v_signal_id, 0, 10, 'FULL');
@@ -176,18 +178,26 @@ BEGIN
     VALUES (v_signal_id, v_match_id, 'KALSHI', 30000, now(), now())
     RETURNING id INTO v_obs_kalshi;
 
-    PERFORM public.record_sports_shadow_routing_provenance(v_signal_id, 30000, 25, 'PMUS', v_obs_pmus, now());
-    PERFORM public.record_sports_shadow_routing_provenance(v_signal_id, 30000, 25, 'KALSHI', v_obs_kalshi, now());
+    PERFORM public.record_sports_shadow_routing_provenance_ladder(v_signal_id, 30000, 'PMUS', v_obs_pmus, now());
+    PERFORM public.record_sports_shadow_routing_provenance_ladder(v_signal_id, 30000, 'KALSHI', v_obs_kalshi, now());
+
+    -- CODEX P1-2 (round 2): ONE call already created the COMPLETE 5-tier ladder -- never
+    -- just the caller's own single tier of interest. A deadline firing right after this
+    -- call can no longer leave any tier with NO durable row at all.
+    IF (SELECT count(*) FROM public.sports_shadow_paper_fills WHERE signal_id = v_signal_id AND requested_delay_ms = 30000) <> 5 THEN
+      RAISE EXCEPTION 'expected record_sports_shadow_routing_provenance_ladder to create all 5 canonical tiers in one call, got %',
+        (SELECT count(*) FROM public.sports_shadow_paper_fills WHERE signal_id = v_signal_id AND requested_delay_ms = 30000);
+    END IF;
 
     -- Re-recording PMUS's provenance with a bogus id must NOT clobber the already-known
     -- one (COALESCE guard) -- a retried/duplicate call is always safe.
-    PERFORM public.record_sports_shadow_routing_provenance(v_signal_id, 30000, 25, 'PMUS', gen_random_uuid(), now());
+    PERFORM public.record_sports_shadow_routing_provenance_ladder(v_signal_id, 30000, 'PMUS', gen_random_uuid(), now());
     IF NOT EXISTS (
       SELECT 1 FROM public.sports_shadow_paper_fills
       WHERE signal_id = v_signal_id AND requested_delay_ms = 30000 AND notional_tier_usd = 25
         AND pmus_observation_id = v_obs_pmus AND kalshi_observation_id = v_obs_kalshi
     ) THEN
-      RAISE EXCEPTION 'expected record_sports_shadow_routing_provenance to preserve already-known observation ids via COALESCE';
+      RAISE EXCEPTION 'expected record_sports_shadow_routing_provenance_ladder to preserve already-known observation ids via COALESCE';
     END IF;
 
     SELECT public.finalize_sports_shadow_routing_decision(
