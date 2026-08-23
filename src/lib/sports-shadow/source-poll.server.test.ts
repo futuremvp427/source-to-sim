@@ -3087,7 +3087,11 @@ describe("pollSportsShadowWallet — pre-go-live backlog drain (recovery regress
 
     // The eligible fill safely stays PENDING (retried next poll) -- but the historical
     // backlog is durably drained anyway, which is exactly what used to be impossible.
-    expect(result.metadataFetchFailures).toBe(1);
+    // RECOVERY round 2: a deadline is a bounded stop, so it is reported as
+    // metadataDeadlineReached (NOT as a failure/error that would raise source_unhealthy).
+    expect(result.metadataFetchFailures).toBe(0);
+    expect(result.metadataDeadlineReached).toBe(true);
+    expect(result.error).toBeNull();
     expect(result.suppressedPreGoLive).toBe(120);
     for (const id of backlogIds) expect(repo.fillsById.get(id)?.downstreamStatus).toBe("COMPLETE");
   });
