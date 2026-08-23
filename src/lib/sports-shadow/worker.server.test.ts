@@ -23,6 +23,7 @@ import {
   SETTLEMENT_LOCK_ID,
   SOURCE_LANE_BUDGET_MS,
   sourceIngestDeadline,
+  sourceCoverageGapAlertPolicy,
   SOURCE_LOCK_ID,
   runSportsShadowCycle,
   runSportsShadowSettlementJob,
@@ -1465,6 +1466,28 @@ describe("FINAL BUILD Parts 25/27: onCycleComplete telemetry/alert hook", () => 
     const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ onCycleComplete }));
     expect(summary.configEnabled).toBe(true);
     expect(summary.errors).toEqual([]); // the hook's own failure never leaks into the cycle's reported errors
+  });
+
+  it("CODEX final gate: a source lease skip neither raises nor resolves source_coverage_gap", async () => {
+    const { repo: leaseRepo } = makeFakeLeaseRepo();
+    await leaseRepo.acquire(SOURCE_LOCK_ID, "already-running-source-job", 60);
+    const summary = await runSportsShadowCycle(enabledConfig(), baseDeps({ leaseRepo }));
+    expect(summary.sourceLane?.acquired).toBe(false);
+    expect(summary.sourceLane?.walletsAttempted).toBe(0);
+    expect(sourceCoverageGapAlertPolicy(summary)).toEqual({ shouldEvaluate: false, active: false });
+  });
+
+  it("CODEX final gate: acquired source cycles evaluate source_coverage_gap only from actual zero-wallet starvation", async () => {
+    const attemptedSummary = await runSportsShadowCycle(enabledConfig(), baseDeps());
+    expect(attemptedSummary.sourceLane?.acquired).toBe(true);
+    expect(attemptedSummary.sourceLane?.walletsAttempted).toBe(1);
+    expect(sourceCoverageGapAlertPolicy(attemptedSummary)).toEqual({ shouldEvaluate: true, active: false });
+
+    const starvedSummary = {
+      ...attemptedSummary,
+      sourceLane: { ...attemptedSummary.sourceLane!, walletsAttempted: 0 },
+    };
+    expect(sourceCoverageGapAlertPolicy(starvedSummary)).toEqual({ shouldEvaluate: true, active: true });
   });
 });
 

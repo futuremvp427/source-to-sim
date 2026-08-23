@@ -482,6 +482,7 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
     })();
     await recordTelemetry(cycleSummaryToTelemetryEvents(summary));
     const { evaluateAlertConditions, raiseAlert, resolveAlert } = await import("./alerts.server");
+    const sourceCoverageGapPolicy = sourceCoverageGapAlertPolicy(summary);
     const alerts = evaluateAlertConditions({
       pmusDiscoveryFailed: summary.sourceLane?.pmus.discoveryFailed ?? false,
       kalshiDiscoveryFailed: summary.sourceLane?.kalshi.discoveryFailed ?? false,
@@ -505,7 +506,7 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
           return 0;
         }
       })(),
-      sourceCoverageGap: summary.sourceLane !== null && summary.walletCount > 0 && summary.sourceLane.walletsAttempted === 0,
+      sourceCoverageGap: sourceCoverageGapPolicy.active,
       rateLimitPersistFailureDetected: recentRateLimitPersistFailures >= RATE_LIMIT_PERSIST_FAILURE_THRESHOLD,
       sourceCoverageIncomplete,
     });
@@ -514,7 +515,7 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
     // Resolve any of THIS cycle's monitored conditions that are no longer active --
     // keeps the dashboard's "currently unresolved" view accurate without a separate
     // sweep job.
-    for (const key of [
+    const resolvableAlertKeys = [
       "venue_discovery_failed:PMUS",
       "venue_discovery_failed:KALSHI",
       "lease_lost:PMUS",
@@ -522,10 +523,11 @@ async function defaultOnCycleComplete(summary: SportsShadowCycleSummary): Promis
       "observation_backlog",
       "source_unhealthy",
       "settlement_stuck",
-      "source_coverage_gap",
       "rate_limit_persist_failed",
       "source_coverage_incomplete",
-    ]) {
+    ];
+    if (sourceCoverageGapPolicy.shouldEvaluate) resolvableAlertKeys.push("source_coverage_gap");
+    for (const key of resolvableAlertKeys) {
       if (!activeKeys.has(key)) await resolveAlert(key);
     }
 
@@ -656,6 +658,16 @@ export type SportsShadowCycleSummary = {
    */
   epochId: string | null;
 };
+
+export type SourceCoverageGapAlertPolicy = { shouldEvaluate: boolean; active: boolean };
+
+export function sourceCoverageGapAlertPolicy(summary: SportsShadowCycleSummary): SourceCoverageGapAlertPolicy {
+  const sourceLaneAcquired = summary.sourceLane !== null && summary.sourceLane.acquired !== false;
+  return {
+    shouldEvaluate: sourceLaneAcquired,
+    active: sourceLaneAcquired && summary.walletCount > 0 && summary.sourceLane!.walletsAttempted === 0,
+  };
+}
 
 function emptyObservationResult(): ObservationLaneResult {
   return { acquired: false, attempted: 0, captured: 0, failed: 0, skipped: 0 };

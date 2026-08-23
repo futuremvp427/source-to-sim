@@ -9,9 +9,13 @@ DO $$
 DECLARE
   v_fill_id uuid;
   v_signal_id uuid;
+  v_trigger_id uuid;
+  v_pmus_match_id uuid;
+  v_kalshi_match_id uuid;
   v_oid_insert oid;
   v_oid_update oid;
   v_public_has_execute boolean;
+  v_missing_count integer;
   v_status text;
 BEGIN
   -- Seed one durable fill (PENDING by default).
@@ -164,6 +168,59 @@ BEGIN
     WHERE source_fill_id = v_fill_id AND trigger_type = 'ADD' AND add_fraction = 0.5
   ) THEN
     RAISE EXCEPTION 'expected valid update_sports_shadow_episode call to record ADD lifecycle trigger atomically';
+  END IF;
+  SELECT id INTO v_trigger_id
+  FROM public.sports_shadow_lifecycle_triggers
+  WHERE source_fill_id = v_fill_id AND trigger_type = 'ADD' AND add_fraction = 0.5;
+
+  ------------------------------------------------------------------
+  -- 6. Lifecycle scheduling RPC is venue-complete: PM-US rows already existing for a
+  -- trigger must not hide the missing Kalshi venue, and once Kalshi's own five rows
+  -- exist the trigger/venue pair disappears idempotently.
+  ------------------------------------------------------------------
+  INSERT INTO public.sports_market_matches (
+    signal_id, venue, match_status, first_match_status, target_market_id, selected_side
+  )
+  VALUES (v_signal_id, 'PMUS', 'EXACT', 'EXACT', 'pmus-fetch-key', 'TEAM:AWY:LONG')
+  RETURNING id INTO v_pmus_match_id;
+
+  INSERT INTO public.sports_market_matches (
+    signal_id, venue, match_status, first_match_status, target_market_id, selected_side
+  )
+  VALUES (v_signal_id, 'KALSHI', 'EXACT', 'EXACT', 'kalshi-ticker', 'YES')
+  RETURNING id INTO v_kalshi_match_id;
+
+  INSERT INTO public.sports_quote_observations (
+    signal_id, match_id, venue, requested_delay_ms, source_timestamp, fire_at, trigger_source_fill_id
+  )
+  SELECT v_signal_id, v_pmus_match_id, 'PMUS', d.requested_delay_ms, now(), now(), v_trigger_id
+  FROM unnest(ARRAY[0, 5000, 10000, 30000, 60000]::integer[]) AS d(requested_delay_ms);
+
+  SELECT count(*) INTO v_missing_count
+  FROM public.find_unscheduled_sports_shadow_lifecycle_triggers(20)
+  WHERE id = v_trigger_id AND venue = 'PMUS';
+  IF v_missing_count <> 0 THEN
+    RAISE EXCEPTION 'expected already-scheduled PMUS lifecycle venue to be omitted, got % rows', v_missing_count;
+  END IF;
+
+  SELECT count(*) INTO v_missing_count
+  FROM public.find_unscheduled_sports_shadow_lifecycle_triggers(20)
+  WHERE id = v_trigger_id AND venue = 'KALSHI' AND match_id = v_kalshi_match_id;
+  IF v_missing_count <> 1 THEN
+    RAISE EXCEPTION 'expected missing Kalshi lifecycle venue to be returned exactly once, got % rows', v_missing_count;
+  END IF;
+
+  INSERT INTO public.sports_quote_observations (
+    signal_id, match_id, venue, requested_delay_ms, source_timestamp, fire_at, trigger_source_fill_id
+  )
+  SELECT v_signal_id, v_kalshi_match_id, 'KALSHI', d.requested_delay_ms, now(), now(), v_trigger_id
+  FROM unnest(ARRAY[0, 5000, 10000, 30000, 60000]::integer[]) AS d(requested_delay_ms);
+
+  SELECT count(*) INTO v_missing_count
+  FROM public.find_unscheduled_sports_shadow_lifecycle_triggers(20)
+  WHERE id = v_trigger_id;
+  IF v_missing_count <> 0 THEN
+    RAISE EXCEPTION 'expected lifecycle trigger to disappear only after all exact venues are scheduled, got % rows', v_missing_count;
   END IF;
 
   RAISE NOTICE 'sports_shadow_fill_retry_rpcs contract passed';

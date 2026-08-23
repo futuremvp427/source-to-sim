@@ -454,6 +454,38 @@ describe("CODEX P1-3: follower lifecycle -- ADD/EXIT decisions", () => {
     expect(rows).toHaveLength(0);
   });
 
+  it("venue-complete lifecycle scheduling cannot lose an open Kalshi position when PM-US rows were scheduled first", async () => {
+    const repo = fakeRepo({
+      positions: new Map([[`sig-1:KALSHI:${TIER}`, { contractsOpen: 20, avgEntryPrice: 0.5 }]]),
+      lifecycleTriggers: new Map([
+        ["trigger-add-kalshi", { signalId: "sig-1", triggerType: "ADD", trackedShares: 1, exitFraction: null, addFraction: 0.1, price: 0.55, sourceTs: 1_700_000_100 }],
+        ["trigger-exit-kalshi", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 5, exitFraction: 0.25, addFraction: null, price: 0.5, sourceTs: 1_700_000_200 }],
+      ]),
+      observations: seedObservations(
+        obs({ id: "obs-add-pmus", venue: "PMUS", triggerSourceFillId: "trigger-add-kalshi", askDepth: [{ price: 0.55, size: 1000 }] }),
+        obs({ id: "obs-add-kalshi", venue: "KALSHI", triggerSourceFillId: "trigger-add-kalshi", askDepth: [{ price: 0.55, size: 1000 }] }),
+        obs({ id: "obs-exit-pmus", venue: "PMUS", triggerSourceFillId: "trigger-exit-kalshi", bidDepth: [{ price: 0.6, size: 1000 }] }),
+        obs({ id: "obs-exit-kalshi", venue: "KALSHI", triggerSourceFillId: "trigger-exit-kalshi", bidDepth: [{ price: 0.6, size: 1000 }] }),
+      ),
+    });
+
+    expect(await computePaperFillsForObservation("obs-add-pmus", { repo })).toHaveLength(0);
+    const kalshiAdd = await computePaperFillsForObservation("obs-add-kalshi", { repo });
+    expect(kalshiAdd).toHaveLength(1);
+    expect(kalshiAdd[0]?.side).toBe("ADD");
+    expect(kalshiAdd[0]?.fillStatus).toBe("REJECTED");
+    expect(kalshiAdd[0]?.rejectReason).toContain("KALSHI fee UNVERIFIED");
+    expect(repo.positions.get(`sig-1:KALSHI:${TIER}`)?.contractsOpen).toBe(20);
+
+    expect(await computePaperFillsForObservation("obs-exit-pmus", { repo })).toHaveLength(0);
+    const kalshiExit = await computePaperFillsForObservation("obs-exit-kalshi", { repo });
+    expect(kalshiExit).toHaveLength(1);
+    expect(kalshiExit[0]?.side).toBe("EXIT");
+    expect(kalshiExit[0]?.fillStatus).toBe("REJECTED");
+    expect(kalshiExit[0]?.rejectReason).toContain("KALSHI fee UNVERIFIED");
+    expect(repo.positions.get(`sig-1:KALSHI:${TIER}`)?.contractsOpen).toBe(20);
+  });
+
   it("EXIT: sells the proportional share of THIS TIER's own contracts_open against BID depth, realizing P&L against avg_entry_price", async () => {
     const repo = fakeRepo({
       positions: new Map([[`sig-1:PMUS:${TIER}`, { contractsOpen: 20, avgEntryPrice: 0.5 }]]),

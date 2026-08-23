@@ -77,16 +77,17 @@
 -- invocation (Task 12H/P1-N's per-venue observation isolation; Task 12F/P1-G's
 -- independent source lease).
 --
--- IDEMPOTENT INSTALL/REMOVAL: cron.unschedule is called first for each of the three job
--- names, so re-running this script (e.g. to change any one job's cadence) never creates
--- a duplicate job under any of the three names.
+-- IDEMPOTENT INSTALL/REMOVAL: cron.unschedule is called first for each current job name
+-- AND the legacy combined job name ('sports-shadow-cycle'), so re-running this script
+-- (e.g. to change any one job's cadence) never creates duplicates and never leaves the
+-- old fourth source invocation behind in an existing deployment.
 
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 CREATE EXTENSION IF NOT EXISTS pg_net;
 
 DO $$
 BEGIN
-  PERFORM cron.unschedule(jobid) FROM cron.job WHERE jobname IN ('sports-shadow-cycle-observation', 'sports-shadow-cycle-source', 'sports-shadow-cycle-settlement');
+  PERFORM cron.unschedule(jobid) FROM cron.job WHERE jobname IN ('sports-shadow-cycle', 'sports-shadow-cycle-observation', 'sports-shadow-cycle-source', 'sports-shadow-cycle-settlement');
 EXCEPTION
   WHEN OTHERS THEN NULL; -- no existing job under these names yet -- nothing to remove
 END $$;

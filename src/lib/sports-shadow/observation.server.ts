@@ -54,8 +54,8 @@ export type DueObservationRow = {
   selectedSide: string | null;
 };
 
-/** CODEX P1-3 (follower lifecycle): a durable "this fill requires a follower reaction" record awaiting its own observation-capture burst. */
-export type PendingLifecycleTrigger = { id: string; signalId: string; sourceFillId: string; detectedAtMs: number; sourceTimestampIso: string };
+/** CODEX P1-3 (follower lifecycle): one missing lifecycle trigger/venue observation burst. */
+export type PendingLifecycleObservationTarget = { id: string; signalId: string; sourceFillId: string; venue: Venue; matchId: string; detectedAtMs: number; sourceTimestampIso: string };
 
 /** Repository abstraction — the ONLY thing that talks to Postgres. Swappable in tests for an in-memory fake; the default (see supabaseObservationRepository) is the real Supabase-backed implementation. */
 export type ObservationRepository = {
@@ -69,8 +69,8 @@ export type ObservationRepository = {
   claimObservationTerminal(id: string, patch: ObservationCapturePatch): Promise<boolean>;
   /** CODEX P1-3: every EXACT-matched, schedulable venue for a signal -- the lifecycle scheduler's own "which venue(s) could this reaction possibly apply to" lookup (a tier/venue with no OPEN position for it is filtered later, at paper-decision time, not here). */
   findExactMatchedVenues(signalId: string): Promise<{ venue: Venue; matchId: string }[]>;
-  /** CODEX P1-3: bounded, oldest-first -- lifecycle triggers with no observation-capture burst scheduled yet. */
-  findUnscheduledLifecycleTriggers(limit: number): Promise<PendingLifecycleTrigger[]>;
+  /** CODEX P1-3: bounded, oldest-first -- missing lifecycle trigger/venue observation bursts. */
+  findUnscheduledLifecycleObservationTargets(limit: number): Promise<PendingLifecycleObservationTarget[]>;
 };
 
 function toDbPatch(patch: ObservationCapturePatch): Record<string, unknown> {
@@ -181,14 +181,16 @@ export const supabaseObservationRepository: ObservationRepository = {
     return ((data ?? []) as unknown as { id: string; venue: Venue }[]).map((r) => ({ venue: r.venue, matchId: r.id }));
   },
 
-  async findUnscheduledLifecycleTriggers(limit) {
+  async findUnscheduledLifecycleObservationTargets(limit) {
     const { data, error } = await supabaseAdmin.rpc("find_unscheduled_sports_shadow_lifecycle_triggers" as never, { p_limit: limit } as never);
     if (error) throw new Error(error.message);
-    type Row = { id: string; signal_id: string; source_fill_id: string; detected_at: string; source_ts: number };
+    type Row = { id: string; signal_id: string; source_fill_id: string; venue: Venue; match_id: string; detected_at: string; source_ts: number };
     return ((data ?? []) as unknown as Row[]).map((r) => ({
       id: r.id,
       signalId: r.signal_id,
       sourceFillId: r.source_fill_id,
+      venue: r.venue,
+      matchId: r.match_id,
       detectedAtMs: Date.parse(r.detected_at),
       sourceTimestampIso: new Date(r.source_ts * 1000).toISOString(),
     }));
@@ -346,14 +348,15 @@ export async function persistVenueMatch(
 
 /**
  * CODEX P1-3 (follower lifecycle): schedules the observation-capture burst for every
- * lifecycle trigger (a source DCA buy or partial/full sell against an already-open
- * episode) that does not have one yet -- the periodic maintenance-task counterpart to
+ * missing lifecycle trigger/venue pair (a source DCA buy or partial/full sell against
+ * an already-open episode) -- the periodic maintenance-task counterpart to
  * persistVenueMatch's own ENTRY-time scheduling, run from worker.server.ts's
- * onCycleComplete exactly like maybeDecideExpiredRoutingCutoffs. Schedules for EVERY
- * currently EXACT-matched venue (not only the venue an eventual open position turns
- * out to be in) -- paper.server.ts's own lifecycle decision filters to whichever
- * venue/tier actually has an OPEN position once each observation is captured; a
- * venue/tier with none is simply skipped there, never a fabricated reaction.
+ * onCycleComplete exactly like maybeDecideExpiredRoutingCutoffs. The DB query returns
+ * missing venue pairs rather than whole triggers, so if PM-US scheduling succeeds and
+ * Kalshi fails transiently, the next pass retries only Kalshi and never duplicates PM-US.
+ * paper.server.ts's own lifecycle decision filters to whichever venue/tier actually has
+ * an OPEN position once each observation is captured; a venue/tier with none is simply
+ * skipped there, never a fabricated reaction.
  * `detectedAtMs` is the trigger's OWN creation time (never the fill's historical
  * sourceTs) -- the fire_at anchor, mirroring persistVenueMatch's identical rule for
  * ENTRY. Bounded and idempotent (scheduleObservations' own ON CONFLICT DO NOTHING);
@@ -361,20 +364,16 @@ export async function persistVenueMatch(
  */
 export async function scheduleLifecycleObservations(deps: Partial<ObservationDeps> = {}, limit = 20): Promise<number> {
   const d: ObservationDeps = { ...defaultDeps, ...deps };
-  const pending = await d.repo.findUnscheduledLifecycleTriggers(limit);
+  const pending = await d.repo.findUnscheduledLifecycleObservationTargets(limit);
   let scheduled = 0;
-  for (const trigger of pending) {
+  for (const target of pending) {
     try {
-      const venues = await d.repo.findExactMatchedVenues(trigger.signalId);
-      for (const { venue, matchId } of venues) {
-        const rows = buildObservationRows(trigger.signalId, matchId, venue, trigger.detectedAtMs, trigger.sourceTimestampIso, trigger.id);
-        if (rows === null) continue;
-        scheduled += await d.repo.scheduleObservations(rows);
-      }
+      const rows = buildObservationRows(target.signalId, target.matchId, target.venue, target.detectedAtMs, target.sourceTimestampIso, target.id);
+      if (rows === null) continue;
+      scheduled += await d.repo.scheduleObservations(rows);
     } catch {
-      // Best-effort: one bad trigger must not block the rest of the batch -- left
-      // unscheduled, retried identically next cycle (findUnscheduledLifecycleTriggers
-      // is idempotent and re-selects it until it succeeds).
+      // Best-effort: one bad trigger/venue target must not block the rest of the batch
+      // -- left unscheduled, retried identically next cycle.
     }
   }
   return scheduled;

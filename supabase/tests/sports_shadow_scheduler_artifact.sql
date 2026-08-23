@@ -23,6 +23,16 @@ CREATE EXTENSION IF NOT EXISTS pg_cron;
 CREATE EXTENSION IF NOT EXISTS pg_net;
 CREATE EXTENSION IF NOT EXISTS supabase_vault;
 
+-- Start from a known local-test state, then deliberately seed the pre-split legacy job
+-- that existing deployments may still have. The artifact must remove it before
+-- installing the current three-job architecture.
+SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname LIKE 'sports-shadow-cycle%';
+SELECT cron.schedule(
+  'sports-shadow-cycle',
+  '30 seconds',
+  $$ SELECT 1; $$
+);
+
 -- Dummy secrets under the exact names the artifact references -- never real values.
 SELECT vault.create_secret('http://localhost:0', 'sports_shadow_project_url');
 SELECT vault.create_secret('test-secret-value', 'sports_shadow_hook_secret');
@@ -97,6 +107,11 @@ BEGIN
   END IF;
   IF v_body NOT LIKE '%timeout_milliseconds := 40000%' THEN
     RAISE EXCEPTION 'expected sports-shadow-cycle-settlement timeout_milliseconds 40000, got %', v_body;
+  END IF;
+
+  SELECT count(*) INTO v_job_count FROM cron.job WHERE jobname = 'sports-shadow-cycle';
+  IF v_job_count <> 0 THEN
+    RAISE EXCEPTION 'expected legacy sports-shadow-cycle job to be unscheduled, got %', v_job_count;
   END IF;
 
   -- Exactly 3 sports-shadow-* jobs total -- no stray fourth job (e.g. a leftover
