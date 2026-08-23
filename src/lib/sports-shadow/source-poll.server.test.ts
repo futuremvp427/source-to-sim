@@ -856,25 +856,23 @@ describe("pollSportsShadowWallet — bootstrap go-live gating", () => {
     const goLiveAtMs = 1_700_000_000_000 + 3_600_000; // one hour after the pre-go-live fill below
     const preGoLiveTrade = trade({ timestamp: 1_700_000_000, id: "pre-go-live-fill" });
 
-    // First poll: markFillComplete fails, so the correctly-suppressed fill stays PENDING
+    // First poll: the pre-go-live completion write fails (RECOVERY: suppression now uses
+    // the batched markFillsComplete drain), so the correctly-suppressed fill stays PENDING
     // instead of becoming the normal terminal COMPLETE.
     const { deps: firstDeps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [preGoLiveTrade] }) });
-    repo.markFillComplete = async (fillId: string) => {
-      repo.markFillCompleteCalls.push(fillId);
-      throw new Error("simulated transient markFillComplete failure");
+    const workingMarkFillsComplete = repo.markFillsComplete.bind(repo);
+    repo.markFillsComplete = async (fillIds: string[]) => {
+      repo.markFillsCompleteBatches.push([...fillIds]);
+      throw new Error("simulated transient markFillsComplete failure");
     };
     const firstResult = await pollSportsShadowWallet(WALLET, goLiveAtMs, firstDeps);
     expect(firstResult.isBootstrap).toBe(false); // unrelated-history fill already made this a resumption poll
     expect(firstResult.suppressedPreGoLive).toBe(1);
     expect([...repo.fillsByEventKey.values()].find((f) => f.row.eventKey.includes("pre-go-live-fill"))?.downstreamStatus).toBe("PENDING");
 
-    // Restore a working markFillComplete and poll again with an EMPTY page (nothing new to
-    // fetch) -- the only thing this second poll has to do is retry the durably-PENDING fill.
-    repo.markFillComplete = async (fillId: string) => {
-      repo.markFillCompleteCalls.push(fillId);
-      const entry = repo.fillsById.get(fillId);
-      if (entry) entry.downstreamStatus = "COMPLETE";
-    };
+    // Restore a working writer and poll again with an EMPTY page (nothing new to fetch) --
+    // the only thing this second poll has to do is retry the durably-PENDING fill.
+    repo.markFillsComplete = workingMarkFillsComplete;
     const { deps: secondDeps } = makeDeps({ repo, network: makeNetworkDeps({ 0: [] }) });
     const secondResult = await pollSportsShadowWallet(WALLET, goLiveAtMs, secondDeps);
     expect(secondResult.isBootstrap).toBe(false); // resumption mode, exactly the condition the old bug required
