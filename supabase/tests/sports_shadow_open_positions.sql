@@ -32,6 +32,11 @@ BEGIN
   ) VALUES (
     v_signal_terminal, 0, 5, now(), 'ENTRY', 'FULL', 10, 5.10, 'PMUS', 'pmus-market-terminal', 'TEAM:NYY:LONG'
   );
+  -- CODEX P1-3: find_open_sports_shadow_paper_positions now sources contracts/cost-basis
+  -- from sports_shadow_paper_positions (the CURRENT remaining inventory), not the frozen
+  -- ENTRY fill row -- every fixture from here on needs its own position row too.
+  INSERT INTO public.sports_shadow_paper_positions (signal_id, venue, notional_tier_usd, contracts_open, avg_entry_price, remaining_cost_basis_usd, status)
+  VALUES (v_signal_terminal, 'PMUS', 5, 10, 0.5, 5.10, 'OPEN');
 
   INSERT INTO public.sports_shadow_settlements (signal_id, venue, notional_tier_usd, settlement_status)
   VALUES (v_signal_terminal, 'PMUS', 5, 'SETTLED_WIN');
@@ -53,6 +58,8 @@ BEGIN
   ) VALUES (
     v_signal_open, 0, 5, now(), 'ENTRY', 'FULL', 10, 5.10, 'KALSHI', 'kalshi-market-open', 'YES'
   );
+  INSERT INTO public.sports_shadow_paper_positions (signal_id, venue, notional_tier_usd, contracts_open, avg_entry_price, remaining_cost_basis_usd, status)
+  VALUES (v_signal_open, 'KALSHI', 5, 10, 0.5, 5.10, 'OPEN');
 
   -- A batch limited to 1 must return the OPEN position, never the terminal-settled one.
   SELECT count(*) INTO v_count
@@ -97,6 +104,8 @@ BEGIN
   ) VALUES (
     v_signal_dual_match, 0, 5, now(), 'ENTRY', 'FULL', 10, 5.10, 'KALSHI', 'kalshi-dual-market', 'YES'
   );
+  INSERT INTO public.sports_shadow_paper_positions (signal_id, venue, notional_tier_usd, contracts_open, avg_entry_price, remaining_cost_basis_usd, status)
+  VALUES (v_signal_dual_match, 'KALSHI', 5, 10, 0.5, 5.10, 'OPEN');
 
   IF NOT EXISTS (
     SELECT 1 FROM public.find_open_sports_shadow_paper_positions(100)
@@ -146,6 +155,8 @@ BEGIN
         ) VALUES (
           v_signal_not_due, 0, 5, now() - interval '1 day', 'ENTRY', 'FULL', 10, 5.10, 'PMUS', 'pmus-market-notdue-' || i, 'TEAM:NYY:LONG'
         );
+        INSERT INTO public.sports_shadow_paper_positions (signal_id, venue, notional_tier_usd, contracts_open, avg_entry_price, remaining_cost_basis_usd, status)
+        VALUES (v_signal_not_due, 'PMUS', 5, 10, 0.5, 5.10, 'OPEN');
 
         -- Recently checked, still PENDING, next check far in the future -- NOT due.
         INSERT INTO public.sports_shadow_settlements (signal_id, venue, notional_tier_usd, settlement_status, next_check_at, check_attempt_count)
@@ -172,6 +183,8 @@ BEGIN
     ) VALUES (
       v_signal_ready, 0, 5, now(), 'ENTRY', 'FULL', 10, 5.10, 'KALSHI', 'kalshi-market-ready', 'YES'
     );
+    INSERT INTO public.sports_shadow_paper_positions (signal_id, venue, notional_tier_usd, contracts_open, avg_entry_price, remaining_cost_basis_usd, status)
+    VALUES (v_signal_ready, 'KALSHI', 5, 10, 0.5, 5.10, 'OPEN');
 
     -- A batch limited to 10 (far fewer than the 50 not-due rows) must still surface the
     -- ready position -- it is not competing with them at all, since they are excluded

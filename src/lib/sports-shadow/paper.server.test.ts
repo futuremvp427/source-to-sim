@@ -5,6 +5,8 @@ import {
   maybeDecideExpiredRoutingCutoffs,
   ROUTING_DECISION_CUTOFF_MS,
   type CapturedObservation,
+  type LifecycleTrigger,
+  type OpenPosition,
   type PaperFillRow,
   type PaperRepository,
   type RoutingProvenance,
@@ -31,13 +33,21 @@ function fakeRepo(config: {
   observations?: Map<string, CapturedObservation>;
   signalProvenance?: Map<string, SignalProvenance>;
   venueMatches?: Map<string, VenueMatchProvenance>;
-} = {}): PaperRepository & { decisions: Map<Key, PaperFillRow>; provenance: Map<Key, RoutingProvenance> } {
+  positions?: Map<string, OpenPosition>;
+  lifecycleTriggers?: Map<string, LifecycleTrigger>;
+} = {}): PaperRepository & { decisions: Map<Key, PaperFillRow>; provenance: Map<Key, RoutingProvenance>; positions: Map<string, OpenPosition> } {
   const observations = config.observations ?? new Map<string, CapturedObservation>();
   const provenance = new Map<Key, RoutingProvenance>();
   const decisions = new Map<Key, PaperFillRow>();
+  const positions = config.positions ?? new Map<string, OpenPosition>();
+  const lifecycleTriggers = config.lifecycleTriggers ?? new Map<string, LifecycleTrigger>();
+  const positionKey = (signalId: string, venue: Venue, tier: number) => `${signalId}:${venue}:${tier}`;
+  const lifecycleKey = (signalId: string, requestedDelayMs: number, tier: number, triggerId: string) => `${signalId}:${requestedDelayMs}:${tier}:${triggerId}`;
+  const lifecycleDecisions = new Map<string, PaperFillRow>();
 
   return {
     decisions,
+    positions,
     provenance,
     async getObservation(id) {
       return observations.get(id) ?? null;
@@ -92,12 +102,46 @@ function fakeRepo(config: {
       }
       return out;
     },
+    async getOpenPosition(signalId, venue, notionalTierUsd) {
+      const p = positions.get(positionKey(signalId, venue, notionalTierUsd));
+      return p && p.contractsOpen > 0 ? p : null;
+    },
+    async getLifecycleTrigger(triggerId) {
+      return lifecycleTriggers.get(triggerId) ?? null;
+    },
+    async finalizeLifecycleDecision(signalId, requestedDelayMs, notionalTierUsd, triggerSourceFillId, _observationId, _decidedAtMs, venue, row) {
+      const lk = lifecycleKey(signalId, requestedDelayMs, notionalTierUsd, triggerSourceFillId);
+      if (lifecycleDecisions.has(lk)) return false; // already decided -- the DB-level guard this mirrors
+      lifecycleDecisions.set(lk, row);
+      decisions.set(key(signalId, requestedDelayMs, notionalTierUsd), row);
+
+      if (row.fillStatus !== "FULL" && row.fillStatus !== "PARTIAL") return true; // decided, but no position mutation
+
+      const pk = positionKey(signalId, venue, notionalTierUsd);
+      const existing = positions.get(pk);
+      if (!existing || existing.contractsOpen <= 0) {
+        throw new Error(`finalizeLifecycleDecision: ${row.side} requires an existing OPEN position for ${pk}`);
+      }
+      if (row.side === "ADD") {
+        const newContractsOpen = existing.contractsOpen + row.contracts;
+        const newAvgEntry = (existing.contractsOpen * (existing.avgEntryPrice ?? 0) + row.contracts * (row.vwap ?? 0)) / newContractsOpen;
+        positions.set(pk, { contractsOpen: newContractsOpen, avgEntryPrice: newAvgEntry });
+      } else {
+        const exitedContracts = Math.min(row.contracts, existing.contractsOpen);
+        positions.set(pk, { contractsOpen: Math.max(0, existing.contractsOpen - exitedContracts), avgEntryPrice: existing.avgEntryPrice });
+      }
+      return true;
+    },
   };
 }
 
 const GOOD_ASKS: DepthLevel[] = [
   { price: 0.5, size: 1000 },
   { price: 0.52, size: 1000 },
+];
+const GOOD_BIDS: DepthLevel[] = [
+  { price: 0.48, size: 1000 },
+  { price: 0.46, size: 1000 },
 ];
 
 function obs(overrides: Partial<CapturedObservation> = {}): CapturedObservation {
@@ -111,6 +155,8 @@ function obs(overrides: Partial<CapturedObservation> = {}): CapturedObservation 
     stale: false,
     errorCode: null,
     askDepth: GOOD_ASKS,
+    bidDepth: GOOD_BIDS,
+    triggerSourceFillId: null,
     ...overrides,
   };
 }
@@ -369,5 +415,146 @@ describe("CODEX P2-6: computePaperFillsForObservation respects an external deadl
     expect(decidedBySweep).toBe(5 - firstCallRows.length); // exactly the tiers left over
     expect(repo.decisions.size).toBe(5); // ALL FIVE tiers terminally decided -- none disappeared
     expect([...repo.decisions.values()].every((r) => r.chosenVenue === "PMUS" && r.cutoffReason !== undefined)).toBe(true);
+  });
+});
+
+describe("CODEX P1-3: follower lifecycle -- ADD/EXIT decisions", () => {
+  const TIER = 10;
+
+  it("ADD: adds to an existing OPEN position via weighted-average cost basis, using the SAME fixed-notional-tier sizing methodology as ENTRY", async () => {
+    const repo = fakeRepo({
+      positions: new Map([[`sig-1:PMUS:${TIER}`, { contractsOpen: 20, avgEntryPrice: 0.5 }]]),
+      lifecycleTriggers: new Map([["trigger-add", { signalId: "sig-1", triggerType: "ADD", trackedShares: 10, exitFraction: null, price: 0.55, sourceTs: 1_700_000_100 }]]),
+      observations: seedObservations(obs({ id: "obs-add", triggerSourceFillId: "trigger-add", askDepth: [{ price: 0.55, size: 1000 }] })),
+    });
+    const rows = await computePaperFillsForObservation("obs-add", { repo });
+    const row = rows.find((r) => r.notionalTierUsd === TIER)!;
+    expect(row.side).toBe("ADD");
+    expect(row.fillStatus).toBe("FULL");
+    const addedContracts = TIER / 0.55;
+    expect(row.contracts).toBeCloseTo(addedContracts, 6);
+
+    const after = repo.positions.get(`sig-1:PMUS:${TIER}`)!;
+    expect(after.contractsOpen).toBeCloseTo(20 + addedContracts, 6);
+    expect(after.avgEntryPrice).toBeCloseTo((20 * 0.5 + addedContracts * 0.55) / (20 + addedContracts), 6);
+  });
+
+  it("ADD is REJECTED (never fabricated) when there is no existing OPEN position for this tier -- nothing to add to", async () => {
+    const repo = fakeRepo({
+      lifecycleTriggers: new Map([["trigger-add", { signalId: "sig-1", triggerType: "ADD", trackedShares: 10, exitFraction: null, price: 0.55, sourceTs: 1_700_000_100 }]]),
+      observations: seedObservations(obs({ id: "obs-add", triggerSourceFillId: "trigger-add" })),
+    });
+    const rows = await computePaperFillsForObservation("obs-add", { repo });
+    expect(rows.every((r) => r.notionalTierUsd !== TIER || false)).toBe(true);
+    // No open position at all for ANY tier -- every tier is SKIPPED (no logical
+    // opportunity), never a fabricated REJECTED row either.
+    expect(rows).toHaveLength(0);
+  });
+
+  it("EXIT: sells the proportional share of THIS TIER's own contracts_open against BID depth, realizing P&L against avg_entry_price", async () => {
+    const repo = fakeRepo({
+      positions: new Map([[`sig-1:PMUS:${TIER}`, { contractsOpen: 20, avgEntryPrice: 0.5 }]]),
+      lifecycleTriggers: new Map([["trigger-exit", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 5, exitFraction: 0.5, price: 0.5, sourceTs: 1_700_000_200 }]]),
+      observations: seedObservations(obs({ id: "obs-exit", triggerSourceFillId: "trigger-exit", bidDepth: [{ price: 0.6, size: 1000 }] })),
+    });
+    const rows = await computePaperFillsForObservation("obs-exit", { repo });
+    const row = rows.find((r) => r.notionalTierUsd === TIER)!;
+    expect(row.side).toBe("EXIT");
+    expect(row.fillStatus).toBe("FULL");
+    expect(row.contracts).toBeCloseTo(10, 6); // 20 * 0.5 exitFraction
+    expect(row.vwap).toBeCloseTo(0.6, 6);
+
+    const after = repo.positions.get(`sig-1:PMUS:${TIER}`)!;
+    expect(after.contractsOpen).toBeCloseTo(10, 6); // 20 - 10 exited
+
+    // allInCostUsd on an EXIT row holds NET PROCEEDS (proceeds minus fee) -- realized
+    // P&L = net proceeds - cost basis (exited contracts * avg_entry_price).
+    const proceeds = 10 * 0.6;
+    const costBasis = 10 * 0.5;
+    expect(row.allInCostUsd).toBeCloseTo(proceeds - row.feeUsd!, 6);
+    expect(row.allInCostUsd! - costBasis).toBeGreaterThan(0); // profitable exit (sold above entry)
+  });
+
+  it("a FULL exit (exitFraction=1) drains contracts_open to exactly zero, leaving no open position for a later tier check", async () => {
+    const repo = fakeRepo({
+      positions: new Map([[`sig-1:PMUS:${TIER}`, { contractsOpen: 20, avgEntryPrice: 0.5 }]]),
+      lifecycleTriggers: new Map([["trigger-exit-full", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 20, exitFraction: 1, price: 0.5, sourceTs: 1_700_000_300 }]]),
+      observations: seedObservations(obs({ id: "obs-exit-full", triggerSourceFillId: "trigger-exit-full", bidDepth: [{ price: 0.5, size: 1000 }] })),
+    });
+    await computePaperFillsForObservation("obs-exit-full", { repo });
+    const position = await repo.getOpenPosition("sig-1", "PMUS", TIER);
+    expect(position).toBeNull(); // fully closed
+  });
+
+  it("restart idempotency: re-running the SAME captured lifecycle observation never double-applies the position mutation", async () => {
+    const repo = fakeRepo({
+      positions: new Map([[`sig-1:PMUS:${TIER}`, { contractsOpen: 20, avgEntryPrice: 0.5 }]]),
+      lifecycleTriggers: new Map([["trigger-exit", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 5, exitFraction: 0.5, price: 0.5, sourceTs: 1_700_000_200 }]]),
+      observations: seedObservations(obs({ id: "obs-exit", triggerSourceFillId: "trigger-exit", bidDepth: [{ price: 0.5, size: 1000 }] })),
+    });
+    const first = await computePaperFillsForObservation("obs-exit", { repo });
+    expect(first).toHaveLength(1); // only TIER has an open position -- the other 4 tiers are SKIPPED (no logical opportunity), never decided at all
+    const afterFirst = { ...repo.positions.get(`sig-1:PMUS:${TIER}`)! };
+
+    const second = await computePaperFillsForObservation("obs-exit", { repo });
+    expect(second).toHaveLength(0); // already decided for every tier that had one -- no-op
+    expect(repo.positions.get(`sig-1:PMUS:${TIER}`)).toEqual(afterFirst); // NOT double-exited
+  });
+
+  it("REQUIRED INTEGRATION TEST: source BUY -> DCA BUY -> partial SELL -> full SELL is followed as ENTRY -> ADD -> partial EXIT -> full EXIT, with correct inventory, realized economics, and restart idempotency, across an isolated OTHER tier", async () => {
+    const OTHER_TIER = 25;
+    const repo = fakeRepo({
+      // ENTRY already happened (out of scope for this test -- simulates its result directly).
+      positions: new Map([
+        [`sig-1:PMUS:${TIER}`, { contractsOpen: 20, avgEntryPrice: 0.5 }],
+        [`sig-1:PMUS:${OTHER_TIER}`, { contractsOpen: 50, avgEntryPrice: 0.5 }],
+      ]),
+      lifecycleTriggers: new Map([
+        ["trigger-add", { signalId: "sig-1", triggerType: "ADD", trackedShares: 10, exitFraction: null, price: 0.55, sourceTs: 1_700_000_100 }],
+        ["trigger-exit-partial", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 5, exitFraction: 0.5, price: 0.5, sourceTs: 1_700_000_200 }],
+        ["trigger-exit-full", { signalId: "sig-1", triggerType: "EXIT", trackedShares: 5, exitFraction: 1, price: 0.45, sourceTs: 1_700_000_300 }],
+      ]),
+      observations: seedObservations(
+        obs({ id: "obs-add", triggerSourceFillId: "trigger-add", askDepth: [{ price: 0.55, size: 1000 }] }),
+        obs({ id: "obs-exit-partial", triggerSourceFillId: "trigger-exit-partial", bidDepth: [{ price: 0.5, size: 1000 }] }),
+        obs({ id: "obs-exit-full", triggerSourceFillId: "trigger-exit-full", bidDepth: [{ price: 0.45, size: 1000 }] }),
+      ),
+    });
+
+    // ADD -- both tiers get their own independent ADD (isolated: TIER and OTHER_TIER
+    // never share state), sized by the SAME fixed-notional methodology as ENTRY.
+    const addRows = await computePaperFillsForObservation("obs-add", { repo });
+    const addTier = addRows.find((r) => r.notionalTierUsd === TIER)!;
+    const addOtherTier = addRows.find((r) => r.notionalTierUsd === OTHER_TIER)!;
+    expect(addTier.side).toBe("ADD");
+    expect(addOtherTier.side).toBe("ADD");
+    const addedContractsTier = TIER / 0.55;
+    const addedContractsOtherTier = OTHER_TIER / 0.55;
+    expect(repo.positions.get(`sig-1:PMUS:${TIER}`)!.contractsOpen).toBeCloseTo(20 + addedContractsTier, 6);
+    expect(repo.positions.get(`sig-1:PMUS:${OTHER_TIER}`)!.contractsOpen).toBeCloseTo(50 + addedContractsOtherTier, 6);
+
+    // Partial EXIT -- proportional to THIS TIER's own remaining inventory, independently per tier.
+    const beforePartialExitTier = repo.positions.get(`sig-1:PMUS:${TIER}`)!.contractsOpen;
+    const beforePartialExitOtherTier = repo.positions.get(`sig-1:PMUS:${OTHER_TIER}`)!.contractsOpen;
+    const exitPartialRows = await computePaperFillsForObservation("obs-exit-partial", { repo });
+    const exitPartialTier = exitPartialRows.find((r) => r.notionalTierUsd === TIER)!;
+    expect(exitPartialTier.side).toBe("EXIT");
+    expect(exitPartialTier.contracts).toBeCloseTo(beforePartialExitTier * 0.5, 6);
+    expect(repo.positions.get(`sig-1:PMUS:${TIER}`)!.contractsOpen).toBeCloseTo(beforePartialExitTier * 0.5, 6);
+    expect(repo.positions.get(`sig-1:PMUS:${OTHER_TIER}`)!.contractsOpen).toBeCloseTo(beforePartialExitOtherTier * 0.5, 6);
+
+    // Idempotency check BEFORE fully closing -- proves the decide-once guard itself,
+    // not merely "nothing left to exit."
+    const afterPartialSnapshot = { ...repo.positions.get(`sig-1:PMUS:${TIER}`)! };
+    const retryPartial = await computePaperFillsForObservation("obs-exit-partial", { repo });
+    expect(retryPartial).toHaveLength(0);
+    expect(repo.positions.get(`sig-1:PMUS:${TIER}`)).toEqual(afterPartialSnapshot);
+
+    // Full EXIT -- a full source sell (exitFraction=1) drains EVERY tier's own
+    // remaining inventory to exactly zero, independently (each tier computes its own
+    // requestedContracts from its OWN contracts_open -- never a shared/global amount).
+    await computePaperFillsForObservation("obs-exit-full", { repo });
+    expect(await repo.getOpenPosition("sig-1", "PMUS", TIER)).toBeNull();
+    expect(await repo.getOpenPosition("sig-1", "PMUS", OTHER_TIER)).toBeNull();
   });
 });

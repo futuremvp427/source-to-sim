@@ -52,7 +52,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
-import { evaluateNotionalTiers, type DepthWalkResult } from "./depth-walk";
+import { evaluateNotionalTiers, SPORTS_SHADOW_NOTIONALS_USD, walkBuyDepth, walkSellDepth, type DepthWalkResult, type ExitDepthWalkResult } from "./depth-walk";
 import { computeTakerFeeForFills, type FeeResult } from "./fees";
 import { routeExecution, type RoutingDecision } from "./router";
 import type { DepthLevel, Venue } from "./types";
@@ -67,6 +67,10 @@ export type CapturedObservation = {
   stale: boolean;
   errorCode: string | null;
   askDepth: DepthLevel[];
+  /** CODEX P1-3 (follower lifecycle): EXIT's own bid-side depth walk -- already fully captured/persisted end-to-end (observation.ts's buildPmusObservationPatch/buildKalshiObservationPatch), simply never read by this module before now. */
+  bidDepth: DepthLevel[];
+  /** CODEX P1-3: null = this is an ENTRY observation; set = a lifecycle (ADD/EXIT) reaction observation for that specific source fill. */
+  triggerSourceFillId: string | null;
 };
 
 export type RoutingProvenance = {
@@ -105,11 +109,30 @@ export type PaperFillRow = {
   experimentEpochId: string | null;
 };
 
+/** CODEX P1-3 (follower lifecycle): durable per-tier follower state, read before deciding an ADD/EXIT. */
+export type OpenPosition = { contractsOpen: number; avgEntryPrice: number | null };
+
+/** CODEX P1-3: the recorded "this fill requires a follower reaction" fact -- see source-poll.server.ts's own doc comment for how/when it's created. */
+export type LifecycleTrigger = { signalId: string; triggerType: "ADD" | "EXIT"; trackedShares: number; exitFraction: number | null; price: number; sourceTs: number };
+
 export type PaperRepository = {
   getObservation(id: string): Promise<CapturedObservation | null>;
   getObservationForVenue(signalId: string, venue: Venue, requestedDelayMs: number): Promise<CapturedObservation | null>;
   getSignalProvenance(signalId: string): Promise<SignalProvenance | null>;
   getVenueMatch(signalId: string, venue: Venue): Promise<VenueMatchProvenance | null>;
+  /** CODEX P1-3: null when no OPEN position exists for this (signal, venue, tier) -- an ADD/EXIT with nothing to react to for this specific venue/tier is simply skipped, never fabricated. */
+  getOpenPosition(signalId: string, venue: Venue, notionalTierUsd: number): Promise<OpenPosition | null>;
+  getLifecycleTrigger(triggerId: string): Promise<LifecycleTrigger | null>;
+  /**
+   * Decides an ADD or EXIT DIRECTLY -- no separate provenance-then-finalize race (an
+   * ADD/EXIT is always scoped to the ONE venue the position is already open in, never
+   * a second venue to wait for). Returns true only if THIS call actually won (a
+   * retried/duplicate call for the identical (signal, delay, tier, trigger) is a safe
+   * no-op). Atomically mutates the position (weighted-average for ADD, proportional
+   * realized P&L for EXIT) in the SAME transaction -- see the migration's own doc
+   * comment on finalize_sports_shadow_lifecycle_decision.
+   */
+  finalizeLifecycleDecision(signalId: string, requestedDelayMs: number, notionalTierUsd: number, triggerSourceFillId: string, observationId: string, decidedAtMs: number, venue: Venue, row: PaperFillRow): Promise<boolean>;
   /**
    * Step 1 of the two-step protocol -- see this module's own P1-2 doc comment. CODEX P1-2
    * (round 2): creates/updates the COMPLETE 5-tier ladder for (signalId, requestedDelayMs)
@@ -129,7 +152,7 @@ export const supabasePaperRepository: PaperRepository = {
   async getObservation(id) {
     const { data, error } = await supabaseAdmin
       .from("sports_quote_observations" as never)
-      .select("id, signal_id, venue, requested_delay_ms, fire_at, observed_at, stale, error_code, ask_depth")
+      .select("id, signal_id, venue, requested_delay_ms, fire_at, observed_at, stale, error_code, ask_depth, bid_depth, trigger_source_fill_id")
       .eq("id", id)
       .maybeSingle();
     if (error) throw new Error(error.message);
@@ -138,12 +161,20 @@ export const supabasePaperRepository: PaperRepository = {
   },
 
   async getObservationForVenue(signalId, venue, requestedDelayMs) {
+    // CODEX P1-3: scoped to the ENTRY plan specifically (trigger_source_fill_id IS
+    // NULL) -- this is only ever used for ENTRY's own sibling-venue check. A
+    // lifecycle-reaction row can share the identical (signal_id, venue,
+    // requested_delay_ms) with the entry row (they are distinguished ONLY by
+    // trigger_source_fill_id under the table's new UNIQUE NULLS NOT DISTINCT
+    // constraint) -- without this filter, .maybeSingle() could error or return either
+    // row non-deterministically once a lifecycle reaction row exists.
     const { data, error } = await supabaseAdmin
       .from("sports_quote_observations" as never)
-      .select("id, signal_id, venue, requested_delay_ms, fire_at, observed_at, stale, error_code, ask_depth")
+      .select("id, signal_id, venue, requested_delay_ms, fire_at, observed_at, stale, error_code, ask_depth, bid_depth, trigger_source_fill_id")
       .eq("signal_id", signalId)
       .eq("venue", venue)
       .eq("requested_delay_ms", requestedDelayMs)
+      .is("trigger_source_fill_id", null)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return null;
@@ -234,6 +265,63 @@ export const supabasePaperRepository: PaperRepository = {
       kalshiObservationId: r.kalshi_observation_id,
     }));
   },
+
+  async getOpenPosition(signalId, venue, notionalTierUsd) {
+    const { data, error } = await supabaseAdmin
+      .from("sports_shadow_paper_positions" as never)
+      .select("contracts_open, avg_entry_price")
+      .eq("signal_id", signalId)
+      .eq("venue", venue)
+      .eq("notional_tier_usd", notionalTierUsd)
+      .eq("status", "OPEN")
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return null;
+    const row = data as unknown as { contracts_open: number; avg_entry_price: number | null };
+    if (row.contracts_open <= 0) return null;
+    return { contractsOpen: row.contracts_open, avgEntryPrice: row.avg_entry_price };
+  },
+
+  async getLifecycleTrigger(triggerId) {
+    const { data, error } = await supabaseAdmin
+      .from("sports_shadow_lifecycle_triggers" as never)
+      .select("signal_id, trigger_type, tracked_shares, exit_fraction, price, source_ts")
+      .eq("id", triggerId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return null;
+    const row = data as unknown as { signal_id: string; trigger_type: "ADD" | "EXIT"; tracked_shares: number; exit_fraction: number | null; price: number; source_ts: number };
+    return { signalId: row.signal_id, triggerType: row.trigger_type, trackedShares: row.tracked_shares, exitFraction: row.exit_fraction, price: row.price, sourceTs: row.source_ts };
+  },
+
+  async finalizeLifecycleDecision(signalId, requestedDelayMs, notionalTierUsd, triggerSourceFillId, observationId, decidedAtMs, venue, row) {
+    const venueResult = row.pmusResult.available || row.pmusResult.depthWalk !== null || row.pmusResult.fee !== null ? row.pmusResult : row.kalshiResult;
+    const { data, error } = await supabaseAdmin.rpc("finalize_sports_shadow_lifecycle_decision" as never, {
+      p_signal_id: signalId,
+      p_requested_delay_ms: requestedDelayMs,
+      p_notional_tier_usd: notionalTierUsd,
+      p_trigger_source_fill_id: triggerSourceFillId,
+      p_observation_id: observationId,
+      p_decided_at: new Date(decidedAtMs).toISOString(),
+      p_venue: venue,
+      p_side: row.side,
+      p_fill_status: row.fillStatus,
+      p_contracts: row.contracts,
+      p_vwap: row.vwap,
+      p_fee_usd: row.feeUsd,
+      p_fee_model_version: row.feeModelVersion,
+      p_fee_valid: row.feeValid,
+      p_all_in_cost_usd: row.allInCostUsd,
+      p_reject_reason: row.rejectReason,
+      p_venue_result: venueResult,
+      p_target_market_id: row.targetMarketId,
+      p_selected_side: row.selectedSide,
+      p_source_fill_id: row.sourceFillId,
+      p_experiment_epoch_id: row.experimentEpochId,
+    } as never);
+    if (error) throw new Error(error.message);
+    return data === true;
+  },
 };
 
 function rowToObservation(data: unknown): CapturedObservation {
@@ -247,6 +335,8 @@ function rowToObservation(data: unknown): CapturedObservation {
     stale: boolean;
     error_code: string | null;
     ask_depth: DepthLevel[] | null;
+    bid_depth: DepthLevel[] | null;
+    trigger_source_fill_id: string | null;
   };
   return {
     id: row.id,
@@ -258,6 +348,8 @@ function rowToObservation(data: unknown): CapturedObservation {
     stale: row.stale,
     errorCode: row.error_code,
     askDepth: row.ask_depth ?? [],
+    bidDepth: row.bid_depth ?? [],
+    triggerSourceFillId: row.trigger_source_fill_id,
   };
 }
 
@@ -295,12 +387,12 @@ function evaluateVenue(venue: Venue, obs: CapturedObservation | null): { availab
 }
 
 /**
- * Builds the full row for one notional tier's decision, including P1-4's direct
+ * Builds the full row for one notional tier's ENTRY decision, including P1-4's direct
  * target_market_id/selected_side provenance (the CHOSEN venue's own match row -- never
  * inferred later via an ambiguous signal_id-only join) and P2-3's epoch/source
- * provenance. `side` is currently always "ENTRY" -- see episode.ts/CODEX P1-7 for the
- * source-side inventory lifecycle this would need to mirror for ADD/EXIT; this routing
- * engine already accepts any `side` value and is not itself the P1-7 gap.
+ * provenance. ADD/EXIT decisions are built separately by decideLifecycleTier below --
+ * see this module's own CODEX P1-3 doc comment for why they never re-run this
+ * function's own cross-venue routing race.
  */
 async function buildDecisionRow(
   signalId: string,
@@ -365,6 +457,14 @@ export async function computePaperFillsForObservation(observationId: string, dep
   const obs = await d.repo.getObservation(observationId);
   if (!obs) return [];
 
+  // CODEX P1-3 (follower lifecycle): a lifecycle-reaction observation (ADD/EXIT) is
+  // handled by an entirely separate path -- see computeLifecycleFillsForObservation's
+  // own doc comment for why it never re-runs this function's cross-venue routing race
+  // (an ADD/EXIT is always scoped to the ONE venue the position is already open in).
+  if (obs.triggerSourceFillId !== null) {
+    return computeLifecycleFillsForObservation(obs, d, deadlineAtMs);
+  }
+
   const otherVenue: Venue = obs.venue === "PMUS" ? "KALSHI" : "PMUS";
   // Crash-safety / robustness: the sibling's own onObservationClaimed callback is the
   // NORMAL way its provenance gets recorded, but a captured sibling observation might
@@ -412,6 +512,201 @@ export async function computePaperFillsForObservation(observationId: string, dep
     if (row) decided.push(row);
   }
   return decided;
+}
+
+/**
+ * ============ CODEX P1-3: FOLLOWER PAPER LIFECYCLE (ENTRY-only -> ENTRY/ADD/EXIT) ============
+ * PROVEN root cause: this module previously hardcoded side='ENTRY' for every routing
+ * decision -- episode.ts's own AGGREGATED_BUY/LATE_RECONCILIATION (a source DCA buy)
+ * and SELL_RECORDED-against-an-open-episode (a source partial/full sell) never
+ * triggered ANY follower reaction. The paper simulator only ever bought the source's
+ * FIRST entry and held every tier to resolution, never following the source's actual
+ * trade lifecycle -- unacceptable for a system whose whole purpose is evaluating
+ * copy-following that lifecycle.
+ *
+ * FIX: source-poll.server.ts now records a durable sports_shadow_lifecycle_triggers
+ * row for every DCA buy / tracked sell against an open episode; observation.server.ts
+ * schedules a 5-tier observation-capture burst for it (tagged with
+ * trigger_source_fill_id); THIS function decides each of those tiers once its own
+ * observation is captured.
+ *
+ * Unlike ENTRY, an ADD/EXIT NEVER races two venues: the follower's position is already
+ * open in exactly one venue (or not open at all, for a given tier), so there is no
+ * "wait for the sibling, or the cutoff" protocol here at all -- a lifecycle observation
+ * decides IMMEDIATELY once captured, always contemporaneous evidence (the book state at
+ * the moment the reaction was scheduled), never a later observation retroactively
+ * simulating an earlier source action.
+ *
+ * Per tier, independently:
+ *   - No OPEN position for (signal, THIS observation's venue, tier) -- SKIPPED, not
+ *     rejected: there is no logical opportunity here at all (either this tier never
+ *     entered, or it entered via the OTHER venue -- observations are scheduled for
+ *     every EXACT-matched venue, not only whichever one ends up holding a position).
+ *   - ADD: same FROZEN fixed-notional-tier sizing methodology ENTRY already uses
+ *     (never proportional to the source's own DCA size) -- a fresh mini-ENTRY
+ *     evaluation against the CURRENT ask depth, added to the existing position via a
+ *     weighted-average cost basis (finalize_sports_shadow_lifecycle_decision).
+ *   - EXIT: sells contracts_open * trigger.exitFraction contracts (this tier's own
+ *     remaining inventory, proportional to how much of the source's OWN tracked
+ *     position this sell represents) against the CURRENT bid depth
+ *     (walkSellDepth) -- realized P&L computed against the position's own recorded
+ *     avg_entry_price, atomically, in the same RPC.
+ *   - Rejected (no exact target / stale quote / insufficient depth / unavailable
+ *     venue / unknown fee) is persisted as a legitimate research outcome, exactly like
+ *     ENTRY's own REJECTED/NONE/INVALID handling -- never silently dropped.
+ * ================================================================================
+ */
+async function computeLifecycleFillsForObservation(obs: CapturedObservation, d: PaperDeps, deadlineAtMs?: number): Promise<PaperFillRow[]> {
+  const trigger = await d.repo.getLifecycleTrigger(obs.triggerSourceFillId!);
+  if (!trigger) return [];
+  const signalProvenance = await d.repo.getSignalProvenance(trigger.signalId);
+  if (!signalProvenance) return [];
+
+  const decided: PaperFillRow[] = [];
+  for (const tier of SPORTS_SHADOW_NOTIONALS_USD) {
+    if (deadlineAtMs !== undefined && d.now() >= deadlineAtMs) break;
+
+    const position = await d.repo.getOpenPosition(trigger.signalId, obs.venue, tier);
+    if (!position) continue; // no logical opportunity for this venue/tier -- never fabricated
+
+    const row =
+      trigger.triggerType === "ADD"
+        ? buildAddDecisionRow(trigger.signalId, obs, tier, signalProvenance)
+        : buildExitDecisionRow(trigger.signalId, obs, tier, trigger, position, signalProvenance);
+
+    const won = await d.repo.finalizeLifecycleDecision(trigger.signalId, obs.requestedDelayMs, tier, obs.triggerSourceFillId!, obs.id, d.now(), obs.venue, row);
+    if (won) decided.push(row);
+  }
+  return decided;
+}
+
+function unavailableLifecycleReason(obs: CapturedObservation): string | null {
+  if (!obs.observed) return `${obs.venue} observation was never captured`;
+  if (obs.stale) return `${obs.venue} book is stale`;
+  if (obs.errorCode !== null) return `${obs.venue} capture failed: ${obs.errorCode}`;
+  return null;
+}
+
+function buildAddDecisionRow(signalId: string, obs: CapturedObservation, tier: number, signalProvenance: SignalProvenance): PaperFillRow {
+  const unavailable = unavailableLifecycleReason(obs);
+  const depthWalk = unavailable ? null : walkBuyDepth(obs.askDepth, tier);
+  const fee = depthWalk && depthWalk.contractsFilled > 0 && depthWalk.fills.length > 0 ? computeTakerFeeForFills(obs.venue, depthWalk.fills) : null;
+
+  let fillStatus: PaperFillRow["fillStatus"];
+  let rejectReason: string | null;
+  let contracts = 0;
+  let vwap: number | null = null;
+  let allInCostUsd: number | null = null;
+
+  if (unavailable) {
+    fillStatus = "REJECTED";
+    rejectReason = `${obs.venue} capability unavailable this cycle: ${unavailable}`;
+  } else if (depthWalk === null || (depthWalk.status !== "FULL" && depthWalk.status !== "PARTIAL")) {
+    fillStatus = "REJECTED";
+    rejectReason = `${obs.venue} depth-walk status ${depthWalk?.status ?? "NONE"}${depthWalk?.invalidReason ? `: ${depthWalk.invalidReason}` : ""}`;
+  } else if (fee === null || !fee.valid) {
+    fillStatus = "REJECTED";
+    rejectReason = `${obs.venue} fee UNVERIFIED${fee?.reason ? `: ${fee.reason}` : ""}`;
+  } else {
+    fillStatus = depthWalk.status;
+    contracts = depthWalk.contractsFilled;
+    vwap = depthWalk.averageExecutionPrice;
+    allInCostUsd = depthWalk.filledNotionalUsd + fee.feeUsd;
+    rejectReason = null;
+  }
+
+  const venueResult = { depthWalk, fee, available: !unavailable };
+  return {
+    signalId,
+    requestedDelayMs: obs.requestedDelayMs,
+    side: "ADD",
+    notionalTierUsd: tier,
+    routingTimestampMs: Date.now(),
+    pmusResult: obs.venue === "PMUS" ? venueResult : { depthWalk: null, fee: null, available: false },
+    kalshiResult: obs.venue === "KALSHI" ? venueResult : { depthWalk: null, fee: null, available: false },
+    chosenVenue: fillStatus === "REJECTED" ? null : obs.venue,
+    fillStatus,
+    contracts,
+    vwap,
+    feeUsd: fee?.feeUsd ?? null,
+    feeModelVersion: fee?.feeModelVersion ?? null,
+    feeValid: fee?.valid ?? false,
+    allInCostUsd,
+    rejectReason,
+    cutoffReason: "BOTH_COMPLETE", // no sibling to race -- this observation alone is always the complete picture for a single-venue lifecycle decision
+    targetMarketId: null, // unchanged from the position's own ENTRY-time provenance -- ADD never re-derives it
+    selectedSide: null,
+    sourceFillId: signalProvenance.firstFillId,
+    experimentEpochId: signalProvenance.experimentEpochId,
+  };
+}
+
+function buildExitDecisionRow(signalId: string, obs: CapturedObservation, tier: number, trigger: LifecycleTrigger, position: OpenPosition, signalProvenance: SignalProvenance): PaperFillRow {
+  const unavailable = unavailableLifecycleReason(obs);
+  // CODEX P1-3: never exits more than currently open -- exitFraction is computed from
+  // SOURCE-side inventory (episode.ts) and can drift slightly from this specific
+  // tier's own follower contracts_open; capped here defensively (the RPC's own final
+  // GREATEST(0, ...) guard is the authoritative enforcement of this invariant, this is
+  // belt-and-suspenders at the point the request is even constructed).
+  const requestedContracts = Math.min(position.contractsOpen, position.contractsOpen * (trigger.exitFraction ?? 1));
+  const exitWalk: ExitDepthWalkResult | null = unavailable || requestedContracts <= 0 ? null : walkSellDepth(obs.bidDepth, requestedContracts);
+  const fee = exitWalk && exitWalk.filledContracts > 0 && exitWalk.fills.length > 0 ? computeTakerFeeForFills(obs.venue, exitWalk.fills) : null;
+
+  let fillStatus: PaperFillRow["fillStatus"];
+  let rejectReason: string | null;
+  let contracts = 0;
+  let vwap: number | null = null;
+  let allInCostUsd: number | null = null; // NET PROCEEDS for an EXIT row (proceeds minus fee) -- see this module's own doc comment on the reused column name
+
+  if (unavailable) {
+    fillStatus = "REJECTED";
+    rejectReason = `${obs.venue} capability unavailable this cycle: ${unavailable}`;
+  } else if (requestedContracts <= 0) {
+    fillStatus = "REJECTED";
+    rejectReason = "no remaining follower inventory to exit for this tier";
+  } else if (exitWalk === null || (exitWalk.status !== "FULL" && exitWalk.status !== "PARTIAL")) {
+    fillStatus = "REJECTED";
+    rejectReason = `${obs.venue} bid depth-walk status ${exitWalk?.status ?? "NONE"}${exitWalk?.invalidReason ? `: ${exitWalk.invalidReason}` : ""}`;
+  } else if (fee === null || !fee.valid) {
+    fillStatus = "REJECTED";
+    rejectReason = `${obs.venue} fee UNVERIFIED${fee?.reason ? `: ${fee.reason}` : ""}`;
+  } else {
+    fillStatus = exitWalk.status;
+    contracts = exitWalk.filledContracts;
+    vwap = exitWalk.averageExecutionPrice;
+    allInCostUsd = exitWalk.proceedsUsd - fee.feeUsd;
+    rejectReason = null;
+  }
+
+  // depth-walk.ts's ExitDepthWalkResult is not the same shape as DepthWalkResult --
+  // pmusResult/kalshiResult's own depthWalk field carries an ENTRY/ADD-shaped result
+  // by type; an EXIT's own walk is preserved here for audit purposes via a structural
+  // cast rather than widening PaperFillRow's own type for one field only EXIT rows use
+  // differently (contracts/proceeds instead of notional).
+  const venueResult = { depthWalk: exitWalk as unknown as DepthWalkResult | null, fee, available: !unavailable };
+  return {
+    signalId,
+    requestedDelayMs: obs.requestedDelayMs,
+    side: "EXIT",
+    notionalTierUsd: tier,
+    routingTimestampMs: Date.now(),
+    pmusResult: obs.venue === "PMUS" ? venueResult : { depthWalk: null, fee: null, available: false },
+    kalshiResult: obs.venue === "KALSHI" ? venueResult : { depthWalk: null, fee: null, available: false },
+    chosenVenue: fillStatus === "REJECTED" ? null : obs.venue,
+    fillStatus,
+    contracts,
+    vwap,
+    feeUsd: fee?.feeUsd ?? null,
+    feeModelVersion: fee?.feeModelVersion ?? null,
+    feeValid: fee?.valid ?? false,
+    allInCostUsd,
+    rejectReason,
+    cutoffReason: "BOTH_COMPLETE",
+    targetMarketId: null,
+    selectedSide: null,
+    sourceFillId: signalProvenance.firstFillId,
+    experimentEpochId: signalProvenance.experimentEpochId,
+  };
 }
 
 async function decideOneTier(

@@ -112,7 +112,15 @@ ALTER TABLE public.sports_shadow_paper_positions
   ADD COLUMN IF NOT EXISTS contracts_exited numeric NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS add_cost_usd numeric NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS exit_proceeds_usd numeric NOT NULL DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS total_fees_usd numeric NOT NULL DEFAULT 0;
+  ADD COLUMN IF NOT EXISTS total_fees_usd numeric NOT NULL DEFAULT 0,
+  -- The FEE-INCLUSIVE cost basis of currently-OPEN inventory only -- distinct from
+  -- avg_entry_price (a per-contract price only, not fee-inclusive): ENTRY sets it to
+  -- p_all_in_cost_usd; ADD adds its own p_all_in_cost_usd; EXIT reduces it
+  -- PROPORTIONALLY to the fraction of contracts_open actually exited, so realized P&L
+  -- (exit net proceeds minus the exited fraction's own true fee-inclusive cost) and
+  -- settlement's own remaining-inventory valuation both stay exact across any number
+  -- of partial ADDs/EXITs, never merely approximated via contracts * avg_entry_price.
+  ADD COLUMN IF NOT EXISTS remaining_cost_basis_usd numeric NOT NULL DEFAULT 0;
 
 -- ============================== RPCs ==============================
 
@@ -242,11 +250,15 @@ BEGIN
     AND decided_at IS NULL;
 
   IF FOUND AND p_side = 'ENTRY' AND p_chosen_venue IS NOT NULL AND p_fill_status IN ('FULL', 'PARTIAL') THEN
-    INSERT INTO public.sports_shadow_paper_positions (signal_id, venue, notional_tier_usd, contracts_open, avg_entry_price, status)
-    VALUES (p_signal_id, p_chosen_venue, p_notional_tier_usd, p_contracts, p_vwap, 'OPEN')
+    -- CODEX P1-3: remaining_cost_basis_usd starts as the ENTRY's own fee-inclusive
+    -- all_in_cost_usd -- see the column's own doc comment for why this (not
+    -- contracts * avg_entry_price) is the authoritative basis ADD/EXIT maintain.
+    INSERT INTO public.sports_shadow_paper_positions (signal_id, venue, notional_tier_usd, contracts_open, avg_entry_price, remaining_cost_basis_usd, status)
+    VALUES (p_signal_id, p_chosen_venue, p_notional_tier_usd, p_contracts, p_vwap, p_all_in_cost_usd, 'OPEN')
     ON CONFLICT (signal_id, venue, notional_tier_usd) DO UPDATE SET
       contracts_open = EXCLUDED.contracts_open,
       avg_entry_price = EXCLUDED.avg_entry_price,
+      remaining_cost_basis_usd = EXCLUDED.remaining_cost_basis_usd,
       status = 'OPEN',
       updated_at = now();
   END IF;
@@ -409,7 +421,7 @@ BEGIN
   END IF;
 
   IF p_side = 'ADD' THEN
-    SELECT contracts_open, avg_entry_price INTO v_open, v_avg_entry
+    SELECT contracts_open, avg_entry_price, remaining_cost_basis_usd INTO v_open, v_avg_entry, v_cost_basis
     FROM public.sports_shadow_paper_positions
     WHERE signal_id = p_signal_id AND venue = p_venue AND notional_tier_usd = p_notional_tier_usd
     FOR UPDATE;
@@ -424,6 +436,10 @@ BEGIN
     UPDATE public.sports_shadow_paper_positions SET
       contracts_open = v_new_contracts_open,
       avg_entry_price = v_new_avg_entry,
+      -- CODEX P1-3: remaining_cost_basis_usd is the authoritative fee-inclusive basis
+      -- -- an ADD's own all_in_cost_usd is simply added to whatever basis already
+      -- remained (see the column's own doc comment).
+      remaining_cost_basis_usd = COALESCE(v_cost_basis, 0) + p_all_in_cost_usd,
       contracts_added = contracts_added + p_contracts,
       add_cost_usd = add_cost_usd + p_all_in_cost_usd,
       total_fees_usd = total_fees_usd + p_fee_usd,
@@ -431,7 +447,7 @@ BEGIN
       updated_at = now()
     WHERE signal_id = p_signal_id AND venue = p_venue AND notional_tier_usd = p_notional_tier_usd;
   ELSE -- EXIT
-    SELECT contracts_open, avg_entry_price INTO v_open, v_avg_entry
+    SELECT contracts_open, avg_entry_price, remaining_cost_basis_usd INTO v_open, v_avg_entry, v_cost_basis
     FROM public.sports_shadow_paper_positions
     WHERE signal_id = p_signal_id AND venue = p_venue AND notional_tier_usd = p_notional_tier_usd
     FOR UPDATE;
@@ -445,10 +461,14 @@ BEGIN
     -- contracts_open; capped here as the final, authoritative guard (CODEX P1-3's own
     -- "remaining >= 0, no EXIT beyond existing follower inventory" invariant).
     v_new_contracts_open := GREATEST(0, v_open - LEAST(p_contracts, v_open));
-    v_cost_basis := LEAST(p_contracts, v_open) * COALESCE(v_avg_entry, 0);
+    -- CODEX P1-3: the EXITED fraction's own TRUE fee-inclusive cost basis --
+    -- proportional to remaining_cost_basis_usd (never contracts * avg_entry_price,
+    -- which would silently drop any ADD fees already folded into the basis).
+    v_cost_basis := COALESCE(v_cost_basis, 0) * (LEAST(p_contracts, v_open) / v_open);
 
     UPDATE public.sports_shadow_paper_positions SET
       contracts_open = v_new_contracts_open,
+      remaining_cost_basis_usd = GREATEST(0, COALESCE(remaining_cost_basis_usd, 0) - v_cost_basis),
       contracts_exited = contracts_exited + LEAST(p_contracts, v_open),
       exit_proceeds_usd = exit_proceeds_usd + p_all_in_cost_usd,
       total_fees_usd = total_fees_usd + p_fee_usd,
