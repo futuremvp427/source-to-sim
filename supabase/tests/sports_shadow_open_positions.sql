@@ -83,10 +83,10 @@ BEGIN
     'p14-episode-dual', '0xwallet', '0xasset', v_fill_id, now(), now(), 'MONEYLINE', 'TEAM:NYY:LONG'
   ) RETURNING id INTO v_signal_dual_match;
 
-  INSERT INTO public.sports_market_matches (signal_id, venue, match_status, target_market_id, selected_side)
+  INSERT INTO public.sports_market_matches (signal_id, venue, match_status, first_match_status, target_market_id, selected_side)
   VALUES
-    (v_signal_dual_match, 'PMUS', 'EXACT', 'pmus-dual-market', 'TEAM:NYY:LONG'),
-    (v_signal_dual_match, 'KALSHI', 'EXACT', 'kalshi-dual-market', 'YES');
+    (v_signal_dual_match, 'PMUS', 'EXACT', 'EXACT', 'pmus-dual-market', 'TEAM:NYY:LONG'),
+    (v_signal_dual_match, 'KALSHI', 'EXACT', 'EXACT', 'kalshi-dual-market', 'YES');
 
   -- The routing decision chose KALSHI -- the paper_fill's OWN stored provenance must be
   -- Kalshi's market/side, never PM-US's (which is what an unfiltered signal_id-only join
