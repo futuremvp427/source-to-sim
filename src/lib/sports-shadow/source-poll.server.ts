@@ -1927,18 +1927,9 @@ export async function pollSportsShadowWallet(
       detectedAt: detectedAtMs,
     };
 
-    if (!isEligibleForEpisodeTrigger(fill.sourceTs, goLiveAtMs)) {
-      result.suppressedPreGoLive += 1;
-      try {
-        await d.repo.markFillComplete(fill.id);
-      } catch {
-        // Best-effort; stays PENDING and is re-evaluated identically next poll. Task 12E/P1-F:
-        // this stays safe under retry because the decision depends ONLY on this fill's own
-        // immutable sourceTs and the fixed, durable goLiveAtMs -- never on wallet-history
-        // state -- so it is guaranteed to still be false next time.
-      }
-      continue;
-    }
+    // RECOVERY: pre-go-live suppression now happens at the TOP of this loop (see the
+    // fast-path drain there) -- BEFORE any metadata fetch -- so historical rows can no
+    // longer consume Gamma/venue network budget. Nothing is decided here anymore.
 
     const positionKey = `${normalizedWallet}:${fill.conditionId}:${fill.asset}`;
     let cacheEntry: EpisodeCacheEntry | null;
