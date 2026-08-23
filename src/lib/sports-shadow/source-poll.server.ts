@@ -1824,7 +1824,44 @@ export async function pollSportsShadowWallet(
   const positionCache = new Map<string, EpisodeCacheEntry | null>();
   const metadataCache = new Map<string, SourceMarketMetadata>();
 
+  /**
+   * RECOVERY (structural backlog drain). The captured production failure was:
+   *   "fetchSourceMarketMetadata failed: gamma-api.polymarket.com reservation RPC aborted:
+   *    caller deadline reached mid-request"
+   * Pre-go-live suppression used to be evaluated AFTER the metadata fetch, so ~33k
+   * historical PENDING rows each had to obtain Gamma metadata before they could be disposed
+   * of -- the first reservation consumed the whole Phase 2 budget and every remaining row
+   * stayed PENDING forever (zero durable progress, every cycle).
+   *
+   * `isEligibleForEpisodeTrigger(sourceTs, goLiveAtMs) === false` is decidable from
+   * immutable local data ALONE (this fill's own sourceTs vs the fixed durable goLiveAtMs --
+   * see isEligibleForEpisodeTrigger and this module's terminal-classification doc comment,
+   * where pre-go-live suppression is canonically COMPLETE). It needs no metadata, so it is
+   * hoisted ahead of every network call and batched into bounded, idempotent flushes.
+   */
+  const preGoLiveBuffer: string[] = [];
+  const flushPreGoLive = async (): Promise<void> => {
+    if (preGoLiveBuffer.length === 0) return;
+    const batch = preGoLiveBuffer.splice(0, preGoLiveBuffer.length);
+    try {
+      await d.repo.markFillsComplete(batch);
+    } catch {
+      // Best-effort: these fills simply stay PENDING and receive the identical (still
+      // false) decision next poll -- no stranding, no fabricated disposition.
+    }
+  };
+
   for (const fill of pendingFills) {
+    // RECOVERY fast path: costs no network and no per-row round trip, so it is evaluated
+    // BEFORE the deadline/lease checks below -- a large historical backlog can therefore
+    // never block the post-go-live rows behind it, and the drain still makes bounded
+    // durable progress in a cycle whose network budget is already exhausted.
+    if (!isEligibleForEpisodeTrigger(fill.sourceTs, goLiveAtMs)) {
+      result.suppressedPreGoLive += 1;
+      preGoLiveBuffer.push(fill.id);
+      if (preGoLiveBuffer.length >= PRE_GO_LIVE_FLUSH_SIZE) await flushPreGoLive();
+      continue;
+    }
     // Task 13F: checked BEFORE every iteration's own (up to 10s) metadata fetch -- once
     // the deadline is reached, the remaining batch is abandoned exactly like a lease loss
     // below: every unprocessed fill simply stays PENDING, re-evaluated identically next
