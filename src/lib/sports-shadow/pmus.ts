@@ -1,19 +1,13 @@
 /**
  * Polymarket US sports-market discovery + book normalization — PURE logic only.
  *
- * Field shapes below were confirmed by live, read-only, unauthenticated requests to
- * https://gateway.polymarket.us during development (GET /v1/events, GET /v1/markets,
- * GET /v1/markets/{slug}/book) — not guessed. In particular: `sportsMarketType` uses a
- * granular, sport-prefixed vocabulary (e.g. "baseball_team_full_game_winner",
- * "baseball_team_first_five_spread", "baseball_player_home_runs") that DOES distinguish
- * full-game from F5/inning/prop/futures — unlike the coarser `sportsMarketTypeV2` field
- * ("SPORTS_MARKET_TYPE_MONEYLINE"/"SPORTS_MARKET_TYPE_SPREAD"/"SPORTS_MARKET_TYPE_TOTAL"),
- * which is used here only as a secondary cross-check. The /book endpoint's real levels are
- * `{px: {value: "0.4530"}, qty: "1.0000"}` under `bids`/`offers` (NOT `asks`) — confirmed by
- * a real open market's book payload, not assumed.
+ * The public PM-US Events API is already queried with category=sports by the server
+ * layer. This module therefore classifies market STRUCTURE rather than hard-coding one
+ * league: recognizable full-contest MONEYLINE/SPREAD/TOTAL markets may become candidates;
+ * partial periods/maps/sets, props and futures continue to fail closed.
  */
 
-import { normalizeTeamName } from "./team-normalization";
+import { inferSportsLeagueFromSlug, normalizeParticipantName } from "./participant-normalization";
 import type { BetType, BookSnapshot, DepthLevel, Venue } from "./types";
 
 /* ------------------------------- Discovery ------------------------------- */
@@ -22,7 +16,6 @@ export type PmusRawTeam = {
   abbreviation?: string | null;
   name?: string | null;
   league?: string | null;
-  /** "away" | "home" — present on marketSides[].team, confirmed live. */
   ordering?: string | null;
 };
 
@@ -37,12 +30,11 @@ export type PmusRawMarket = {
   id?: string | number | null;
   slug?: string | null;
   question?: string | null;
-  /** Confirmed-live free-text settlement rules (e.g. "...Extra innings are included if played. If the game is delayed, postponed, or suspended and not rescheduled within two weeks..."). Preserved raw for Task 7's settlement-compatibility evaluation — never parsed as the sole source of eligibility. */
   description?: string | null;
   marketType?: string | null;
-  /** Granular, sport-prefixed type. THE authoritative field for eligibility (see module doc). */
+  /** Granular provider type; used for positive partial/prop/future exclusions. */
   sportsMarketType?: string | null;
-  /** Coarse type, used only as a secondary cross-check — does not distinguish full-game/F5. */
+  /** Coarse documented enum: MONEYLINE / SPREAD / TOTAL / PROP. */
   sportsMarketTypeV2?: string | null;
   line?: number | null;
   status?: string | null;
@@ -57,26 +49,27 @@ export type PmusRawEvent = {
   slug?: string | null;
   title?: string | null;
   startTime?: string | null;
-  /** Stable numeric game identifier — confirmed present, critical for doubleheader disambiguation. */
   gameId?: number | string | null;
   active?: boolean | null;
   closed?: boolean | null;
-  /** Event-level team pair, array order [away, home] per confirmed live data (cross-checked against title/marketSides ordering, never trusted alone). */
+  /** Legacy/live shape used by the existing code. */
   teams?: PmusRawTeam[] | null;
+  /** Current public docs call the same sports-event concept `participants`. */
+  participants?: PmusRawTeam[] | null;
   markets?: PmusRawMarket[] | null;
 };
 
 export type PmusCandidateStatus = "ELIGIBLE" | "UNSUPPORTED" | "UNVERIFIED";
-
 export type PmusEligibleReasonCode = "ELIGIBLE_FULL_GAME_MONEYLINE" | "ELIGIBLE_FULL_GAME_SPREAD" | "ELIGIBLE_FULL_GAME_TOTAL";
 
 export type PmusRejectReasonCode =
-  | "REJECT_NON_MLB"
+  | "REJECT_NON_MLB" // historical vocabulary; no longer emitted solely for being non-MLB
   | "REJECT_F5"
   | "REJECT_INNING"
   | "REJECT_PROP"
   | "REJECT_FUTURE"
   | "REJECT_EXTRA_INNINGS"
+  | "REJECT_PARTIAL_CONTEST"
   | "REJECT_UNSUPPORTED_MARKET_TYPE";
 
 export type PmusUnverifiedReasonCode =
@@ -90,17 +83,11 @@ export type PmusCandidateReasonCode = PmusEligibleReasonCode | PmusRejectReasonC
 export type PmusCandidateSide = {
   description: string | null;
   teamAbbreviation: string | null;
+  /** Full name is retained so generic sports do not depend on league-specific abbreviation maps. */
+  teamName: string | null;
   long: boolean | null;
 };
 
-/**
- * One normalized PM-US market candidate. ONE candidate per MARKET (not per side) — Task 5
- * deliberately does not decide which side maps to the source-selected outcome; `sides`
- * preserves both raw sides for Task 7 to resolve. This is NOT an EXACT match determination
- * (that is Task 7's job) — only ELIGIBLE (structurally a full-game MLB ML/SPREAD/TOTAL),
- * UNSUPPORTED (positively something else — F5/prop/futures/etc.), or UNVERIFIED (evidence
- * insufficient or contradictory; never silently promoted to ELIGIBLE).
- */
 export type PmusCandidate = {
   status: PmusCandidateStatus;
   reasonCode: PmusCandidateReasonCode;
@@ -119,16 +106,20 @@ export type PmusCandidate = {
   closed: boolean | null;
   marketStatus: string | null;
   question: string | null;
-  /** Raw market-level settlement rules text (market.description) — see PmusRawMarket.description. Task 7 diagnostic input only. */
   rulesDescription: string | null;
   sides: PmusCandidateSide[];
 };
 
-/** Only these three confirmed-live, sport-prefixed types are Phase-1 eligible. Whitelist, not blacklist — anything else defaults to rejected/unsupported. */
 const FULL_GAME_TYPE_MAP: Record<string, BetType> = {
   baseball_team_full_game_winner: "MONEYLINE",
   baseball_team_full_game_spread: "SPREAD",
   baseball_team_full_game_total: "TOTAL",
+};
+
+const V2_TO_BET_TYPE: Record<string, BetType> = {
+  SPORTS_MARKET_TYPE_MONEYLINE: "MONEYLINE",
+  SPORTS_MARKET_TYPE_SPREAD: "SPREAD",
+  SPORTS_MARKET_TYPE_TOTAL: "TOTAL",
 };
 
 const EXPECTED_V2: Record<BetType, string> = {
@@ -137,14 +128,19 @@ const EXPECTED_V2: Record<BetType, string> = {
   TOTAL: "SPORTS_MARKET_TYPE_TOTAL",
 };
 
-/** Confirmed-live non-full-game sportsMarketType values, for a more specific rejection reason than the generic fallback. Not exhaustive — anything unrecognized still rejects via REJECT_UNSUPPORTED_MARKET_TYPE. */
-function classifyKnownExclusion(rawType: string): PmusRejectReasonCode {
-  if (rawType.includes("first_five")) return "REJECT_F5";
-  if (/inning\d/.test(rawType) || rawType.includes("first_inning")) return "REJECT_INNING";
-  if (rawType.startsWith("baseball_player_")) return "REJECT_PROP";
-  if (rawType === "futures" || rawType.includes("champ") || rawType.includes("division")) return "REJECT_FUTURE";
-  if (rawType.includes("extra_innings")) return "REJECT_EXTRA_INNINGS";
-  return "REJECT_UNSUPPORTED_MARKET_TYPE";
+const PARTIAL_TEXT = /\bmap\s*\d+\b|\bset\s*\d+\b|\b(first|second|1st|2nd)\s+half\b|\b(1st|first|2nd|second|3rd|third|4th|fourth)\s+(quarter|period)\b|\bq[1-4]\b/i;
+const PARTIAL_TYPE = /first[_-]?five|inning|quarter|period|(?:^|[_-])half(?:$|[_-])|(?:^|[_-])map\d*|(?:^|[_-])set\d*|first[_-]?set|first[_-]?map/i;
+
+function classifyKnownExclusion(rawType: string, market: PmusRawMarket): PmusRejectReasonCode | null {
+  const lower = rawType.toLowerCase();
+  const text = `${market.question ?? ""} ${market.slug ?? ""} ${lower}`;
+  if (lower.includes("first_five")) return "REJECT_F5";
+  if (/inning\d|first_inning/.test(lower)) return "REJECT_INNING";
+  if (lower.includes("player_") || lower.includes("prop") || market.sportsMarketTypeV2 === "SPORTS_MARKET_TYPE_PROP") return "REJECT_PROP";
+  if (lower === "futures" || /champ|season|division|conference|series_winner/.test(lower)) return "REJECT_FUTURE";
+  if (lower.includes("extra_innings")) return "REJECT_EXTRA_INNINGS";
+  if (PARTIAL_TYPE.test(lower) || PARTIAL_TEXT.test(text)) return "REJECT_PARTIAL_CONTEST";
+  return null;
 }
 
 function baseCandidate(event: PmusRawEvent, market: PmusRawMarket): Omit<PmusCandidate, "status" | "reasonCode" | "betType" | "league" | "awayTeam" | "homeTeam" | "line"> {
@@ -163,22 +159,25 @@ function baseCandidate(event: PmusRawEvent, market: PmusRawMarket): Omit<PmusCan
     sides: (market.marketSides ?? []).map((s) => ({
       description: s.description ?? null,
       teamAbbreviation: s.team?.abbreviation ?? null,
+      teamName: s.team?.name ?? null,
       long: s.long ?? null,
     })),
   };
 }
 
-/** Resolves the event's away/home team pair, preferring the moneyline market's explicit `team.ordering` (most reliable), falling back to the event-level `teams` array (order [away, home], only trusted when exactly two teams are present). Returns null when neither source can establish it. */
+/** Resolve two contest participants, preferring explicit away/home side ordering. */
 function resolveEventTeams(event: PmusRawEvent): { away: PmusRawTeam; home: PmusRawTeam } | null {
-  const moneyline = (event.markets ?? []).find((m) => m.sportsMarketType === "baseball_team_full_game_winner");
+  const moneyline = (event.markets ?? []).find((m) => m.sportsMarketTypeV2 === "SPORTS_MARKET_TYPE_MONEYLINE");
   const sides = moneyline?.marketSides ?? [];
   const awaySide = sides.find((s) => s.team?.ordering === "away")?.team;
   const homeSide = sides.find((s) => s.team?.ordering === "home")?.team;
   if (awaySide && homeSide) return { away: awaySide, home: homeSide };
 
-  const teams = event.teams ?? [];
-  if (teams.length === 2 && teams[0] && teams[1]) return { away: teams[0], home: teams[1] };
-
+  const participants = event.teams ?? event.participants ?? [];
+  const orderedAway = participants.find((t) => t.ordering === "away");
+  const orderedHome = participants.find((t) => t.ordering === "home");
+  if (orderedAway && orderedHome) return { away: orderedAway, home: orderedHome };
+  if (participants.length === 2 && participants[0] && participants[1]) return { away: participants[0], home: participants[1] };
   return null;
 }
 
@@ -190,55 +189,68 @@ function unverified(event: PmusRawEvent, market: PmusRawMarket, reasonCode: Pmus
   return { ...baseCandidate(event, market), status: "UNVERIFIED", reasonCode, betType: null, league, awayTeam: null, homeTeam: null, line: null };
 }
 
+function marketBetType(market: PmusRawMarket): { betType: BetType | null; rejection: PmusRejectReasonCode | null } {
+  const rawType = market.sportsMarketType?.toLowerCase() ?? null;
+  if (rawType) {
+    const exclusion = classifyKnownExclusion(rawType, market);
+    if (exclusion) return { betType: null, rejection: exclusion };
+    const exact = FULL_GAME_TYPE_MAP[rawType];
+    if (exact) return { betType: exact, rejection: null };
+  }
+
+  // sportsMarketTypeV2 is intentionally only consulted AFTER the granular type/text has
+  // passed the explicit partial/prop/future exclusions above. This opens other leagues
+  // without treating a known set/map/quarter market as a full contest merely because its
+  // coarse V2 value is MONEYLINE/SPREAD/TOTAL.
+  const v2 = market.sportsMarketTypeV2 ?? null;
+  const fromV2 = v2 ? V2_TO_BET_TYPE[v2] : undefined;
+  if (fromV2) return { betType: fromV2, rejection: null };
+  return { betType: null, rejection: "REJECT_UNSUPPORTED_MARKET_TYPE" };
+}
+
 /**
- * Normalizes one PM-US event's markets into candidates. MLB-only, full-game
- * MONEYLINE/SPREAD/TOTAL only classify as ELIGIBLE; every other market is UNSUPPORTED
- * (positively excluded) or UNVERIFIED (evidence insufficient/contradictory) — never
- * silently ELIGIBLE. Preserves gameId/eventId/eventSlug/marketId/marketSlug on every
- * candidate so two same-day games between the same teams (doubleheaders) remain distinct.
+ * Normalizes one PM-US sports event into fail-closed full-contest candidates. League is
+ * evidence, not an allow-list: any league with two identifiable participants may be
+ * evaluated, while unsupported market structure remains explicitly rejected.
  */
 export function eventToCandidates(event: PmusRawEvent): PmusCandidate[] {
   const markets = event.markets ?? [];
   if (markets.length === 0) return [];
 
   const teamPair = resolveEventTeams(event);
-  const league = teamPair?.away.league?.toLowerCase() ?? teamPair?.home.league?.toLowerCase() ?? null;
+  const league =
+    teamPair?.away.league?.toLowerCase() ??
+    teamPair?.home.league?.toLowerCase() ??
+    inferSportsLeagueFromSlug(event.slug) ??
+    inferSportsLeagueFromSlug(markets[0]?.slug) ??
+    null;
 
-  if (league !== null && league !== "mlb") {
-    return markets.map((m) => unsupported(event, m, "REJECT_NON_MLB", league));
-  }
-  if (teamPair === null) {
-    return markets.map((m) => unverified(event, m, "UNVERIFIED_METADATA_MISSING", null));
-  }
+  if (!league) return markets.map((m) => unverified(event, m, "UNVERIFIED_METADATA_MISSING", null));
+  if (teamPair === null) return markets.map((m) => unverified(event, m, "UNVERIFIED_METADATA_MISSING", league));
 
-  const awayCode = normalizeTeamName(teamPair.away.abbreviation ?? teamPair.away.name);
-  const homeCode = normalizeTeamName(teamPair.home.abbreviation ?? teamPair.home.name);
-  if (!awayCode || !homeCode) {
-    return markets.map((m) => unverified(event, m, "UNVERIFIED_UNKNOWN_TEAM", league));
-  }
+  // Full names are preferred outside MLB. MLB itself still routes through its strict
+  // audited alias table inside normalizeParticipantName.
+  const awayCode = normalizeParticipantName(teamPair.away.name ?? teamPair.away.abbreviation, league);
+  const homeCode = normalizeParticipantName(teamPair.home.name ?? teamPair.home.abbreviation, league);
+  if (!awayCode || !homeCode) return markets.map((m) => unverified(event, m, "UNVERIFIED_UNKNOWN_TEAM", league));
 
   return markets.map((market) => {
-    const rawType = market.sportsMarketType ?? null;
-    const betType = rawType ? FULL_GAME_TYPE_MAP[rawType] : undefined;
-    if (!betType) {
-      const reasonCode = rawType ? classifyKnownExclusion(rawType) : "REJECT_UNSUPPORTED_MARKET_TYPE";
-      return unsupported(event, market, reasonCode, league);
-    }
+    const { betType, rejection } = marketBetType(market);
+    if (!betType) return unsupported(event, market, rejection ?? "REJECT_UNSUPPORTED_MARKET_TYPE", league);
 
     const v2 = market.sportsMarketTypeV2 ?? null;
-    if (v2 !== null && v2 !== EXPECTED_V2[betType]) {
-      return unverified(event, market, "UNVERIFIED_CONFLICTING_METADATA", league);
-    }
+    if (v2 !== null && v2 !== EXPECTED_V2[betType]) return unverified(event, market, "UNVERIFIED_CONFLICTING_METADATA", league);
 
     if (betType !== "MONEYLINE" && (market.line === null || market.line === undefined || !Number.isFinite(market.line))) {
       return unverified(event, market, "UNVERIFIED_MISSING_LINE", league);
     }
 
-    // Cross-check this specific market's own team sides (when present, e.g. moneyline/spread)
-    // against the event-level team pair — a mismatch is a genuine data anomaly, not a guess.
     if (betType !== "TOTAL") {
-      const sideTeams = (market.marketSides ?? []).map((s) => s.team?.abbreviation ?? s.team?.name).filter((t): t is string => Boolean(t));
-      const sideCodes = new Set(sideTeams.map((t) => normalizeTeamName(t)).filter((c): c is string => c !== null));
+      const sideCodes = new Set(
+        (market.marketSides ?? [])
+          .map((s) => normalizeParticipantName(s.team?.name ?? s.team?.abbreviation, league))
+          .filter((c): c is string => c !== null),
+      );
       if (sideCodes.size > 0 && (!sideCodes.has(awayCode) || !sideCodes.has(homeCode))) {
         return unverified(event, market, "UNVERIFIED_CONFLICTING_METADATA", league);
       }
@@ -266,7 +278,6 @@ export type PmusRawBookLevel = { px?: { value?: string | null } | null; qty?: st
 export type PmusRawBookData = {
   marketSlug?: string | null;
   bids?: PmusRawBookLevel[] | null;
-  /** Confirmed live field name — NOT "asks". */
   offers?: PmusRawBookLevel[] | null;
   state?: string | null;
   transactTime?: string | null;
@@ -293,15 +304,6 @@ function emptySnapshot(marketSlug: string, observedAt: number, marketStatus: str
   return { venue: PMUS_VENUE, marketId: marketSlug, bestBid: null, bestAsk: null, bidLevels: [], askLevels: [], marketStatus, observedAt, staleReason };
 }
 
-/**
- * Pure normalizer for the real /v1/markets/{slug}/book payload shape (`marketData.bids`/
- * `marketData.offers`, each `{px:{value}, qty}`, string-encoded). Deliberately re-sorts
- * both sides (never trusts input order), derives bestBid/bestAsk from the sorted depth
- * (there is no separate top-level BBO field on this endpoint to reconcile against), retains
- * up to 5 levels per side without fabricating missing ones, and fails closed to an explicit
- * invalid snapshot (nulled bestBid/bestAsk, non-null staleReason) on a crossed book or any
- * malformed shape — never returns a fabricated tradable quote.
- */
 export function normalizePmusBook(raw: unknown, marketSlug: string, observedAt: number): BookSnapshot {
   if (typeof raw !== "object" || raw === null) return emptySnapshot(marketSlug, observedAt, null, "malformed book payload: not an object");
   const marketData = (raw as PmusRawBookResponse).marketData;
@@ -324,7 +326,6 @@ export function normalizePmusBook(raw: unknown, marketSlug: string, observedAt: 
   let bestBid = bidLevels[0]?.price ?? null;
   let bestAsk = askLevels[0]?.price ?? null;
   let staleReason: string | null = null;
-
   if (bestBid !== null && bestAsk !== null && bestBid >= bestAsk) {
     staleReason = `crossed book: best bid ${bestBid} >= best ask ${bestAsk}`;
     bestBid = null;
