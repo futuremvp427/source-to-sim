@@ -180,16 +180,32 @@ export async function ensureCurrentEpoch(
   const versions: ExperimentEpochVersions = currentEpochVersions(PMUS_FEE_MODEL_VERSION, KALSHI_FEE_MODEL_VERSION);
   const existing = await repo.getCurrentEpoch();
   const configHash = await computeConfigHash(wallets, versions);
+  const goLiveAtIso = new Date(goLiveAtMs).toISOString();
 
-  if (existing && !requiresNewEpoch(existing.versions, versions) && existing.configHash === configHash) {
+  // ACTIVATION-DEFECT FIX: gitSha and goLiveAt are part of the epoch's RUNTIME IDENTITY,
+  // not just descriptive metadata. computeConfigHash intentionally covers only wallets +
+  // semantic versions, so a redeploy that changes SPORTS_SHADOW_GIT_SHA or a re-armed
+  // SPORTS_SHADOW_GO_LIVE_AT previously kept reusing the OLD current epoch forever --
+  // making the dashboard report a stale revision/boundary. Compare them explicitly here so
+  // changed runtime metadata starts a NEW current epoch, while an unchanged config stays
+  // fully idempotent (no write, same epoch id).
+  if (
+    existing &&
+    !requiresNewEpoch(existing.versions, versions) &&
+    existing.configHash === configHash &&
+    existing.gitSha === gitSha &&
+    existing.goLiveAtIso === goLiveAtIso
+  ) {
     return existing;
   }
+
 
   // No current epoch, OR the current one's config/versions have drifted from what the
   // running code now implements -- start a fresh one rather than silently blending
   // pre-change and post-change results into the same epoch (Part 17's core rule).
   return repo.startNewEpoch({
-    goLiveAtIso: new Date(goLiveAtMs).toISOString(),
+    goLiveAtIso,
+
     walletCohort: wallets,
     gitSha,
     configHash,
