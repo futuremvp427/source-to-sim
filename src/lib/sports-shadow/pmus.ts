@@ -85,7 +85,10 @@ export type PmusCandidateSide = {
    * to the same audited codes through normalizeTeamName in resolver.ts.
    */
   teamAbbreviation: string | null;
-  teamName: string | null;
+  /** Runtime normalization populates this when provider metadata supplies a full name.
+   * Optional for compatibility with older resolver fixtures/callers that predate the field.
+   */
+  teamName?: string | null;
   long: boolean | null;
 };
 
@@ -217,7 +220,6 @@ export function eventToCandidates(event: PmusRawEvent): PmusCandidate[] {
 
   if (!league) return markets.map((m) => unverified(event, m, "UNVERIFIED_METADATA_MISSING", null));
   if (teamPair === null) return markets.map((m) => unverified(event, m, "UNVERIFIED_METADATA_MISSING", league));
-
   const awayCode = normalizeParticipantName(teamPair.away.name ?? teamPair.away.abbreviation, league);
   const homeCode = normalizeParticipantName(teamPair.home.name ?? teamPair.home.abbreviation, league);
   if (!awayCode || !homeCode) return markets.map((m) => unverified(event, m, "UNVERIFIED_UNKNOWN_TEAM", league));
