@@ -415,6 +415,16 @@ export function mergePendingFillSlices<T extends { id: string }>(oldestRows: rea
 
 export type PollRepository = {
   hasAnyFillsForWallet(wallet: string): Promise<boolean>;
+  /**
+   * DEGRADED-IDENTITY LIVENESS FIX (2026-08-24 incident): the newest durable `source_ts`
+   * for this wallet -- the "durable frontier". This is restart-safe durable evidence that
+   * does NOT depend on any event key being reliable, so steady-state continuity keeps
+   * working for wallets whose entire durable history uses degraded (tx_hash_ordinal)
+   * identity. `null` when the wallet has no durable fills at all. Optional so existing
+   * test doubles remain valid; when absent, behaviour is exactly as before this fix
+   * (reliable-key overlap only).
+   */
+  getMaxDurableSourceTs?(wallet: string): Promise<number | null>;
   findExistingEventKeys(wallet: string, eventKeys: string[]): Promise<Set<string>>;
   insertRawFill(row: RawFillRow): Promise<InsertFillResult>;
   /**
@@ -540,6 +550,19 @@ export const supabasePollRepository: PollRepository = {
     if (error) throw new Error(error.message);
     return ((data as unknown[] | null)?.length ?? 0) > 0;
   },
+
+  async getMaxDurableSourceTs(wallet) {
+    const { data, error } = await supabaseAdmin
+      .from("sports_shadow_source_fills" as never)
+      .select("source_ts")
+      .eq("wallet", wallet)
+      .order("source_ts", { ascending: false })
+      .limit(1);
+    if (error) throw new Error(error.message);
+    const rows = (data as unknown as { source_ts: number }[] | null) ?? [];
+    return rows.length > 0 ? Number(rows[0]!.source_ts) : null;
+  },
+
 
   async findExistingEventKeys(wallet, eventKeys) {
     if (eventKeys.length === 0) return new Set();
@@ -1353,6 +1376,45 @@ export async function pollSportsShadowWallet(
   result.sourceCoverageComplete = coverage?.coverageComplete ?? false;
   result.sourceCoverageIncompleteReason = coverage?.incompleteReason ?? null;
 
+  /**
+   * ================= DEGRADED-IDENTITY STEADY-STATE LIVENESS FIX (2026-08-24) =================
+   * PROVEN INCIDENT: every durable fill for the tracked cohort uses degraded
+   * (tx_hash_ordinal) identity. Steady-state's only stopping rule was a RELIABLE-key
+   * overlap, which such history can never produce, so every poll paged to the ceiling,
+   * burned the whole Phase 1 budget, was discarded by the no-stranding rule
+   * (scanConfirmedComplete=false), and reported backlogTruncated forever -- starving
+   * forward ingestion AND Phase 2 while upstream had hundreds of fresh trades.
+   *
+   * FIX (no weakening of dedup, no trust in ordinal keys as global IDs): add a SECOND,
+   * identity-independent stopping rule based on durable, restart-safe evidence -- the
+   * wallet's newest durable `source_ts` (the "durable frontier", read fresh from the DB
+   * before pagination starts, never in-memory state). Once this scan has walked
+   * continuously from "now" back to a fetched fill STRICTLY OLDER than that frontier, it
+   * has provably observed every fill at or after the frontier, so the union with the
+   * previously-durable range (which, by the same induction the reliable-overlap rule
+   * already relied on, was itself continuous back from its own boundary) is gapless.
+   *
+   * - Same-second safety: the comparison is STRICTLY less-than, so every fill sharing the
+   *   frontier's exact second is re-fetched inside this scan and passed through the
+   *   normal dedup path (reliable keys via findExistingEventKeys; degraded tuples via
+   *   reconcileDegradedEvents' durable tuple_prefix counts) -- no silent skip, no
+   *   duplicate downstream application.
+   * - Page/window shifts: the rule is a property of immutable `source_ts` values, not of
+   *   page indexes or ordinal labels, so pagination shifting between polls cannot move it.
+   * - No-stranding preserved: this only ever ENDS a scan that already walked continuously
+   *   from page 0; an interrupted scan is still discarded wholesale, unchanged.
+   */
+  let durableFrontierTs: number | null = null;
+  if (!provingCoverage && d.repo.getMaxDurableSourceTs) {
+    try {
+      durableFrontierTs = await d.repo.getMaxDurableSourceTs(normalizedWallet);
+    } catch {
+      // Best-effort: fall back to reliable-key-only overlap (pre-fix behaviour).
+      durableFrontierTs = null;
+    }
+  }
+
+
   // Task 13G / P1-Q (Codex re-review): bootstrap and steady-state share the SAME page
   // ceiling. Bootstrap typically stops after just one page in the common case (see the
   // go-live-boundary-crossing check below), but must be allowed to walk as far as
@@ -1364,6 +1426,8 @@ export async function pollSportsShadowWallet(
   let overlapFound = false;
   let naturalEnd = false;
   let deadlineExceeded = false;
+  // See the frontier stop's same-second/page-boundary guard below.
+  let frontierStopArmed = false;
   try {
     for (let page = 0; page < maxPagesThisScan; page += 1) {
       const offset = page * PAGE_SIZE;
@@ -1468,9 +1532,8 @@ export async function pollSportsShadowWallet(
       // early, leaving an older, not-yet-covered sibling of a colliding tuple
       // outside this poll's fetched range. See the window-shift audit above
       // reconcileDegradedEvents for the full reasoning.
-      const pageReliableKeys = normalizeSourceEvents(rows, normalizedWallet)
-        .filter((e) => !e.identityDegraded)
-        .map((e) => e.eventKey);
+      const pageEvents = normalizeSourceEvents(rows, normalizedWallet);
+      const pageReliableKeys = pageEvents.filter((e) => !e.identityDegraded).map((e) => e.eventKey);
       if (pageReliableKeys.length > 0) {
         const pageExisting = await d.repo.findExistingEventKeys(normalizedWallet, pageReliableKeys);
         if (pageExisting.size > 0) {
@@ -1478,6 +1541,28 @@ export async function pollSportsShadowWallet(
           break;
         }
       }
+      // Degraded-identity continuity (2026-08-24 liveness fix -- see durableFrontierTs
+      // above): strictly-older-than the durable frontier proves continuous coverage back
+      // into already-durable territory WITHOUT trusting any ordinal key as a global id.
+      //
+      // SAME-SECOND / PAGE-BOUNDARY GUARD: degraded (tx_hash_ordinal) reconciliation is
+      // COUNT-based per economic tuple, so it is only correct when every occurrence of a
+      // tuple is inside the same scan. Occurrences sharing the frontier's exact second can
+      // legitimately straddle a provider page boundary, so when this page still carries a
+      // degraded event AT the frontier second, the scan fetches ONE more page before
+      // stopping -- guaranteeing those siblings are observed together instead of one of
+      // them being silently reconciled away as an already-durable duplicate.
+      if (durableFrontierTs !== null && pageEvents.some((e) => e.sourceTs < durableFrontierTs!)) {
+        const degradedAtFrontier = pageEvents.some((e) => e.identityDegraded && e.sourceTs === durableFrontierTs);
+        if (degradedAtFrontier && !frontierStopArmed) {
+          frontierStopArmed = true;
+        } else {
+          overlapFound = true;
+          break;
+        }
+      }
+
+
       if (rows.length < PAGE_SIZE) {
         naturalEnd = true;
         break;
