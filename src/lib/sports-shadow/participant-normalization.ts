@@ -1,13 +1,9 @@
-import { normalizeTeamName } from "./team-normalization";
+import { normalizeMlbTeamName } from "./team-normalization";
 
 /**
  * Derives a conservative league/sport token from the canonical Polymarket sports slug
  * family (`wnba-...`, `wta-...`, `atp-...`, `nfl-...`, `val-...`, etc.). This is a
  * fallback only: callers should prefer structured league metadata whenever it exists.
- *
- * The helper deliberately does not maintain an allow-list. A new sport can enter the
- * research pipeline without a code deployment, while downstream classification still
- * fails closed on unsupported/partial market structure.
  */
 export function inferSportsLeagueFromSlug(slug: string | null | undefined): string | null {
   if (!slug) return null;
@@ -24,21 +20,17 @@ function normalizeGeneric(raw: string): string | null {
     .trim()
     .replace(/\s+/g, " ")
     .toLowerCase();
-  return cleaned.length > 0 ? cleaned : null;
+  return cleaned.length > 0 ? `GENERIC:${cleaned}` : null;
 }
 
 /**
- * Canonical participant identity used by the sport-agnostic source/PMUS resolver.
- *
- * MLB keeps the existing audited alias table and intentionally ambiguous-city failures.
- * Every other sport uses a conservative normalized FULL NAME. Callers should pass a full
- * participant/team name when one is available (rather than an abbreviation), so the same
- * real participant on Gamma and PM-US converges without requiring a permanent league-by-
- * league alias table.
+ * Canonical participant identity used by sport-agnostic source/PMUS classification.
+ * MLB keeps the original audited alias table. Every other sport uses a deterministic
+ * full-name key, avoiding a permanent hard-coded league/category allow-list.
  */
 export function normalizeParticipantName(raw: string | null | undefined, league: string | null | undefined): string | null {
   if (!raw) return null;
-  if ((league ?? "").toLowerCase() === "mlb") return normalizeTeamName(raw);
+  if ((league ?? "").toLowerCase() === "mlb") return normalizeMlbTeamName(raw);
   return normalizeGeneric(raw);
 }
 
@@ -50,13 +42,11 @@ export function parseVersusParticipants(text: string | null | undefined): { away
   let away = (parts[0] ?? "").trim();
   let home = (parts[1] ?? "").trim();
 
-  // Tennis/event titles often prefix the first player with tournament context, e.g.
-  // "Monterrey Open, Qualification: Anna Bondar vs En-Shuo Liang". Keep only the text
-  // after the final colon on the left side; the right side is already the participant.
+  // Individual-sport titles often prefix the first participant with tournament context.
   const colon = away.lastIndexOf(":");
   if (colon >= 0) away = away.slice(colon + 1).trim();
 
-  // Strip common market-scope suffixes that can follow the second participant.
+  // Strip common partial-market suffixes from the second participant text.
   home = home.replace(/\s+-\s+(?:match|game|map|set)\b.*$/i, "").trim();
   if (!away || !home) return null;
   return { away, home };
