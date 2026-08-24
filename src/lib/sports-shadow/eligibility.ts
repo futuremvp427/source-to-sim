@@ -8,19 +8,12 @@ export type GammaMarket = {
   slug: string | null;
   question: string | null;
   groupItemTitle: string | null;
-  /** Structured bet-type field as returned by gamma-api. */
   sportsMarketType: string | null;
   line: number | null;
   events: GammaMarketEvent[] | null;
 };
 
 export type EligibleReasonCode = "ELIGIBLE_FULL_GAME_MONEYLINE" | "ELIGIBLE_FULL_GAME_SPREAD" | "ELIGIBLE_FULL_GAME_TOTAL";
-
-/**
- * REJECT_NON_MLB / REJECT_ESPORTS are retained in the persisted vocabulary for backward
- * compatibility with historical epochs. The sport-agnostic classifier no longer emits
- * them merely because a league is non-MLB; it rejects market STRUCTURE instead.
- */
 export type RejectReasonCode =
   | "REJECT_NON_MLB"
   | "REJECT_PROP"
@@ -33,7 +26,6 @@ export type RejectReasonCode =
   | "REJECT_TEAM_TOTAL"
   | "REJECT_PARTIAL_CONTEST"
   | "REJECT_UNSUPPORTED_MARKET_TYPE";
-
 export type UnverifiedReasonCode =
   | "UNVERIFIED_METADATA_MISSING"
   | "UNVERIFIED_AMBIGUOUS_PERIOD"
@@ -44,7 +36,6 @@ export type UnverifiedReasonCode =
   | "UNVERIFIED_FETCH_FAILED"
   | "UNVERIFIED_EMPTY_RESPONSE"
   | "UNVERIFIED_MALFORMED_RESPONSE";
-
 export type ReasonCode = EligibleReasonCode | RejectReasonCode | UnverifiedReasonCode;
 export type UnverifiedDisposition = "RETRYABLE" | "TERMINAL";
 
@@ -66,7 +57,6 @@ export function classifyUnverifiedDisposition(reasonCode: UnverifiedReasonCode):
 
 export type ClassificationResult = {
   status: ClassificationStatus;
-  /** Structured/fallback league token used for participant normalization and durable signal attribution. */
   league: string | null;
   betType: BetType | null;
   line: number | null;
@@ -78,10 +68,6 @@ export type ClassificationResult = {
 
 const ESPORTS_LEAGUES = new Set(["esports", "lol", "leagueoflegends", "valorant", "val", "cs", "csgo", "cs2", "dota", "dota2"]);
 const TENNIS_LEAGUES = new Set(["tennis", "atp", "wta"]);
-
-// Positive exclusions are intentionally sport-structure based. A new league can be
-// accepted without a deployment, but a map/set/period/prop/future cannot silently become
-// a full-contest signal simply because its parent event is a sport.
 const F5_PATTERN = /first\s*5\b|first\s*five|\bf5\b|1st\s*5\b|5\s*innings/i;
 const ORDINAL_INNING_PATTERN = /\b(1st|first|2nd|second|3rd|third)\s+inning\b/i;
 const PARTIAL_INNING_COUNT_PATTERN = /\bfirst\s*(3|7)\b/i;
@@ -138,14 +124,11 @@ function parseLineToken(token: string | undefined | null): number | null {
   return Number(`${m[1]}.${m[2]}`);
 }
 
-/** Conservative generic slug fallback, used only when sportsMarketType is absent. */
 function parseBetTypeFromSlug(slug: string): { betType: BetType; line: number | null } | null {
   const spreadMatch = slug.match(/-spread-(?:home|away)-(\d+pt\d+)/i);
   if (spreadMatch) return { betType: "SPREAD", line: parseLineToken(spreadMatch[1]) };
   const totalMatch = slug.match(/-total-(\d+pt\d+)/i);
   if (totalMatch) return { betType: "TOTAL", line: parseLineToken(totalMatch[1]) };
-  // Canonical event-level winner slugs observed across sports use a sport/league prefix
-  // and terminate in YYYY-MM-DD. Any derivative suffix must fail this exact ending test.
   if (/^[a-z0-9]+-.+-\d{4}-\d{2}-\d{2}$/i.test(slug)) return { betType: "MONEYLINE", line: null };
   return null;
 }
@@ -156,7 +139,6 @@ function parseLineFromSlugForConflictCheck(slug: string, betType: BetType): numb
   return null;
 }
 
-/** MLB keeps the prior strict slug/team cross-check; generic slugs often use short aliases that are not safe to equate with full participant names. */
 function parseMlbTeamTokensFromSlug(slug: string): { away: string; home: string } | null {
   const m = slug.match(/^mlb-([a-z0-9]+)-([a-z0-9]+)-\d{4}-\d{2}-\d{2}/i);
   if (!m || !m[1] || !m[2]) return null;
@@ -173,9 +155,6 @@ function resolveParticipantPair(market: GammaMarket, league: string): { away: st
     return away && home ? { away, home } : null;
   }
 
-  // Some individual-sport Gamma events do not attach ordered team objects. The market
-  // question/title still names the two competitors. This parser is intentionally limited
-  // to the explicit "A vs B" shape and never guesses from arbitrary prose.
   const parsed = parseVersusParticipants(market.question ?? market.groupItemTitle);
   if (parsed) {
     const away = normalizeParticipantName(parsed.away, league);
@@ -183,7 +162,6 @@ function resolveParticipantPair(market: GammaMarket, league: string): { away: st
     if (away && home) return { away, home };
   }
 
-  // Last structured fallback: exactly two named participants, preserving provider order.
   if (teams.length === 2 && teams[0]?.name && teams[1]?.name) {
     const away = normalizeParticipantName(teams[0].name, league);
     const home = normalizeParticipantName(teams[1].name, league);
@@ -192,17 +170,24 @@ function resolveParticipantPair(market: GammaMarket, league: string): { away: st
   return null;
 }
 
-/**
- * Sport-agnostic source classifier. It accepts recognizable full-contest MONEYLINE /
- * SPREAD / TOTAL markets for any sport/league while continuing to fail closed on partial
- * periods, maps, sets, props, futures, parlays, exotics, missing lines, and ambiguous
- * participant identity. Structured metadata is preferred; a canonical sport-prefixed
- * slug is a fallback when Gamma omits the structured sport field.
- */
 export function classifyGammaMarket(market: GammaMarket): ClassificationResult {
   const text = combinedText(market);
   const structuredLeague = market.events?.[0]?.sport?.sport?.trim().toLowerCase() ?? null;
-  const league = structuredLeague || inferSportsLeagueFromSlug(market.slug);
+  const slugLeague = inferSportsLeagueFromSlug(market.slug);
+
+  // A provider saying "tennis" while the market slug says "mlb" is conflicting evidence,
+  // not permission to reinterpret the MLB-shaped contract as another sport. Preserve the
+  // historical reject vocabulary for this exact regression shape while accepting genuine
+  // non-MLB markets whose structured/slug evidence agrees (or where one side is absent).
+  if (structuredLeague && slugLeague && structuredLeague !== slugLeague) {
+    if (slugLeague === "mlb") {
+      if (ESPORTS_LEAGUES.has(structuredLeague)) return rejected(structuredLeague, "REJECT_ESPORTS", `structured league ${structuredLeague} conflicts with MLB market slug`);
+      return rejected(structuredLeague, "REJECT_NON_MLB", `structured league ${structuredLeague} conflicts with MLB market slug`);
+    }
+    return unverified(structuredLeague, "UNVERIFIED_CONFLICTING_METADATA", `structured league ${structuredLeague} conflicts with slug league ${slugLeague}`);
+  }
+
+  const league = structuredLeague || slugLeague;
   if (!league) return unverified(null, "UNVERIFIED_METADATA_MISSING", "no structured sport/league and no canonical sports slug prefix");
 
   if (F5_PATTERN.test(text)) return rejected(league, "REJECT_F5", "first-five-innings market excluded");
@@ -221,9 +206,7 @@ export function classifyGammaMarket(market: GammaMarket): ClassificationResult {
   let betType: BetType | undefined = market.sportsMarketType ? SPORTS_MARKET_TYPE_TO_BET_TYPE[market.sportsMarketType.toLowerCase()] : undefined;
   let fallbackLine: number | null = null;
   if (!betType) {
-    if (market.sportsMarketType) {
-      return rejected(league, "REJECT_UNSUPPORTED_MARKET_TYPE", `sportsMarketType '${market.sportsMarketType}' is not an eligible full-contest bet type`);
-    }
+    if (market.sportsMarketType) return rejected(league, "REJECT_UNSUPPORTED_MARKET_TYPE", `sportsMarketType '${market.sportsMarketType}' is not an eligible full-contest bet type`);
     if (!market.slug) return unverified(league, "UNVERIFIED_METADATA_MISSING", "no sportsMarketType and no slug to fall back on");
     const fallback = parseBetTypeFromSlug(market.slug);
     if (!fallback) return unverified(league, "UNVERIFIED_PARSE_FAILURE", `slug '${market.slug}' did not match a known full-contest market shape`);
@@ -232,9 +215,7 @@ export function classifyGammaMarket(market: GammaMarket): ClassificationResult {
   }
 
   const line = market.line ?? fallbackLine;
-  if (betType !== "MONEYLINE" && line == null) {
-    return unverified(league, "UNVERIFIED_MISSING_LINE", `${betType} market has no numeric line available from any source`);
-  }
+  if (betType !== "MONEYLINE" && line == null) return unverified(league, "UNVERIFIED_MISSING_LINE", `${betType} market has no numeric line available from any source`);
 
   if (market.line != null && market.slug && betType !== "MONEYLINE") {
     const slugLine = parseLineFromSlugForConflictCheck(market.slug, betType);
@@ -246,20 +227,13 @@ export function classifyGammaMarket(market: GammaMarket): ClassificationResult {
   const pair = resolveParticipantPair(market, league);
   if (!pair) return unverified(league, "UNVERIFIED_UNKNOWN_TEAM", "the two contest participants could not be normalized without guessing");
 
-  // Preserve the old audited MLB structured-vs-slug identity conflict check. Generic
-  // sport slugs often contain provider abbreviations rather than full names, so applying
-  // the same comparison outside MLB would create false conflicts rather than safety.
   if (league === "mlb" && market.slug) {
     const slugTeams = parseMlbTeamTokensFromSlug(market.slug);
     if (slugTeams) {
       const slugAwayCode = normalizeTeamName(slugTeams.away);
       const slugHomeCode = normalizeTeamName(slugTeams.home);
       if (slugAwayCode && slugHomeCode && (slugAwayCode !== pair.away || slugHomeCode !== pair.home)) {
-        return unverified(
-          league,
-          "UNVERIFIED_CONFLICTING_METADATA",
-          `structured teams ${pair.away}@${pair.home} conflict with slug-derived teams ${slugAwayCode}@${slugHomeCode}`,
-        );
+        return unverified(league, "UNVERIFIED_CONFLICTING_METADATA", `structured teams ${pair.away}@${pair.home} conflict with slug-derived teams ${slugAwayCode}@${slugHomeCode}`);
       }
     }
   }
