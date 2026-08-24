@@ -1,6 +1,43 @@
 import { normalizeMlbTeamName } from "./team-normalization";
 
 /**
+ * Conservative fallback registry for canonical Polymarket sports slug prefixes.
+ *
+ * IMPORTANT: this is only used when structured provider league metadata is absent.
+ * Structured league metadata remains authoritative and is not constrained by this set,
+ * so sport-agnostic support is preserved while arbitrary text such as
+ * `unknown-league-game-...` cannot fabricate league evidence from its first token.
+ */
+const SPORTS_SLUG_LEAGUE_TOKENS = new Set([
+  "mlb",
+  "nba",
+  "wnba",
+  "nfl",
+  "nhl",
+  "mls",
+  "ncaa",
+  "kbo",
+  "npb",
+  "epl",
+  "soccer",
+  "cricket",
+  "rugby",
+  "atp",
+  "wta",
+  "tennis",
+  "golf",
+  "ufc",
+  "mma",
+  "boxing",
+  "f1",
+  "esports",
+  "lol",
+  "val",
+  "cs",
+  "dota",
+]);
+
+/**
  * Derives a conservative league/sport token from the canonical Polymarket sports slug
  * family (`wnba-...`, `wta-...`, `atp-...`, `nfl-...`, `val-...`, etc.). This is a
  * fallback only: callers should prefer structured league metadata whenever it exists.
@@ -8,7 +45,7 @@ import { normalizeMlbTeamName } from "./team-normalization";
 export function inferSportsLeagueFromSlug(slug: string | null | undefined): string | null {
   if (!slug) return null;
   const token = slug.trim().toLowerCase().match(/^([a-z0-9]+)-/)?.[1] ?? null;
-  return token && token.length >= 2 ? token : null;
+  return token && SPORTS_SLUG_LEAGUE_TOKENS.has(token) ? token : null;
 }
 
 function normalizeGeneric(raw: string): string | null {
