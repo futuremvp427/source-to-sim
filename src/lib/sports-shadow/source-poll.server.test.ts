@@ -82,6 +82,18 @@ class FakeRepo implements PollRepository {
     return false;
   }
 
+  /** Mirrors the real max(source_ts) read — rows seeded without a sourceTs are ignored, exactly like NULLs would be. */
+  async getMaxDurableSourceTs(wallet: string): Promise<number | null> {
+    let max: number | null = null;
+    for (const { row } of this.fillsByEventKey.values()) {
+      if (row.wallet !== wallet) continue;
+      if (!Number.isFinite(row.sourceTs)) continue;
+      if (max === null || row.sourceTs > max) max = row.sourceTs;
+    }
+    return max;
+  }
+
+
   async getWalletCoverage(wallet: string): Promise<{ coveredThroughTs: number | null; coverageComplete: boolean; incompleteReason: string | null } | null> {
     const override = this.coverageOverride.get(wallet);
     if (override) return override;
@@ -3147,5 +3159,118 @@ describe("pollSportsShadowWallet — pre-go-live backlog drain (recovery regress
     expect(repo.findLatestEpisodeCalls).toBe(0);
     expect(repo.episodesById.size).toBe(0);
     expect(metadataSpy).not.toHaveBeenCalled();
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* 2026-08-24 PRODUCTION INCIDENT: degraded-identity steady-state       */
+/* starvation. Every durable fill for the tracked cohort used degraded  */
+/* (tx_hash_ordinal) identity, so the reliable-key-only overlap rule    */
+/* never matched: each poll paged to the ceiling, burned the whole      */
+/* Phase 1 budget, was discarded by the no-stranding rule, and reported */
+/* backlogTruncated forever while upstream had fresh trades.            */
+/* ------------------------------------------------------------------ */
+describe("degraded-identity steady-state continuity (2026-08-24 liveness incident)", () => {
+  const GO_LIVE = 1_700_000_000_000;
+
+  /** A trade with no native id and no log index -> forced onto the degraded ord: tier. */
+  function degradedTrade(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return trade({ id: "", transactionHash: `0xtx-${Math.random().toString(36).slice(2)}`, ...overrides });
+  }
+
+  /** Seeds durable history that is 100% degraded identity, exactly like production. */
+  function seedDegradedHistory(repo: FakeRepo, count: number, ts: number) {
+    for (let i = 0; i < count; i += 1) {
+      const eventKey = `ord:0xold-${i}:0xasset-moneyline-yankees:BUY:${ts}:10:0.55#0`;
+      repo.fillsByEventKey.set(eventKey, {
+        id: `durable-${i}`,
+        row: { eventKey, wallet: WALLET.toLowerCase(), sourceTs: ts, identityDegraded: true } as unknown as RawFillRow,
+        downstreamStatus: "COMPLETE",
+      });
+    }
+  }
+
+  it("REPRODUCES + FIXES the incident: degraded-only history + fresh upstream trades -> new fills persist and backlogTruncated clears", async () => {
+    const repo = new FakeRepo();
+    const frontierTs = 1_700_000_100;
+    seedDegradedHistory(repo, 3, frontierTs);
+
+    // Page 0: fresh post-frontier trades. Page 1 reaches strictly older than the frontier.
+    const page0 = [
+      ...Array.from({ length: PAGE_SIZE - 1 }, (_, i) => degradedTrade({ timestamp: frontierTs + 100 + i })),
+      degradedTrade({ timestamp: frontierTs }),
+    ];
+    const page1 = [degradedTrade({ timestamp: frontierTs - 5 })];
+
+    const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: page0, [PAGE_SIZE]: page1 }) });
+    const result = await pollSportsShadowWallet(WALLET, GO_LIVE, deps);
+
+    expect(result.isBootstrap).toBe(false);
+    expect(result.error).toBeNull();
+    expect(result.backlogTruncated).toBe(false);
+    // Bounded: nowhere near MAX_PAGES_PER_WALLET, so Phase 1 no longer eats the budget.
+    expect(result.pagesFetched).toBe(2);
+    expect(result.pagesFetched).toBeLessThan(MAX_PAGES_PER_WALLET);
+    // Fresh upstream fills actually landed durably.
+    expect(repo.fillsByEventKey.size).toBeGreaterThan(3);
+  });
+
+  it("SAME-SECOND: fills sharing the frontier's exact second are re-fetched (strictly-older stop), never skipped", async () => {
+    const repo = new FakeRepo();
+    const frontierTs = 1_700_000_100;
+    // One durable degraded fill at the frontier second.
+    const durableKey = `ord:0xsame:0xasset-moneyline-yankees:BUY:${frontierTs}:10:0.55#0`;
+    repo.fillsByEventKey.set(durableKey, {
+      id: "durable-same",
+      row: { eventKey: durableKey, wallet: WALLET.toLowerCase(), sourceTs: frontierTs, identityDegraded: true } as unknown as RawFillRow,
+      downstreamStatus: "COMPLETE",
+    });
+
+    // A SECOND, genuinely distinct physical fill at the very same second must still land.
+    const siblingTx = "0xsame";
+    const page0 = [
+      degradedTrade({ transactionHash: siblingTx, timestamp: frontierTs }),
+      degradedTrade({ timestamp: frontierTs - 1 }),
+    ];
+    const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: page0 }) });
+    const result = await pollSportsShadowWallet(WALLET, GO_LIVE, deps);
+
+    expect(result.error).toBeNull();
+    // The colliding-tuple sibling is reconciled by durable tuple-prefix COUNT, not skipped
+    // outright: one durable occurrence already exists, so the second occurrence is #1.
+    expect(repo.fillsByEventKey.size).toBeGreaterThan(1);
+  });
+
+  it("PAGE BOUNDARY: the frontier crossing on a later page still stops the scan and persists every newer page", async () => {
+    const repo = new FakeRepo();
+    const frontierTs = 1_700_000_100;
+    seedDegradedHistory(repo, 1, frontierTs);
+    const page0 = Array.from({ length: PAGE_SIZE }, (_, i) => degradedTrade({ timestamp: frontierTs + 300 + i }));
+    const page1 = Array.from({ length: PAGE_SIZE }, (_, i) => degradedTrade({ timestamp: frontierTs + 100 + i }));
+    const page2 = [degradedTrade({ timestamp: frontierTs - 1 })];
+    const { deps } = makeDeps({ repo, network: makeNetworkDeps({ 0: page0, [PAGE_SIZE]: page1, [PAGE_SIZE * 2]: page2 }) });
+    const result = await pollSportsShadowWallet(WALLET, GO_LIVE, deps);
+    expect(result.pagesFetched).toBe(3);
+    expect(result.backlogTruncated).toBe(false);
+    expect(repo.fillsByEventKey.size).toBe(1 + PAGE_SIZE * 2 + 1);
+  });
+
+  it("IDEMPOTENT: re-running the identical poll persists nothing new (restart-safe, no duplicate downstream application)", async () => {
+    const repo = new FakeRepo();
+    const frontierTs = 1_700_000_100;
+    seedDegradedHistory(repo, 1, frontierTs);
+    const fresh = Array.from({ length: 5 }, (_, i) => degradedTrade({ timestamp: frontierTs + 10 + i }));
+    const older = degradedTrade({ timestamp: frontierTs - 1 });
+    const pages = { 0: [...fresh, older] };
+
+    const first = await pollSportsShadowWallet(WALLET, GO_LIVE, makeDeps({ repo, network: makeNetworkDeps(pages) }).deps);
+    expect(first.error).toBeNull();
+    const afterFirst = repo.fillsByEventKey.size;
+    expect(afterFirst).toBe(1 + 6);
+
+    const second = await pollSportsShadowWallet(WALLET, GO_LIVE, makeDeps({ repo, network: makeNetworkDeps(pages) }).deps);
+    expect(second.error).toBeNull();
+    expect(second.backlogTruncated).toBe(false);
+    expect(repo.fillsByEventKey.size).toBe(afterFirst);
   });
 });
