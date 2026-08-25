@@ -25,7 +25,7 @@ export const DISCOVERY_PAGE_SIZE = 200;
 /** Bounded: at most 2,000 MLB events per baseline discovery refresh. */
 export const DISCOVERY_MAX_PAGES = 10;
 const DISCOVERY_CACHE_TTL_MS = 5 * 60 * 1000;
-const PMUS_MLB_DISCOVERY_ENDPOINT = "/v2/leagues/mlb/events";
+const pmusLeagueEventsEndpoint = (league: string) => `/v2/leagues/${league}/events`;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -149,7 +149,7 @@ let discoveryCache: CacheEntry | null = null;
  * `marketSides` orientation data this resolver requires, so discovery narrows at the server
  * while preserving the existing fail-closed page cap.
  */
-export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}, deadlineAtMs?: number): Promise<PmusCandidate[]> {
+export async function discoverPmusSportsMarkets(deps: Partial<PmusNetworkDeps> = {}, deadlineAtMs?: number): Promise<PmusCandidate[]> {
   const d: PmusNetworkDeps = { ...defaultDeps, ...deps };
   const now = d.now();
   // Task 13I / P1-S: a cache hit is allowed only if the caller is still within its own
