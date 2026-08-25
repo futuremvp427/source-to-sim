@@ -183,11 +183,25 @@ export const PHASE2_DOWNSTREAM_RESERVE_MS = 8_000;
  * natural stop, exactly like every deadline-exhaustion case already handled elsewhere in
  * this file (left PENDING, safely retryable, never fabricated).
  */
+/**
+ * PHASE-2 STARVATION FIX (2026-08-25): the flat subtraction above meant any caller window
+ * at or below the reserve gave Phase 1 the WHOLE window and Phase 2 exactly zero time.
+ * Production ran with a 6s per-poll window against an 8s reserve, so Phase 2 never ran at
+ * all and 3,610 post-go-live fills stayed PENDING with newSignals=0 forever. The reserve is
+ * now PROPORTIONAL: never more than half the remaining window, so Phase 2 always receives
+ * genuine usable time no matter how small the caller's budget is. Windows under
+ * PHASE2_MIN_SPLIT_WINDOW_MS are too small to split usefully and keep the old behavior.
+ */
+export const PHASE2_MIN_SPLIT_WINDOW_MS = 1_000;
+
 export function phase1IngestDeadline(deadlineAtMs: number, nowMs: number): number {
   if (!Number.isFinite(deadlineAtMs)) return deadlineAtMs;
-  if (deadlineAtMs - nowMs <= PHASE2_DOWNSTREAM_RESERVE_MS) return deadlineAtMs;
-  return deadlineAtMs - PHASE2_DOWNSTREAM_RESERVE_MS;
+  const window = deadlineAtMs - nowMs;
+  if (window <= PHASE2_MIN_SPLIT_WINDOW_MS) return deadlineAtMs;
+  const reserve = Math.min(PHASE2_DOWNSTREAM_RESERVE_MS, Math.floor(window / 2));
+  return deadlineAtMs - reserve;
 }
+
 
 /**
  * FINAL BUILD Part 2 (closes the Task 13G-documented degraded-tuple liveness residual):
@@ -407,7 +421,30 @@ export const PENDING_FILLS_NEWEST_SHARE = MAX_PENDING_FILLS_PER_POLL - PENDING_F
  * `oldestRows` dropped so a small total backlog (full overlap between the two slices)
  * never processes the same fill twice in one poll.
  */
+/**
+ * ============ PHASE-2 EXECUTION-ORDER FIX (2026-08-25) ============
+ * mergePendingFillSlices guaranteed fresh rows were SELECTED, but the loop still EXECUTED
+ * strictly oldest-first, so the historical backlog consumed the whole bounded window and
+ * freshly detected followed-wallet trades stayed PENDING for tens of minutes (production:
+ * hundreds of orphanedFillsRecovered with newSignals=0). Fresh work now runs FIRST:
+ * the newest FRESH_PENDING_QUOTA rows (chronological among themselves, so episode
+ * aggregation order is preserved within the fresh window) are executed before the
+ * remaining older backlog, which still runs — bounded — with whatever budget is left.
+ * Pure, deterministic, restart-safe: a function of (sourceTs, id) only.
+ */
+export const FRESH_PENDING_QUOTA = 150;
+
+export function orderPendingFillsFreshFirst<T extends { id: string; sourceTs: number }>(rows: readonly T[], quota: number = FRESH_PENDING_QUOTA): { ordered: T[]; freshCount: number; oldCount: number } {
+  const byNewest = [...rows].sort((a, b) => (b.sourceTs - a.sourceTs) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+  const freshIds = new Set(byNewest.slice(0, Math.max(0, quota)).map((r) => r.id));
+  const chronological = [...rows].sort((a, b) => (a.sourceTs - b.sourceTs) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const fresh = chronological.filter((r) => freshIds.has(r.id));
+  const old = chronological.filter((r) => !freshIds.has(r.id));
+  return { ordered: [...fresh, ...old], freshCount: fresh.length, oldCount: old.length };
+}
+
 export function mergePendingFillSlices<T extends { id: string }>(oldestRows: readonly T[], newestRows: readonly T[]): T[] {
+
   const seen = new Set(oldestRows.map((r) => r.id));
   const dedupedNewest = [...newestRows].reverse().filter((r) => !seen.has(r.id));
   return [...oldestRows, ...dedupedNewest];
@@ -1013,6 +1050,12 @@ export type WalletPollResult = {
   backlogTruncated: boolean;
   /** How many fills processed this poll (phase 2) were NOT part of this poll's freshly-inserted batch — i.e. genuinely recovered from an earlier failed/crashed poll. Direct evidence of the Task 12D/P1-A durable-retry mechanism actually doing something, not just existing. */
   orphanedFillsRecovered: number;
+  /** PHASE-2 OBSERVABILITY (2026-08-25): how many PENDING fills this poll selected, and how they split between the fresh-first window and the older backlog (see orderPendingFillsFreshFirst). */
+  pendingSelected: number;
+  freshPendingSelected: number;
+  oldPendingSelected: number;
+  /** How many selected fills actually reached a downstream disposition this poll -- the direct signal that Phase 2 got usable budget. */
+  pendingProcessed: number;
   /** Task 12F / P1-G: true when checkpointLease() reported the source lease lost at any point this poll -- pagination and/or phase-2 downstream processing stopped immediately rather than continuing under a stale fence. */
   leaseLost: boolean;
   /** First error encountered, if any. Partial progress made before the error is still reflected in the other fields above — one bad page/row does not discard already-persisted evidence. */
@@ -1044,6 +1087,10 @@ function emptyResult(wallet: string): WalletPollResult {
     lateReconciliationCount: 0,
     backlogTruncated: false,
     orphanedFillsRecovered: 0,
+    pendingSelected: 0,
+    freshPendingSelected: 0,
+    oldPendingSelected: 0,
+    pendingProcessed: 0,
     leaseLost: false,
     error: null,
     sourceCoverageComplete: false,
@@ -1916,6 +1963,12 @@ export async function pollSportsShadowWallet(
     pendingFills = [];
   }
   result.orphanedFillsRecovered = pendingFills.filter((f) => !insertedThisPoll.has(f.id)).length;
+  const freshFirst = orderPendingFillsFreshFirst(pendingFills);
+  pendingFills = freshFirst.ordered;
+  result.pendingSelected = pendingFills.length;
+  result.freshPendingSelected = freshFirst.freshCount;
+  result.oldPendingSelected = freshFirst.oldCount;
+
 
   const positionCache = new Map<string, EpisodeCacheEntry | null>();
   const metadataCache = new Map<string, SourceMarketMetadata>();
@@ -1948,6 +2001,8 @@ export async function pollSportsShadowWallet(
   };
 
   for (const fill of pendingFills) {
+    result.pendingProcessed += 1;
+
     // RECOVERY fast path: costs no network and no per-row round trip, so it is evaluated
     // BEFORE the deadline/lease checks below -- a large historical backlog can therefore
     // never block the post-go-live rows behind it, and the drain still makes bounded

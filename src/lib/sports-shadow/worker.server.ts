@@ -221,7 +221,15 @@ export const SOURCE_LEASE_TTL_SECONDS = 60;
  */
 export const VENUE_MATCH_RESERVE_MS = 12_000;
 /** One already-started source-trades request can finish after the ingest cutoff; reserve for that overrun so venue matching still receives VENUE_MATCH_RESERVE_MS in real wall-clock time. */
-export const SOURCE_INGEST_OVERRUN_ALLOWANCE_MS = 12_000;
+/**
+ * PHASE-2 STARVATION FIX (2026-08-25): this was 12_000, which left source polling only
+ * 6s of the 30s lane -- smaller than PHASE2_DOWNSTREAM_RESERVE_MS, so downstream
+ * classification (Phase 2) received zero budget every cycle and 3,610 post-go-live fills
+ * stayed PENDING with newSignals=0. One in-flight /trades request needs ~3s of overrun
+ * allowance in practice; the 12s venue-matching reserve is untouched.
+ */
+export const SOURCE_INGEST_OVERRUN_ALLOWANCE_MS = 3_000;
+
 
 /** Absolute cutoff after which wallet source ingestion stops starting new work, leaving VENUE_MATCH_RESERVE_MS after the known one-request source overrun. */
 export function sourceIngestDeadline(laneStartMs: number): number {
@@ -581,6 +589,10 @@ export type WalletSummary = {
   newSignals: number;
   backlogTruncated: boolean;
   orphanedFillsRecovered: number;
+  /** PHASE-2 OBSERVABILITY (2026-08-25): pending fills selected / of those in the fresh-first window / actually processed this poll. */
+  pendingSelected: number;
+  freshPendingSelected: number;
+  pendingProcessed: number;
   error: string | null;
   /** CODEX P1-1 (round 2): durably known/proven coverage state as of the end of this wallet's poll -- see WalletPollResult's own doc comment. */
   sourceCoverageComplete: boolean;
@@ -956,6 +968,9 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
         newSignals: result.newSignals.length,
         backlogTruncated: result.backlogTruncated,
         orphanedFillsRecovered: result.orphanedFillsRecovered,
+        pendingSelected: result.pendingSelected,
+        freshPendingSelected: result.freshPendingSelected,
+        pendingProcessed: result.pendingProcessed,
         error: result.error,
         sourceCoverageComplete: result.sourceCoverageComplete,
         sourceCoverageIncompleteReason: result.sourceCoverageIncompleteReason,
@@ -977,6 +992,9 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
         newSignals: 0,
         backlogTruncated: false,
         orphanedFillsRecovered: 0,
+        pendingSelected: 0,
+        freshPendingSelected: 0,
+        pendingProcessed: 0,
         error: message,
         sourceCoverageComplete: false,
         sourceCoverageIncompleteReason: `wallet poll threw before coverage could be verified: ${message}`,
