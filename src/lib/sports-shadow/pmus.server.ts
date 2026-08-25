@@ -225,9 +225,11 @@ export async function discoverPmusSportsMarkets(deps: Partial<PmusNetworkDeps> =
   }
   if (pageBudgetExhausted) {
     throw new Error(
-      `PM-US MLB discovery truncated: DISCOVERY_MAX_PAGES (${DISCOVERY_MAX_PAGES}) exhausted while the final page was still full (${DISCOVERY_PAGE_SIZE} events) -- completeness unproven, refusing to return/cache a partial catalog`,
+      `PM-US ${leagueSegment.toUpperCase()} discovery truncated: DISCOVERY_MAX_PAGES (${DISCOVERY_MAX_PAGES}) exhausted while the final page was still full (${DISCOVERY_PAGE_SIZE} events) -- completeness unproven, refusing to return/cache a partial catalog`,
     );
   }
+  }
+
 
   const value = [...byMarketSlug.values()];
   discoveryCache = { value, expiresAt: d.now() + DISCOVERY_CACHE_TTL_MS };
