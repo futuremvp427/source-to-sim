@@ -86,6 +86,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_final_build_schema.sql
+      - name: Verify atomic Sports Shadow epoch resolution under concurrent callers (production canary regression)
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_epoch_concurrency.sql
       - name: Verify Sports Shadow pg_cron scheduler artifact (FINAL BUILD Part 21 -- not applied to production)
         env:
           PGPASSWORD: postgres

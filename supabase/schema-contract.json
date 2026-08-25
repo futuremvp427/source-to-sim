@@ -477,6 +477,31 @@
     },
     {
       "schema": "public",
+      "table": "sports_shadow_experiment_epochs",
+      "name": "sports_shadow_experiment_epochs_git_sha_real_check",
+      "definition_contains": [
+        "git_sha",
+        "unknown"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_signals",
+      "name": "sports_shadow_signals_experiment_epoch_id_present_check",
+      "definition_contains": [
+        "experiment_epoch_id is not null"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_fills",
+      "name": "sports_shadow_paper_fills_experiment_epoch_id_present_check",
+      "definition_contains": [
+        "experiment_epoch_id is not null"
+      ]
+    },
+    {
+      "schema": "public",
       "table": "sports_shadow_source_sell_events",
       "name": "sports_shadow_source_sell_events_source_fill_id_key",
       "definition_contains": [
@@ -1390,6 +1415,34 @@
     },
     {
       "schema": "public",
+      "name": "ensure_sports_shadow_current_epoch",
+      "identity_args": "timestamp with time zone, text[], text, text, text, text, text, text, text, text, text, text",
+      "security_definer": true,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "service_role required",
+        "pg_advisory_xact_lock",
+        "from public.sports_shadow_experiment_epochs",
+        "for update",
+        "where is_current",
+        "update public.sports_shadow_experiment_epochs",
+        "set is_current = false",
+        "insert into public.sports_shadow_experiment_epochs",
+        "return v_created"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
+    },
+    {
+      "schema": "public",
       "name": "find_pending_sports_shadow_signals",
       "identity_args": "text, integer",
       "security_definer": false,
@@ -1400,6 +1453,7 @@
         "from public.sports_shadow_signals",
         "left join public.sports_market_matches",
         "source_rules_description",
+        "s.experiment_epoch_id is not null",
         "order by s.created_at asc, s.id asc",
         "limit least(greatest(coalesce(p_limit, 20), 0), 100)"
       ],
@@ -1471,9 +1525,11 @@
       ],
       "definition_contains": [
         "service_role required",
+        "signal % has no experiment_epoch_id",
         "from (values (5",
         "on conflict (signal_id, requested_delay_ms, notional_tier_usd, trigger_source_fill_id)",
         "coalesce(public.sports_shadow_paper_fills.pmus_observation_id",
+        "experiment_epoch_id",
         "trigger_source_fill_id is not distinct from p_trigger_source_fill_id"
       ],
       "execute_allowed": [

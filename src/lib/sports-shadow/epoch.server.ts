@@ -7,7 +7,7 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
-import { computeConfigHash, currentEpochVersions, requiresNewEpoch, type ExperimentEpoch, type ExperimentEpochVersions, type ExperimentStage } from "./epoch";
+import { computeConfigHash, currentEpochVersions, type ExperimentEpoch, type ExperimentEpochVersions, type ExperimentStage } from "./epoch";
 import { KALSHI_FEE_MODEL_VERSION, PMUS_FEE_MODEL_VERSION } from "./fees";
 
 /** Fields a caller never supplies directly -- always server-defaulted at creation (stage_entered_at = now(), the per-stage started_at columns stay null until transitionStage actually sets them). */
@@ -16,6 +16,8 @@ type EpochServerDefaultedFields = "id" | "createdAtIso" | "stageEnteredAtIso" | 
 export type EpochRepository = {
   getCurrentEpoch(): Promise<ExperimentEpoch | null>;
   createEpoch(epoch: Omit<ExperimentEpoch, EpochServerDefaultedFields>): Promise<ExperimentEpoch>;
+  /** Resolves the current epoch in one serialized database transaction. Concurrent callers requesting the same identity must receive the same current epoch id. */
+  resolveCurrentEpoch(epoch: Omit<ExperimentEpoch, EpochServerDefaultedFields | "stage" | "frozenAtIso">): Promise<ExperimentEpoch>;
   /** Atomically flips the current epoch (if any) to is_current=false and inserts the new one as current -- never two is_current rows at once (DB-enforced, see the partial unique index). */
   startNewEpoch(epoch: Omit<ExperimentEpoch, EpochServerDefaultedFields | "stage" | "frozenAtIso">): Promise<ExperimentEpoch>;
   transitionStage(epochId: string, stage: ExperimentStage): Promise<void>;
@@ -109,6 +111,27 @@ export const supabaseEpochRepository: EpochRepository = {
     return fromRow(data as unknown as RawEpochRow);
   },
 
+  async resolveCurrentEpoch(epoch) {
+    const { data, error } = await supabaseAdmin.rpc("ensure_sports_shadow_current_epoch" as never, {
+      p_go_live_at: epoch.goLiveAtIso,
+      p_wallet_cohort: epoch.walletCohort,
+      p_git_sha: epoch.gitSha,
+      p_config_hash: epoch.configHash,
+      p_classifier_version: epoch.versions.classifierVersion,
+      p_episode_version: epoch.versions.episodeVersion,
+      p_resolver_version: epoch.versions.resolverVersion,
+      p_router_version: epoch.versions.routerVersion,
+      p_pmus_fee_model_version: epoch.versions.pmusFeeModelVersion,
+      p_kalshi_fee_model_version: epoch.versions.kalshiFeeModelVersion,
+      p_execution_simulator_version: epoch.versions.executionSimulatorVersion,
+      p_settlement_version: epoch.versions.settlementVersion,
+    } as never);
+    if (error) throw new Error(error.message);
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row) throw new Error("ensure_sports_shadow_current_epoch returned no epoch row");
+    return fromRow(row as unknown as RawEpochRow);
+  },
+
   async startNewEpoch(epoch) {
     // Two-step, not a single upsert: the OLD current epoch (if any) must be flipped to
     // false BEFORE the new one is inserted as current, or the partial unique index
@@ -178,24 +201,14 @@ export async function ensureCurrentEpoch(
   repo: EpochRepository = supabaseEpochRepository,
 ): Promise<ExperimentEpoch> {
   const versions: ExperimentEpochVersions = currentEpochVersions(PMUS_FEE_MODEL_VERSION, KALSHI_FEE_MODEL_VERSION);
-  const existing = await repo.getCurrentEpoch();
   const configHash = await computeConfigHash(wallets, versions);
   const goLiveAtIso = new Date(goLiveAtMs).toISOString();
 
-  if (
-    existing &&
-    !requiresNewEpoch(existing.versions, versions) &&
-    existing.configHash === configHash &&
-    existing.gitSha === gitSha &&
-    existing.goLiveAtIso === goLiveAtIso
-  ) {
-    return existing;
-  }
-
-  // No current epoch, OR semantic config/version/deployment/boundary identity drifted.
-  // Start a fresh prospective epoch rather than silently blending results across either
-  // a code revision or a changed go-live boundary.
-  return repo.startNewEpoch({
+  // No application-level read/decide/write split here: production can run multiple
+  // Cloudflare/Lovable invocations concurrently, so current-epoch resolution must be
+  // serialized in the database. The Supabase repository backs this with the
+  // ensure_sports_shadow_current_epoch RPC; tests use an equivalent fake implementation.
+  return repo.resolveCurrentEpoch({
     goLiveAtIso,
     walletCohort: wallets,
     gitSha,

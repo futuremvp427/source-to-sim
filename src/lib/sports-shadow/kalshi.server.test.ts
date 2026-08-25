@@ -185,6 +185,37 @@ describe("discoverKalshiMlbMarkets", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("CANARY-3: a discovery 429 persists cooldown, suppresses same-host retries inside cooldown, and automatically resumes after expiry", async () => {
+    clearKalshiDiscoveryCache();
+    let now = 1_700_000_000_000;
+    let blockedUntil = 0;
+    let firstFetch = true;
+    const fetchImpl = vi.fn(async () => {
+      if (firstFetch) {
+        firstFetch = false;
+        return new Response("{}", { status: 429, headers: { "retry-after": "20" } });
+      }
+      return new Response(JSON.stringify({ markets: [], events: [], cursor: "" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const getHostCooldown = vi.fn(async () =>
+      blockedUntil > now ? { blocked: true, reason: `Retry-After until ${blockedUntil}` } : { blocked: false, reason: null },
+    );
+    const recordHostRateLimit = vi.fn(async (_host: string, retryAfterMs: number | null) => {
+      blockedUntil = now + (retryAfterMs ?? 90_000);
+    });
+
+    await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl, getHostCooldown, recordHostRateLimit, now: () => now }))).rejects.toThrow(/429/);
+    expect(recordHostRateLimit).toHaveBeenCalledWith(KALSHI_HOST, 20_000);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl, getHostCooldown, recordHostRateLimit, now: () => now + 1_000 }))).rejects.toThrow(/cooldown/i);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    now = blockedUntil + 1;
+    await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl, getHostCooldown, recordHostRateLimit, now: () => now }))).resolves.toEqual([]);
+    expect(fetchImpl).toHaveBeenCalledTimes(7); // first 429 + 3 series x (/markets + /events) after cooldown
+  });
+
   describe("Task 12I / P2-P1: pagination truncation must fail closed, never cache a partial catalog", () => {
     /** Builds a fetchImpl where /markets (and, independently, /events) always returns one item plus a non-empty cursor -- i.e. upstream always claims there's more, page after page. */
     function alwaysMorePagesFetchImpl() {

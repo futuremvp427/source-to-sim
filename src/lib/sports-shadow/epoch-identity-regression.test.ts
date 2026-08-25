@@ -49,6 +49,23 @@ function createHistoryRepo(initial: ExperimentEpoch): EpochRepository & {
       history.push(created);
       return created;
     },
+    async resolveCurrentEpoch(epoch) {
+      const current = history.find((existing) => existing.id === currentId) ?? null;
+      if (
+        current &&
+        current.configHash === epoch.configHash &&
+        current.gitSha === epoch.gitSha &&
+        current.goLiveAtIso === epoch.goLiveAtIso &&
+        JSON.stringify(current.walletCohort) === JSON.stringify(epoch.walletCohort) &&
+        JSON.stringify(current.versions) === JSON.stringify(epoch.versions)
+      ) {
+        return current;
+      }
+      const created = materialize(epoch);
+      history.push(created);
+      currentId = created.id;
+      return created;
+    },
     async startNewEpoch(epoch) {
       const created = materialize(epoch);
       history.push(created);

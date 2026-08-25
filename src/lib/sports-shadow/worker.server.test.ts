@@ -22,6 +22,8 @@ import {
   SETTLEMENT_LEASE_TTL_SECONDS,
   SETTLEMENT_LOCK_ID,
   SOURCE_LANE_BUDGET_MS,
+  SOURCE_INGEST_OVERRUN_ALLOWANCE_MS,
+  VENUE_MATCH_RESERVE_MS,
   sourceIngestDeadline,
   sourceCoverageGapAlertPolicy,
   SOURCE_LOCK_ID,
@@ -35,6 +37,8 @@ import {
 const WALLET_A = "0xa71093cafc0c099b4ccab24c3cb8018d817923c4";
 const WALLET_B = "0x32ed517a571c01b6e9adecf61ba81ca48ff2f960";
 const WALLET_C = "0x5268527977f700f9bf9b6d5cd843859e4e70135d";
+const COMPATIBLE_RULES =
+  "This market will resolve to the winner of the game. Extra innings are included in this market. If the game is postponed, this market will remain open until the game has been completed.";
 
 function enabledConfig(overrides: Partial<SportsShadowConfig> = {}): SportsShadowConfig {
   return { enabled: true, wallets: [WALLET_A], goLiveAtMs: 1_700_000_000_000, gitSha: "test-sha", ...overrides };
@@ -113,7 +117,35 @@ function signalRow(overrides: Partial<SignalRow> = {}): SignalRow {
     selectedOutcomeRaw: "New York Yankees",
     eventSlug: "mlb-nyy-bal-2026-08-19",
     marketSlug: "mlb-nyy-bal-2026-08-19",
-    sourceRulesDescription: null,
+    sourceRulesDescription: COMPATIBLE_RULES,
+    ...overrides,
+  };
+}
+
+function pmusExactCandidate(overrides: Partial<PmusCandidate> = {}): PmusCandidate {
+  return {
+    status: "ELIGIBLE",
+    reasonCode: "ELIGIBLE_FULL_GAME_MONEYLINE",
+    betType: "MONEYLINE",
+    eventId: "pmus-event-1",
+    eventSlug: "mlb-nyy-bal-2026-08-19",
+    gameId: "game-1",
+    marketId: "pmus-market-1",
+    marketSlug: "pmus-mlb-nyy-bal-2026-08-19",
+    scheduledStartAt: "2026-08-19T22:35:00Z",
+    league: "mlb",
+    awayTeam: "NYY",
+    homeTeam: "BAL",
+    line: null,
+    active: true,
+    closed: false,
+    marketStatus: "MARKET_STATUS_OPEN",
+    question: "New York Yankees vs. Baltimore Orioles",
+    rulesDescription: COMPATIBLE_RULES,
+    sides: [
+      { description: "New York Yankees", teamAbbreviation: "nyy", long: true },
+      { description: "Baltimore Orioles", teamAbbreviation: "bal", long: false },
+    ],
     ...overrides,
   };
 }
@@ -360,11 +392,12 @@ describe("runSportsShadowCycle — wallet polling (fixed order)", () => {
     expect(new Set(deadlines).size).toBe(1); // identical deadline value passed to every wallet this lane
   });
 
-  it("SOAK-INCIDENT FIX: the wallet-poll deadline is the RESERVED ingest sub-budget (lane start + 30s - VENUE_MATCH_RESERVE_MS), so heavy ingestion can never consume the venue-matching lanes' budget", async () => {
+  it("CANARY-4: the wallet-poll deadline reserves venue time even after one already-started source request overruns the ingest cutoff", async () => {
     const fixedNow = 1_700_000_000_000;
     const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, _deps: unknown, _deadlineAtMs: number) => emptyWalletResult(wallet));
     await runSportsShadowCycle(enabledConfig({ wallets: [WALLET_A] }), baseDeps({ pollSportsShadowWallet: pollSportsShadowWallet as never, now: () => fixedNow }));
     expect(pollSportsShadowWallet.mock.calls[0]?.[3]).toBe(sourceIngestDeadline(fixedNow));
+    expect(pollSportsShadowWallet.mock.calls[0]?.[3]).toBe(fixedNow + SOURCE_LANE_BUDGET_MS - VENUE_MATCH_RESERVE_MS - SOURCE_INGEST_OVERRUN_ALLOWANCE_MS);
     expect(pollSportsShadowWallet.mock.calls[0]?.[3]).toBeLessThan(fixedNow + SOURCE_LANE_BUDGET_MS);
   });
 
@@ -406,18 +439,20 @@ describe("runSportsShadowCycle — epoch attribution (repository-completion pass
     }
   });
 
-  it("a failed ensureCurrentEpoch is recorded as a cycle error but never blocks wallet polling -- episodes still get created (epochId null) rather than data collection stalling on epoch bookkeeping", async () => {
+  it("CANARY-1: a failed ensureCurrentEpoch fails the cycle before wallet polling or venue persistence can create null-epoch research rows", async () => {
     const ensureCurrentEpoch = vi.fn(async () => {
       throw new Error("epoch table unreachable");
     });
     const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, deps: { epochId: string | null }) => emptyWalletResult(wallet));
-    const summary = await runSportsShadowCycle(
-      enabledConfig({ wallets: [WALLET_A] }),
-      baseDeps({ ensureCurrentEpoch: ensureCurrentEpoch as never, pollSportsShadowWallet: pollSportsShadowWallet as never }),
-    );
-    expect(summary.errors.some((e) => e.includes("ensureCurrentEpoch failed"))).toBe(true);
-    expect(pollSportsShadowWallet).toHaveBeenCalledTimes(1);
-    expect(pollSportsShadowWallet.mock.calls[0]?.[2].epochId).toBeNull();
+    const persistVenueMatch = vi.fn();
+    await expect(
+      runSportsShadowCycle(
+        enabledConfig({ wallets: [WALLET_A] }),
+        baseDeps({ ensureCurrentEpoch: ensureCurrentEpoch as never, pollSportsShadowWallet: pollSportsShadowWallet as never, persistVenueMatch: persistVenueMatch as never }),
+      ),
+    ).rejects.toThrow(/epoch resolution failed.*epoch table unreachable/i);
+    expect(pollSportsShadowWallet).not.toHaveBeenCalled();
+    expect(persistVenueMatch).not.toHaveBeenCalled();
   });
 
   it("Codex-caught P1 regression: summary.epochId is populated even when the source lease is NOT acquired this cycle -- epoch resolution must not live inside runSourceLane, or every telemetry event this cycle would be written with experiment_epoch_id NULL", async () => {
@@ -790,6 +825,49 @@ describe("runSportsShadowCycle — target discovery", () => {
     await runSportsShadowCycle(enabledConfig(), baseDeps({ discoverPmus, discoverKalshi }));
     expect(discoverPmus).not.toHaveBeenCalled();
     expect(discoverKalshi).not.toHaveBeenCalled();
+  });
+
+  it("CANARY-3/4: heavy multi-wallet source work is bounded, PM-US still processes a pending signal, and Kalshi cooldown does not block PM-US or create null-epoch work", async () => {
+    const wallets = Array.from({ length: 9 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}`);
+    const workerRepo = makeFakeWorkerRepo([signalRow({ id: "canary-pending-signal" })], []);
+    const laneStart = 1_700_000_100_000;
+    let now = laneStart;
+    const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, deps: { epochId: string | null }, deadlineAtMs: number) => {
+      expect(deadlineAtMs).toBe(sourceIngestDeadline(laneStart));
+      expect(deps.epochId).toBe("epoch-fake");
+      now = sourceIngestDeadline(laneStart) + SOURCE_INGEST_OVERRUN_ALLOWANCE_MS;
+      return emptyWalletResult(wallet, { newSignals: ["canary-pending-signal"] as never });
+    });
+    const discoverPmus = vi.fn(async (_deps: unknown, deadlineAtMs?: number) => {
+      expect(deadlineAtMs).toBe(laneStart + SOURCE_LANE_BUDGET_MS);
+      expect(now).toBeLessThan(deadlineAtMs ?? 0);
+      return [pmusExactCandidate()];
+    });
+    const discoverKalshi = vi.fn(async () => {
+      throw new Error("external-api.kalshi.com is in cooldown: 429 without Retry-After");
+    });
+    const persistVenueMatch = vi.fn(async (_signalId: string, _result: VenueMatchResult, _detectedAtMs: number, _sourceTimestampIso: string) => ({ matchId: "pmus-match-1", scheduled: 5, downgradeSkipped: false }));
+
+    const summary = await runSportsShadowCycle(
+      enabledConfig({ wallets }),
+      baseDeps({ workerRepo, pollSportsShadowWallet: pollSportsShadowWallet as never, discoverPmus, discoverKalshi, persistVenueMatch: persistVenueMatch as never, now: () => now }),
+      "source",
+    );
+
+    expect(summary.epochId).toBe("epoch-fake");
+    expect(summary.sourceLane?.walletsAttempted).toBe(1);
+    expect(pollSportsShadowWallet).toHaveBeenCalledTimes(1);
+    expect(summary.sourceLane?.pmus.pendingFound).toBe(1);
+    expect(summary.sourceLane?.pmus.pendingProcessed).toBe(1);
+    expect(summary.sourceLane?.pmus.exact).toBe(1);
+    expect(summary.sourceLane?.pmus.deadlineReached).toBe(false);
+    expect(summary.sourceLane?.kalshi.pendingFound).toBe(1);
+    expect(summary.sourceLane?.kalshi.discoveryFailed).toBe(true);
+    expect(summary.sourceLane?.kalshi.pendingProcessed).toBe(0);
+    const pmusCalls = persistVenueMatch.mock.calls.filter((call) => (call[1] as VenueMatchResult).venue === "PMUS");
+    const kalshiCalls = persistVenueMatch.mock.calls.filter((call) => (call[1] as VenueMatchResult).venue === "KALSHI");
+    expect(pmusCalls).toHaveLength(1);
+    expect(kalshiCalls).toHaveLength(0);
   });
 });
 

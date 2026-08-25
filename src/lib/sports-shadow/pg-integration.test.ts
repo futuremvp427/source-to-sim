@@ -17,10 +17,35 @@
 import { describe, expect, it } from "vitest";
 
 const RUN = process.env["SPORTS_SHADOW_PG_INTEGRATION"] === "1";
+type SupabaseAdmin = typeof import("@/integrations/supabase/client.server").supabaseAdmin;
 
 describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shadow)", () => {
   function uniqueId(prefix: string): string {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  async function seedTestEpoch(supabaseAdmin: SupabaseAdmin, label: string, wallet: string): Promise<string> {
+    const { data, error } = await supabaseAdmin
+      .from("sports_shadow_experiment_epochs" as never)
+      .insert({
+        go_live_at: new Date().toISOString(),
+        wallet_cohort: [wallet],
+        git_sha: "1111111111111111111111111111111111111111",
+        config_hash: `pg-integration-${label}`,
+        classifier_version: "c1",
+        episode_version: "e1",
+        resolver_version: "r1",
+        router_version: "rt1",
+        pmus_fee_model_version: "pf1",
+        kalshi_fee_model_version: "kf1",
+        execution_simulator_version: "x1",
+        settlement_version: "s1",
+        is_current: false,
+      } as never)
+      .select("id")
+      .single();
+    if (error) throw new Error(error.message);
+    return (data as unknown as { id: string }).id;
   }
 
   describe("Task 8: supabaseObservationRepository + takeDueSportsShadowObservations", () => {
@@ -31,6 +56,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       const signalId = uniqueId("sig");
       const wallet = "0x" + "1".repeat(40);
       const fillKey = uniqueId("fill");
+      const epochId = await seedTestEpoch(supabaseAdmin, uniqueId("obs"), wallet);
 
       const { data: fill, error: fillErr } = await supabaseAdmin
         .from("sports_shadow_source_fills" as never)
@@ -51,6 +77,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
           source_last_fill_at: new Date().toISOString(),
           bet_type: "MONEYLINE",
           selected_side: "TEAM",
+          experiment_epoch_id: epochId,
         } as never)
         .select("id")
         .single();
@@ -154,6 +181,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
 
       const fillKey = uniqueId("fill-cas");
       const wallet = "0x" + "2".repeat(40);
+      const epochId = await seedTestEpoch(supabaseAdmin, uniqueId("obs-cas"), wallet);
       const { data: fill } = await supabaseAdmin
         .from("sports_shadow_source_fills" as never)
         .insert({ event_key: fillKey, wallet, asset: "0xasset", side: "BUY", source_ts: 1, identity_basis: "source_id" } as never)
@@ -162,7 +190,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       const fillId = (fill as unknown as { id: string }).id;
       const { data: signal } = await supabaseAdmin
         .from("sports_shadow_signals" as never)
-        .insert({ episode_key: uniqueId("episode-cas"), source_wallet: wallet, source_asset: "0xasset", first_fill_id: fillId, source_first_fill_at: new Date().toISOString(), source_last_fill_at: new Date().toISOString(), bet_type: "MONEYLINE", selected_side: "TEAM" } as never)
+        .insert({ episode_key: uniqueId("episode-cas"), source_wallet: wallet, source_asset: "0xasset", first_fill_id: fillId, source_first_fill_at: new Date().toISOString(), source_last_fill_at: new Date().toISOString(), bet_type: "MONEYLINE", selected_side: "TEAM", experiment_epoch_id: epochId } as never)
         .select("id")
         .single();
       const realSignalId = (signal as unknown as { id: string }).id;
@@ -196,6 +224,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       const { supabasePollRepository } = await import("./source-poll.server");
 
       const wallet = "0x" + "3".repeat(40);
+      const epochId = await seedTestEpoch(supabaseAdmin, uniqueId("poll-repo"), wallet);
       const eventKey = uniqueId("sid:fill");
       const insertResult = await supabasePollRepository.insertRawFill({
         eventKey,
@@ -286,7 +315,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
         sourceEventSlug: null,
         sourceMarketSlug: null,
         sourceOutcome: "AWY",
-        experimentEpochId: null,
+        experimentEpochId: epochId,
         sourceRulesDescription: null,
       });
 
@@ -335,6 +364,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       const { supabasePollRepository } = await import("./source-poll.server");
 
       const wallet = "0x" + "5".repeat(40);
+      const epochId = await seedTestEpoch(supabaseAdmin, uniqueId("poll-rollback"), wallet);
       const eventKey = uniqueId("sid:fill-gate");
       const insertResult = await supabasePollRepository.insertRawFill({
         eventKey,
@@ -382,7 +412,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
           sourceEventSlug: null,
           sourceMarketSlug: null,
           sourceOutcome: "AWY",
-          experimentEpochId: null,
+          experimentEpochId: epochId,
           sourceRulesDescription: null,
         }),
       ).rejects.toThrow();
@@ -427,6 +457,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
 
       const wallet = "0x" + "4".repeat(40);
       const fillKey = uniqueId("fill-t11");
+      const epochId = await seedTestEpoch(supabaseAdmin, uniqueId("pending"), wallet);
       const { data: fill } = await supabaseAdmin
         .from("sports_shadow_source_fills" as never)
         .insert({ event_key: fillKey, wallet, asset: "0xasset", side: "BUY", source_ts: 1, identity_basis: "source_id" } as never)
@@ -436,7 +467,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       const episodeKey = uniqueId("episode-t11");
       const { data: signal } = await supabaseAdmin
         .from("sports_shadow_signals" as never)
-        .insert({ episode_key: episodeKey, source_wallet: wallet, source_asset: "0xasset", source_condition_id: "0xcondition", first_fill_id: fillId, source_first_fill_at: new Date().toISOString(), source_last_fill_at: new Date().toISOString(), bet_type: "MONEYLINE", selected_side: "AWY" } as never)
+        .insert({ episode_key: episodeKey, source_wallet: wallet, source_asset: "0xasset", source_condition_id: "0xcondition", first_fill_id: fillId, source_first_fill_at: new Date().toISOString(), source_last_fill_at: new Date().toISOString(), bet_type: "MONEYLINE", selected_side: "AWY", experiment_epoch_id: epochId } as never)
         .select("id")
         .single();
       const realSignalId = (signal as unknown as { id: string }).id;
@@ -466,6 +497,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
       const { supabaseWorkerRepository } = await import("./worker.server");
       const wallet = "0x" + "7".repeat(40);
+      const epochId = await seedTestEpoch(supabaseAdmin, uniqueId("pending-batch"), wallet);
       const fillIds: string[] = [];
       const signalIds: string[] = [];
 
@@ -479,7 +511,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
         fillIds.push(fillId);
         const { data: signal } = await supabaseAdmin
           .from("sports_shadow_signals" as never)
-          .insert({ episode_key: uniqueId(`ep-pc-old-${i}`), source_wallet: wallet, source_asset: "0xasset", source_condition_id: "0xcondition", first_fill_id: fillId, source_first_fill_at: new Date(2026, 0, 1 + i).toISOString(), source_last_fill_at: new Date().toISOString(), bet_type: "MONEYLINE", selected_side: "AWY", created_at: new Date(2026, 0, 1 + i).toISOString() } as never)
+          .insert({ episode_key: uniqueId(`ep-pc-old-${i}`), source_wallet: wallet, source_asset: "0xasset", source_condition_id: "0xcondition", first_fill_id: fillId, source_first_fill_at: new Date(2026, 0, 1 + i).toISOString(), source_last_fill_at: new Date().toISOString(), bet_type: "MONEYLINE", selected_side: "AWY", created_at: new Date(2026, 0, 1 + i).toISOString(), experiment_epoch_id: epochId } as never)
           .select("id").single();
         const sid = (signal as unknown as { id: string }).id;
         signalIds.push(sid);
@@ -495,7 +527,7 @@ describe.skipIf(!RUN)("Task 12C: real PostgREST integration (Sports Forward Shad
       fillIds.push(newerFillId);
       const { data: newerSignal } = await supabaseAdmin
         .from("sports_shadow_signals" as never)
-        .insert({ episode_key: uniqueId("ep-pc-newer"), source_wallet: wallet, source_asset: "0xasset", source_condition_id: "0xcondition", first_fill_id: newerFillId, source_first_fill_at: new Date().toISOString(), source_last_fill_at: new Date().toISOString(), bet_type: "MONEYLINE", selected_side: "AWY", created_at: new Date(2026, 0, 10).toISOString() } as never)
+        .insert({ episode_key: uniqueId("ep-pc-newer"), source_wallet: wallet, source_asset: "0xasset", source_condition_id: "0xcondition", first_fill_id: newerFillId, source_first_fill_at: new Date().toISOString(), source_last_fill_at: new Date().toISOString(), bet_type: "MONEYLINE", selected_side: "AWY", created_at: new Date(2026, 0, 10).toISOString(), experiment_epoch_id: epochId } as never)
         .select("id").single();
       const newerSignalId = (newerSignal as unknown as { id: string }).id;
       signalIds.push(newerSignalId);

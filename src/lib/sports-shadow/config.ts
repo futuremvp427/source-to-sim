@@ -25,13 +25,44 @@ export type SportsShadowConfig = {
   /**
    * FINAL BUILD Part 17/analytics: attached to every experiment epoch created from this
    * config (epoch.server.ts's ensureCurrentEpoch) so a milestone snapshot can always name
-   * the exact code revision it was produced under. Metadata only -- never fails config
-   * validation when absent, unlike wallets/goLiveAt which are safety-relevant.
+   * the exact code revision it was produced under. When Sports Shadow is enabled this is
+   * safety-relevant provenance: an absent runtime identity fails closed before scheduler
+   * work starts.
    */
   gitSha: string;
 };
 
 export type ConfigResult = { ok: true; config: SportsShadowConfig } | { ok: false; reason: string };
+
+const DEPLOYMENT_SHA_ENV_KEYS = [
+  "LOVABLE_GIT_COMMIT_SHA",
+  "LOVABLE_COMMIT_SHA",
+  "LOVABLE_DEPLOYMENT_COMMIT_SHA",
+  "CF_PAGES_COMMIT_SHA",
+  "VERCEL_GIT_COMMIT_SHA",
+  "NETLIFY_COMMIT_REF",
+  "RENDER_GIT_COMMIT",
+  "GITHUB_SHA",
+  "SPORTS_SHADOW_GIT_SHA",
+] as const;
+
+const GIT_SHA_PATTERN = /^[0-9a-f]{7,64}$/i;
+
+export function resolveSportsShadowDeploymentSha(env: Record<string, string | undefined>): { ok: true; gitSha: string; source: string } | { ok: false; reason: string } {
+  for (const key of DEPLOYMENT_SHA_ENV_KEYS) {
+    const value = (env[key] ?? "").trim();
+    if (value.length === 0) continue;
+    if (!GIT_SHA_PATTERN.test(value)) {
+      return { ok: false, reason: `${key} must be a git commit SHA (7-64 hex characters)` };
+    }
+    return { ok: true, gitSha: value.toLowerCase(), source: key };
+  }
+  return {
+    ok: false,
+    reason:
+      "Sports Shadow is enabled but no deployment commit SHA was found. Configure a provider git SHA env var (preferred) or SPORTS_SHADOW_GIT_SHA before enabling the scheduler.",
+  };
+}
 
 function parseWallets(raw: string): { ok: true; wallets: string[] } | { ok: false; reason: string } {
   let rawList: string[];
@@ -99,11 +130,14 @@ export function parseSportsShadowConfig(env: Record<string, string | undefined>)
   const enabledRaw = (env["SPORTS_SHADOW_ENABLED"] ?? "").trim().toLowerCase();
   const enabled = enabledRaw === "true" || enabledRaw === "1";
 
-  const gitSha = (env["SPORTS_SHADOW_GIT_SHA"] ?? "").trim() || "unknown";
+  const shaResult = resolveSportsShadowDeploymentSha(env);
+  const gitSha = shaResult.ok ? shaResult.gitSha : "unknown";
 
   if (!enabled) {
     return { ok: true, config: { enabled: false, wallets: [], goLiveAtMs: null, gitSha } };
   }
+
+  if (!shaResult.ok) return { ok: false, reason: shaResult.reason };
 
   const walletsRaw = env["SPORTS_SHADOW_WALLETS"] ?? "";
   const walletsResult = parseWallets(walletsRaw);
@@ -129,4 +163,3 @@ export function checkSportsShadowSecret(provided: string | null, expected: strin
   const exp = expected ?? "";
   return exp.length > 0 && provided === exp;
 }
-

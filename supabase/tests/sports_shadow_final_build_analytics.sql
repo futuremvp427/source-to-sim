@@ -50,7 +50,7 @@ BEGIN
     resolver_version, router_version, pmus_fee_model_version, kalshi_fee_model_version,
     execution_simulator_version, settlement_version, calibration_started_at, oos_started_at
   ) VALUES (
-    v_cal_start, ARRAY[v_wallet], 'sha1', 'hash1', 'c1', 'e1', 'r1', 'rt1', 'pf1', 'kf1', 'x1', 's1',
+    v_cal_start, ARRAY[v_wallet], '1111111111111111111111111111111111111111', 'hash1', 'c1', 'e1', 'r1', 'rt1', 'pf1', 'kf1', 'x1', 's1',
     v_cal_start, v_oos_start
   ) RETURNING id INTO v_epoch_id;
 

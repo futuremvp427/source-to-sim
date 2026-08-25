@@ -12,8 +12,18 @@ DECLARE
   v_signal_terminal uuid;
   v_signal_open uuid;
   v_signal_dual_match uuid;
+  v_epoch_id uuid;
   v_count integer;
 BEGIN
+  INSERT INTO public.sports_shadow_experiment_epochs (
+    go_live_at, wallet_cohort, git_sha, config_hash, classifier_version, episode_version,
+    resolver_version, router_version, pmus_fee_model_version, kalshi_fee_model_version,
+    execution_simulator_version, settlement_version, is_current
+  ) VALUES (
+    now(), ARRAY['0xwallet'], '1111111111111111111111111111111111111111', 'open-positions-test-epoch',
+    'c1', 'e1', 'r1', 'rt1', 'pf1', 'kf1', 'x1', 's1', false
+  ) RETURNING id INTO v_epoch_id;
+
   -- ---------- Fixture 1: a TERMINAL-settled position and an OPEN one ----------
   INSERT INTO public.sports_shadow_source_fills (event_key, wallet, asset, side, identity_basis)
   VALUES ('p14-fill-terminal', '0xwallet', '0xasset', 'BUY', 'source_id')
@@ -21,16 +31,16 @@ BEGIN
 
   INSERT INTO public.sports_shadow_signals (
     episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at,
-    bet_type, selected_side
+    bet_type, selected_side, experiment_epoch_id
   ) VALUES (
-    'p14-episode-terminal', '0xwallet', '0xasset', v_fill_id, now(), now(), 'MONEYLINE', 'TEAM:NYY:LONG'
+    'p14-episode-terminal', '0xwallet', '0xasset', v_fill_id, now(), now(), 'MONEYLINE', 'TEAM:NYY:LONG', v_epoch_id
   ) RETURNING id INTO v_signal_terminal;
 
   INSERT INTO public.sports_shadow_paper_fills (
     signal_id, requested_delay_ms, notional_tier_usd, decided_at, side, fill_status,
-    contracts, all_in_cost_usd, chosen_venue, target_market_id, selected_side
+    contracts, all_in_cost_usd, chosen_venue, target_market_id, selected_side, experiment_epoch_id
   ) VALUES (
-    v_signal_terminal, 0, 5, now(), 'ENTRY', 'FULL', 10, 5.10, 'PMUS', 'pmus-market-terminal', 'TEAM:NYY:LONG'
+    v_signal_terminal, 0, 5, now(), 'ENTRY', 'FULL', 10, 5.10, 'PMUS', 'pmus-market-terminal', 'TEAM:NYY:LONG', v_epoch_id
   );
   -- CODEX P1-3: find_open_sports_shadow_paper_positions now sources contracts/cost-basis
   -- from sports_shadow_paper_positions (the CURRENT remaining inventory), not the frozen
@@ -47,16 +57,16 @@ BEGIN
 
   INSERT INTO public.sports_shadow_signals (
     episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at,
-    bet_type, selected_side
+    bet_type, selected_side, experiment_epoch_id
   ) VALUES (
-    'p14-episode-open', '0xwallet', '0xasset', v_fill_id, now(), now(), 'MONEYLINE', 'TEAM:BOS:SHORT'
+    'p14-episode-open', '0xwallet', '0xasset', v_fill_id, now(), now(), 'MONEYLINE', 'TEAM:BOS:SHORT', v_epoch_id
   ) RETURNING id INTO v_signal_open;
 
   INSERT INTO public.sports_shadow_paper_fills (
     signal_id, requested_delay_ms, notional_tier_usd, decided_at, side, fill_status,
-    contracts, all_in_cost_usd, chosen_venue, target_market_id, selected_side
+    contracts, all_in_cost_usd, chosen_venue, target_market_id, selected_side, experiment_epoch_id
   ) VALUES (
-    v_signal_open, 0, 5, now(), 'ENTRY', 'FULL', 10, 5.10, 'KALSHI', 'kalshi-market-open', 'YES'
+    v_signal_open, 0, 5, now(), 'ENTRY', 'FULL', 10, 5.10, 'KALSHI', 'kalshi-market-open', 'YES', v_epoch_id
   );
   INSERT INTO public.sports_shadow_paper_positions (signal_id, venue, notional_tier_usd, contracts_open, avg_entry_price, remaining_cost_basis_usd, status)
   VALUES (v_signal_open, 'KALSHI', 5, 10, 0.5, 5.10, 'OPEN');
@@ -85,9 +95,9 @@ BEGIN
 
   INSERT INTO public.sports_shadow_signals (
     episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at,
-    bet_type, selected_side
+    bet_type, selected_side, experiment_epoch_id
   ) VALUES (
-    'p14-episode-dual', '0xwallet', '0xasset', v_fill_id, now(), now(), 'MONEYLINE', 'TEAM:NYY:LONG'
+    'p14-episode-dual', '0xwallet', '0xasset', v_fill_id, now(), now(), 'MONEYLINE', 'TEAM:NYY:LONG', v_epoch_id
   ) RETURNING id INTO v_signal_dual_match;
 
   INSERT INTO public.sports_market_matches (signal_id, venue, match_status, first_match_status, target_market_id, selected_side)
@@ -100,9 +110,9 @@ BEGIN
   -- against sports_market_matches could have returned instead).
   INSERT INTO public.sports_shadow_paper_fills (
     signal_id, requested_delay_ms, notional_tier_usd, decided_at, side, fill_status,
-    contracts, all_in_cost_usd, chosen_venue, target_market_id, selected_side
+    contracts, all_in_cost_usd, chosen_venue, target_market_id, selected_side, experiment_epoch_id
   ) VALUES (
-    v_signal_dual_match, 0, 5, now(), 'ENTRY', 'FULL', 10, 5.10, 'KALSHI', 'kalshi-dual-market', 'YES'
+    v_signal_dual_match, 0, 5, now(), 'ENTRY', 'FULL', 10, 5.10, 'KALSHI', 'kalshi-dual-market', 'YES', v_epoch_id
   );
   INSERT INTO public.sports_shadow_paper_positions (signal_id, venue, notional_tier_usd, contracts_open, avg_entry_price, remaining_cost_basis_usd, status)
   VALUES (v_signal_dual_match, 'KALSHI', 5, 10, 0.5, 5.10, 'OPEN');
@@ -143,17 +153,18 @@ BEGIN
 
         INSERT INTO public.sports_shadow_signals (
           episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at,
-          bet_type, selected_side, created_at
+          bet_type, selected_side, created_at, experiment_epoch_id
         ) VALUES (
           'p23-episode-notdue-' || i, '0xwallet', '0xasset', v_fill_not_due, now(), now(), 'MONEYLINE', 'TEAM:NYY:LONG',
-          now() - interval '1 day' -- OLDER than the ready position below -- would win a pure oldest-decided-first ordering
+          now() - interval '1 day', -- OLDER than the ready position below -- would win a pure oldest-decided-first ordering
+          v_epoch_id
         ) RETURNING id INTO v_signal_not_due;
 
         INSERT INTO public.sports_shadow_paper_fills (
           signal_id, requested_delay_ms, notional_tier_usd, decided_at, side, fill_status,
-          contracts, all_in_cost_usd, chosen_venue, target_market_id, selected_side
+          contracts, all_in_cost_usd, chosen_venue, target_market_id, selected_side, experiment_epoch_id
         ) VALUES (
-          v_signal_not_due, 0, 5, now() - interval '1 day', 'ENTRY', 'FULL', 10, 5.10, 'PMUS', 'pmus-market-notdue-' || i, 'TEAM:NYY:LONG'
+          v_signal_not_due, 0, 5, now() - interval '1 day', 'ENTRY', 'FULL', 10, 5.10, 'PMUS', 'pmus-market-notdue-' || i, 'TEAM:NYY:LONG', v_epoch_id
         );
         INSERT INTO public.sports_shadow_paper_positions (signal_id, venue, notional_tier_usd, contracts_open, avg_entry_price, remaining_cost_basis_usd, status)
         VALUES (v_signal_not_due, 'PMUS', 5, 10, 0.5, 5.10, 'OPEN');
@@ -172,16 +183,16 @@ BEGIN
 
     INSERT INTO public.sports_shadow_signals (
       episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at,
-      bet_type, selected_side
+      bet_type, selected_side, experiment_epoch_id
     ) VALUES (
-      'p23-episode-ready', '0xwallet', '0xasset', v_fill_id, now(), now(), 'MONEYLINE', 'TEAM:BOS:SHORT'
+      'p23-episode-ready', '0xwallet', '0xasset', v_fill_id, now(), now(), 'MONEYLINE', 'TEAM:BOS:SHORT', v_epoch_id
     ) RETURNING id INTO v_signal_ready;
 
     INSERT INTO public.sports_shadow_paper_fills (
       signal_id, requested_delay_ms, notional_tier_usd, decided_at, side, fill_status,
-      contracts, all_in_cost_usd, chosen_venue, target_market_id, selected_side
+      contracts, all_in_cost_usd, chosen_venue, target_market_id, selected_side, experiment_epoch_id
     ) VALUES (
-      v_signal_ready, 0, 5, now(), 'ENTRY', 'FULL', 10, 5.10, 'KALSHI', 'kalshi-market-ready', 'YES'
+      v_signal_ready, 0, 5, now(), 'ENTRY', 'FULL', 10, 5.10, 'KALSHI', 'kalshi-market-ready', 'YES', v_epoch_id
     );
     INSERT INTO public.sports_shadow_paper_positions (signal_id, venue, notional_tier_usd, contracts_open, avg_entry_price, remaining_cost_basis_usd, status)
     VALUES (v_signal_ready, 'KALSHI', 5, 10, 0.5, 5.10, 'OPEN');

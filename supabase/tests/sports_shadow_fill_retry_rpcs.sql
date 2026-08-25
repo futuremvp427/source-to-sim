@@ -12,12 +12,22 @@ DECLARE
   v_trigger_id uuid;
   v_pmus_match_id uuid;
   v_kalshi_match_id uuid;
+  v_epoch_id uuid;
   v_oid_insert oid;
   v_oid_update oid;
   v_public_has_execute boolean;
   v_missing_count integer;
   v_status text;
 BEGIN
+  INSERT INTO public.sports_shadow_experiment_epochs (
+    go_live_at, wallet_cohort, git_sha, config_hash, classifier_version, episode_version,
+    resolver_version, router_version, pmus_fee_model_version, kalshi_fee_model_version,
+    execution_simulator_version, settlement_version, is_current
+  ) VALUES (
+    now(), ARRAY['0xtest'], '1111111111111111111111111111111111111111', 'fill-retry-test-epoch',
+    'c1', 'e1', 'r1', 'rt1', 'pf1', 'kf1', 'x1', 's1', false
+  ) RETURNING id INTO v_epoch_id;
+
   -- Seed one durable fill (PENDING by default).
   INSERT INTO public.sports_shadow_source_fills (event_key, wallet, asset, side, source_ts, identity_basis)
   VALUES ('rpc-test-fill-1', '0xtest', '0xasset', 'BUY', 1, 'source_id')
@@ -79,7 +89,7 @@ BEGIN
   BEGIN
     PERFORM public.insert_sports_shadow_episode(
       v_fill_id, 'rpc-test-episode-bad', '0xtest', NULL, '0xcondition', '0xasset', NULL, NULL, NULL,
-      now(), now(), 0.5, 1, 0.5, 1, false, 'MLB', NULL, NULL, NULL, 'NOT_A_REAL_BET_TYPE', 'TEAM', NULL
+      now(), now(), 0.5, 1, 0.5, 1, false, 'MLB', NULL, NULL, NULL, 'NOT_A_REAL_BET_TYPE', 'TEAM', NULL, NULL, v_epoch_id
     );
     RAISE EXCEPTION 'expected insert_sports_shadow_episode to fail on an invalid bet_type';
   EXCEPTION WHEN check_violation THEN
@@ -100,7 +110,7 @@ BEGIN
   ------------------------------------------------------------------
   v_signal_id := public.insert_sports_shadow_episode(
     v_fill_id, 'rpc-test-episode-1', '0xtest', NULL, '0xcondition', '0xasset', NULL, NULL, NULL,
-    now(), now(), 0.5, 10, 5, 1, false, 'MLB', NULL, 'AWY', 'HOM', 'MONEYLINE', 'TEAM', NULL
+    now(), now(), 0.5, 10, 5, 1, false, 'MLB', NULL, 'AWY', 'HOM', 'MONEYLINE', 'TEAM', NULL, NULL, v_epoch_id
   );
   IF NOT EXISTS (SELECT 1 FROM public.sports_shadow_signals WHERE id = v_signal_id) THEN
     RAISE EXCEPTION 'expected a signal row to exist after insert_sports_shadow_episode';

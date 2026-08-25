@@ -11,6 +11,7 @@ BEGIN;
 DO $$
 DECLARE
   v_t0 timestamptz := now() - interval '2 hours'; -- T0: original detection, simulated as 2h in the past
+  v_epoch_id uuid;
   v_fill_id uuid;
   v_signal_id uuid;
   v_created_at timestamptz;
@@ -45,6 +46,15 @@ BEGIN
     RESET ROLE;
   END;
 
+  INSERT INTO public.sports_shadow_experiment_epochs (
+    go_live_at, wallet_cohort, git_sha, config_hash, classifier_version, episode_version,
+    resolver_version, router_version, pmus_fee_model_version, kalshi_fee_model_version,
+    execution_simulator_version, settlement_version, is_current
+  ) VALUES (
+    now(), ARRAY['0xtest'], '2222222222222222222222222222222222222222', 'signal-detection-time-test-epoch',
+    'c1', 'e1', 'r1', 'rt1', 'pf1', 'kf1', 'x1', 's1', false
+  ) RETURNING id INTO v_epoch_id;
+
   ------------------------------------------------------------------
   -- 2. L1/L2: seed a raw fill whose first_seen_at (T0) is explicitly 2 hours in the
   -- past (simulating: fill detected at T0, downstream processing failed/stayed
@@ -62,7 +72,7 @@ BEGIN
   v_signal_id := public.insert_sports_shadow_episode(
     v_fill_id, 'detection-time-episode-1', '0xtest', NULL, '0xcondition', '0xasset', NULL, NULL, NULL,
     '2026-01-01T00:00:00Z'::timestamptz, '2026-01-01T00:05:00Z'::timestamptz, -- source trade time: a THIRD distinct value
-    0.5, 10, 5, 1, false, 'MLB', NULL, 'AWY', 'HOM', 'MONEYLINE', 'TEAM', NULL
+    0.5, 10, 5, 1, false, 'MLB', NULL, 'AWY', 'HOM', 'MONEYLINE', 'TEAM', NULL, NULL, v_epoch_id
   );
 
   SELECT created_at, source_first_fill_at, source_last_fill_at, updated_at
@@ -110,7 +120,7 @@ BEGIN
 
     v_immediate_signal_id := public.insert_sports_shadow_episode(
       v_immediate_fill_id, 'detection-time-episode-2', '0xtest', NULL, '0xcondition2', '0xasset', NULL, NULL, NULL,
-      now(), now(), 0.5, 10, 5, 1, false, 'MLB', NULL, 'AWY', 'HOM', 'MONEYLINE', 'TEAM', NULL
+      now(), now(), 0.5, 10, 5, 1, false, 'MLB', NULL, 'AWY', 'HOM', 'MONEYLINE', 'TEAM', NULL, NULL, v_epoch_id
     );
     SELECT created_at INTO v_immediate_created_at FROM public.sports_shadow_signals WHERE id = v_immediate_signal_id;
     IF v_immediate_created_at <> v_immediate_first_seen_at THEN
@@ -125,7 +135,7 @@ BEGIN
   BEGIN
     PERFORM public.insert_sports_shadow_episode(
       gen_random_uuid(), 'detection-time-episode-orphan', '0xtest', NULL, '0xcondition3', '0xasset', NULL, NULL, NULL,
-      now(), now(), 0.5, 10, 5, 1, false, 'MLB', NULL, 'AWY', 'HOM', 'MONEYLINE', 'TEAM', NULL
+      now(), now(), 0.5, 10, 5, 1, false, 'MLB', NULL, 'AWY', 'HOM', 'MONEYLINE', 'TEAM', NULL, NULL, v_epoch_id
     );
     RAISE EXCEPTION 'expected insert_sports_shadow_episode to fail explicitly for a nonexistent p_fill_id';
   EXCEPTION WHEN foreign_key_violation THEN

@@ -195,7 +195,20 @@ Behavior:
 - The app logs provider failures without the full URL, and heartbeat failure never changes the ingest response from success to failure.
 - Verification: temporarily point `INGEST_SUCCESS_HEARTBEAT_URL` at a controlled test endpoint, trigger one scheduled or manual POST to `/api/public/hooks/ingest`, and confirm exactly one external ping after the worker row records a successful cycle.
 
-### 1B. Sports Shadow pg_cron scheduler
+### 1B. Sports Shadow deployment identity
+
+Sports Shadow research epochs require an explicit runtime deployment commit SHA. The application prefers provider-supplied commit variables in this order: `LOVABLE_GIT_COMMIT_SHA`, `LOVABLE_COMMIT_SHA`, `LOVABLE_DEPLOYMENT_COMMIT_SHA`, `CF_PAGES_COMMIT_SHA`, `VERCEL_GIT_COMMIT_SHA`, `NETLIFY_COMMIT_REF`, `RENDER_GIT_COMMIT`, `GITHUB_SHA`, then the manual fallback `SPORTS_SHADOW_GIT_SHA`.
+
+The value must be a real 7-64 character hexadecimal commit identity. `unknown`, an empty value, or a non-hex placeholder fails closed while `SPORTS_SHADOW_ENABLED=true`; workers must not create a new epoch with fake or stale provenance.
+
+Operator procedure before enabling Sports Shadow cron:
+
+1. Confirm the deployed Lovable revision/commit SHA from the provider.
+2. Confirm the running app exposes or receives the same value through one of the provider variables above.
+3. If Lovable exposes no trustworthy provider variable, set `SPORTS_SHADOW_GIT_SHA` to the exact deployed commit SHA for that deployment before enabling the scheduler.
+4. Query the current epoch after the first successful cycle and confirm `sports_shadow_experiment_epochs.git_sha` equals the deployed SHA. If it does not, disable all Sports Shadow cron jobs immediately and preserve evidence.
+
+### 1C. Sports Shadow pg_cron scheduler
 
 Repository expected configuration is defined in `supabase/scheduler/sports_shadow_pg_cron.sql`, not in ordinary migrations. It must be applied only as an explicit deployment step after code deployment, secret creation, and a disabled-smoke check.
 

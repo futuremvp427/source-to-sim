@@ -220,10 +220,12 @@ export const SOURCE_LEASE_TTL_SECONDS = 60;
  * ================================================================================
  */
 export const VENUE_MATCH_RESERVE_MS = 12_000;
+/** One already-started source-trades request can finish after the ingest cutoff; reserve for that overrun so venue matching still receives VENUE_MATCH_RESERVE_MS in real wall-clock time. */
+export const SOURCE_INGEST_OVERRUN_ALLOWANCE_MS = 12_000;
 
-/** Absolute cutoff after which wallet source ingestion stops starting new work, leaving VENUE_MATCH_RESERVE_MS of the lane budget for venue matching. */
+/** Absolute cutoff after which wallet source ingestion stops starting new work, leaving VENUE_MATCH_RESERVE_MS after the known one-request source overrun. */
 export function sourceIngestDeadline(laneStartMs: number): number {
-  return laneStartMs + Math.max(0, SOURCE_LANE_BUDGET_MS - VENUE_MATCH_RESERVE_MS);
+  return laneStartMs + Math.max(0, SOURCE_LANE_BUDGET_MS - VENUE_MATCH_RESERVE_MS - SOURCE_INGEST_OVERRUN_ALLOWANCE_MS);
 }
 
 /**
@@ -1083,17 +1085,18 @@ export async function runSportsShadowCycle(config: SportsShadowConfig, deps: Par
     };
   }
 
-  // FINAL BUILD Part 6/repository-completion pass (Codex-caught P1): resolved ONCE per
-  // cycle, BEFORE either lane runs, so every telemetry event this cycle records (not
-  // just newly-created episodes) carries the current epoch -- regardless of whether the
-  // source lease is even acquired this cycle. A failure here is best-effort: the cycle
-  // still proceeds (epochId null) rather than blocking collection on epoch bookkeeping.
+  // Resolved ONCE per enabled cycle, BEFORE either lane runs, so every research row
+  // created by this cycle can be attributed to the current deployment/config epoch.
+  // Production canary 2026-08-25 proved that continuing with epochId=null creates
+  // invalid research evidence, so epoch acquisition is now fail-closed: retry the whole
+  // cycle later rather than creating signals/matches/observations/paper rows without
+  // provenance.
   let epochId: string | null = null;
   try {
     const epoch = await d.ensureCurrentEpoch(config.wallets, config.goLiveAtMs ?? d.now(), config.gitSha);
     epochId = epoch.id;
   } catch (err) {
-    errors.push(`ensureCurrentEpoch failed: ${err instanceof Error ? err.message : "unknown error"}`);
+    throw new Error(`sports shadow epoch resolution failed: ${err instanceof Error ? err.message : "unknown error"}`);
   }
 
   // LANE A: observation, highest priority, always attempted first. Task 12H/P1-N: both

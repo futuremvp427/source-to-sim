@@ -79,7 +79,7 @@ BEGIN
     resolver_version, router_version, pmus_fee_model_version, kalshi_fee_model_version,
     execution_simulator_version, settlement_version
   ) VALUES (
-    now(), ARRAY['0xa'], 'sha1', 'hash1', 'c1', 'e1', 'r1', 'rt1', 'pf1', 'kf1', 'x1', 's1'
+    now(), ARRAY['0xa'], '1111111111111111111111111111111111111111', 'hash1', 'c1', 'e1', 'r1', 'rt1', 'pf1', 'kf1', 'x1', 's1'
   ) RETURNING id INTO v_epoch_id;
 
   BEGIN
@@ -88,7 +88,7 @@ BEGIN
       resolver_version, router_version, pmus_fee_model_version, kalshi_fee_model_version,
       execution_simulator_version, settlement_version, is_current
     ) VALUES (
-      now(), ARRAY['0xb'], 'sha2', 'hash2', 'c1', 'e1', 'r1', 'rt1', 'pf1', 'kf1', 'x1', 's1', true
+      now(), ARRAY['0xb'], '2222222222222222222222222222222222222222', 'hash2', 'c1', 'e1', 'r1', 'rt1', 'pf1', 'kf1', 'x1', 's1', true
     );
     RAISE EXCEPTION 'expected a second is_current=true epoch to violate the one-current partial unique index';
   EXCEPTION
@@ -103,7 +103,7 @@ BEGIN
     resolver_version, router_version, pmus_fee_model_version, kalshi_fee_model_version,
     execution_simulator_version, settlement_version
   ) VALUES (
-    now(), ARRAY['0xb'], 'sha2', 'hash2', 'c1', 'e1', 'r1', 'rt1', 'pf1', 'kf1', 'x1', 's1'
+    now(), ARRAY['0xb'], '2222222222222222222222222222222222222222', 'hash2', 'c1', 'e1', 'r1', 'rt1', 'pf1', 'kf1', 'x1', 's1'
   ) RETURNING id INTO v_epoch_id_2;
 
   ------------------------------------------------------------------
@@ -148,11 +148,11 @@ BEGIN
   -- finalize_sports_shadow_routing_decision's WHERE decided_at IS NULL guard lets
   -- exactly one caller win.
   ------------------------------------------------------------------
-  INSERT INTO public.sports_shadow_paper_fills (signal_id, requested_delay_ms, notional_tier_usd, fill_status)
-  VALUES (v_signal_id, 0, 10, 'FULL');
+  INSERT INTO public.sports_shadow_paper_fills (signal_id, requested_delay_ms, notional_tier_usd, fill_status, experiment_epoch_id)
+  VALUES (v_signal_id, 0, 10, 'FULL', v_epoch_id_2);
   BEGIN
-    INSERT INTO public.sports_shadow_paper_fills (signal_id, requested_delay_ms, notional_tier_usd, fill_status)
-    VALUES (v_signal_id, 0, 10, 'FULL');
+    INSERT INTO public.sports_shadow_paper_fills (signal_id, requested_delay_ms, notional_tier_usd, fill_status, experiment_epoch_id)
+    VALUES (v_signal_id, 0, 10, 'FULL', v_epoch_id_2);
     RAISE EXCEPTION 'expected a duplicate (signal_id, requested_delay_ms, notional_tier_usd) paper fill to violate UNIQUE';
   EXCEPTION
     WHEN unique_violation THEN NULL; -- expected

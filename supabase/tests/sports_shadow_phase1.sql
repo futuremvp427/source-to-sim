@@ -10,6 +10,7 @@ DECLARE
   v_table text;
   v_oid oid;
   v_public_has_execute boolean;
+  v_epoch_id uuid;
 BEGIN
   -- A. TABLES EXIST
   FOREACH v_table IN ARRAY ARRAY[
@@ -124,10 +125,19 @@ BEGIN
   -- Seed real rows OUTSIDE any exception-catching sub-block, so the deliberately-invalid
   -- insert below (and its implicit-savepoint rollback) cannot also undo these -- section
   -- F reuses this exact signal/match pair afterward.
+  INSERT INTO public.sports_shadow_experiment_epochs (
+    go_live_at, wallet_cohort, git_sha, config_hash, classifier_version, episode_version,
+    resolver_version, router_version, pmus_fee_model_version, kalshi_fee_model_version,
+    execution_simulator_version, settlement_version, is_current
+  ) VALUES (
+    now(), ARRAY['0xtest'], '1111111111111111111111111111111111111111', 'phase1-test-epoch',
+    'c1', 'e1', 'r1', 'rt1', 'pf1', 'kf1', 'x1', 's1', false
+  ) RETURNING id INTO v_epoch_id;
+
   INSERT INTO public.sports_shadow_source_fills (event_key, wallet, asset, side, source_ts, identity_basis)
   VALUES ('contract-test-fill-1', '0xtest', '0xasset', 'BUY', 1, 'source_id');
-  INSERT INTO public.sports_shadow_signals (episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at, bet_type, selected_side)
-  VALUES ('contract-test-episode-1', '0xtest', '0xasset', (SELECT id FROM public.sports_shadow_source_fills WHERE event_key = 'contract-test-fill-1'), now(), now(), 'MONEYLINE', 'TEAM');
+  INSERT INTO public.sports_shadow_signals (episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at, bet_type, selected_side, experiment_epoch_id)
+  VALUES ('contract-test-episode-1', '0xtest', '0xasset', (SELECT id FROM public.sports_shadow_source_fills WHERE event_key = 'contract-test-fill-1'), now(), now(), 'MONEYLINE', 'TEAM', v_epoch_id);
   INSERT INTO public.sports_market_matches (signal_id, venue, match_status, first_match_status)
   VALUES ((SELECT id FROM public.sports_shadow_signals WHERE episode_key = 'contract-test-episode-1'), 'PMUS', 'EXACT', 'EXACT');
 

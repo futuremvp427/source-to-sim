@@ -11,6 +11,14 @@ const STAGE_TIMING_DEFAULTS = { stageEnteredAtIso: new Date().toISOString(), soa
 function makeFakeRepo(initial: ExperimentEpoch | null = null): EpochRepository & { epochs: ExperimentEpoch[] } {
   const epochs: ExperimentEpoch[] = initial ? [initial] : [];
   let seq = 0;
+  const materialize = (epoch: Omit<ExperimentEpoch, "id" | "createdAtIso" | "stageEnteredAtIso" | "soakStartedAtIso" | "calibrationStartedAtIso" | "oosStartedAtIso" | "stage" | "frozenAtIso">): ExperimentEpoch => ({
+    ...epoch,
+    id: `epoch-${++seq}`,
+    createdAtIso: new Date().toISOString(),
+    stage: "PRE_SOAK",
+    frozenAtIso: null,
+    ...STAGE_TIMING_DEFAULTS,
+  });
   return {
     epochs,
     async getCurrentEpoch() {
@@ -22,12 +30,28 @@ function makeFakeRepo(initial: ExperimentEpoch | null = null): EpochRepository &
       epochs.push(created);
       return created;
     },
+    async resolveCurrentEpoch(epoch) {
+      const current = epochs[0] ?? null;
+      if (
+        current &&
+        current.configHash === epoch.configHash &&
+        current.gitSha === epoch.gitSha &&
+        current.goLiveAtIso === epoch.goLiveAtIso &&
+        JSON.stringify(current.walletCohort) === JSON.stringify(epoch.walletCohort) &&
+        JSON.stringify(current.versions) === JSON.stringify(epoch.versions)
+      ) {
+        return current;
+      }
+      epochs.length = 0;
+      const created = materialize(epoch);
+      epochs.push(created);
+      return created;
+    },
     async startNewEpoch(epoch) {
-      seq += 1;
       // Simulate the real repo's flip-then-insert.
       for (const e of epochs) (e as { stage: string }).stage = e.stage; // no-op, is_current not modeled here
       epochs.length = 0;
-      const created: ExperimentEpoch = { ...epoch, id: `epoch-${seq}`, createdAtIso: new Date().toISOString(), stage: "PRE_SOAK", frozenAtIso: null, ...STAGE_TIMING_DEFAULTS };
+      const created = materialize(epoch);
       epochs.push(created);
       return created;
     },

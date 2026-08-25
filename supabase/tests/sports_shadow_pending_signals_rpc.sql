@@ -9,6 +9,19 @@
 -- `supabase db reset --local`)
 BEGIN;
 
+CREATE TEMP TABLE sports_shadow_test_epoch(id uuid) ON COMMIT DROP;
+WITH inserted_epoch AS (
+INSERT INTO public.sports_shadow_experiment_epochs (
+  go_live_at, wallet_cohort, git_sha, config_hash, classifier_version, episode_version,
+  resolver_version, router_version, pmus_fee_model_version, kalshi_fee_model_version,
+  execution_simulator_version, settlement_version, is_current
+) VALUES (
+  '2026-01-01T00:00:00Z', ARRAY['0xtestwallet'], '1111111111111111111111111111111111111111',
+  'pending-signals-test-epoch', 'c1', 'e1', 'r1', 'rt1', 'pf1', 'kf1', 'x1', 's1', false
+) RETURNING id
+)
+INSERT INTO pg_temp.sports_shadow_test_epoch SELECT id FROM inserted_epoch;
+
 -- Temporary helper (rolled back with the transaction): seeds one fill + one signal at a
 -- controlled created_at, returns the signal id. Keeps the scenarios below readable.
 CREATE FUNCTION pg_temp.seed_pending_signal(p_key text, p_created_at timestamptz) RETURNS uuid AS $$
@@ -20,8 +33,8 @@ BEGIN
   VALUES ('fill-' || p_key, '0xtestwallet', '0xtestasset-' || p_key, 'BUY', 1, 'source_id')
   RETURNING id INTO v_fill_id;
 
-  INSERT INTO public.sports_shadow_signals (episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at, bet_type, selected_side, created_at, updated_at)
-  VALUES ('episode-' || p_key, '0xtestwallet', '0xtestasset-' || p_key, v_fill_id, p_created_at, p_created_at, 'MONEYLINE', 'TEAM', p_created_at, p_created_at)
+  INSERT INTO public.sports_shadow_signals (episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at, bet_type, selected_side, created_at, updated_at, experiment_epoch_id)
+  VALUES ('episode-' || p_key, '0xtestwallet', '0xtestasset-' || p_key, v_fill_id, p_created_at, p_created_at, 'MONEYLINE', 'TEAM', p_created_at, p_created_at, (SELECT id FROM pg_temp.sports_shadow_test_epoch))
   RETURNING id INTO v_signal_id;
 
   RETURN v_signal_id;
@@ -58,8 +71,8 @@ BEGIN
   VALUES ('fill-' || p_key, '0xtestwallet', '0xtestasset-' || p_key, 'BUY', 1, 'source_id')
   RETURNING id INTO v_fill_id;
 
-  INSERT INTO public.sports_shadow_signals (episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at, bet_type, selected_side, created_at, updated_at, scheduled_start_at)
-  VALUES ('episode-' || p_key, '0xtestwallet', '0xtestasset-' || p_key, v_fill_id, p_created_at, p_created_at, 'MONEYLINE', 'TEAM', p_created_at, p_created_at, p_scheduled_start_at)
+  INSERT INTO public.sports_shadow_signals (episode_key, source_wallet, source_asset, first_fill_id, source_first_fill_at, source_last_fill_at, bet_type, selected_side, created_at, updated_at, scheduled_start_at, experiment_epoch_id)
+  VALUES ('episode-' || p_key, '0xtestwallet', '0xtestasset-' || p_key, v_fill_id, p_created_at, p_created_at, 'MONEYLINE', 'TEAM', p_created_at, p_created_at, p_scheduled_start_at, (SELECT id FROM pg_temp.sports_shadow_test_epoch))
   RETURNING id INTO v_signal_id;
 
   RETURN v_signal_id;

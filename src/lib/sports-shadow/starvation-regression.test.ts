@@ -10,7 +10,7 @@
 import { describe, expect, it } from "vitest";
 
 import { PHASE2_DOWNSTREAM_RESERVE_MS, phase1IngestDeadline } from "./source-poll.server";
-import { SOURCE_LANE_BUDGET_MS, VENUE_MATCH_RESERVE_MS, sourceIngestDeadline } from "./worker.server";
+import { SOURCE_INGEST_OVERRUN_ALLOWANCE_MS, SOURCE_LANE_BUDGET_MS, VENUE_MATCH_RESERVE_MS, sourceIngestDeadline } from "./worker.server";
 
 describe("source ingestion can no longer consume the whole lane budget", () => {
   it("reserves budget for venue matching", () => {
@@ -18,8 +18,9 @@ describe("source ingestion can no longer consume the whole lane budget", () => {
     const ingestCutoff = sourceIngestDeadline(laneStart);
     const laneDeadline = laneStart + SOURCE_LANE_BUDGET_MS;
     expect(ingestCutoff).toBeLessThan(laneDeadline);
-    expect(laneDeadline - ingestCutoff).toBe(VENUE_MATCH_RESERVE_MS);
+    expect(laneDeadline - ingestCutoff).toBe(VENUE_MATCH_RESERVE_MS + SOURCE_INGEST_OVERRUN_ALLOWANCE_MS);
     expect(VENUE_MATCH_RESERVE_MS).toBeGreaterThan(0);
+    expect(SOURCE_INGEST_OVERRUN_ALLOWANCE_MS).toBeGreaterThan(0);
   });
 
   it("both PMUS and KALSHI lanes still have real time left after ingestion exhausts its own sub-budget", () => {

@@ -956,7 +956,7 @@ export type WalletPollDeps = {
   now: () => number;
   /** Task 12F / P1-G: checked between trade pages and before each pending fill's downstream write so this poll can never continue non-idempotent episode mutations after its caller's source lease has been lost. Defaults to always-true for any caller not exercising lease-loss behavior. */
   checkpointLease: LeaseCheckpoint;
-  /** FINAL BUILD Part 17/analytics: the current experiment epoch, resolved once per cycle by the caller (worker.server.ts's runSourceLane) -- null when ensureCurrentEpoch failed this cycle. Every newly-created episode is tagged with this so per-epoch analytics/counters can scope to it. */
+  /** Current experiment epoch, resolved once per cycle before source work starts. The field stays nullable for old tests/disabled call sites, but enabled Sports Shadow cycles now fail before creating epoch-bearing rows if epoch resolution is unavailable. */
   epochId: string | null;
 };
 

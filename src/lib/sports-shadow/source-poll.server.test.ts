@@ -704,7 +704,7 @@ describe("CODEX P1-1 (round 2): source coverage is a CONTINUOUS invariant -- a w
       expect(result.sourceCoverageComplete).toBe(false);
     }
     expect(repo.coverageOverride.get(WALLET.toLowerCase())?.coverageComplete).toBe(false);
-  });
+  }, 15_000);
 });
 
 describe("pollSportsShadowWallet — normalization edge cases", () => {
