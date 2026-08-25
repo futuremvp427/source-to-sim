@@ -51,7 +51,12 @@ BEGIN
 
   FOR i IN 1..p_calls LOOP
     v_conn := 'sports_epoch_concurrency_' || txid_current()::text || '_' || i::text;
-    PERFORM dblink_connect(v_conn, format('dbname=%I', current_database()));
+    -- dblink runs inside the local Supabase Postgres container, so connect
+    -- back to the container-local database listener with the CI/dev password.
+    PERFORM dblink_connect(
+      v_conn,
+      format('host=127.0.0.1 port=5432 dbname=%s user=postgres password=postgres', current_database())
+    );
     PERFORM dblink_send_query(v_conn, v_sql);
     v_conns := array_append(v_conns, v_conn);
   END LOOP;
