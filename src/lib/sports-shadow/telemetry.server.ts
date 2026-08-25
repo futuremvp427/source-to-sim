@@ -232,7 +232,7 @@ export function cycleSummaryToTelemetryEvents(summary: {
     newSignalsCreated: number;
     leaseLost: boolean;
     /** CODEX P1-1 (round 2): only sourceCoverageComplete is read here -- the full WalletSummary is accepted structurally. */
-    walletSummaries: { sourceCoverageComplete: boolean }[];
+    walletSummaries: { sourceCoverageComplete: boolean; pendingSelected: number; freshPendingSelected: number; pendingProcessed: number }[];
     pmus: { attempted: number; exact: number; discoveryFailed: boolean; deadlineReached: boolean };
     kalshi: { attempted: number; exact: number; discoveryFailed: boolean; deadlineReached: boolean };
   } | null;
