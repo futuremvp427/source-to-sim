@@ -162,6 +162,11 @@ export async function discoverPmusSportsMarkets(deps: Partial<PmusNetworkDeps> =
   }
 
   const byMarketSlug = new Map<string, PmusCandidate>();
+  // Sport-agnostic: one bounded league pass per registered adapter with a PM-US catalog
+  // path (see ./sport-registry). Completeness is proven PER LEAGUE with the same
+  // fail-closed page-cap rule as before, so one sport's truncation can never be laundered
+  // into a "complete" multi-sport catalog.
+  for (const leagueSegment of pmusDiscoveryLeagues()) {
   // Task 12I / P2-P2: PM-US uses fixed offset/page-size pagination (no continuation
   // cursor), so a FULL final page (events.length === DISCOVERY_PAGE_SIZE) at the page cap
   // proves nothing -- there could be an unread page 11 sitting right behind it. Only a
