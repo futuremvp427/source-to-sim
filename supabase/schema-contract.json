@@ -150,6 +150,71 @@
       "definition_contains": [
         "experiment_id, id"
       ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_source_fills",
+      "name": "sports_shadow_source_fills_pending_idx",
+      "must_exist": true,
+      "definition_contains": [
+        "wallet",
+        "source_ts",
+        "id",
+        "downstream_status = 'PENDING'"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_quote_observations",
+      "name": "sports_quote_observations_lifecycle_schedule_idx",
+      "must_exist": true,
+      "definition_contains": [
+        "trigger_source_fill_id",
+        "venue",
+        "requested_delay_ms",
+        "trigger_source_fill_id is not null"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_fills",
+      "name": "sports_shadow_paper_fills_pending_cutoff_idx",
+      "must_exist": true,
+      "definition_contains": [
+        "fire_at",
+        "decided_at is null"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_experiment_epochs",
+      "name": "sports_shadow_experiment_epochs_one_current_idx",
+      "must_exist": true,
+      "definition_contains": [
+        "is_current",
+        "where is_current"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_telemetry_events",
+      "name": "sports_shadow_telemetry_events_lookup_idx",
+      "must_exist": true,
+      "definition_contains": [
+        "category",
+        "metric",
+        "created_at desc"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_alerts",
+      "name": "sports_shadow_alerts_one_unresolved_per_key_idx",
+      "must_exist": true,
+      "definition_contains": [
+        "alert_key",
+        "resolved_at is null"
+      ]
     }
   ],
   "constraints": [
@@ -306,6 +371,178 @@
       "name": "http_rate_limits_pkey",
       "definition_contains": [
         "primary key (host)"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_source_fills",
+      "name": "sports_shadow_source_fills_event_key_key",
+      "definition_contains": [
+        "unique (event_key)"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_source_fills",
+      "name": "sports_shadow_source_fills_downstream_status_check",
+      "definition_contains": [
+        "downstream_status",
+        "PENDING",
+        "COMPLETE",
+        "TERMINAL_INELIGIBLE",
+        "TERMINAL_INVALID"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_signals",
+      "name": "sports_shadow_signals_episode_key_key",
+      "definition_contains": [
+        "unique (episode_key)"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_signals",
+      "name": "sports_shadow_signals_bet_type_check",
+      "definition_contains": [
+        "MONEYLINE",
+        "SPREAD",
+        "TOTAL"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_market_matches",
+      "name": "sports_market_matches_signal_id_venue_key",
+      "definition_contains": [
+        "unique (signal_id, venue)"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_market_matches",
+      "name": "sports_market_matches_status_check",
+      "definition_contains": [
+        "EXACT",
+        "NEAR",
+        "NONE",
+        "UNVERIFIED"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_market_matches",
+      "name": "sports_market_matches_settlement_check",
+      "definition_contains": [
+        "COMPATIBLE",
+        "INCOMPATIBLE",
+        "UNKNOWN"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_quote_observations",
+      "name": "sports_quote_observations_delay_check",
+      "definition_contains": [
+        "requested_delay_ms",
+        "0",
+        "5000",
+        "10000",
+        "30000",
+        "60000"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_quote_observations",
+      "name": "sports_quote_observations_logical_key",
+      "definition_contains": [
+        "unique nulls not distinct (signal_id, venue, requested_delay_ms, trigger_source_fill_id)"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_experiment_epochs",
+      "name": "sports_shadow_experiment_epochs_stage_check",
+      "definition_contains": [
+        "PRE_SOAK",
+        "OPERATIONAL_SOAK",
+        "CALIBRATION",
+        "OUT_OF_SAMPLE",
+        "LIVE_PILOT_REVIEW_READY",
+        "FAILED",
+        "PAUSED"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_source_sell_events",
+      "name": "sports_shadow_source_sell_events_source_fill_id_key",
+      "definition_contains": [
+        "unique (source_fill_id)"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_source_sell_events",
+      "name": "sports_shadow_source_sell_events_pre_epoch_consistency",
+      "definition_contains": [
+        "is_pre_epoch",
+        "signal_id is null"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_fills",
+      "name": "sports_shadow_paper_fills_logical_key",
+      "definition_contains": [
+        "unique nulls not distinct (signal_id, requested_delay_ms, notional_tier_usd, trigger_source_fill_id)"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_fills",
+      "name": "sports_shadow_paper_fills_cutoff_reason_check",
+      "definition_contains": [
+        "BOTH_COMPLETE",
+        "CUTOFF_EXPIRED"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_positions",
+      "name": "sports_shadow_paper_positions_signal_id_venue_notional_tier_usd",
+      "definition_contains": [
+        "unique (signal_id, venue, notional_tier_usd)"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_settlements",
+      "name": "sports_shadow_settlements_signal_id_venue_notional_tier_usd_key",
+      "definition_contains": [
+        "unique (signal_id, venue, notional_tier_usd)"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_lifecycle_triggers",
+      "name": "sports_shadow_lifecycle_triggers_source_fill_id_key",
+      "definition_contains": [
+        "unique (source_fill_id)"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_lifecycle_triggers",
+      "name": "sports_shadow_lifecycle_triggers_type_fraction_check",
+      "definition_contains": [
+        "trigger_type",
+        "ADD",
+        "EXIT",
+        "add_fraction is not null",
+        "exit_fraction is not null"
       ]
     }
   ],
@@ -661,6 +898,188 @@
       "name": "market_scope",
       "type": "text",
       "not_null": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_source_fills",
+      "name": "downstream_status",
+      "type": "text",
+      "not_null": true,
+      "default_contains": [
+        "'PENDING'"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_source_fills",
+      "name": "tuple_prefix",
+      "type": "text",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_signals",
+      "name": "experiment_epoch_id",
+      "type": "uuid",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_signals",
+      "name": "cluster_key",
+      "type": "text",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_signals",
+      "name": "source_rules_description",
+      "type": "text",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_signals",
+      "name": "source_sell_shares",
+      "type": "numeric",
+      "not_null": true,
+      "default_contains": [
+        "0"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_market_matches",
+      "name": "rule_fingerprint",
+      "type": "jsonb",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_wallet_coverage",
+      "name": "coverage_complete",
+      "type": "boolean",
+      "not_null": true,
+      "default_contains": [
+        "false"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_wallet_coverage",
+      "name": "incomplete_reason",
+      "type": "text",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_quote_observations",
+      "name": "trigger_source_fill_id",
+      "type": "uuid",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_fills",
+      "name": "requested_delay_ms",
+      "type": "integer",
+      "not_null": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_fills",
+      "name": "pmus_observation_id",
+      "type": "uuid",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_fills",
+      "name": "kalshi_observation_id",
+      "type": "uuid",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_fills",
+      "name": "trigger_source_fill_id",
+      "type": "uuid",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_fills",
+      "name": "fee_valid",
+      "type": "boolean",
+      "not_null": true,
+      "default_contains": [
+        "true"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_positions",
+      "name": "remaining_cost_basis_usd",
+      "type": "numeric",
+      "not_null": true,
+      "default_contains": [
+        "0"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_positions",
+      "name": "realized_pnl_usd",
+      "type": "numeric",
+      "not_null": true,
+      "default_contains": [
+        "0"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_settlements",
+      "name": "next_check_at",
+      "type": "timestamp with time zone",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_settlements",
+      "name": "check_attempt_count",
+      "type": "integer",
+      "not_null": true,
+      "default_contains": [
+        "0"
+      ]
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_telemetry_events",
+      "name": "experiment_epoch_id",
+      "type": "uuid",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_lifecycle_triggers",
+      "name": "source_fill_id",
+      "type": "uuid",
+      "not_null": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_lifecycle_triggers",
+      "name": "add_fraction",
+      "type": "numeric",
+      "not_null": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_lifecycle_triggers",
+      "name": "exit_fraction",
+      "type": "numeric",
+      "not_null": false
     }
   ],
   "functions": [
@@ -945,6 +1364,272 @@
         "anon",
         "authenticated"
       ]
+    },
+    {
+      "schema": "public",
+      "name": "count_durable_ordinal_fills",
+      "identity_args": "text, text[]",
+      "security_definer": false,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "from public.sports_shadow_source_fills",
+        "f.wallet = p_wallet",
+        "f.tuple_prefix = any",
+        "group by f.tuple_prefix"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "find_pending_sports_shadow_signals",
+      "identity_args": "text, integer",
+      "security_definer": false,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "from public.sports_shadow_signals",
+        "left join public.sports_market_matches",
+        "source_rules_description",
+        "order by s.created_at asc, s.id asc",
+        "limit least(greatest(coalesce(p_limit, 20), 0), 100)"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "insert_sports_shadow_episode",
+      "identity_args": "uuid, text, text, text, text, text, text, text, text, timestamp with time zone, timestamp with time zone, numeric, numeric, numeric, integer, boolean, text, timestamp with time zone, text, text, text, text, numeric, text, uuid, text",
+      "security_definer": true,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "service_role required",
+        "insert into public.sports_shadow_signals",
+        "source_rules_description",
+        "update public.sports_shadow_source_fills",
+        "downstream_status = 'COMPLETE'"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "update_sports_shadow_episode",
+      "identity_args": "uuid, uuid, timestamp with time zone, timestamp with time zone, numeric, numeric, numeric, integer, boolean, numeric, numeric, numeric, numeric, numeric, bigint, numeric, numeric, numeric, text, numeric, numeric, numeric, numeric, bigint",
+      "security_definer": true,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "service_role required",
+        "update public.sports_shadow_signals",
+        "source_sell_shares = p_source_sell_shares",
+        "insert into public.sports_shadow_source_sell_events",
+        "insert into public.sports_shadow_lifecycle_triggers",
+        "on conflict (source_fill_id)"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "record_sports_shadow_routing_provenance_ladder",
+      "identity_args": "uuid, integer, text, uuid, timestamp with time zone, uuid",
+      "security_definer": true,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "service_role required",
+        "from (values (5",
+        "on conflict (signal_id, requested_delay_ms, notional_tier_usd, trigger_source_fill_id)",
+        "coalesce(public.sports_shadow_paper_fills.pmus_observation_id",
+        "trigger_source_fill_id is not distinct from p_trigger_source_fill_id"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "finalize_sports_shadow_routing_decision",
+      "identity_args": "uuid, integer, numeric, timestamp with time zone, text, text, text, numeric, numeric, numeric, text, boolean, numeric, text, jsonb, jsonb, text, text, text, uuid, uuid, uuid",
+      "security_definer": true,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "service_role required",
+        "where signal_id = p_signal_id",
+        "trigger_source_fill_id is not distinct from p_trigger_source_fill_id",
+        "and decided_at is null",
+        "insert into public.sports_shadow_paper_positions",
+        "remaining_cost_basis_usd"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "record_sports_shadow_lifecycle_trigger",
+      "identity_args": "uuid, uuid, text, numeric, numeric, numeric, numeric, bigint",
+      "security_definer": true,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "service_role required",
+        "insert into public.sports_shadow_lifecycle_triggers",
+        "on conflict (source_fill_id)",
+        "returning id into v_id"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "finalize_sports_shadow_lifecycle_decision",
+      "identity_args": "uuid, integer, numeric, uuid, uuid, timestamp with time zone, text, text, text, numeric, numeric, numeric, text, boolean, numeric, text, jsonb, text, text, uuid, uuid",
+      "security_definer": true,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "service_role required",
+        "on conflict (signal_id, requested_delay_ms, notional_tier_usd, trigger_source_fill_id)",
+        "where public.sports_shadow_paper_fills.decided_at is null",
+        "for update",
+        "remaining_cost_basis_usd",
+        "realized_pnl_usd"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "find_unscheduled_sports_shadow_lifecycle_triggers",
+      "identity_args": "integer",
+      "security_definer": true,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "from public.sports_shadow_lifecycle_triggers",
+        "join public.sports_market_matches",
+        "m.match_status = 'EXACT'",
+        "where exists",
+        "o.trigger_source_fill_id = t.id",
+        "o.venue = m.venue"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "find_open_sports_shadow_paper_positions",
+      "identity_args": "integer",
+      "security_definer": true,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "from public.sports_shadow_paper_fills",
+        "left join public.sports_shadow_settlements",
+        "s.settlement_status is null or s.settlement_status = 'PENDING'",
+        "s.next_check_at is null or s.next_check_at <= now()",
+        "order by coalesce(s.next_check_at, f.decided_at)"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
+    },
+    {
+      "schema": "public",
+      "name": "get_sports_shadow_episode_outcomes",
+      "identity_args": "uuid",
+      "security_definer": true,
+      "config_contains": [
+        "search_path=public"
+      ],
+      "definition_contains": [
+        "from public.sports_shadow_signals",
+        "distinct on",
+        "realized_pnl_usd",
+        "remaining_cost_basis_usd",
+        "lifecycle_realized_pnl_usd"
+      ],
+      "execute_allowed": [
+        "service_role"
+      ],
+      "execute_denied": [
+        "PUBLIC",
+        "anon",
+        "authenticated"
+      ]
     }
   ],
   "rls": [
@@ -1016,6 +1701,81 @@
     {
       "schema": "public",
       "table": "http_rate_limits",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_source_fills",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_signals",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_market_matches",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_quote_observations",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_experiment_epochs",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_source_sell_events",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_venue_capability",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_fills",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_positions",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_settlements",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_telemetry_events",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_integrity_audits",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_alerts",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_wallet_coverage",
+      "enabled": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_lifecycle_triggers",
       "enabled": true
     }
   ],
@@ -1174,6 +1934,216 @@
       "role": "service_role",
       "privilege": "SELECT",
       "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_source_fills",
+      "role": "service_role",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_source_fills",
+      "role": "anon",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_source_fills",
+      "role": "authenticated",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_signals",
+      "role": "service_role",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_signals",
+      "role": "anon",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_signals",
+      "role": "authenticated",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_market_matches",
+      "role": "service_role",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_market_matches",
+      "role": "anon",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_market_matches",
+      "role": "authenticated",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_quote_observations",
+      "role": "service_role",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_quote_observations",
+      "role": "anon",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_quote_observations",
+      "role": "authenticated",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_experiment_epochs",
+      "role": "service_role",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_experiment_epochs",
+      "role": "anon",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_experiment_epochs",
+      "role": "authenticated",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_fills",
+      "role": "service_role",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_fills",
+      "role": "anon",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_fills",
+      "role": "authenticated",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_positions",
+      "role": "service_role",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_positions",
+      "role": "anon",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_paper_positions",
+      "role": "authenticated",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_settlements",
+      "role": "service_role",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_settlements",
+      "role": "anon",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_settlements",
+      "role": "authenticated",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_wallet_coverage",
+      "role": "service_role",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_wallet_coverage",
+      "role": "anon",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_wallet_coverage",
+      "role": "authenticated",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_lifecycle_triggers",
+      "role": "service_role",
+      "privilege": "SELECT",
+      "allowed": true
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_lifecycle_triggers",
+      "role": "anon",
+      "privilege": "SELECT",
+      "allowed": false
+    },
+    {
+      "schema": "public",
+      "table": "sports_shadow_lifecycle_triggers",
+      "role": "authenticated",
+      "privilege": "SELECT",
+      "allowed": false
     }
   ]
 }

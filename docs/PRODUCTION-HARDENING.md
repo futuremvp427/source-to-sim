@@ -23,6 +23,7 @@ This document is the durable operations record for Mirror Trader. It separates c
 - Phantom closed-position classification fix.
 - Telegram delivery state distinguishes attempted/failed/sent, and failed important alerts are retried from the scheduled ingest hook. Delivery is at-least-once, not exactly-once: a crash between Telegram accepting a message and the `notified_at` commit can duplicate a send — an accepted, documented limitation, not something the retry/index hardening closes.
 - Scheduled ingest is POST-only and accepts only the dedicated `INGEST_HOOK_SECRET`; the former browser-visible publishable-key fallback has been removed.
+- Scheduled ingest can optionally ping an external dead-man's-switch after a successful cycle via `INGEST_SUCCESS_HEARTBEAT_URL`. When unset it is a no-op; provider failures are logged with a sanitized endpoint label and never fail ingestion.
 - PMUS preview decisions are verified after the conditional database update so a no-op cannot be reported as success.
 - Environment files are ignored/untracked.
 - Dashboard is marked `noindex`/`nofollow`; robots disallow crawler indexing.
@@ -182,6 +183,90 @@ New regression tests cover both: the write is proven to actually complete before
 Do not expose `INGEST_HOOK_SECRET` to browser code or a `VITE_*` environment variable.
 
 Note: as of 2026-08-14, the live `shadow-ingest` `pg_cron` job is already calling the ingest route successfully on a one-minute schedule (confirmed by direct observation of successful worker polls), so the currently configured secret is confirmed working. Rotation is optional hardening, not a blocker, and should not be done reactively without a reason — rotating a working secret carries its own risk of a self-inflicted outage.
+
+### 1A. Optional external ingest heartbeat
+
+Set `INGEST_SUCCESS_HEARTBEAT_URL` to a generic HTTPS heartbeat/dead-man endpoint if an external monitor should alert when the scheduler stops entirely. Leave it unset to disable the integration.
+
+Behavior:
+
+- The hook pings the URL only after `runIngestCycle` returns successfully.
+- The URL is read server-side only; do not expose it through `VITE_*` or dashboard-visible configuration.
+- The app logs provider failures without the full URL, and heartbeat failure never changes the ingest response from success to failure.
+- Verification: temporarily point `INGEST_SUCCESS_HEARTBEAT_URL` at a controlled test endpoint, trigger one scheduled or manual POST to `/api/public/hooks/ingest`, and confirm exactly one external ping after the worker row records a successful cycle.
+
+### 1B. Sports Shadow pg_cron scheduler
+
+Repository expected configuration is defined in `supabase/scheduler/sports_shadow_pg_cron.sql`, not in ordinary migrations. It must be applied only as an explicit deployment step after code deployment, secret creation, and a disabled-smoke check.
+
+Expected Sports Shadow jobs:
+
+| Job | Schedule | Route | pg_net timeout |
+| --- | --- | --- | --- |
+| `sports-shadow-cycle-observation` | `10 seconds` | `/api/public/hooks/sports-shadow-observation` | `25000` ms |
+| `sports-shadow-cycle-source` | `30 seconds` | `/api/public/hooks/sports-shadow` | `50000` ms |
+| `sports-shadow-cycle-settlement` | `* * * * *` | `/api/public/hooks/sports-shadow-settlement` | `40000` ms |
+
+Required production configuration:
+
+- `pg_cron`, `pg_net`, and `supabase_vault` available in the database.
+- Vault secret `sports_shadow_project_url` contains the deployed project origin.
+- Vault secret `sports_shadow_hook_secret` contains the same value as server-side `SPORTS_SHADOW_HOOK_SECRET`.
+- App environment controls execution with `SPORTS_SHADOW_ENABLED`; applying the SQL artifact alone must not enable collection.
+
+Read-only live verification query:
+
+```sql
+select
+  jobname,
+  schedule,
+  active,
+  command
+from cron.job
+where jobname in (
+  'sports-shadow-cycle',
+  'sports-shadow-cycle-observation',
+  'sports-shadow-cycle-source',
+  'sports-shadow-cycle-settlement'
+)
+order by jobname;
+```
+
+Expected live result after the current artifact is applied:
+
+- `sports-shadow-cycle` returns no row.
+- Exactly one row exists for each of `sports-shadow-cycle-observation`, `sports-shadow-cycle-source`, and `sports-shadow-cycle-settlement`.
+- All three rows have `active = true`.
+- Each command calls `net.http_post`, reads `sports_shadow_project_url` and `sports_shadow_hook_secret` from `vault.decrypted_secrets`, and targets the route/timeout in the table above.
+
+Recent-run health query:
+
+```sql
+select
+  j.jobname,
+  r.status,
+  r.return_message,
+  r.start_time,
+  r.end_time
+from cron.job_run_details r
+join cron.job j on j.jobid = r.jobid
+where j.jobname in (
+  'sports-shadow-cycle-observation',
+  'sports-shadow-cycle-source',
+  'sports-shadow-cycle-settlement'
+)
+order by r.start_time desc
+limit 60;
+```
+
+Recovery/recreation procedure:
+
+1. Confirm the deployed code has the three Sports Shadow hook routes and `SPORTS_SHADOW_HOOK_SECRET` configured.
+2. Confirm or create the two vault secrets. Never paste secret values into checked-in SQL.
+3. Apply `supabase/scheduler/sports_shadow_pg_cron.sql` once.
+4. Re-run the read-only verification query above.
+5. Re-run the recent-run health query after one observation/source/settlement interval.
+6. Only then consider enabling `SPORTS_SHADOW_ENABLED` for controlled observation.
 
 ### 2. Add a real admin authentication boundary
 

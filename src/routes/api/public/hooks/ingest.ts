@@ -1,5 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 
+import type { IngestHeartbeatResult } from "@/lib/ingest-heartbeat.server";
+
 /**
  * Scheduled ingestion endpoint for the autonomous follower.
  * Called by the database scheduler (and optionally by the standalone worker),
@@ -64,12 +66,25 @@ async function handle(request: Request): Promise<Response> {
       // Best-effort only; delivery state remains pending/failed for a later retry.
     }
 
+    let externalHeartbeat: IngestHeartbeatResult = { configured: false, ok: null, reason: "UNSET" };
+    try {
+      const { pingIngestSuccessHeartbeat } = await import("@/lib/ingest-heartbeat.server");
+      externalHeartbeat = await pingIngestSuccessHeartbeat();
+    } catch (err) {
+      // The heartbeat provider is diagnostic only. It must never fail a
+      // successful ingestion cycle or expose the configured endpoint URL.
+      console.warn(
+        `[ingest-heartbeat] unexpected failure: ${err instanceof Error ? err.name : "unknown"}`,
+      );
+    }
+
     return Response.json({
       ok: true,
       ...result,
       researchPersistence,
       paperBuyNotifications,
       notifications,
+      externalHeartbeat,
     });
   } catch (err) {
     return Response.json(

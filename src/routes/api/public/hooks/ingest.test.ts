@@ -27,4 +27,11 @@ describe("scheduled ingest route authorization contract", () => {
     expect(source).toContain('request.headers.get("apikey")');
     expect(source).toMatch(/provided\s*!==\s*expected/);
   });
+
+  it("pings the optional external heartbeat only after a successful ingest cycle", () => {
+    expect(source).toContain("pingIngestSuccessHeartbeat");
+    expect(source.indexOf("runIngestCycle(workerId)")).toBeGreaterThan(-1);
+    expect(source.indexOf("pingIngestSuccessHeartbeat")).toBeGreaterThan(source.indexOf("runIngestCycle(workerId)"));
+    expect(source).toMatch(/catch\s*\(err\)\s*\{[\s\S]*?unexpected failure/);
+  });
 });

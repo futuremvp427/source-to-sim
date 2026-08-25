@@ -48,7 +48,9 @@ export type ObservationSeries = {
   cashSkipRatePct: number | null;
   settledDays: number;
   settlements: number;
+  /** Raw theoretical paper-book result, before copyability/friction adjustment. */
   realizedPnl: number;
+  /** Friction-adjusted/copyable estimate derived from no-lookahead slippage observations. */
   slippageAdjustedCumulativePnl: number | null;
   worker: { id: string; status: "PASS" | "WARN" | "FAIL"; reason: string };
   days: ObservationDay[];
@@ -57,15 +59,19 @@ export type ObservationSeries = {
 
 export type ObservationLogData = {
   generatedAt: string;
+  scope: ObservationLogScope;
   handle: string;
   series: ObservationSeries[];
   note: string;
 };
 
 const NOTE =
-  `PAPER SIMULATION / DERIVED. Out-of-sample observation only: no strategy, sizing, bankroll or qualification change is driven by anything on this panel. Historical slippage-adjusted figures use ${SLIPPAGE_METHODOLOGY_VERSION}: each settled UTC day uses at most the ${SLIPPAGE_SAMPLE_LIMIT.toLocaleString("en-US")} most recent observed entry-slippage samples strictly before 00:00 UTC that day. Samples collected during or after a settled day cannot retrospectively change that day's estimate. The current observed slippage median is descriptive only. Milestones are research flags and never promote a wallet or enable live execution.`;
+  `PAPER SIMULATION / DERIVED. Out-of-sample observation only: no strategy, sizing, bankroll or qualification change is driven by anything on this panel. Raw realized P&L is the theoretical paper ledger. Historical friction-adjusted/copyable P&L uses ${SLIPPAGE_METHODOLOGY_VERSION}: each settled UTC day uses at most the ${SLIPPAGE_SAMPLE_LIMIT.toLocaleString("en-US")} most recent observed entry-slippage samples strictly before 00:00 UTC that day. Samples collected during or after a settled day cannot retrospectively change that day's estimate. The current observed slippage median is descriptive only. Future paper-to-limited-live promotion analysis must use friction-adjusted/copyable performance, not raw theoretical paper P&L alone. Milestones are research flags and never promote a wallet or enable live execution.`;
 
-const OBSERVED_HANDLE = "Poligarch";
+export type ObservationLogScope = "ALL_ENABLED_V2_V3" | "POLIGARCH_ONLY";
+
+const DEFAULT_SCOPE: ObservationLogScope = "ALL_ENABLED_V2_V3";
+const LEGACY_OBSERVED_HANDLE = "Poligarch";
 
 type SettlementRow = {
   resolution_ts: string | null;
@@ -296,19 +302,33 @@ function round2(v: number): number {
   return Math.round(v * 100) / 100;
 }
 
-export async function loadObservationLog(): Promise<ObservationLogData> {
+function observedHandleForScope(scope: ObservationLogScope): string {
+  return scope === "POLIGARCH_ONLY" ? LEGACY_OBSERVED_HANDLE : "ALL_ENABLED_V2_V3";
+}
+
+function shouldIncludeObservationExperiment(
+  experiment: { name: string },
+  scope: ObservationLogScope,
+): boolean {
+  if (!isV2Name(experiment.name) && !isV3Name(experiment.name)) return false;
+  if (scope === "POLIGARCH_ONLY") return experiment.name.includes(LEGACY_OBSERVED_HANDLE);
+  return true;
+}
+
+export async function loadObservationLog(
+  options: { scope?: ObservationLogScope } = {},
+): Promise<ObservationLogData> {
+  const scope = options.scope ?? DEFAULT_SCOPE;
   const { data } = await supabaseAdmin
     .from("paper_experiments")
     .select("id, name, enabled")
     .eq("enabled", true)
     .or(`name.like.${V2_PREFIX}%,name.like.${V3_PREFIX}%`);
 
-  const experiments = (data ?? []).filter(
-    (row) => (isV2Name(row.name) || isV3Name(row.name)) && row.name.includes(OBSERVED_HANDLE),
-  );
+  const experiments = (data ?? []).filter((row) => shouldIncludeObservationExperiment(row, scope));
 
   const series = await Promise.all(experiments.map((row) => buildSeries(row)));
-  series.sort((a, b) => a.cohort.localeCompare(b.cohort));
+  series.sort((a, b) => a.cohort.localeCompare(b.cohort) || a.handle.localeCompare(b.handle));
 
-  return { generatedAt: new Date().toISOString(), handle: OBSERVED_HANDLE, series, note: NOTE };
+  return { generatedAt: new Date().toISOString(), scope, handle: observedHandleForScope(scope), series, note: NOTE };
 }
