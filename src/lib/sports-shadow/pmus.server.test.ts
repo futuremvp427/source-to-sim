@@ -180,11 +180,11 @@ describe("discoverPmusMlbMarkets", () => {
       let calls = 0;
       const fetchImpl = vi.fn(async () => {
         calls += 1;
-        const isFinalPage = calls === DISCOVERY_MAX_PAGES;
+        const isFinalPage = calls % DISCOVERY_MAX_PAGES === 0; // per-league page cap
         return new Response(JSON.stringify({ events: isFinalPage ? [eventFixture("last", "aec-mlb-last")] : fullPageOfEvents(calls) }), { status: 200 });
       });
       await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).resolves.not.toThrow();
-      expect(calls).toBe(DISCOVERY_MAX_PAGES); // proves the loop actually ran the full page budget, not fewer
+      expect(calls).toBe(DISCOVERY_MAX_PAGES * LEAGUE_COUNT); // full page budget per league, not fewer
     });
 
     it("exactly DISCOVERY_MAX_PAGES pages, the final page STILL full (=== DISCOVERY_PAGE_SIZE) -> explicit truncation failure, not a returned/cached partial catalog", async () => {
@@ -214,11 +214,11 @@ describe("discoverPmusMlbMarkets", () => {
       let calls = 0;
       const fetchImpl = vi.fn(async () => {
         calls += 1;
-        if (calls < DISCOVERY_MAX_PAGES) return new Response(JSON.stringify({ events: fullPageOfEvents(calls) }), { status: 200 });
+        if (calls % DISCOVERY_MAX_PAGES !== 0) return new Response(JSON.stringify({ events: fullPageOfEvents(calls) }), { status: 200 });
         return new Response(JSON.stringify({ events: [] }), { status: 200 });
       });
       await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).resolves.not.toThrow();
-      expect(calls).toBe(DISCOVERY_MAX_PAGES);
+      expect(calls).toBe(DISCOVERY_MAX_PAGES * LEAGUE_COUNT);
     });
 
     it("a truncation failure never poisons the discovery cache -- a subsequent call with a healthy short-final-page response succeeds normally", async () => {
