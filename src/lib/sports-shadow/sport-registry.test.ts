@@ -48,7 +48,7 @@ describe("sport registry (sport-agnostic orchestration)", () => {
 
   it("MLB adapter still parses canonical full-game slugs and rejects derivatives", () => {
     const parse = getSportAdapter("mlb")!.canonicalSlugParticipants!;
-    expect(parse("mlb-tex-cws-2026-08-25-total-7pt5")).toEqual({ away: "Texas Rangers", home: "Chicago White Sox", betType: "TOTAL", line: 7.5 });
+    expect(parse("mlb-tex-cws-2026-08-25-total-7pt5")).toEqual({ away: "TEX", home: "CWS", betType: "TOTAL", line: 7.5 });
     expect(parse("mlb-tex-cws-2026-08-25")?.betType).toBe("MONEYLINE");
     expect(parse("mlb-tex-cws-2026-08-25-f5-total-4pt5")).toBeNull();
     expect(parse("mlb-tex-cws-2026-08-25-judge-hr")).toBeNull();
