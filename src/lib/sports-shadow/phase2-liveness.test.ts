@@ -67,7 +67,10 @@ describe("fresh PENDING work is executed before historical backlog", () => {
     const fresh = Array.from({ length: 10 }, (_, i) => row(`fresh-${i}`, 9_000_000 + i));
     const { ordered, freshCount, oldCount } = orderPendingFillsFreshFirst([...old, ...fresh]);
     expect(ordered.length).toBe(410);
-    expect(ordered.slice(0, 10).map((r) => r.id)).toEqual(fresh.map((r) => r.id));
+    // the fresh window is the newest FRESH_PENDING_QUOTA rows (chronological within itself),
+    // so the 10 genuinely new post-go-live rows are the TAIL of that window -- reached within
+    // the first FRESH_PENDING_QUOTA iterations instead of after 400 historical rows.
+    expect(ordered.slice(FRESH_PENDING_QUOTA - 10, FRESH_PENDING_QUOTA).map((r) => r.id)).toEqual(fresh.map((r) => r.id));
     expect(freshCount).toBe(FRESH_PENDING_QUOTA);
     expect(oldCount).toBe(410 - FRESH_PENDING_QUOTA);
     // nothing is discarded -- the old backlog still gets whatever budget remains
