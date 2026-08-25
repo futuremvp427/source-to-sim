@@ -1,5 +1,5 @@
 import { inferSportsLeagueFromSlug, normalizeParticipantName, parseVersusParticipants } from "./participant-normalization";
-import { normalizeMlbTeamName } from "./team-normalization";
+import { getSportAdapter } from "./sport-registry";
 import type { BetType, ClassificationStatus } from "./types";
 
 export type GammaMarketTeam = { name?: string | null; ordering?: string | null };
