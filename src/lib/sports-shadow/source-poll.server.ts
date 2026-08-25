@@ -2280,6 +2280,19 @@ export async function pollSportsShadowWallet(
     }
 
     // NEW_EPISODE | NEW_EPISODE_AFTER_30M
+    // Sport-agnostic + fail closed: the league is whatever the classifier PROVED from
+    // structured/slug evidence. There is no hard-coded sport default -- an eligible fill
+    // whose league cannot be labeled is never turned into a signal.
+    const signalLeague = canonicalLeagueLabel(metadata.league);
+    if (!signalLeague) {
+      result.invalidRows += 1;
+      try {
+        await d.repo.markFillTerminal(fill.id, "TERMINAL_INVALID");
+      } catch {
+        // Best-effort; stays PENDING and is re-evaluated identically next poll.
+      }
+      continue;
+    }
     const firstFillAtIso = new Date(fill.sourceTs * 1000).toISOString();
     const newRow: NewSignalRow = {
       episodeKey: decision.episodeKey,
