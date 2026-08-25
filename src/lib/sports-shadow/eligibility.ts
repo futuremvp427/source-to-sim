@@ -140,31 +140,24 @@ function parseLineFromSlugForConflictCheck(slug: string, betType: BetType): numb
 }
 
 /**
- * Evidence-backed canonical MLB full-game slug parser only.
+ * Sport-agnostic canonical slug participant fallback.
  *
- * Accepts exactly:
- * - mlb-<away>-<home>-YYYY-MM-DD
- * - mlb-<away>-<home>-YYYY-MM-DD-spread-(home|away)-<line>
- * - mlb-<away>-<home>-YYYY-MM-DD-total-<line>
- *
- * It intentionally does NOT accept player props (`...-hr-player-...`), F5, innings,
- * team totals, futures, parlays, or any derivative tail. The exclusion checks above
- * still run before this fallback is ever considered.
+ * Delegates to the per-sport adapter in ./sport-registry (MLB is the only sport with an
+ * audited team-code table today). Sports without an adapter parser get NO slug-derived
+ * identity at all: they must supply structured provider participants or stay UNVERIFIED.
  */
-function parseCanonicalMlbFullGameSlug(slug: string): { away: string; home: string; betType: BetType; line: number | null } | null {
-  const m = slug.match(/^mlb-([a-z0-9]+)-([a-z0-9]+)-(\d{4}-\d{2}-\d{2})(?:-(spread)-(?:home|away)-(\d+pt\d+)|-(total)-(\d+pt\d+))?$/i);
-  if (!m || !m[1] || !m[2]) return null;
-  if (m[4] === "spread") return { away: m[1], home: m[2], betType: "SPREAD", line: parseLineToken(m[5]) };
-  if (m[6] === "total") return { away: m[1], home: m[2], betType: "TOTAL", line: parseLineToken(m[7]) };
-  return { away: m[1], home: m[2], betType: "MONEYLINE", line: null };
+function resolveCanonicalSlugParticipants(
+  league: string,
+  slug: string,
+): { away: string; home: string; betType: BetType; line: number | null } | null {
+  const parser = getSportAdapter(league)?.canonicalSlugParticipants ?? null;
+  return parser ? parser(slug) : null;
 }
 
-function resolveCanonicalMlbSlugParticipants(slug: string): { away: string; home: string; betType: BetType; line: number | null } | null {
-  const parsed = parseCanonicalMlbFullGameSlug(slug);
-  if (!parsed) return null;
-  const away = normalizeMlbTeamName(parsed.away);
-  const home = normalizeMlbTeamName(parsed.home);
-  return away && home ? { ...parsed, away, home } : null;
+/** True when the slug matches this sport's canonical full-contest grammar. */
+function looksLikeCanonicalSlug(league: string, slug: string): boolean {
+  const shape = getSportAdapter(league)?.canonicalSlugShape ?? null;
+  return shape ? shape.test(slug) : false;
 }
 
 function resolveParticipantPair(market: GammaMarket, league: string): { away: string; home: string } | null {
