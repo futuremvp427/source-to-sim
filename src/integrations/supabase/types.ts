@@ -2693,6 +2693,53 @@ export type Database = {
         }
         Returns: Json
       }
+      ensure_sports_shadow_current_epoch: {
+        Args: {
+          p_classifier_version: string
+          p_config_hash: string
+          p_episode_version: string
+          p_execution_simulator_version: string
+          p_git_sha: string
+          p_go_live_at: string
+          p_kalshi_fee_model_version: string
+          p_pmus_fee_model_version: string
+          p_resolver_version: string
+          p_router_version: string
+          p_settlement_version: string
+          p_wallet_cohort: string[]
+        }
+        Returns: {
+          calibration_started_at: string | null
+          classifier_version: string
+          config_hash: string
+          created_at: string
+          episode_version: string
+          execution_simulator_version: string
+          frozen_at: string | null
+          frozen_config: Json | null
+          git_sha: string
+          go_live_at: string
+          id: string
+          is_current: boolean
+          kalshi_fee_model_version: string
+          notes: string | null
+          oos_started_at: string | null
+          pmus_fee_model_version: string
+          resolver_version: string
+          router_version: string
+          settlement_version: string
+          soak_started_at: string | null
+          stage: string
+          stage_entered_at: string
+          wallet_cohort: string[]
+        }
+        SetofOptions: {
+          from: "*"
+          to: "sports_shadow_experiment_epochs"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       finalize_sports_shadow_lifecycle_decision: {
         Args: {
           p_all_in_cost_usd: number
