@@ -44,33 +44,32 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 
 ### CANARY-1 Epoch Concurrency
 
-- Status: IN PROGRESS.
+- Status: FIXED IN CODE.
 - Evidence: Production emitted `duplicate key value violates unique constraint "sports_shadow_experiment_epochs_one_current_idx"` during overlapping canary workers, and canary signals were created with mixed/null epoch attribution.
 - Fix: Move current epoch resolution into serialized database RPC `ensure_sports_shadow_current_epoch`, require nonempty deployment SHA/identity, and fail enabled cycles before source/matching work when epoch acquisition fails. Add fail-closed constraints for future epoch-bearing rows.
 - Regression test: `supabase/tests/sports_shadow_epoch_concurrency.sql`; worker/config regression tests.
-- Commit SHA once fixed: TBD.
+- Fix commit SHA: `76d15bd`.
 
 ### CANARY-2 Stale Deployment SHA
 
-- Status: IN PROGRESS.
+- Status: FIXED IN CODE.
 - Evidence: Production-deployed main SHA was `09faae89f97f4e128f6f1318b1ded558afd8096c`, while new epochs were stamped with stale `e2ac939a89ccba5964930d4e147f8dc855ca51f4`.
 - Fix: Prefer provider-native deployment SHA environment variables over manual `SPORTS_SHADOW_GIT_SHA`; reject missing/invalid SHA when Sports Shadow is enabled.
 - Regression test: `src/lib/sports-shadow/config.test.ts`.
-- Commit SHA once fixed: TBD.
+- Fix commit SHA: `76d15bd`.
 
 ### CANARY-3 Kalshi 429 Handling
 
-- Status: IN PROGRESS.
+- Status: FIXED IN CODE.
 - Evidence: Production observed Kalshi discovery HTTP 429 and unresolved `venue_discovery_failed:KALSHI` alert.
 - Fix: Use existing host-aware cooldown path for Kalshi discovery; persist cooldown, suppress upstream calls while blocked, keep PM-US independent, and resume automatically after cooldown expiry.
 - Regression test: `src/lib/sports-shadow/kalshi.server.test.ts`.
-- Commit SHA once fixed: TBD.
+- Fix commit SHA: `76d15bd`.
 
 ### CANARY-4 PM-US Deadline Starvation
 
-- Status: IN PROGRESS.
+- Status: FIXED IN CODE.
 - Evidence: Production source lane wrote fills/signals, but PM-US matching repeatedly reported `deadlineReached=true` with `pendingProcessed=0`.
 - Fix: Reserve usable matching time inside the source worker by cutting off ingestion early enough to tolerate one source request overrun plus the venue matching reserve.
 - Regression test: `src/lib/sports-shadow/worker.server.test.ts`.
-- Commit SHA once fixed: TBD.
-
+- Fix commit SHA: `76d15bd`.
