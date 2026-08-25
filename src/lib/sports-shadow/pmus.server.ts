@@ -15,6 +15,7 @@ import { PMUS_PUBLIC_BASE } from "../pmus/us-markets.server";
 import { wrapRecordHostRateLimitWithTelemetry } from "./telemetry.server";
 import { eventToCandidates, normalizePmusBook, type PmusCandidate, type PmusRawEvent } from "./pmus";
 import { runtimeFetch } from "./runtime-fetch.server";
+import { pmusDiscoveryLeagues } from "./sport-registry";
 import { NO_OP_LEASE_CHECKPOINT, type LeaseCheckpoint } from "./sports-lease.server";
 import type { BookSnapshot } from "./types";
 
@@ -235,6 +236,9 @@ export async function discoverPmusSportsMarkets(deps: Partial<PmusNetworkDeps> =
   discoveryCache = { value, expiresAt: d.now() + DISCOVERY_CACHE_TTL_MS };
   return value;
 }
+
+/** Back-compat alias: PM-US discovery is now multi-sport (see ./sport-registry). */
+export const discoverPmusMlbMarkets = discoverPmusSportsMarkets;
 
 /** Test/diagnostics helper. */
 export function clearPmusDiscoveryCache(): void {
