@@ -199,7 +199,7 @@ export async function discoverPmusSportsMarkets(deps: Partial<PmusNetworkDeps> =
     }
     const offset = page * DISCOVERY_PAGE_SIZE;
     const json = await pacedGetJson<{ events?: unknown }>(
-      `${PMUS_MLB_DISCOVERY_ENDPOINT}?limit=${DISCOVERY_PAGE_SIZE}&offset=${offset}&active=true&closed=false`,
+      `${pmusLeagueEventsEndpoint(leagueSegment)}?limit=${DISCOVERY_PAGE_SIZE}&offset=${offset}&active=true&closed=false`,
       d,
       deadlineAtMs,
     );
