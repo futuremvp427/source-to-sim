@@ -512,7 +512,7 @@
     {
       "schema": "public",
       "table": "sports_shadow_paper_positions",
-      "name": "sports_shadow_paper_positions_signal_id_venue_notional_tier_usd",
+      "name": "sports_shadow_paper_positions_signal_id_venue_notional_tier_key",
       "definition_contains": [
         "unique (signal_id, venue, notional_tier_usd)"
       ]
@@ -1592,11 +1592,12 @@
         "search_path=public"
       ],
       "definition_contains": [
-        "from public.sports_shadow_paper_fills",
+        "from public.sports_shadow_paper_positions",
+        "join public.sports_shadow_paper_fills",
         "left join public.sports_shadow_settlements",
         "s.settlement_status is null or s.settlement_status = 'PENDING'",
         "s.next_check_at is null or s.next_check_at <= now()",
-        "order by coalesce(s.next_check_at, f.decided_at)"
+        "order by coalesce(s.next_check_at, p.updated_at)"
       ],
       "execute_allowed": [
         "service_role"
@@ -1611,16 +1612,14 @@
       "schema": "public",
       "name": "get_sports_shadow_episode_outcomes",
       "identity_args": "uuid",
-      "security_definer": true,
-      "config_contains": [
-        "search_path=public"
-      ],
+      "security_definer": false,
       "definition_contains": [
         "from public.sports_shadow_signals",
         "distinct on",
-        "realized_pnl_usd",
-        "remaining_cost_basis_usd",
-        "lifecycle_realized_pnl_usd"
+        "pf_inner.trigger_source_fill_id is null",
+        "left join public.sports_shadow_paper_positions",
+        "p.realized_pnl_usd",
+        "p.total_fees_usd"
       ],
       "execute_allowed": [
         "service_role"
