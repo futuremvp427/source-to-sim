@@ -15,6 +15,7 @@ import { PMUS_PUBLIC_BASE } from "../pmus/us-markets.server";
 import { wrapRecordHostRateLimitWithTelemetry } from "./telemetry.server";
 import { eventToCandidates, normalizePmusBook, type PmusCandidate, type PmusRawEvent } from "./pmus";
 import { runtimeFetch } from "./runtime-fetch.server";
+import { pmusDiscoveryLeagues } from "./sport-registry";
 import { NO_OP_LEASE_CHECKPOINT, type LeaseCheckpoint } from "./sports-lease.server";
 import type { BookSnapshot } from "./types";
 
@@ -25,7 +26,7 @@ export const DISCOVERY_PAGE_SIZE = 200;
 /** Bounded: at most 2,000 MLB events per baseline discovery refresh. */
 export const DISCOVERY_MAX_PAGES = 10;
 const DISCOVERY_CACHE_TTL_MS = 5 * 60 * 1000;
-const PMUS_MLB_DISCOVERY_ENDPOINT = "/v2/leagues/mlb/events";
+const pmusLeagueEventsEndpoint = (league: string) => `/v2/leagues/${league}/events`;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -149,7 +150,7 @@ let discoveryCache: CacheEntry | null = null;
  * `marketSides` orientation data this resolver requires, so discovery narrows at the server
  * while preserving the existing fail-closed page cap.
  */
-export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}, deadlineAtMs?: number): Promise<PmusCandidate[]> {
+export async function discoverPmusSportsMarkets(deps: Partial<PmusNetworkDeps> = {}, deadlineAtMs?: number): Promise<PmusCandidate[]> {
   const d: PmusNetworkDeps = { ...defaultDeps, ...deps };
   const now = d.now();
   // Task 13I / P1-S: a cache hit is allowed only if the caller is still within its own
@@ -162,6 +163,11 @@ export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}
   }
 
   const byMarketSlug = new Map<string, PmusCandidate>();
+  // Sport-agnostic: one bounded league pass per registered adapter with a PM-US catalog
+  // path (see ./sport-registry). Completeness is proven PER LEAGUE with the same
+  // fail-closed page-cap rule as before, so one sport's truncation can never be laundered
+  // into a "complete" multi-sport catalog.
+  for (const leagueSegment of pmusDiscoveryLeagues()) {
   // Task 12I / P2-P2: PM-US uses fixed offset/page-size pagination (no continuation
   // cursor), so a FULL final page (events.length === DISCOVERY_PAGE_SIZE) at the page cap
   // proves nothing -- there could be an unread page 11 sitting right behind it. Only a
@@ -194,7 +200,7 @@ export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}
     }
     const offset = page * DISCOVERY_PAGE_SIZE;
     const json = await pacedGetJson<{ events?: unknown }>(
-      `${PMUS_MLB_DISCOVERY_ENDPOINT}?limit=${DISCOVERY_PAGE_SIZE}&offset=${offset}&active=true&closed=false`,
+      `${pmusLeagueEventsEndpoint(leagueSegment)}?limit=${DISCOVERY_PAGE_SIZE}&offset=${offset}&active=true&closed=false`,
       d,
       deadlineAtMs,
     );
@@ -220,14 +226,19 @@ export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}
   }
   if (pageBudgetExhausted) {
     throw new Error(
-      `PM-US MLB discovery truncated: DISCOVERY_MAX_PAGES (${DISCOVERY_MAX_PAGES}) exhausted while the final page was still full (${DISCOVERY_PAGE_SIZE} events) -- completeness unproven, refusing to return/cache a partial catalog`,
+      `PM-US ${leagueSegment.toUpperCase()} discovery truncated: DISCOVERY_MAX_PAGES (${DISCOVERY_MAX_PAGES}) exhausted while the final page was still full (${DISCOVERY_PAGE_SIZE} events) -- completeness unproven, refusing to return/cache a partial catalog`,
     );
   }
+  }
+
 
   const value = [...byMarketSlug.values()];
   discoveryCache = { value, expiresAt: d.now() + DISCOVERY_CACHE_TTL_MS };
   return value;
 }
+
+/** Back-compat alias: PM-US discovery is now multi-sport (see ./sport-registry). */
+export const discoverPmusMlbMarkets = discoverPmusSportsMarkets;
 
 /** Test/diagnostics helper. */
 export function clearPmusDiscoveryCache(): void {

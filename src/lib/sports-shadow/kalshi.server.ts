@@ -19,9 +19,10 @@
  */
 
 import { DeadlineExceededError, getHostCooldown, parseRetryAfterMs, recordHostRateLimitReporting, reserveRequestSlot } from "../http-rate-limit.server";
-import { classifyKalshiMarket, normalizeKalshiBook, PHASE1_KALSHI_SERIES, type KalshiBookSnapshot, type KalshiCandidate, type KalshiRawEvent, type KalshiRawMarket } from "./kalshi";
+import { classifyKalshiMarket, normalizeKalshiBook, type KalshiBookSnapshot, type KalshiCandidate, type KalshiRawEvent, type KalshiRawMarket } from "./kalshi";
 import { wrapRecordHostRateLimitWithTelemetry } from "./telemetry.server";
 import { runtimeFetch } from "./runtime-fetch.server";
+import { kalshiDiscoverySeries } from "./sport-registry";
 import { NO_OP_LEASE_CHECKPOINT, type LeaseCheckpoint } from "./sports-lease.server";
 
 export const KALSHI_HOST = "external-api.kalshi.com";
@@ -204,7 +205,7 @@ let discoveryCache: CacheEntry | null = null;
  * classifies via the pure classifyKalshiMarket, and deduplicates by market ticker. Catalog
  * data ONLY — fetchKalshiBook never reads from or writes to this cache.
  */
-export async function discoverKalshiMlbMarkets(deps: Partial<KalshiNetworkDeps> = {}, deadlineAtMs?: number): Promise<KalshiCandidate[]> {
+export async function discoverKalshiSportsMarkets(deps: Partial<KalshiNetworkDeps> = {}, deadlineAtMs?: number): Promise<KalshiCandidate[]> {
   const d: KalshiNetworkDeps = { ...defaultDeps, ...deps };
   const now = d.now();
   // Task 13I / P1-S: a cache hit is allowed only if the caller is still within its own
@@ -214,7 +215,10 @@ export async function discoverKalshiMlbMarkets(deps: Partial<KalshiNetworkDeps> 
   }
 
   const byTicker = new Map<string, KalshiCandidate>();
-  for (const series of PHASE1_KALSHI_SERIES) {
+  // Sport-agnostic: only series whose candidate parser is VERIFIED for that sport are
+  // queried (see ./sport-registry). Known-but-unverified series (e.g. KXNBAGAME) are
+  // deliberately not fetched, so an unproven ticker grammar can never be mis-parsed.
+  for (const series of kalshiDiscoverySeries()) {
     const markets = await paginate<KalshiRawMarket>(
       (cursor) => `/markets?series_ticker=${series}&status=open&limit=${PAGE_LIMIT}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
       "markets",
@@ -241,6 +245,9 @@ export async function discoverKalshiMlbMarkets(deps: Partial<KalshiNetworkDeps> 
   discoveryCache = { value, expiresAt: d.now() + DISCOVERY_CACHE_TTL_MS };
   return value;
 }
+
+/** Back-compat alias: Kalshi discovery is series-registry driven (see ./sport-registry). */
+export const discoverKalshiMlbMarkets = discoverKalshiSportsMarkets;
 
 /** Test/diagnostics helper. */
 export function clearKalshiDiscoveryCache(): void {

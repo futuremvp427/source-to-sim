@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildPmusObservationPatch } from "./observation";
+import { pmusDiscoveryLeagues } from "./sport-registry";
 import { clearPmusDiscoveryCache, discoverPmusMlbMarkets, DISCOVERY_MAX_PAGES, DISCOVERY_PAGE_SIZE, fetchPmusBook, PMUS_HOST, type PmusNetworkDeps } from "./pmus.server";
 import { NO_OP_LEASE_CHECKPOINT } from "./sports-lease.server";
 
@@ -41,8 +42,10 @@ function eventFixture(id: string, marketSlug: string) {
   };
 }
 
-describe("CANARY-6: PM-US discovery narrows through the MLB league endpoint", () => {
-  it("discoverPmusMlbMarkets requests /v2/leagues/mlb/events, not the unfiltered all-sports /v1/events catalog that can truncate before PM-US resolution", async () => {
+const LEAGUE_COUNT = pmusDiscoveryLeagues().length;
+
+describe("CANARY-6: PM-US discovery narrows through per-league endpoints", () => {
+  it("requests /v2/leagues/<league>/events for every registered sport, never the unfiltered all-sports /v1/events catalog that can truncate before PM-US resolution", async () => {
     clearPmusDiscoveryCache();
     const requestedUrls: string[] = [];
     const fetchImpl = vi.fn(async (url: RequestInfo | URL) => {
@@ -52,8 +55,13 @@ describe("CANARY-6: PM-US discovery narrows through the MLB league endpoint", ()
     await discoverPmusMlbMarkets(okDeps({ fetchImpl }));
     expect(requestedUrls.length).toBeGreaterThan(0);
     for (const url of requestedUrls) {
-      expect(url).toContain("/v2/leagues/mlb/events");
+      expect(url).toMatch(/\/v2\/leagues\/[a-z0-9-]+\/events/);
       expect(url).not.toContain("/v1/events?");
+    }
+    // MLB must still be covered, and every requested league must be a registered one.
+    expect(requestedUrls.some((url) => url.includes("/v2/leagues/mlb/events"))).toBe(true);
+    for (const league of pmusDiscoveryLeagues()) {
+      expect(requestedUrls.some((url) => url.includes(`/v2/leagues/${league}/events`))).toBe(true);
     }
   });
 });
@@ -63,8 +71,8 @@ describe("discoverPmusMlbMarkets", () => {
     clearPmusDiscoveryCache();
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ events: [eventFixture("1", "aec-mlb-nyy-bal-1")] }), { status: 200 }));
     const candidates = await discoverPmusMlbMarkets(okDeps({ fetchImpl }));
-    expect(candidates).toHaveLength(1);
-    expect(fetchImpl).toHaveBeenCalledTimes(1); // short page (< page size) stops pagination immediately
+    expect(candidates).toHaveLength(1); // identical fixture slug across leagues dedupes
+    expect(fetchImpl).toHaveBeenCalledTimes(LEAGUE_COUNT); // one short page per registered league
   });
 
   it("18. duplicate market/event responses across pages dedupe deterministically by marketSlug", async () => {
@@ -172,11 +180,11 @@ describe("discoverPmusMlbMarkets", () => {
       let calls = 0;
       const fetchImpl = vi.fn(async () => {
         calls += 1;
-        const isFinalPage = calls === DISCOVERY_MAX_PAGES;
+        const isFinalPage = calls % DISCOVERY_MAX_PAGES === 0; // per-league page cap
         return new Response(JSON.stringify({ events: isFinalPage ? [eventFixture("last", "aec-mlb-last")] : fullPageOfEvents(calls) }), { status: 200 });
       });
       await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).resolves.not.toThrow();
-      expect(calls).toBe(DISCOVERY_MAX_PAGES); // proves the loop actually ran the full page budget, not fewer
+      expect(calls).toBe(DISCOVERY_MAX_PAGES * LEAGUE_COUNT); // full page budget per league, not fewer
     });
 
     it("exactly DISCOVERY_MAX_PAGES pages, the final page STILL full (=== DISCOVERY_PAGE_SIZE) -> explicit truncation failure, not a returned/cached partial catalog", async () => {
@@ -206,11 +214,11 @@ describe("discoverPmusMlbMarkets", () => {
       let calls = 0;
       const fetchImpl = vi.fn(async () => {
         calls += 1;
-        if (calls < DISCOVERY_MAX_PAGES) return new Response(JSON.stringify({ events: fullPageOfEvents(calls) }), { status: 200 });
+        if (calls % DISCOVERY_MAX_PAGES !== 0) return new Response(JSON.stringify({ events: fullPageOfEvents(calls) }), { status: 200 });
         return new Response(JSON.stringify({ events: [] }), { status: 200 });
       });
       await expect(discoverPmusMlbMarkets(okDeps({ fetchImpl }))).resolves.not.toThrow();
-      expect(calls).toBe(DISCOVERY_MAX_PAGES);
+      expect(calls).toBe(DISCOVERY_MAX_PAGES * LEAGUE_COUNT);
     });
 
     it("a truncation failure never poisons the discovery cache -- a subsequent call with a healthy short-final-page response succeeds normally", async () => {
@@ -240,7 +248,7 @@ describe("discoverPmusMlbMarkets", () => {
       return new Response(JSON.stringify({ events: [] }), { status: 200 });
     });
     await discoverPmusMlbMarkets(okDeps({ fetchImpl, reserveRequestSlot }));
-    expect(calls).toEqual(["reserve", "fetch"]);
+    expect(calls).toEqual(Array.from({ length: LEAGUE_COUNT }, () => ["reserve", "fetch"]).flat());
   });
 
   it("caches within the TTL and does not re-fetch", async () => {
@@ -249,7 +257,7 @@ describe("discoverPmusMlbMarkets", () => {
     const deps = okDeps({ fetchImpl });
     await discoverPmusMlbMarkets(deps);
     await discoverPmusMlbMarkets(deps);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(LEAGUE_COUNT); // second call served entirely from cache
   });
 });
 

@@ -30,10 +30,10 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 import { DeadlineExceededError } from "../http-rate-limit.server";
 import type { SportsShadowConfig } from "./config";
-import { discoverKalshiMlbMarkets } from "./kalshi.server";
+import { discoverKalshiSportsMarkets } from "./kalshi.server";
 import type { KalshiCandidate } from "./kalshi";
 import { persistVenueMatch, takeDueSportsShadowObservations, type ObservationDeps } from "./observation.server";
-import { discoverPmusMlbMarkets } from "./pmus.server";
+import { discoverPmusSportsMarkets } from "./pmus.server";
 import type { PmusCandidate } from "./pmus";
 import { resolveKalshiMatch, resolvePmusMatch, type MatchStatus, type VenueMatchResult } from "./resolver";
 import {
@@ -357,8 +357,8 @@ export type SportsShadowWorkerDeps = {
   workerRepo: WorkerRepository;
   observationDeps: Partial<ObservationDeps>;
   sourcePollDeps: Partial<WalletPollDeps>;
-  discoverPmus: typeof discoverPmusMlbMarkets;
-  discoverKalshi: typeof discoverKalshiMlbMarkets;
+  discoverPmus: typeof discoverPmusSportsMarkets;
+  discoverKalshi: typeof discoverKalshiSportsMarkets;
   persistVenueMatch: typeof persistVenueMatch;
   takeDueSportsShadowObservations: typeof takeDueSportsShadowObservations;
   pollSportsShadowWallet: typeof pollSportsShadowWallet;
@@ -558,8 +558,8 @@ const defaultDeps: SportsShadowWorkerDeps = {
   workerRepo: supabaseWorkerRepository,
   observationDeps: {},
   sourcePollDeps: { repo: supabasePollRepository },
-  discoverPmus: discoverPmusMlbMarkets,
-  discoverKalshi: discoverKalshiMlbMarkets,
+  discoverPmus: discoverPmusSportsMarkets,
+  discoverKalshi: discoverKalshiSportsMarkets,
   persistVenueMatch,
   takeDueSportsShadowObservations,
   pollSportsShadowWallet,
