@@ -230,12 +230,6 @@ export const VENUE_MATCH_RESERVE_MS = 12_000;
  */
 export const SOURCE_INGEST_OVERRUN_ALLOWANCE_MS = 3_000;
 
-/**
- * Per-wallet slice of the ingest window, so a single heavy wallet cannot consume the whole
- * cycle and several wallets make forward progress per cycle (rotation still guarantees
- * fairness across cycles).
- */
-export const PER_WALLET_SOURCE_BUDGET_MS = 5_000;
 
 /** Absolute cutoff after which wallet source ingestion stops starting new work, leaving VENUE_MATCH_RESERVE_MS after the known one-request source overrun. */
 export function sourceIngestDeadline(laneStartMs: number): number {
@@ -966,7 +960,7 @@ async function runSourceLane(config: SportsShadowConfig, d: SportsShadowWorkerDe
     // latency fix already applied throughout source-poll.server.ts.
     if (d.now() >= ingestDeadlineAtMs) break;
     try {
-      const result: WalletPollResult = await d.pollSportsShadowWallet(wallet, config.goLiveAtMs, { ...d.sourcePollDeps, checkpointLease: checkpoint, epochId }, Math.min(ingestDeadlineAtMs, d.now() + PER_WALLET_SOURCE_BUDGET_MS));
+      const result: WalletPollResult = await d.pollSportsShadowWallet(wallet, config.goLiveAtMs, { ...d.sourcePollDeps, checkpointLease: checkpoint, epochId }, ingestDeadlineAtMs);
       newSignalsCreated += result.newSignals.length;
       walletSummaries.push({
         wallet: result.wallet,
