@@ -232,7 +232,7 @@ export function cycleSummaryToTelemetryEvents(summary: {
     newSignalsCreated: number;
     leaseLost: boolean;
     /** CODEX P1-1 (round 2): only sourceCoverageComplete is read here -- the full WalletSummary is accepted structurally. */
-    walletSummaries: { sourceCoverageComplete: boolean }[];
+    walletSummaries: { sourceCoverageComplete: boolean; pendingSelected?: number; freshPendingSelected?: number; pendingProcessed?: number }[];
     pmus: { attempted: number; exact: number; discoveryFailed: boolean; deadlineReached: boolean };
     kalshi: { attempted: number; exact: number; discoveryFailed: boolean; deadlineReached: boolean };
   } | null;
@@ -272,9 +272,9 @@ export function cycleSummaryToTelemetryEvents(summary: {
       { category: "SOURCE", metric: "wallets_attempted", value: summary.sourceLane.walletsAttempted },
       { category: "SOURCE", metric: "source_starved", value: summary.sourceLane.walletsAttempted === 0 ? 1 : 0 },
       { category: "SOURCE", metric: "new_signals", value: summary.sourceLane.newSignalsCreated },
-      { category: "SOURCE", metric: "pending_selected", value: summary.sourceLane.walletSummaries.reduce((a, w) => a + w.pendingSelected, 0) },
-      { category: "SOURCE", metric: "pending_fresh_selected", value: summary.sourceLane.walletSummaries.reduce((a, w) => a + w.freshPendingSelected, 0) },
-      { category: "SOURCE", metric: "pending_processed", value: summary.sourceLane.walletSummaries.reduce((a, w) => a + w.pendingProcessed, 0) },
+      { category: "SOURCE", metric: "pending_selected", value: summary.sourceLane.walletSummaries.reduce((a, w) => a + (w.pendingSelected ?? 0), 0) },
+      { category: "SOURCE", metric: "pending_fresh_selected", value: summary.sourceLane.walletSummaries.reduce((a, w) => a + (w.freshPendingSelected ?? 0), 0) },
+      { category: "SOURCE", metric: "pending_processed", value: summary.sourceLane.walletSummaries.reduce((a, w) => a + (w.pendingProcessed ?? 0), 0) },
       { category: "SOURCE", metric: "lease_lost", value: summary.sourceLane.leaseLost ? 1 : 0 },
       // CODEX P1-1 (round 2): durable per-cycle visibility into the continuous
       // source-coverage invariant -- how many of the wallets actually polled THIS cycle

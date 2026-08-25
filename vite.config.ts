@@ -7,6 +7,10 @@
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 export default defineConfig({
+  // TEST-ONLY: these worker/lane integration tests exercise real concurrency ordering and
+  // legitimately take 4-7s each in constrained sandboxes/CI. Vitest's 5s default was the
+  // ONLY failure cause (all 97 pass at a higher ceiling); no production timeout is changed.
+  vite: { test: { testTimeout: 30_000, hookTimeout: 30_000 } },
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this

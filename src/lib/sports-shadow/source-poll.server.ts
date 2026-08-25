@@ -432,7 +432,7 @@ export const PENDING_FILLS_NEWEST_SHARE = MAX_PENDING_FILLS_PER_POLL - PENDING_F
  * remaining older backlog, which still runs — bounded — with whatever budget is left.
  * Pure, deterministic, restart-safe: a function of (sourceTs, id) only.
  */
-export const FRESH_PENDING_QUOTA = 150;
+export const FRESH_PENDING_QUOTA = 40;
 
 export function orderPendingFillsFreshFirst<T extends { id: string; sourceTs: number }>(rows: readonly T[], quota: number = FRESH_PENDING_QUOTA): { ordered: T[]; freshCount: number; oldCount: number } {
   const byNewest = [...rows].sort((a, b) => (b.sourceTs - a.sourceTs) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
