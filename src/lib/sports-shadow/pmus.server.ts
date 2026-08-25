@@ -22,9 +22,10 @@ export const PMUS_HOST = "gateway.polymarket.us";
 
 const REQUEST_TIMEOUT_MS = 12_000;
 export const DISCOVERY_PAGE_SIZE = 200;
-/** Bounded: at most 2,000 sports events per baseline discovery refresh. */
+/** Bounded: at most 2,000 MLB events per baseline discovery refresh. */
 export const DISCOVERY_MAX_PAGES = 10;
 const DISCOVERY_CACHE_TTL_MS = 5 * 60 * 1000;
+const PMUS_MLB_DISCOVERY_ENDPOINT = "/v2/leagues/mlb/events";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -132,32 +133,21 @@ type CacheEntry = { value: PmusCandidate[]; expiresAt: number };
 let discoveryCache: CacheEntry | null = null;
 
 /**
- * FINAL BUILD Part 7: the MLB-specific `GET /v2/leagues/mlb/events` endpoint (documented
- * at docs.polymarket.us, e.g. `?limit=1000&active=true&closed=false`) was evaluated
- * against a real live fixture (2026-08-22) as a candidate replacement for the generic
- * `/v1/events?category=sports` discovery below. EVALUATED AND REJECTED, not left as
- * research: the MLB-specific endpoint's events DO carry every event-level field this
- * module needs (id, slug, teams, gameId, startTime), but each market's side/orientation
- * data is exposed as `outcomes` -- confirmed live to be nothing more than a bare array of
- * line strings, e.g. `["-2.50","+2.50"]` -- NOT the `marketSides` array of
- * `{description, team, long, price}` objects the generic endpoint provides and this
- * module's `eventToCandidates`/PM-US LONG/SHORT resolution (Task 12G) depends on. Adopting
- * the MLB-specific endpoint would silently lose team/orientation data for every market,
- * which this module refuses to trade for fewer requests (Part 7's own explicit rule).
- * The decision IS the implementation: discovery continues against `/v1/events` below,
- * documented here with the concrete evidence rather than left unresolved. Revisit only if
- * PM-US's `/v2/leagues/mlb/events` response shape changes to include full marketSides-
- * equivalent data.
- */
-
-/**
  * Bounded, briefly-cached baseline discovery of currently-listed MLB sports markets.
- * Paginates GET /v1/events?...&category=sports (stopping at a short/empty page or
+ * Paginates GET /v2/leagues/mlb/events?... (stopping at a short/empty page or
  * DISCOVERY_MAX_PAGES, whichever comes first), classifies every event's markets via the
  * pure `eventToCandidates`, and deduplicates by marketSlug (a retried/overlapping page can
  * never produce two candidates for the same market). This is catalog data ONLY — never used
  * for live book/quote data, which fetchPmusBook always fetches fresh (see its own doc
  * comment for why the two caches are kept semantically separate).
+ *
+ * CANARY-6 / PM-US discovery truncation: the previous implementation scanned
+ * `/v1/events?category=sports`, an all-sports catalog where the live API ignores attempted
+ * `league`, `sport`, `seriesSlug`, and `tag` filters. Production proved that catalog can
+ * remain full through the 10-page safety cap, leaving PM-US pending signals untouched. A
+ * live read-only probe on 2026-08-25 confirmed the MLB league endpoint now carries the same
+ * `marketSides` orientation data this resolver requires, so discovery narrows at the server
+ * while preserving the existing fail-closed page cap.
  */
 export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}, deadlineAtMs?: number): Promise<PmusCandidate[]> {
   const d: PmusNetworkDeps = { ...defaultDeps, ...deps };
@@ -204,7 +194,7 @@ export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}
     }
     const offset = page * DISCOVERY_PAGE_SIZE;
     const json = await pacedGetJson<{ events?: unknown }>(
-      `/v1/events?limit=${DISCOVERY_PAGE_SIZE}&offset=${offset}&active=true&closed=false&category=sports`,
+      `${PMUS_MLB_DISCOVERY_ENDPOINT}?limit=${DISCOVERY_PAGE_SIZE}&offset=${offset}&active=true&closed=false`,
       d,
       deadlineAtMs,
     );
@@ -230,7 +220,7 @@ export async function discoverPmusMlbMarkets(deps: Partial<PmusNetworkDeps> = {}
   }
   if (pageBudgetExhausted) {
     throw new Error(
-      `PM-US discovery truncated: DISCOVERY_MAX_PAGES (${DISCOVERY_MAX_PAGES}) exhausted while the final page was still full (${DISCOVERY_PAGE_SIZE} events) -- completeness unproven, refusing to return/cache a partial catalog`,
+      `PM-US MLB discovery truncated: DISCOVERY_MAX_PAGES (${DISCOVERY_MAX_PAGES}) exhausted while the final page was still full (${DISCOVERY_PAGE_SIZE} events) -- completeness unproven, refusing to return/cache a partial catalog`,
     );
   }
 

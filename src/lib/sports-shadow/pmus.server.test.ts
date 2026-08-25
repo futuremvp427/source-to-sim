@@ -41,8 +41,8 @@ function eventFixture(id: string, marketSlug: string) {
   };
 }
 
-describe("FINAL BUILD Part 7: discovery deliberately targets /v1/events, never the MLB-specific /v2/leagues/mlb/events endpoint", () => {
-  it("discoverPmusMlbMarkets requests /v1/events -- switching to /v2/leagues/mlb/events without re-verifying its outcomes-vs-marketSides shape would silently lose team/orientation data", async () => {
+describe("CANARY-6: PM-US discovery narrows through the MLB league endpoint", () => {
+  it("discoverPmusMlbMarkets requests /v2/leagues/mlb/events, not the unfiltered all-sports /v1/events catalog that can truncate before PM-US resolution", async () => {
     clearPmusDiscoveryCache();
     const requestedUrls: string[] = [];
     const fetchImpl = vi.fn(async (url: RequestInfo | URL) => {
@@ -52,8 +52,8 @@ describe("FINAL BUILD Part 7: discovery deliberately targets /v1/events, never t
     await discoverPmusMlbMarkets(okDeps({ fetchImpl }));
     expect(requestedUrls.length).toBeGreaterThan(0);
     for (const url of requestedUrls) {
-      expect(url).toContain("/v1/events");
-      expect(url).not.toContain("/v2/leagues/mlb/events");
+      expect(url).toContain("/v2/leagues/mlb/events");
+      expect(url).not.toContain("/v1/events?");
     }
   });
 });

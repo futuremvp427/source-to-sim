@@ -9,7 +9,7 @@ import type { KalshiCandidate } from "./kalshi";
 import type { VenueMatchResult } from "./resolver";
 import type { SportsLease, SportsLeaseRepository } from "./sports-lease.server";
 import type { WalletPollResult } from "./source-poll.server";
-import type { SignalRow } from "./worker";
+import { PENDING_BATCH_SIZE, type SignalRow } from "./worker";
 import type { Venue } from "./types";
 import {
   FINAL_OBSERVATION_STAGE_DEADLINE_MS_FOR_TEST,
@@ -868,6 +868,64 @@ describe("runSportsShadowCycle — target discovery", () => {
     const kalshiCalls = persistVenueMatch.mock.calls.filter((call) => (call[1] as VenueMatchResult).venue === "KALSHI");
     expect(pmusCalls).toHaveLength(1);
     expect(kalshiCalls).toHaveLength(0);
+  });
+
+  it("CANARY-6: 40 PM-US pending signals share one bounded discovery pass and still process while Kalshi is in cooldown", async () => {
+    const pendingSignals = Array.from({ length: 40 }, (_, i) =>
+      signalRow({
+        id: `pmus-pending-${String(i).padStart(2, "0")}`,
+        createdAtIso: `2026-08-19T00:00:${String(i).padStart(2, "0")}.000Z`,
+      }),
+    );
+    const workerRepo = makeFakeWorkerRepo(pendingSignals, []);
+    const discoverPmus = vi.fn(async (_deps: unknown, deadlineAtMs?: number) => {
+      expect(deadlineAtMs).toBeGreaterThan(0);
+      return [pmusExactCandidate()];
+    });
+    const discoverKalshi = vi.fn(async () => {
+      throw new Error("external-api.kalshi.com is in cooldown: 429 retry-after active");
+    });
+    const persistVenueMatch = vi.fn(async (signalId: string, result: VenueMatchResult) => ({
+      matchId: `${result.venue.toLowerCase()}-${signalId}`,
+      scheduled: result.status === "EXACT" ? 5 : 0,
+      downgradeSkipped: false,
+    }));
+    const pollSportsShadowWallet = vi.fn(async (wallet: string, _goLiveAtMs: number | null, deps: { epochId: string | null }) => {
+      expect(deps.epochId).toBe("epoch-fake");
+      return emptyWalletResult(wallet);
+    });
+
+    const summary = await runSportsShadowCycle(
+      enabledConfig({ wallets: [WALLET_A, WALLET_B, WALLET_C] }),
+      baseDeps({
+        workerRepo,
+        pollSportsShadowWallet: pollSportsShadowWallet as never,
+        discoverPmus: discoverPmus as never,
+        discoverKalshi: discoverKalshi as never,
+        persistVenueMatch: persistVenueMatch as never,
+      }),
+      "source",
+    );
+
+    expect(summary.epochId).toBe("epoch-fake");
+    expect(summary.sourceLane?.pmus.pendingFound).toBe(PENDING_BATCH_SIZE);
+    expect(summary.sourceLane?.pmus.pendingRemainingHint).toBe(true);
+    expect(summary.sourceLane?.pmus.pendingProcessed).toBe(PENDING_BATCH_SIZE);
+    expect(summary.sourceLane?.pmus.exact).toBe(PENDING_BATCH_SIZE);
+    expect(summary.sourceLane?.pmus.discoveryFailed).toBe(false);
+    expect(summary.sourceLane?.pmus.deadlineReached).toBe(false);
+    expect(discoverPmus).toHaveBeenCalledTimes(1);
+
+    expect(summary.sourceLane?.kalshi.pendingFound).toBe(PENDING_BATCH_SIZE);
+    expect(summary.sourceLane?.kalshi.discoveryFailed).toBe(true);
+    expect(summary.sourceLane?.kalshi.pendingProcessed).toBe(0);
+    expect(discoverKalshi).toHaveBeenCalledTimes(1);
+
+    const pmusCalls = persistVenueMatch.mock.calls.filter((call) => (call[1] as VenueMatchResult).venue === "PMUS");
+    const kalshiCalls = persistVenueMatch.mock.calls.filter((call) => (call[1] as VenueMatchResult).venue === "KALSHI");
+    expect(pmusCalls).toHaveLength(PENDING_BATCH_SIZE);
+    expect(kalshiCalls).toHaveLength(0);
+    expect(pmusCalls.every((call) => (call[1] as VenueMatchResult).status === "EXACT")).toBe(true);
   });
 });
 
