@@ -127,6 +127,7 @@ import { fetchSourceMarketMetadata } from "./source-metadata.server";
 import { isEligibleForEpisodeTrigger } from "./source-poll";
 import { NO_OP_LEASE_CHECKPOINT, type LeaseCheckpoint } from "./sports-lease.server";
 import type { BetType, SourceMarketMetadata } from "./types";
+import { canonicalLeagueLabel } from "./sport-registry";
 
 /**
  * Bounded to exactly the provider's own offset ceiling (see MAX_TRADES_OFFSET's doc
@@ -2307,7 +2308,7 @@ export async function pollSportsShadowWallet(
       notional: decision.nextState.totalNotional,
       fillCount: decision.nextState.buyFillCount,
       sellSeen: decision.nextState.sellSeen,
-      league: canonicalLeagueLabel(metadata.league) ?? UNKNOWN_LEAGUE_LABEL,
+      league: signalLeague,
       scheduledStartAt: metadata.gameStartTime,
       awayTeam: metadata.awayTeam,
       homeTeam: metadata.homeTeam,
