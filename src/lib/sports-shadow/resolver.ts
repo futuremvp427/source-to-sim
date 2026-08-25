@@ -157,7 +157,7 @@ function analyzeExtraInnings(text: string | null): RuleDimensionStatus {
   return "UNVERIFIED";
 }
 
-export type PostponementTreatment = "VOID_ON_POSTPONEMENT" | "REMAINS_OPEN_UNTIL_COMPLETED" | "UNVERIFIED";
+export type PostponementTreatment = "VOID_ON_POSTPONEMENT" | "REMAINS_OPEN_UNTIL_COMPLETED" | "SETTLES_LAST_FAIR_MARKET_PRICE" | "UNVERIFIED";
 
 /**
  * CODEX P1-5: previously, MERELY MENTIONING postponed/delayed/suspended/rescheduled was
@@ -190,10 +190,11 @@ function analyzePostponementTreatment(text: string | null): PostponementTreatmen
   if (!text) return "UNVERIFIED";
   const triggerPattern = /\b(postpon\w*|delay\w*|suspend\w*|resched\w*|call(?:ed)?\s+(?:game|off)|shorten\w*|make[\s-]?up\s+game)\b/i;
   if (!triggerPattern.test(text)) return "UNVERIFIED"; // topic never even raised
-  const voidPattern = /\b(void\w*|cancel\w*|no[\s-]?contest|refund\w*)\b/i;
-  if (voidPattern.test(text)) return "VOID_ON_POSTPONEMENT";
+  if (/not\s+rescheduled[\s\S]{0,120}\bwithin\s+two\s+weeks\b/i.test(text) && /last\s+fair\s+market\s+price/i.test(text)) return "SETTLES_LAST_FAIR_MARKET_PRICE";
   const remainsOpenPattern = /\b(remains?|stays?)\s+(open|active)\b|will\s+remain\s+open|until\s+(?:the\s+)?game\s+(?:has\s+been\s+|is\s+)?complet\w*/i;
   if (remainsOpenPattern.test(text)) return "REMAINS_OPEN_UNTIL_COMPLETED";
+  const voidPattern = /\b(void\w*|cancel\w*|no[\s-]?contest|refund\w*)\b/i;
+  if (voidPattern.test(text)) return "VOID_ON_POSTPONEMENT";
   return "UNVERIFIED"; // topic raised, but no decisive declared treatment found -- fail closed, never guess
 }
 

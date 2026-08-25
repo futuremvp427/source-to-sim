@@ -862,4 +862,35 @@ describe("CODEX P1-5: postponement/cancellation TREATMENT must be classified, no
     expect(r.status).not.toBe("EXACT");
     expect(r.settlementProfile?.postponement).toBe("UNVERIFIED");
   });
+
+  it("real PM-US two-week/LFMP wording is recognized as a different postponement treatment, not forced EXACT", () => {
+    const s = source({
+      awayTeam: "BOS",
+      homeTeam: "MIA",
+      selectedOutcomeRaw: "Miami Marlins",
+      eventSlug: "mlb-bos-mia-2026-08-25",
+      marketSlug: "mlb-bos-mia-2026-08-25",
+      gameStartTime: "2026-08-25T22:40:00Z",
+      sourceRulesDescription:
+        "This market will resolve to the winner of the game. Extra innings are included. If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, or ends in a tie, this market will resolve 50-50.",
+    });
+    const target = pmusCandidate({
+      awayTeam: "BOS",
+      homeTeam: "MIA",
+      eventSlug: "mlb-bos-mia-2026-08-25",
+      marketSlug: "aec-mlb-bos-mia-2026-08-25",
+      marketId: "490533",
+      scheduledStartAt: "2026-08-25T22:40:00Z",
+      sides: [
+        { description: "Boston Red Sox", teamAbbreviation: "bos", long: true },
+        { description: "Miami Marlins", teamAbbreviation: "mia", long: false },
+      ],
+      rulesDescription:
+        "This market will settle to the winner of the Boston Red Sox vs Miami Marlins MLB game scheduled for 2026-08-25 at 6:40PM ET. Extra innings are included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from MLB.",
+    });
+    const r = resolvePmusMatch(s, [target]);
+    expect(r.status).not.toBe("EXACT");
+    expect(r.settlementProfile?.postponement).toBe("KNOWN_INCOMPATIBLE");
+    expect(r.reasonCode).toBe("NEAR_RULE_MISMATCH");
+  });
 });

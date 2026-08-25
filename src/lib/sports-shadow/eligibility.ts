@@ -1,5 +1,5 @@
 import { inferSportsLeagueFromSlug, normalizeParticipantName, parseVersusParticipants } from "./participant-normalization";
-import { normalizeTeamName } from "./team-normalization";
+import { normalizeMlbTeamName } from "./team-normalization";
 import type { BetType, ClassificationStatus } from "./types";
 
 export type GammaMarketTeam = { name?: string | null; ordering?: string | null };
@@ -139,10 +139,32 @@ function parseLineFromSlugForConflictCheck(slug: string, betType: BetType): numb
   return null;
 }
 
-function parseMlbTeamTokensFromSlug(slug: string): { away: string; home: string } | null {
-  const m = slug.match(/^mlb-([a-z0-9]+)-([a-z0-9]+)-\d{4}-\d{2}-\d{2}/i);
+/**
+ * Evidence-backed canonical MLB full-game slug parser only.
+ *
+ * Accepts exactly:
+ * - mlb-<away>-<home>-YYYY-MM-DD
+ * - mlb-<away>-<home>-YYYY-MM-DD-spread-(home|away)-<line>
+ * - mlb-<away>-<home>-YYYY-MM-DD-total-<line>
+ *
+ * It intentionally does NOT accept player props (`...-hr-player-...`), F5, innings,
+ * team totals, futures, parlays, or any derivative tail. The exclusion checks above
+ * still run before this fallback is ever considered.
+ */
+function parseCanonicalMlbFullGameSlug(slug: string): { away: string; home: string; betType: BetType; line: number | null } | null {
+  const m = slug.match(/^mlb-([a-z0-9]+)-([a-z0-9]+)-(\d{4}-\d{2}-\d{2})(?:-(spread)-(?:home|away)-(\d+pt\d+)|-(total)-(\d+pt\d+))?$/i);
   if (!m || !m[1] || !m[2]) return null;
-  return { away: m[1], home: m[2] };
+  if (m[4] === "spread") return { away: m[1], home: m[2], betType: "SPREAD", line: parseLineToken(m[5]) };
+  if (m[6] === "total") return { away: m[1], home: m[2], betType: "TOTAL", line: parseLineToken(m[7]) };
+  return { away: m[1], home: m[2], betType: "MONEYLINE", line: null };
+}
+
+function resolveCanonicalMlbSlugParticipants(slug: string): { away: string; home: string; betType: BetType; line: number | null } | null {
+  const parsed = parseCanonicalMlbFullGameSlug(slug);
+  if (!parsed) return null;
+  const away = normalizeMlbTeamName(parsed.away);
+  const home = normalizeMlbTeamName(parsed.home);
+  return away && home ? { ...parsed, away, home } : null;
 }
 
 function resolveParticipantPair(market: GammaMarket, league: string): { away: string; home: string } | null {
@@ -224,17 +246,24 @@ export function classifyGammaMarket(market: GammaMarket): ClassificationResult {
     }
   }
 
-  const pair = resolveParticipantPair(market, league);
-  if (!pair) return unverified(league, "UNVERIFIED_UNKNOWN_TEAM", "the two contest participants could not be normalized without guessing");
+  const canonicalMlbSlug = league === "mlb" && market.slug ? resolveCanonicalMlbSlugParticipants(market.slug) : null;
+  const hasProviderTeamNames = (market.events?.[0]?.teams ?? []).some((team) => Boolean(team.name?.trim()));
+  if (league === "mlb" && market.slug && canonicalMlbSlug === null && /^mlb-[a-z0-9]+-[a-z0-9]+-\d{4}-\d{2}-\d{2}(?:$|-spread-|-total-)/i.test(market.slug)) {
+    return unverified(league, "UNVERIFIED_UNKNOWN_TEAM", "canonical MLB slug contains an unknown team code");
+  }
+  if (canonicalMlbSlug && (canonicalMlbSlug.betType !== betType || (canonicalMlbSlug.line !== null && line !== null && Math.abs(Math.abs(line) - canonicalMlbSlug.line) > 0.01))) {
+    return unverified(league, "UNVERIFIED_CONFLICTING_METADATA", "structured market type/line conflicts with canonical MLB slug");
+  }
 
-  if (league === "mlb" && market.slug) {
-    const slugTeams = parseMlbTeamTokensFromSlug(market.slug);
-    if (slugTeams) {
-      const slugAwayCode = normalizeTeamName(slugTeams.away);
-      const slugHomeCode = normalizeTeamName(slugTeams.home);
-      if (slugAwayCode && slugHomeCode && (slugAwayCode !== pair.away || slugHomeCode !== pair.home)) {
-        return unverified(league, "UNVERIFIED_CONFLICTING_METADATA", `structured teams ${pair.away}@${pair.home} conflict with slug-derived teams ${slugAwayCode}@${slugHomeCode}`);
-      }
+  const pair = resolveParticipantPair(market, league);
+  if (!pair) {
+    if (canonicalMlbSlug && !hasProviderTeamNames) return eligible(league, betType, line, canonicalMlbSlug.away, canonicalMlbSlug.home);
+    return unverified(league, "UNVERIFIED_UNKNOWN_TEAM", "the two contest participants could not be normalized without guessing");
+  }
+
+  if (canonicalMlbSlug) {
+    if (canonicalMlbSlug.away !== pair.away || canonicalMlbSlug.home !== pair.home) {
+      return unverified(league, "UNVERIFIED_CONFLICTING_METADATA", `structured teams ${pair.away}@${pair.home} conflict with slug-derived teams ${canonicalMlbSlug.away}@${canonicalMlbSlug.home}`);
     }
   }
 

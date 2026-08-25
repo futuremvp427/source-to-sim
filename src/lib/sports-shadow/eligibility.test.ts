@@ -251,6 +251,83 @@ describe("classifyGammaMarket — STRUCTURED PRIORITY", () => {
   });
 });
 
+describe("classifyGammaMarket — canonical MLB slug fallback after exclusions", () => {
+  const missingTeams = (overrides: Partial<GammaMarket> = {}): GammaMarket => ({
+    ...moneyline,
+    question: null,
+    groupItemTitle: null,
+    events: [{ sport: { sport: "mlb" }, teams: null }],
+    ...overrides,
+  });
+
+  it("derives participants for canonical MLB moneyline when Gamma teams are missing", () => {
+    const r = classifyGammaMarket(missingTeams({ slug: "mlb-bos-mia-2026-08-25", sportsMarketType: "moneyline", line: null }));
+    expect(r.status).toBe("ELIGIBLE");
+    expect(r.betType).toBe("MONEYLINE");
+    expect(r.awayTeam).toBe("BOS");
+    expect(r.homeTeam).toBe("MIA");
+  });
+
+  it("derives participants for canonical MLB full-game spread when Gamma teams are missing", () => {
+    const r = classifyGammaMarket(missingTeams({ slug: "mlb-bos-mia-2026-08-25-spread-away-1pt5", sportsMarketType: "spreads", line: -1.5 }));
+    expect(r.status).toBe("ELIGIBLE");
+    expect(r.betType).toBe("SPREAD");
+    expect(r.awayTeam).toBe("BOS");
+    expect(r.homeTeam).toBe("MIA");
+  });
+
+  it("derives participants for canonical MLB full-game total when Gamma teams are missing", () => {
+    const r = classifyGammaMarket(missingTeams({ slug: "mlb-tex-cws-2026-08-25-total-7pt5", sportsMarketType: "totals", line: 7.5 }));
+    expect(r.status).toBe("ELIGIBLE");
+    expect(r.betType).toBe("TOTAL");
+    expect(r.awayTeam).toBe("TEX");
+    expect(r.homeTeam).toBe("CWS");
+  });
+
+  it("keeps Wilyer Abreu home-run prop rejected before slug fallback", () => {
+    const r = classifyGammaMarket(
+      missingTeams({
+        slug: "mlb-bos-mia-2026-08-24-hr-wilyer-abreu-0pt5",
+        question: "Wilyer Abreu: Home Runs O/U 0.5",
+        sportsMarketType: "player_prop",
+        line: 0.5,
+      }),
+    );
+    expect(r.status).toBe("INELIGIBLE");
+    expect(r.reasonCode).toBe("REJECT_PROP");
+  });
+
+  it("keeps F5 total rejected before slug fallback", () => {
+    const r = classifyGammaMarket(missingTeams({ slug: "mlb-bos-mia-2026-08-25-f5-total-4pt5", question: "BOS vs MIA first 5 innings total 4.5", sportsMarketType: "totals", line: 4.5 }));
+    expect(r.status).toBe("INELIGIBLE");
+    expect(r.reasonCode).toBe("REJECT_F5");
+  });
+
+  it("keeps inning markets rejected before slug fallback", () => {
+    const r = classifyGammaMarket(missingTeams({ slug: "mlb-bos-mia-2026-08-25-1st-inning", question: "Will Boston score in the 1st inning?", sportsMarketType: "moneyline" }));
+    expect(r.status).toBe("INELIGIBLE");
+    expect(r.reasonCode).toBe("REJECT_INNING");
+  });
+
+  it("malformed MLB slug remains UNVERIFIED", () => {
+    const r = classifyGammaMarket(missingTeams({ slug: "mlb-bos-mia-2026-08-25-total-seven", sportsMarketType: null, line: null }));
+    expect(r.status).toBe("UNVERIFIED");
+    expect(r.reasonCode).toBe("UNVERIFIED_PARSE_FAILURE");
+  });
+
+  it("unknown MLB team code remains fail-closed", () => {
+    const r = classifyGammaMarket(missingTeams({ slug: "mlb-xxx-mia-2026-08-25-total-7pt5", sportsMarketType: "totals", line: 7.5 }));
+    expect(r.status).toBe("UNVERIFIED");
+    expect(r.reasonCode).toBe("UNVERIFIED_UNKNOWN_TEAM");
+  });
+
+  it("structured teams conflicting with canonical slug remain UNVERIFIED_CONFLICTING_METADATA", () => {
+    const r = classifyGammaMarket({ ...moneyline, slug: "mlb-bos-mia-2026-08-25", question: null, groupItemTitle: null });
+    expect(r.status).toBe("UNVERIFIED");
+    expect(r.reasonCode).toBe("UNVERIFIED_CONFLICTING_METADATA");
+  });
+});
+
 /**
  * Task 12F / P1-H: exhaustive over the real UnverifiedReasonCode union (9 members) --
  * H3/H4/H5 (retryable/transport) and H6/H7/H8/H9/H10 (terminal/classifier-level).
