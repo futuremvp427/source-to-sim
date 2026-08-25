@@ -239,24 +239,24 @@ export function classifyGammaMarket(market: GammaMarket): ClassificationResult {
     }
   }
 
-  const canonicalMlbSlug = league === "mlb" && market.slug ? resolveCanonicalMlbSlugParticipants(market.slug) : null;
+  const canonicalSlug = market.slug ? resolveCanonicalSlugParticipants(league, market.slug) : null;
   const hasProviderTeamNames = (market.events?.[0]?.teams ?? []).some((team) => Boolean(team.name?.trim()));
-  if (league === "mlb" && market.slug && canonicalMlbSlug === null && /^mlb-[a-z0-9]+-[a-z0-9]+-\d{4}-\d{2}-\d{2}(?:$|-spread-|-total-)/i.test(market.slug)) {
-    return unverified(league, "UNVERIFIED_UNKNOWN_TEAM", "canonical MLB slug contains an unknown team code");
+  if (market.slug && canonicalSlug === null && looksLikeCanonicalSlug(league, market.slug)) {
+    return unverified(league, "UNVERIFIED_UNKNOWN_TEAM", `canonical ${league.toUpperCase()} slug contains an unknown participant code`);
   }
-  if (canonicalMlbSlug && (canonicalMlbSlug.betType !== betType || (canonicalMlbSlug.line !== null && line !== null && Math.abs(Math.abs(line) - canonicalMlbSlug.line) > 0.01))) {
-    return unverified(league, "UNVERIFIED_CONFLICTING_METADATA", "structured market type/line conflicts with canonical MLB slug");
+  if (canonicalSlug && (canonicalSlug.betType !== betType || (canonicalSlug.line !== null && line !== null && Math.abs(Math.abs(line) - canonicalSlug.line) > 0.01))) {
+    return unverified(league, "UNVERIFIED_CONFLICTING_METADATA", `structured market type/line conflicts with canonical ${league.toUpperCase()} slug`);
   }
 
   const pair = resolveParticipantPair(market, league);
   if (!pair) {
-    if (canonicalMlbSlug && !hasProviderTeamNames) return eligible(league, betType, line, canonicalMlbSlug.away, canonicalMlbSlug.home);
+    if (canonicalSlug && !hasProviderTeamNames) return eligible(league, betType, line, canonicalSlug.away, canonicalSlug.home);
     return unverified(league, "UNVERIFIED_UNKNOWN_TEAM", "the two contest participants could not be normalized without guessing");
   }
 
-  if (canonicalMlbSlug) {
-    if (canonicalMlbSlug.away !== pair.away || canonicalMlbSlug.home !== pair.home) {
-      return unverified(league, "UNVERIFIED_CONFLICTING_METADATA", `structured teams ${pair.away}@${pair.home} conflict with slug-derived teams ${canonicalMlbSlug.away}@${canonicalMlbSlug.home}`);
+  if (canonicalSlug) {
+    if (canonicalSlug.away !== pair.away || canonicalSlug.home !== pair.home) {
+      return unverified(league, "UNVERIFIED_CONFLICTING_METADATA", `structured teams ${pair.away}@${pair.home} conflict with slug-derived teams ${canonicalSlug.away}@${canonicalSlug.home}`);
     }
   }
 
