@@ -2294,7 +2294,7 @@ export async function pollSportsShadowWallet(
       notional: decision.nextState.totalNotional,
       fillCount: decision.nextState.buyFillCount,
       sellSeen: decision.nextState.sellSeen,
-      league: metadata.league ?? "MLB",
+      league: canonicalLeagueLabel(metadata.league) ?? UNKNOWN_LEAGUE_LABEL,
       scheduledStartAt: metadata.gameStartTime,
       awayTeam: metadata.awayTeam,
       homeTeam: metadata.homeTeam,
