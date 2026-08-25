@@ -141,6 +141,14 @@ export const MAX_PAGES_PER_WALLET = Math.floor(MAX_TRADES_OFFSET / PAGE_SIZE) + 
 export const MAX_PENDING_FILLS_PER_POLL = 500;
 
 /**
+ * RECOVERY: pre-go-live fills are disposed of in bounded batches of this size (one lone,
+ * idempotent single-table UPDATE ... WHERE id IN (...) per flush), so a huge historical
+ * backlog drains without per-row round trips and without any network metadata call. Kept
+ * well under MAX_PENDING_FILLS_PER_POLL so each flush stays a small, fast statement.
+ */
+export const PRE_GO_LIVE_FLUSH_SIZE = 100;
+
+/**
  * ============ SOAK INCIDENT (2026-08-22): PHASE-2 DOWNSTREAM RESERVE ============
  * PROVEN production failure: Phase 1 (trade-page pagination + persistence) consumed the
  * whole poll deadline while catching up a heavy backlog, so the Phase-2 deadline guard
@@ -407,6 +415,16 @@ export function mergePendingFillSlices<T extends { id: string }>(oldestRows: rea
 
 export type PollRepository = {
   hasAnyFillsForWallet(wallet: string): Promise<boolean>;
+  /**
+   * DEGRADED-IDENTITY LIVENESS FIX (2026-08-24 incident): the newest durable `source_ts`
+   * for this wallet -- the "durable frontier". This is restart-safe durable evidence that
+   * does NOT depend on any event key being reliable, so steady-state continuity keeps
+   * working for wallets whose entire durable history uses degraded (tx_hash_ordinal)
+   * identity. `null` when the wallet has no durable fills at all. Optional so existing
+   * test doubles remain valid; when absent, behaviour is exactly as before this fix
+   * (reliable-key overlap only).
+   */
+  getMaxDurableSourceTs?(wallet: string): Promise<number | null>;
   findExistingEventKeys(wallet: string, eventKeys: string[]): Promise<Set<string>>;
   insertRawFill(row: RawFillRow): Promise<InsertFillResult>;
   /**
@@ -464,6 +482,16 @@ export type PollRepository = {
   recordPreEpochSell(fillId: string, shares: number, price: number, notional: number, sourceTs: number): Promise<void>;
   /** Marks a fill COMPLETE with no paired episode mutation — safe as a lone single-table write (see this module's terminal-classification doc comment). */
   markFillComplete(fillId: string): Promise<void>;
+  /**
+   * RECOVERY (pre-go-live backlog drain): bulk form of markFillComplete for the ONE
+   * disposition that is provably decidable from immutable local data alone --
+   * `isEligibleForEpisodeTrigger(sourceTs, goLiveAtMs) === false` (see this module's
+   * terminal-classification doc comment: pre-go-live suppression -> COMPLETE). Bounded
+   * (called with at most PRE_GO_LIVE_FLUSH_SIZE ids) and idempotent (re-running the same
+   * update is a no-op), a lone single-table write requiring no episode mutation and no
+   * network metadata, so a large historical backlog can never consume Gamma/venue budget.
+   */
+  markFillsComplete(fillIds: string[]): Promise<void>;
   /** Marks a fill permanently terminal — its own immutable data will never produce a different outcome on retry. */
   markFillTerminal(fillId: string, status: "TERMINAL_INELIGIBLE" | "TERMINAL_INVALID"): Promise<void>;
   /** Task 12F / P1-H: marks a fill TERMINAL_UNVERIFIED, durably retaining the exact classifier reason code for later audit/accounting -- distinct from TERMINAL_INELIGIBLE (a positive ineligibility determination) since "could not verify" and "determined ineligible" remain different outcomes. */
@@ -522,6 +550,19 @@ export const supabasePollRepository: PollRepository = {
     if (error) throw new Error(error.message);
     return ((data as unknown[] | null)?.length ?? 0) > 0;
   },
+
+  async getMaxDurableSourceTs(wallet) {
+    const { data, error } = await supabaseAdmin
+      .from("sports_shadow_source_fills" as never)
+      .select("source_ts")
+      .eq("wallet", wallet)
+      .order("source_ts", { ascending: false })
+      .limit(1);
+    if (error) throw new Error(error.message);
+    const rows = (data as unknown as { source_ts: number }[] | null) ?? [];
+    return rows.length > 0 ? Number(rows[0]!.source_ts) : null;
+  },
+
 
   async findExistingEventKeys(wallet, eventKeys) {
     if (eventKeys.length === 0) return new Set();
@@ -856,6 +897,15 @@ export const supabasePollRepository: PollRepository = {
     if (error) throw new Error(error.message);
   },
 
+  async markFillsComplete(fillIds) {
+    if (fillIds.length === 0) return;
+    const { error } = await supabaseAdmin
+      .from("sports_shadow_source_fills" as never)
+      .update({ downstream_status: "COMPLETE" } as never)
+      .in("id", fillIds);
+    if (error) throw new Error(error.message);
+  },
+
   async markFillTerminal(fillId, status) {
     const { error } = await supabaseAdmin
       .from("sports_shadow_source_fills" as never)
@@ -948,6 +998,8 @@ export type WalletPollResult = {
   duplicateRows: number;
   invalidRows: number;
   metadataFetchFailures: number;
+  /** RECOVERY (round 2): true when Phase 2 stopped because this cycle's own metadata budget was exhausted (DeadlineExceededError). A bounded, expected stop -- NOT an error, and never a source_unhealthy trigger; remaining fills stay PENDING and retry next poll. */
+  metadataDeadlineReached: boolean;
   ineligibleRows: number;
   unverifiedRows: number;
   /** Task 12F / P1-H: the subset of unverifiedRows classified TERMINAL (see eligibility.ts's classifyUnverifiedDisposition) and marked TERMINAL_UNVERIFIED rather than left PENDING. */
@@ -981,6 +1033,7 @@ function emptyResult(wallet: string): WalletPollResult {
     duplicateRows: 0,
     invalidRows: 0,
     metadataFetchFailures: 0,
+    metadataDeadlineReached: false,
     ineligibleRows: 0,
     unverifiedRows: 0,
     terminalUnverifiedRows: 0,
@@ -1323,6 +1376,45 @@ export async function pollSportsShadowWallet(
   result.sourceCoverageComplete = coverage?.coverageComplete ?? false;
   result.sourceCoverageIncompleteReason = coverage?.incompleteReason ?? null;
 
+  /**
+   * ================= DEGRADED-IDENTITY STEADY-STATE LIVENESS FIX (2026-08-24) =================
+   * PROVEN INCIDENT: every durable fill for the tracked cohort uses degraded
+   * (tx_hash_ordinal) identity. Steady-state's only stopping rule was a RELIABLE-key
+   * overlap, which such history can never produce, so every poll paged to the ceiling,
+   * burned the whole Phase 1 budget, was discarded by the no-stranding rule
+   * (scanConfirmedComplete=false), and reported backlogTruncated forever -- starving
+   * forward ingestion AND Phase 2 while upstream had hundreds of fresh trades.
+   *
+   * FIX (no weakening of dedup, no trust in ordinal keys as global IDs): add a SECOND,
+   * identity-independent stopping rule based on durable, restart-safe evidence -- the
+   * wallet's newest durable `source_ts` (the "durable frontier", read fresh from the DB
+   * before pagination starts, never in-memory state). Once this scan has walked
+   * continuously from "now" back to a fetched fill STRICTLY OLDER than that frontier, it
+   * has provably observed every fill at or after the frontier, so the union with the
+   * previously-durable range (which, by the same induction the reliable-overlap rule
+   * already relied on, was itself continuous back from its own boundary) is gapless.
+   *
+   * - Same-second safety: the comparison is STRICTLY less-than, so every fill sharing the
+   *   frontier's exact second is re-fetched inside this scan and passed through the
+   *   normal dedup path (reliable keys via findExistingEventKeys; degraded tuples via
+   *   reconcileDegradedEvents' durable tuple_prefix counts) -- no silent skip, no
+   *   duplicate downstream application.
+   * - Page/window shifts: the rule is a property of immutable `source_ts` values, not of
+   *   page indexes or ordinal labels, so pagination shifting between polls cannot move it.
+   * - No-stranding preserved: this only ever ENDS a scan that already walked continuously
+   *   from page 0; an interrupted scan is still discarded wholesale, unchanged.
+   */
+  let durableFrontierTs: number | null = null;
+  if (!provingCoverage && d.repo.getMaxDurableSourceTs) {
+    try {
+      durableFrontierTs = await d.repo.getMaxDurableSourceTs(normalizedWallet);
+    } catch {
+      // Best-effort: fall back to reliable-key-only overlap (pre-fix behaviour).
+      durableFrontierTs = null;
+    }
+  }
+
+
   // Task 13G / P1-Q (Codex re-review): bootstrap and steady-state share the SAME page
   // ceiling. Bootstrap typically stops after just one page in the common case (see the
   // go-live-boundary-crossing check below), but must be allowed to walk as far as
@@ -1334,6 +1426,8 @@ export async function pollSportsShadowWallet(
   let overlapFound = false;
   let naturalEnd = false;
   let deadlineExceeded = false;
+  // See the frontier stop's same-second/page-boundary guard below.
+  let frontierStopArmed = false;
   try {
     for (let page = 0; page < maxPagesThisScan; page += 1) {
       const offset = page * PAGE_SIZE;
@@ -1438,9 +1532,8 @@ export async function pollSportsShadowWallet(
       // early, leaving an older, not-yet-covered sibling of a colliding tuple
       // outside this poll's fetched range. See the window-shift audit above
       // reconcileDegradedEvents for the full reasoning.
-      const pageReliableKeys = normalizeSourceEvents(rows, normalizedWallet)
-        .filter((e) => !e.identityDegraded)
-        .map((e) => e.eventKey);
+      const pageEvents = normalizeSourceEvents(rows, normalizedWallet);
+      const pageReliableKeys = pageEvents.filter((e) => !e.identityDegraded).map((e) => e.eventKey);
       if (pageReliableKeys.length > 0) {
         const pageExisting = await d.repo.findExistingEventKeys(normalizedWallet, pageReliableKeys);
         if (pageExisting.size > 0) {
@@ -1448,6 +1541,28 @@ export async function pollSportsShadowWallet(
           break;
         }
       }
+      // Degraded-identity continuity (2026-08-24 liveness fix -- see durableFrontierTs
+      // above): strictly-older-than the durable frontier proves continuous coverage back
+      // into already-durable territory WITHOUT trusting any ordinal key as a global id.
+      //
+      // SAME-SECOND / PAGE-BOUNDARY GUARD: degraded (tx_hash_ordinal) reconciliation is
+      // COUNT-based per economic tuple, so it is only correct when every occurrence of a
+      // tuple is inside the same scan. Occurrences sharing the frontier's exact second can
+      // legitimately straddle a provider page boundary, so when this page still carries a
+      // degraded event AT the frontier second, the scan fetches ONE more page before
+      // stopping -- guaranteeing those siblings are observed together instead of one of
+      // them being silently reconciled away as an already-durable duplicate.
+      if (durableFrontierTs !== null && pageEvents.some((e) => e.sourceTs < durableFrontierTs!)) {
+        const degradedAtFrontier = pageEvents.some((e) => e.identityDegraded && e.sourceTs === durableFrontierTs);
+        if (degradedAtFrontier && !frontierStopArmed) {
+          frontierStopArmed = true;
+        } else {
+          overlapFound = true;
+          break;
+        }
+      }
+
+
       if (rows.length < PAGE_SIZE) {
         naturalEnd = true;
         break;
@@ -1805,7 +1920,44 @@ export async function pollSportsShadowWallet(
   const positionCache = new Map<string, EpisodeCacheEntry | null>();
   const metadataCache = new Map<string, SourceMarketMetadata>();
 
+  /**
+   * RECOVERY (structural backlog drain). The captured production failure was:
+   *   "fetchSourceMarketMetadata failed: gamma-api.polymarket.com reservation RPC aborted:
+   *    caller deadline reached mid-request"
+   * Pre-go-live suppression used to be evaluated AFTER the metadata fetch, so ~33k
+   * historical PENDING rows each had to obtain Gamma metadata before they could be disposed
+   * of -- the first reservation consumed the whole Phase 2 budget and every remaining row
+   * stayed PENDING forever (zero durable progress, every cycle).
+   *
+   * `isEligibleForEpisodeTrigger(sourceTs, goLiveAtMs) === false` is decidable from
+   * immutable local data ALONE (this fill's own sourceTs vs the fixed durable goLiveAtMs --
+   * see isEligibleForEpisodeTrigger and this module's terminal-classification doc comment,
+   * where pre-go-live suppression is canonically COMPLETE). It needs no metadata, so it is
+   * hoisted ahead of every network call and batched into bounded, idempotent flushes.
+   */
+  const preGoLiveBuffer: string[] = [];
+  const flushPreGoLive = async (): Promise<void> => {
+    if (preGoLiveBuffer.length === 0) return;
+    const batch = preGoLiveBuffer.splice(0, preGoLiveBuffer.length);
+    try {
+      await d.repo.markFillsComplete(batch);
+    } catch {
+      // Best-effort: these fills simply stay PENDING and receive the identical (still
+      // false) decision next poll -- no stranding, no fabricated disposition.
+    }
+  };
+
   for (const fill of pendingFills) {
+    // RECOVERY fast path: costs no network and no per-row round trip, so it is evaluated
+    // BEFORE the deadline/lease checks below -- a large historical backlog can therefore
+    // never block the post-go-live rows behind it, and the drain still makes bounded
+    // durable progress in a cycle whose network budget is already exhausted.
+    if (!isEligibleForEpisodeTrigger(fill.sourceTs, goLiveAtMs)) {
+      result.suppressedPreGoLive += 1;
+      preGoLiveBuffer.push(fill.id);
+      if (preGoLiveBuffer.length >= PRE_GO_LIVE_FLUSH_SIZE) await flushPreGoLive();
+      continue;
+    }
     // Task 13F: checked BEFORE every iteration's own (up to 10s) metadata fetch -- once
     // the deadline is reached, the remaining batch is abandoned exactly like a lease loss
     // below: every unprocessed fill simply stays PENDING, re-evaluated identically next
@@ -1847,6 +1999,22 @@ export async function pollSportsShadowWallet(
         // fetchSourceMarketMetadata's own doc comment).
         metadata = await d.fetchSourceMarketMetadata(fill.conditionId, {}, deadlineAtMs);
       } catch (err) {
+        /**
+         * RECOVERY (round 2). A DeadlineExceededError here is NOT a failure of this wallet's
+         * poll -- it is this cycle's own bounded Phase 2 budget running out, exactly like the
+         * `d.now() >= deadlineAtMs` breaks above/below. Treating it as `result.error` made a
+         * routine budget exhaustion surface as a wallet-level error and raise the
+         * `source_unhealthy` WARNING alert (observed in production canary 2), while `continue`
+         * kept re-attempting a host whose deadline had already passed for every remaining row.
+         * Break instead -- matching the established convention in observation.server.ts and
+         * worker.server.ts -- so remaining fills simply stay PENDING and are retried, byte
+         * identically, by the next cycle. A genuine (non-deadline) metadata failure keeps its
+         * original error/metadataFetchFailures + continue semantics unchanged.
+         */
+        if (err instanceof DeadlineExceededError) {
+          result.metadataDeadlineReached = true;
+          break; // remaining fills stay PENDING, retried next poll
+        }
         result.error = result.error ?? `fetchSourceMarketMetadata failed: ${err instanceof Error ? err.message : "unknown error"}`;
         result.metadataFetchFailures += 1;
         continue; // stays PENDING
@@ -1908,18 +2076,9 @@ export async function pollSportsShadowWallet(
       detectedAt: detectedAtMs,
     };
 
-    if (!isEligibleForEpisodeTrigger(fill.sourceTs, goLiveAtMs)) {
-      result.suppressedPreGoLive += 1;
-      try {
-        await d.repo.markFillComplete(fill.id);
-      } catch {
-        // Best-effort; stays PENDING and is re-evaluated identically next poll. Task 12E/P1-F:
-        // this stays safe under retry because the decision depends ONLY on this fill's own
-        // immutable sourceTs and the fixed, durable goLiveAtMs -- never on wallet-history
-        // state -- so it is guaranteed to still be false next time.
-      }
-      continue;
-    }
+    // RECOVERY: pre-go-live suppression now happens at the TOP of this loop (see the
+    // fast-path drain there) -- BEFORE any metadata fetch -- so historical rows can no
+    // longer consume Gamma/venue network budget. Nothing is decided here anymore.
 
     const positionKey = `${normalizedWallet}:${fill.conditionId}:${fill.asset}`;
     let cacheEntry: EpisodeCacheEntry | null;
@@ -2135,6 +2294,14 @@ export async function pollSportsShadowWallet(
       // stays PENDING
     }
   }
+
+  // RECOVERY: final flush of the pre-go-live drain buffer. Runs after every loop exit path
+  // (normal end, deadline break, lease-loss break) because it is a lone, bounded,
+  // idempotent single-table write of a disposition already decided from immutable local
+  // data -- skipping it would strand the whole batch as PENDING again, which is exactly the
+  // stall this recovery fixes. A failure is best-effort: those fills simply stay PENDING and
+  // get the identical decision next poll.
+  await flushPreGoLive();
 
   return result;
 }

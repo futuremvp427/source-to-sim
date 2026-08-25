@@ -165,11 +165,11 @@ export const supabaseEpochRepository: EpochRepository = {
 };
 
 /**
- * Ensures a current epoch exists and matches the CURRENT code's versions, creating a
- * new one if none exists yet or if `requiresNewEpoch` detects drift (a version bump
- * shipped since the last-known current epoch). Called once per source-lane cycle
- * (worker.server.ts) -- cheap (one SELECT in the common case, no write at all when the
- * existing epoch already matches).
+ * Ensures a current epoch exists and matches the CURRENT runtime identity, creating a
+ * new one whenever semantic config/versions, deployed git SHA, or prospective go-live
+ * boundary changes. The SHA/go-live checks are intentionally explicit rather than
+ * folded into computeConfigHash: configHash remains the semantic strategy fingerprint,
+ * while deployment/boundary identity remains visible in its dedicated durable columns.
  */
 export async function ensureCurrentEpoch(
   wallets: readonly string[],
@@ -180,16 +180,23 @@ export async function ensureCurrentEpoch(
   const versions: ExperimentEpochVersions = currentEpochVersions(PMUS_FEE_MODEL_VERSION, KALSHI_FEE_MODEL_VERSION);
   const existing = await repo.getCurrentEpoch();
   const configHash = await computeConfigHash(wallets, versions);
+  const goLiveAtIso = new Date(goLiveAtMs).toISOString();
 
-  if (existing && !requiresNewEpoch(existing.versions, versions) && existing.configHash === configHash) {
+  if (
+    existing &&
+    !requiresNewEpoch(existing.versions, versions) &&
+    existing.configHash === configHash &&
+    existing.gitSha === gitSha &&
+    existing.goLiveAtIso === goLiveAtIso
+  ) {
     return existing;
   }
 
-  // No current epoch, OR the current one's config/versions have drifted from what the
-  // running code now implements -- start a fresh one rather than silently blending
-  // pre-change and post-change results into the same epoch (Part 17's core rule).
+  // No current epoch, OR semantic config/version/deployment/boundary identity drifted.
+  // Start a fresh prospective epoch rather than silently blending results across either
+  // a code revision or a changed go-live boundary.
   return repo.startNewEpoch({
-    goLiveAtIso: new Date(goLiveAtMs).toISOString(),
+    goLiveAtIso,
     walletCohort: wallets,
     gitSha,
     configHash,

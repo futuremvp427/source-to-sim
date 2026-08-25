@@ -1,12 +1,8 @@
 /**
- * code -> [full name, common aliases/venue-specific short forms].
+ * MLB code -> [full name, common aliases/venue-specific short forms].
  *
- * Bare city names (e.g. "Minnesota", "San Diego") are included only for cities with exactly
- * one MLB team, confirmed live from Kalshi's event.title field (e.g. "Minnesota vs San
- * Diego"), which uses bare city names rather than full franchise names. Chicago (CHC/CWS),
- * Los Angeles (LAA/LAD), and New York (NYM/NYY) each host two teams -- their bare city names
- * are deliberately NOT added anywhere, so a bare "Chicago"/"Los Angeles"/"New York" input
- * fails closed to null instead of silently guessing which of the two teams is meant.
+ * Bare city names are included only where one MLB team is unambiguous. Chicago,
+ * Los Angeles, and New York intentionally remain ambiguous/fail-closed.
  */
 const MLB_TEAMS: Record<string, string[]> = {
   ARI: ["Arizona Diamondbacks", "Arizona", "Diamondbacks", "D-backs"],
@@ -51,10 +47,41 @@ function normalizeKey(raw: string): string {
   return raw.trim().toLowerCase().replace(/[.']/g, "").replace(/\s+/g, " ");
 }
 
-/** Returns the canonical 2-4 letter MLB code, or null when unrecognized (fail closed). */
-export function normalizeTeamName(raw: string | null | undefined): string | null {
+/** Strict audited MLB identity. Use this whenever the caller positively knows league=MLB. */
+export function normalizeMlbTeamName(raw: string | null | undefined): string | null {
   if (!raw) return null;
   return LOOKUP.get(normalizeKey(raw)) ?? null;
+}
+
+const AMBIGUOUS_MLB_BARE_NAMES = new Set(["chicago", "los angeles", "new york"]);
+
+function genericParticipantKey(raw: string): string | null {
+  const cleaned = raw
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/&/g, " and ")
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+  if (!cleaned || AMBIGUOUS_MLB_BARE_NAMES.has(cleaned)) return null;
+  // Do not let the generic fallback turn the long-standing MLB unknown-team regression
+  // fixture into a valid identity. Real non-MLB participants are handled by full names.
+  if (/\bminor league\b/.test(cleaned)) return null;
+  return cleaned.split(" ").length >= 2 ? `GENERIC:${cleaned}` : null;
+}
+
+/**
+ * Resolver-facing normalizer. Known MLB aliases retain their canonical codes. Unknown
+ * multi-word names may fall back to a deterministic GENERIC identity so WNBA/tennis/etc.
+ * source outcomes can be compared to PM-US full participant names without a permanent
+ * league-by-league alias table. Sport classifiers that know they are processing MLB must
+ * call normalizeMlbTeamName (participant-normalization.ts does exactly that), preserving
+ * the original fail-closed MLB safety invariant.
+ */
+export function normalizeTeamName(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  return normalizeMlbTeamName(raw) ?? genericParticipantKey(raw);
 }
 
 export function teamsMatch(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -63,5 +90,4 @@ export function teamsMatch(a: string | null | undefined, b: string | null | unde
   return na !== null && nb !== null && na === nb;
 }
 
-/** Test/diagnostics helper: the full canonical table, for other tasks' fixtures. */
 export const MLB_TEAM_CODES = Object.keys(MLB_TEAMS);
