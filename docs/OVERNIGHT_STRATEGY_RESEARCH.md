@@ -52,16 +52,23 @@ But it is **not yet proven executable**. The remaining risk is almost entirely m
 - prices can move while the basket is being assembled;
 - the fee schedule can vary by market, so a forward scanner must read/verify applicable fees rather than assume the generic formula forever;
 - mutually-exclusive language and complete bucket coverage must be verified for each event before trading;
-- liquidity/capital efficiency may be poor because roughly ~$496-$499 of capital is tied to a $1-$4 gross edge per 100-contract six-leg basket;
 - quote precision and API latency can erase the edge quickly.
 
-Kalshi's current public weather pages explicitly label these daily-high events as mutually exclusive, and the current general fee documentation says taker fees are based on `0.07 × contracts × P × (1-P)` rounded up, although Kalshi warns that some markets can have different fee schedules. The Aug. 14, 2026 settlement-source transition from NWS to The Weather Company changes settlement provenance but does not alter the basket logic if the six buckets remain exhaustive and exactly one resolves YES.
+### Live-depth falsification and collateral-return correction
 
-**Next gate:** prospective, read-only collection of all six live order-book depths and timestamps, then atomicity-aware paper execution simulation. Require full six-leg fillability at the same moment and positive profit after actual market-specific fees. If this fails, reject the strategy. Do not infer capacity from historical candles.
+A current read-only six-leg depth scan materially reduced confidence in immediate executability. Chicago and San Francisco had complete six-leg depth at the scan snapshot but were **negative after taker fees at every tested size**. Chicago ranged from -$0.07 at 1 contract/leg to -$0.77 at 25/leg, with 50/100 not fully fillable. San Francisco ranged from -$0.03 at 1/leg to -$12.73 at 100/leg. NYC, Los Angeles, and Miami each lacked a YES bid on at least one bucket, so a complete NO basket was not available. This means historical candle edge is not enough; the live market can be efficiently priced or incompletely quoted.
+
+A separate Kalshi mechanism changes the capital-efficiency analysis: **Collateral Return** can return guaranteed collateral early on mutually exclusive NO positions. Kalshi documents that when `netting_enabled` is set for an event, guaranteed payout across hedged mutually-exclusive NO positions is returned to available cash rather than requiring the full gross position cost to remain tied up. Current live weather events expose `mutually_exclusive=true` and `collateral_return_type=MECNET`, consistent with this mechanism. Therefore the earlier statement that roughly $496-$499 must remain tied until settlement was too conservative. However, this does **not** create an executable profit by itself and does not solve partial-fill or quote-movement risk. The event's netting choice is locked from the first order, and positions receiving collateral return can have selling restrictions, so the simulator must model this explicitly.
+
+The practical implication is: structural NO baskets may have much better capital efficiency than gross notional suggests **if** a positive complete basket exists and collateral return is enabled correctly before the first order. The decisive bottleneck remains simultaneous profitable all-leg depth, not weather outcome risk.
+
+Kalshi's current public weather pages explicitly label these daily-high events as mutually exclusive, and current fee documentation says fees depend on contract price and can vary by market. The Aug. 14, 2026 settlement-source transition from NWS to The Weather Company changes settlement provenance but does not alter the basket logic if the bucket set remains exhaustive and exactly one resolves YES.
+
+**Next gate:** repeated prospective read-only collection of all six live order-book depths, event metadata, fee schedule, and timestamps; then a sequential-fill paper simulator with explicit leg-risk and collateral-return accounting. Require a complete basket to remain positive after actual fees and realistic request-to-request price movement. If repeated prospective scans never show positive fully fillable baskets, reject the historical arb as non-executable.
 
 ## Current ranking of research families (not deployment ranking)
 
-1. **Exhaustive-bucket NO basket / structural arb** — strongest candidate now. 49/50 historical events had an after-fee displayed edge; 35/50 survived +2c-per-leg stress. Outcome risk can be mechanically hedged, but fill/depth/leg risk is still unproven and is the decisive next test.
+1. **Exhaustive-bucket NO basket / structural arb** — strongest hypothesis structurally because completed baskets remove weather outcome risk; 49/50 historical events had an after-fee displayed edge and 35/50 survived +2c-per-leg stress, but the first live depth snapshot showed no profitable complete basket. Keep at #1 only as a prospective microstructure test, not a deployment candidate.
 2. **Maskache2 mechanism** — 76.1% event-positive endpoint reconstruction and broad price-band profitability; still needs exact lifecycle/entry-timing reconstruction and target-venue replay.
 3. **ColdMath segmented mechanism** — strong official all-time Weather ranking and highly segmented behavior; likely multiple sub-strategies, not one price rule.
 4. **BeefSlayer asymmetric value** — officially top-tier Weather profit and profitable reconstructed cheap-tail cohorts, but lower win rate and meaningful loss tail.
@@ -71,9 +78,10 @@ Kalshi's current public weather pages explicitly label these daily-high events a
 ## Failure-mode checklist still open
 
 - For structural baskets, prospectively verify all-leg order-book **depth**, not just best quotes, and model sequential/partial fills.
+- Model Kalshi Collateral Return / `netting_enabled` explicitly, including first-order lock-in and post-return selling constraints.
 - Verify market-specific fee schedule on every candidate basket.
 - Fail closed unless every bucket is present, mutually exclusive/exhaustive, same event/date/source, and exactly one YES is possible.
-- Quantify capital lockup, settlement time, and annualized return, not just dollars per basket.
+- Quantify capital lockup using net collateral after collateral return, settlement time, and annualized return.
 - Reconcile `/closed-positions.realizedPnl` against lifecycle cash flows before trusting wallet-derived ROI.
 - Reconstruct wallet entry/exit lifecycle rather than BUY-only inference.
 - Determine maker vs taker and whether rebates are material.
@@ -83,7 +91,7 @@ Kalshi's current public weather pages explicitly label these daily-high events a
 
 ## Running next
 
-- Extend structural-basket stress by city/date and stronger execution assumptions.
-- Design/read-only prospective six-leg BBO+depth collector and paper fill simulator; no authenticated preview or order submission.
+- Repeat live structural-basket scans to estimate how often complete profitable depth actually appears.
+- Add collateral-return-aware capital accounting and sequential-fill leg-risk simulation.
 - Continue lifecycle reconstruction of Maskache2/ColdMath/BeefSlayer as fallback families.
 - The production application is untouched and `LIVE_EXECUTION_IMPLEMENTED=false` remains unchanged.
