@@ -1,0 +1,28 @@
+#!/usr/bin/env node
+
+/** Research-only event-net decomposition of badatmath high-temperature closed positions. */
+import { mkdir, writeFile } from "node:fs/promises";
+const DATA="https://data-api.polymarket.com";
+const ADDRESS="0x8fbd7cf5f806f563080864694415829f7229a959";
+const LIMIT=Number(process.env.BADATMATH_CLOSED_LIMIT??"10000");
+const LOOKBACK=Number(process.env.BADATMATH_LOOKBACK_DAYS??"180");
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function get(url){for(let i=0;i<5;i++){const r=await fetch(url,{headers:{"User-Agent":"source-to-sim-weather-research/1.0"}});if(r.ok)return r.json();if(![429,500,502,503,504].includes(r.status))throw new Error(`${r.status} ${await r.text()}`);await sleep(Math.min(5000,400*2**i));}throw new Error("fetch failed");}
+async function positions(){const out=[];for(let o=0;o<LIMIT;o+=50){const q=new URLSearchParams({user:ADDRESS,limit:"50",offset:String(o),sortBy:"TIMESTAMP",sortDirection:"DESC"});const rows=await get(`${DATA}/closed-positions?${q}`);if(!Array.isArray(rows)||!rows.length)break;out.push(...rows);if(rows.length<50)break;await sleep(60);}return out;}
+const sum=(xs,f)=>xs.reduce((a,x)=>a+f(x),0);const pct=(n,d)=>d?100*n/d:null;const fmt=x=>x==null?"n/a":`${x.toFixed(1)}%`;const money=x=>`$${x.toFixed(2)}`;
+function weather(p){return /highest temperature/i.test(p.title??"");}
+function eventKey(p){return p.eventSlug||p.conditionId;}
+function band(x){if(x<.05)return"<5c";if(x<.10)return"5-10c";if(x<.20)return"10-20c";if(x<=.55)return"20-55c";if(x<.90)return"55-90c";return">=90c";}
+function summarizeEvents(rows){const m=new Map();for(const p of rows){const k=eventKey(p);const a=m.get(k)??[];a.push(p);m.set(k,a);}return [...m.entries()].map(([event,ps])=>{const pnl=sum(ps,p=>Number(p.realizedPnl)||0);const cost=sum(ps,p=>(Number(p.avgPrice)||0)*(Number(p.totalBought)||0));const posWins=ps.filter(p=>(Number(p.realizedPnl)||0)>0).length;const distinctBands=new Set(ps.map(p=>band(Number(p.avgPrice)||0))).size;return{event,positions:ps.length,pnl,cost,roi:cost?100*pnl/cost:null,posWins,distinctBands,minPrice:Math.min(...ps.map(p=>Number(p.avgPrice)||1)),maxPrice:Math.max(...ps.map(p=>Number(p.avgPrice)||0)),titles:ps.map(p=>p.title),outcomes:ps.map(p=>p.outcome)};});}
+function cohort(events,pred){const xs=events.filter(pred);const wins=xs.filter(e=>e.pnl>0);const losses=xs.filter(e=>e.pnl<0);const pnl=sum(xs,e=>e.pnl),cost=sum(xs,e=>e.cost);const gw=sum(wins,e=>e.pnl),gl=-sum(losses,e=>e.pnl);return{events:xs.length,winRate:pct(wins.length,wins.length+losses.length),pnl,roi:cost?100*pnl/cost:null,pf:gl?gw/gl:null,worst:xs.length?Math.min(...xs.map(e=>e.pnl)):null,best:xs.length?Math.max(...xs.map(e=>e.pnl)):null};}
+async function main(){const cutoff=Date.now()-LOOKBACK*86400_000;const raw=await positions();const rows=raw.filter(weather).filter(p=>{const t=(Number(p.timestamp)||0)*1000||Date.parse(p.endDate??"");return !Number.isFinite(t)||t>=cutoff;}).filter(p=>Number.isFinite(Number(p.realizedPnl)));const events=summarizeEvents(rows);const cohorts=[
+["1 position",e=>e.positions===1],["2 positions",e=>e.positions===2],["3-5 positions",e=>e.positions>=3&&e.positions<=5],["6+ positions",e=>e.positions>=6],
+["min avgPrice <5c",e=>e.minPrice<.05],["all positions <=20c",e=>e.maxPrice<=.20],["has 55-90c",e=>e.maxPrice>.55&&e.maxPrice<.90],["has >=90c",e=>e.maxPrice>=.90]
+].map(([name,p])=>({name,...cohort(events,p)}));
+const single=events.filter(e=>e.positions===1).sort((a,b)=>b.pnl-a.pnl).slice(0,20);
+const multi=events.filter(e=>e.positions>=2).sort((a,b)=>b.pnl-a.pnl).slice(0,20);
+const lines=["# badatmath Event-Net Weather Decomposition","",`Lookback: ${LOOKBACK} days. High-temperature closed positions only.`,"This specifically tests whether the extraordinary wallet-level results disappear after netting all bucket positions inside each daily-temperature event.","","| Cohort | Events | Win rate | Net P/L | Cost-proxy ROI | Profit factor | Worst | Best |","|---|---:|---:|---:|---:|---:|---:|---:|"];
+for(const c of cohorts)lines.push(`| ${c.name} | ${c.events} | ${fmt(c.winRate)} | ${money(c.pnl)} | ${fmt(c.roi)} | ${c.pf==null?"n/a":c.pf.toFixed(2)}x | ${c.worst==null?"n/a":money(c.worst)} | ${c.best==null?"n/a":money(c.best)} |`);
+lines.push("",`Total positions: **${rows.length}**; independent events: **${events.length}**.`,"",`Single-position events: **${events.filter(e=>e.positions===1).length}**; multi-position events: **${events.filter(e=>e.positions>=2).length}**.`,"","## Guardrails","","- `avgPrice × totalBought` is only a cost proxy; realizedPnl is from Polymarket's public closed-position API.","- Event-net aggregation is required before interpreting a bucket-level win rate because mutually exclusive buckets in one event are correlated.","- Even a robust source-wallet pattern is not transferable to a US venue until contemporaneous target prices, settlement rules, fees, and fillability are verified.","- No credentials, orders, or live trading are used.");
+await mkdir("research-output",{recursive:true});await writeFile("research-output/badatmath-event-net.json",JSON.stringify({generatedAt:new Date().toISOString(),rows:rows.length,events:events.length,cohorts,single,multi},null,2)+"\n");await writeFile("research-output/badatmath-event-net.md",lines.join("\n")+"\n");console.log(lines.join("\n"));}
+main().catch(e=>{console.error(e.stack||e);process.exitCode=1;});

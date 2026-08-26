@@ -175,3 +175,188 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - First paper position: PENDING.
 - Dashboard verification: PENDING.
 - Live execution unchanged: `LIVE_EXECUTION_IMPLEMENTED=false`.
+
+### WEATHER-US TRANSLATION RESEARCH
+
+- Status: FEATURE BRANCH ONLY; NOT DEPLOYED; RESEARCH/PAPER GATE ONLY.
+- Branch: `weather-us-translation-research`, based from deployed/main SHA `aafe7a5f0966abb4a30de07b96bd1932ad8d356f`.
+- Goal: test whether selected international weather-trader signals can be translated onto US venues without pretending the contracts are economically identical.
+- First audited corridors only: Los Angeles/KLAX, San Francisco/KSFO, Miami/KMIA.
+- NYC and Chicago are intentionally excluded because the observed international and PM-US products use different stations. All other cities fail closed until separately audited.
+- Translation candidacy requires an open US market plus same audited city, same calendar date, and exact same temperature threshold/range shape, numbers, and units.
+- A translation candidate is explicitly `settlementEquivalence=UNPROVEN` and `previewEligible=false`.
+- Existing `EXACT_MATCH` authenticated-preview gate is unchanged. `TRANSLATION_CANDIDATE` is rejected by `decidePreviewAction` and cannot sign or submit an order.
+- Added: `src/lib/pmus/weather-translation.ts` and `src/lib/pmus/weather-translation.test.ts`.
+- Regression coverage: LA/SF/Miami positive research candidates; NYC/Chicago/unverified cities rejected; wrong date, bucket, units, closed markets rejected; missing threshold remains UNVERIFIED; multiple candidates are preserved rather than silently selected; translation status cannot unlock authenticated preview.
+- Next evidence gate before any translated paper-copy activation: historical settlement-agreement replay for KLAX/KSFO/KMIA and source-trader trade replay against contemporaneous PM-US/Kalshi prices.
+- Production Sports Shadow is intentionally untouched by this branch so the currently aligned deployment/runtime SHA is not disturbed and no Lovable credits are required for this research change.
+- Live execution unchanged: `LIVE_EXECUTION_IMPLEMENTED=false`.
+
+### WEATHER-TRANSLATION-1 Settlement-source equivalence
+
+- Status: DIVERGENCE OBSERVED; RESEARCH-ONLY; NO PROMOTION.
+- Historical replay: 9 independent target-linked station/date observations across KLAX, KSFO, and KMIA; 8 agreements and 1 divergence (88.9% observed agreement in this small search-selected sample).
+- Decisive counterexample: KSFO on 2026-07-03. The international Wunderground-based 68-69 F contract resolved YES, while NWS CLISFO reported a 70 F daily maximum; a PM-US-style 68-69 F bucket therefore resolves NO.
+- Conclusion: same-airport, same-date, same-bucket translation is not economically exact and must not promote to production `EXACT_MATCH` or authenticated-preview eligibility.
+- Added deterministic evaluator/tests: `src/lib/pmus/weather-settlement-equivalence.ts` and `src/lib/pmus/weather-settlement-equivalence.test.ts`.
+- Evidence report: `docs/WEATHER_TRANSLATION_HISTORICAL_EVIDENCE.md`.
+- Same-source-entry-price BUY/hold sensitivity for six observed BUY examples totals -$75.12751, but this is explicitly not executable PM-US P&L because contemporaneous historical PM-US BBO/quote snapshots were not recovered and exits/hedges are incomplete.
+- Historical executable US counterfactual P/L remains UNVERIFIED. Future work may recover or prospectively collect contemporaneous target-venue quotes, but it cannot erase the observed settlement-source divergence.
+- No production deployment was performed; Lovable was not used; live execution remains disabled.
+
+### WEATHER-STRATEGY-1 Dead-bucket same-day lag
+
+- Status: FALSIFIED AS A PRACTICAL PRICED EDGE IN THE TESTED WINDOW; DO NOT BUILD/DEPLOY.
+- Research-only workflow run: `32926865872` (reconfirmed in run `32927058789`).
+- Window: 2026-07-20 through 2026-08-24, 36 days each for KLAX, KSFO, KMIA.
+- Signal: timestamped station maximum had already exceeded a bounded Kalshi daily-high bucket ceiling by at least 2 F; candidate NO quote had to appear within 10 minutes.
+- Outcome correctness: 180/180 candidate buckets ultimately resolved NO; 0 false-dead signals.
+- Price reality: 0 opportunities had inferred executable NO ask <= 75c, 80c, 85c, 90c, or 95c. Minimum observed NO ask was 96c; median was 100c.
+- Conclusion: the market repriced already-dead buckets too quickly for the simple stale-price hypothesis to provide a meaningful edge after fees. A 100% outcome hit rate here is not a profitable 100% trading strategy because there were no adequately priced entries.
+- Implementation: `scripts/research-weather-lag.mjs` plus `.github/workflows/weather-lag-research.yml`.
+- Public historical data only; no credentials, previews, orders, Lovable, or live trading used.
+
+### WEATHER-STRATEGY-2 Late-day max-stagnation train/OOS
+
+- Status: FAILED PREREGISTERED TRAINING GATE; OOS NOT ENTERED; DO NOT PARAMETER-TUNE INTO A PASS.
+- Research-only workflow run: `32927058789`.
+- Candidate rows: 358 total; 232 training rows (2026-07-20 through 2026-08-11) and 126 reserved OOS rows (2026-08-12 through 2026-08-24).
+- Tested fixed grid: local decision hour 15/16/17/18; observed maximum unchanged for 60/120/180 minutes; maximum YES ask 60/70/75/80/85/90c.
+- Training acceptance required at least 15 trades, >=75% win rate, and positive after-fee P/L.
+- Result: no rule met the preregistered training minimums. Therefore no rule was frozen and the OOS set was not touched for strategy selection.
+- OOS acceptance status: FAIL / NOT ENTERED.
+- Some low-win-rate cheap-YES rules had positive training expectancy because occasional wins paid many losses, but they do not satisfy the requested high-win-rate objective and are not evidence for a >=75% strategy.
+- Implementation: `scripts/research-weather-late-day.mjs`; workflow updated at `35d77f29be9f7ca500ae9db0f631462ec5db4000`.
+- Anti-overfitting rule: do not keep changing these parameters after seeing this result. The next and final serious weather hypothesis, if pursued, is a separate probabilistic NBM-vs-market mispricing test with its own frozen train/OOS protocol.
+- No production deployment was performed; Sports Shadow was untouched; Lovable/Codex credits were not used; `LIVE_EXECUTION_IMPLEMENTED=false` remains unchanged.
+
+### WEATHER-STRATEGY-3 Previous-day NBM probabilistic mispricing
+
+- Status: FAILED OUT-OF-SAMPLE; DO NOT BUILD/DEPLOY OR RETUNE ON THE SAME OOS WINDOW.
+- Primary workflow run: `32927555964`.
+- Protocol: previous-day NOAA NBM v5 NBP 13Z forecast, FHR35/UTC00 daytime maximum; model probability from QMD `TXNMN` mean and `TXNSD` standard deviation; first Kalshi public 1-minute BBO at/after 16:00Z on the forecast-run date; at most one selected trade per station-day.
+- Evidence: 594 market rows with archived forecast + contemporaneous quote; 104 independent settled station-day events.
+- Baseline top-bucket accuracy: NBM model 41.3%; Kalshi market snapshot 49.0%.
+- TRAIN-selected frozen rule: model confidence >=80%, model edge over executable ask >=10 percentage points, ask <=80c.
+- TRAIN result: 20 trades, 18 wins / 2 losses = 90.0% win rate; +$325.27 after-fee P&L; +22.1% ROI on cost using 100-contract research sizing.
+- OOS result on untouched 2026-08-12 through 2026-08-24 dates: 10 trades, 7 wins / 3 losses = 70.0% win rate; -$39.83 after-fee P&L; -5.4% ROI.
+- Acceptance requirement was >=75% OOS win rate plus positive OOS P&L/ROI and minimum OOS count. Result: FAIL.
+- Interpretation: the attractive 90% training result did not survive unseen data. This is evidence of instability/overfit for the tested rule, not evidence of a proven edge.
+- Reproducibility: `scripts/research-weather-nbm.mjs`, `.github/workflows/weather-lag-research.yml`, and `docs/WEATHER_STRATEGY_FALSIFICATION.md`.
+- Hard stop for this research family: do not loosen thresholds, switch model parameters, or mine the same OOS period to force a pass. A future weather project would require a genuinely new hypothesis and a new untouched holdout period.
+- No production deployment was performed; Sports Shadow was untouched; no Lovable/Codex credits or trading credentials were used; `LIVE_EXECUTION_IMPLEMENTED=false` remains unchanged.
+
+### WEATHER-STRATEGY-4 Public profitable-wallet archetypes
+
+- Status: REVERSE ENGINEERING COMPLETE FOR FIRST 90-DAY PASS; NO STRATEGY PROMOTED YET.
+- Research workflow: `32928556191`; public Polymarket Data API plus IEM station observations; no credentials/orders/Lovable/Codex credits.
+- HighTempTation recent sample: 2,274 weather markets; median first BUY 96.0c; 96.7% of BUYs above 55c. Of 225 usable same-day U.S. station rows, 210 (93.3%) were already `DEAD_HIGH` when the first BUY occurred; median first-BUY time ~13.87 local. Interpretation: primarily near-certainty / information-reaction carry, not a day-ahead forecast edge.
+- Weatherstappen recent sample: 865 weather markets; median first BUY 98.0c; 94.3% of BUYs above 55c. Of 31 usable same-day U.S. rows, 24 (77.4%) were `DEAD_HIGH`. Same broad certainty/carry archetype.
+- BeefSlayer recent sample: 394 weather markets; median first BUY 8.9c; 62.3% of BUYs below 20c. Of 100 usable same-day U.S. rows, only 1 was `DEAD_HIGH`; 66 were below the target bucket and 30 already inside it. Interpretation: forecast/tail-value archetype with genuine outcome risk, materially different from HighTempTation.
+- ColdMath recent sample: 403 weather markets; median first BUY 2.2c; 62.0% of BUYs below 20c; 843 BUY / 0 SELL rows. Usable U.S. first-BUY median ~04:32 local and 8/12 were below the target bucket. Interpretation: early forecast-first/tail-value hold-to-resolution archetype.
+- Maskache2 recent sample: 1,312 weather markets; median first BUY 12.6c; 56.8% of BUYs below 20c. Of 205 usable U.S. rows, 154 (75.1%) were below the target bucket and only 2 were `DEAD_HIGH`. Interpretation: predictive/tail-value archetype.
+- JoeTheMeteorologist recent sample: 267 weather markets; median first BUY 7.0c; 72.5% of BUYs below 20c; only 5 usable U.S. same-day rows, too small for a station-state conclusion.
+- badatmath recent sample: 1,442 weather markets; median first BUY 23.5c; 35 usable U.S. same-day first buys and no late >=15:00 starts; among 30 rows with station evidence, 25 (83.3%) were below the target bucket. Interpretation: forecast-first rather than dead-bucket carry.
+- Key distinction: the visually impressive ~97% win-rate wallets are mostly buying near-certainty outcomes around 93-99c after observed temperature has already invalidated a lower bucket. That is consistent with the prior Kalshi dead-bucket result where 180/180 outcomes were correct but no executable NO ask was <=95c. High win rate does not imply a large or reproducible edge.
+- Most promising new research family: forecast-first low-price/tail value as represented by BeefSlayer / ColdMath / Maskache2, not the certainty-carry family. This requires a genuinely new untouched holdout and richer forecast-state-at-entry reconstruction; do not reuse/tune the failed WEATHER-STRATEGY-3 OOS window.
+- Implementation: `scripts/research-weather-wallets.mjs`; workflow updated on `weather-us-translation-research`.
+- No production deployment; Sports Shadow unchanged; `LIVE_EXECUTION_IMPLEMENTED=false` remains unchanged.
+
+### WEATHER-STRATEGY-5 Candidate backend stress
+
+- Status: RESEARCH COMPLETE FOR THIS PASS; NOTHING PROMOTED TO PRODUCTION OR LIVE TRADING.
+- Full evidence: `docs/WEATHER_CANDIDATE_BACKEND_STRESS.md`; Claude handoff: `docs/CLAUDE_STRATEGY_HANDOFF.md`.
+- Comprehensive candidate run `32959085859`: wallet stability, five-city basket stress, corrected cheap-value OOS, and repeated live prospective basket depth all completed successfully.
+- Wallet transferability run `32959222539`: SUCCESS. Basket sequential leg-risk run `32959356012`: SUCCESS.
+- Maskache2 240-day stress: 760 events, 76.1% event-positive, +$175,574.88 diagnostic endpoint P/L, 39.2% proxy ROI, PF 4.13x, max DD -$8,808.27, 6/8 positive months, bootstrap win-rate interval 73.0%-79.1%, and +$39,405.71 remains after deleting the largest 5% winning events. First and second halves are both positive with nearly identical event-positive rates.
+- Maskache2 price segmentation matters: 20-55c has 322 events / 75.5% event-positive / +$87,480.78 diagnostic P/L; 55-90c has 155 / 99.4% / +$80,400.87; >=90c is 97.8% event-positive but -$5,227.95. High win rate alone is explicitly rejected as a promotion criterion.
+- Five-target-city Maskache2 subset: 166 events, 72.3% event-positive, +23.6% proxy ROI, PF 2.49x. NYC is the only large city slice (120 events, 71.7%, +28.6% proxy ROI); Miami is negative. Source contracts remain non-equivalent to U.S. contracts, so this is only a research prior.
+- BeefSlayer remains the strongest fallback wallet archetype: 466-event 240-day stability slice, 54.7% event-positive, +27.7% proxy ROI, PF 2.37x, 6/8 positive months, +$5,551.57 remains after deleting top 5% winners. Its five-target-city share is 46.5% (376/809 all-event reconstruction), target subset 63.3% event-positive, +14.0% proxy ROI, PF 2.70x. Recent/second-half edge weakened materially; fresh validation is mandatory.
+- ColdMath is DEMOTED as a wholesale strategy prior despite 81.7% event-positive: only 2/8 positive months, max DD -$94,334.16, second half -$31,927.78 / PF 0.59x, and P/L becomes -$52,230.51 after removing the top 5% winners. Narrow sub-regimes may be researched separately only with fresh preregistration.
+- Exhaustive NO basket historical anomaly expanded to 125 events across NYC/CHI/LA/SF/MIA: 120/125 displayed positive, 106/125 at +1c/leg stress, 80/125 at +2c, 67/125 at +3c. However, repeated prospective live scans found 0 profitable complete baskets at every tested size and frequent missing legs. Current leg-risk scan had only SF complete and it was negative at every size; 100/leg full guaranteed P/L -$20.54 with $77.12 minimum optimized prefix risk. Structural basket is therefore INCONCLUSIVE/WATCH-ONLY, not a current taker implementation candidate.
+- Corrected archived-market cheap-tail NBM test recovered 640 forecast+quote rows across 240 station-days. Frozen TRAIN: 21 trades, 14.3% wins, +$154.01, +105.5% proxy ROI. OOS: only 6 baseline trades (16.7% wins, +$56.31); at +2c only 3 trades remain (+$73.38). Acceptance required >=10 OOS trades, so FAIL due insufficient sample. Do not retune this OOS.
+- Updated primary research hypothesis: independently build a U.S.-settlement-specific probability/value model inspired by Maskache2/BeefSlayer behavior, using source-wallet activity only as a feature/trigger rather than a blind copy. Test 20-55c and 55-90c as separate regimes; avoid assuming >=90c is safe. Prioritize NYC first because it has the only large Maskache2 target-city sample, then validate each other city separately.
+- No production deployment, no Sports Shadow changes, no real orders, no Lovable/Codex credits, and `LIVE_EXECUTION_IMPLEMENTED=false` remains unchanged.
+
+### WEATHER-STRATEGY-6 Independent Claude audit of the candidate ranking
+
+- Status: MEASUREMENT FALSIFIED FOR THE PRIOR #1 CANDIDATE; RANKING REORDERED; NOTHING PROMOTED; RESEARCH/PAPER ONLY.
+- Full evidence: `docs/WEATHER_CLAUDE_INDEPENDENT_AUDIT.md`. Scripts: `scripts/research-weather-wallet-cashflow-audit.mjs`, `scripts/research-weather-basket-live-fee-floor.mjs`. Workflow: `.github/workflows/weather-cashflow-audit.yml`.
+- Core finding: `sum(/closed-positions.realizedPnl)` is a survivorship-filtered measure. `/closed-positions` can only report a position that actually closed, so a wallet that abandons worthless losing tokens never files those events. This is the same failure already found and quarantined for `badatmath`; it was never generalised to the other wallets.
+- Method: each wallet rebuilt from the public `/activity` ledger as literal cash (BUY out; SELL/REDEEM/MERGE/CONVERSION/incentives in; SPLIT out) plus terminal unredeemed inventory from `/positions`. Whole-wallet net cash is treated as a binding tie-out constraint.
+- Maskache2 (`0x1f66796b45581868376365aef54b51eb84184c8d`, alias `ShyGuy1`): REJECTED. 565 of 1,325 weather events (42.6%) absent from `/closed-positions`, 98.6% losers, hiding -$61,664.71. Event-positive falls 72.2% -> 32.6% (95% bootstrap 30.0%-35.2%); P/L +$199,479 -> +$62,168; PF 4.13x -> 1.43x. Wallet holds 3,013 worthless unredeemed positions ($518,955 gross buy cost, $87.10 recoverable). Complete lifetime net cash is +$44,205 against a claimed +$175,574.88 on weather alone. `/closed-positions` verified exhausted at 1,926 rows, so this is not a pagination artifact.
+- Worked counterexample: `highest-temperature-in-nyc-on-august-25-2026` reconciles to -$78.49 true cash against +$147.91 endpoint-summed `realizedPnl`. The `80-81F` leg was bought for $148 cash, resolved NO, and is reported at +$121.09. Positions acquired by `CONVERSION` receive a synthetic 1/N cost basis, so `avgPrice x totalBought` is not a cost for those legs.
+- Headline cohort does not survive: NYC 20-55c is 36 events / 50.0% event-positive / +$3,125 / 7.8% ROI on the true ledger, not 52 events / 78.8% / +$15,722.90 / 44.0%. Chronological halves are +$3,175 then -$50, so the "both halves positive" claim is also an artifact.
+- BeefSlayer (`0x331bf91c132af9d921e1908ca0979363fc47193f`): promoted to strongest candidate. Only 13 events missing (-$615). True ledger 692 events, 58.2% event-positive (95% bootstrap 54.6%-62.0%), +$63,241.67, PF 5.13x, max DD -$2,234. The endpoint reconstruction understates it by ~18%.
+- BeefSlayer mechanism reconstructed: 7,900 BUY / 3,218 SELL / 808 REDEEM weather trades, zero conversions, $135 incentive income. First entries cluster 12-24h after 00Z of the target weather date (68.6%), only 6.1% before the weather date, median first-BUY price 8.2c. This is intraday information reaction on cheap tails, not day-ahead forecasting, and is therefore a different mechanism from every previously failed forecast-first test.
+- ColdMath (`0x594edb9112f526fa6a80b8f858a6379c8a2c1c11`): the earlier demotion rested on wrong numbers. True ledger gives 8/9 positive months (not 2/8), max DD -$3,618.82 (not -$94,334.16), second half +$23,021 (not -$31,927.78), and +$29,923 after removing the top 5% winners (not -$52,230.51). Totals agree (80.2% event-positive, +$105,718.14, PF 3.44x). Its 55-90c cohort is 884 events, the largest sample in this project. However the wallet has effectively stopped trading: monthly events fall 707 (April) -> 284 (May) -> 102 (June) -> 2 (July) -> 14 (August), last activity 2026-08-19. Treat as diagnostic prior only.
+- Structural NO basket: REJECTED with a structural reason, not merely "not observed". Basket structure assumption confirmed correct (6 mutually exclusive exhaustive legs, `mutually_exclusive: true`, `collateral_return_type: MECNET`). Two live scans 60s apart over 10 open events found zero profitable complete baskets at every size. Kalshi taker fee `ceil(0.07 * P * (1-P) * C * 100)/100` costs about $4.92 per 100-contract six-leg basket, so the basket only profits if the six best NO asks sum to <= $4.9508; observed sums were $5.00-$5.13, with the best case exactly $5.0000 still yielding -$0.08. Missing tail legs (no resting YES bid) reproduced independently.
+- Kalshi fee asymmetry against cheap tails, not previously modelled: the fee is rounded up per contract, so at P=0.05 it is $0.01/contract = 20% of premium, and ~12% at BeefSlayer's median 8.2c entry. BeefSlayer's edge was earned on international contracts without this charge.
+- Settlement source has changed again: live Kalshi rules now read "New York City (CLINYC) ... according to The Weather Company". International (Wunderground), historical US (NWS CLI) and current US (The Weather Company) are three distinct sources, so any US settlement replay built against NWS CLI is measuring a rule no longer in force. The existing `DIVERGENCE_OBSERVED` finding stands and is understated.
+- Selection bias applies to every wallet candidate and is not fixed by fixing the measurement: these wallets were chosen because they were already known to be profitable, so their historical economics are conditioned on success.
+- Repository health verified on this branch: `npx tsc --noEmit` clean, `npx vitest run` 2,028 passed / 9 skipped across 133 files, `npm run build` succeeded.
+- No production deployment, no Sports Shadow change, no Supabase change, no Lovable/Codex credits, no orders, and `LIVE_EXECUTION_IMPLEMENTED=false` remains unchanged. `main` untouched.
+
+### WEATHER-LAB-1 Independent US intraday weather value — forward paper build
+
+- Status: BACKEND AND RESEARCH CORE BUILT; NOT YET COLLECTING EVIDENCE; CALIBRATION GATE OPEN; PAPER/RESEARCH ONLY.
+- Branch `weather-us-translation-research`. `main` untouched. No production deployment, no Sports Shadow change, no Lovable credits spent yet, `LIVE_EXECUTION_IMPLEMENTED=false` unchanged.
+- This is NOT a wallet-copy bot. Maskache2/BeefSlayer/ColdMath are research priors only. The system independently estimates each US contract's probability and compares it against the actual depth-walked executable price after fees and slippage.
+- Modules (all under `src/lib/weather-lab/`): `fees.ts`, `buckets.ts`, `settlement.ts`, `provenance.ts`, `probability.ts`, `execution.ts`, `edge.ts`, `performance.ts`, `experiment.ts`, `sources/index.ts`. 186 new tests; full suite 2,214 passed / 9 skipped across 143 files; `tsc --noEmit` clean; `npm run build` succeeds; `git diff --check` clean.
+- Fee model is data-driven, not hard-coded: `fee_type` and `fee_multiplier` are read per-series from Kalshi (weather currently reports `quadratic` / `1`) and anything unrecognised fails closed. Rounding follows Kalshi's published rule: round UP to the nearest $0.0001 (centicent) **per fill**.
+- CORRECTION to WEATHER-STRATEGY-6: that entry stated the Kalshi fee is ~20% of premium at 5c and ~12% at 8.2c. That was wrong — it assumed rounding to the nearest cent. Under the correct centicent rule the burden is **6.93% at 1c, 6.65% at 5c, 6.43% at 8.2c, 5.60% at 20c** — approximately `0.07 x (1 - price)` of premium, nearly flat across the cheap-tail range. The cheap-tail regime is therefore materially MORE viable than that entry claimed. The exhaustive-NO-basket conclusion is unaffected: at 100 contracts/leg the fee is ~$5 per $500 basket either way, so the ~$4.95 fee floor and the REJECT stand.
+- Settlement is fail-closed and fingerprinted. Only `The Weather Company` is an audited provider and only CLINYC/CLICHI/CLILAX/CLISFO/CLIMIA are audited stations; anything else is `SETTLEMENT_UNVERIFIED` and cannot be paper traded. A fingerprint change mid-experiment marks affected rows excluded rather than blended.
+- Bucket parsing encodes the load-bearing off-by-one: Kalshi `strike_type=less` with `cap_strike=80` means "79 or below", and `greater` with `floor_strike=87` means "88 or above". An event is only usable if its bucket set tiles the integer temperature line exactly once.
+- Probability engine emits a full distribution per station-day with continuity correction at integer boundaries, an observed maximum applied as a truncating floor, and model dispersion reported rather than hidden. Forecast sigma prefers the GEFS ensemble's empirical member spread over any table; the lead-time fallback is recorded as `LEAD_TIME_FALLBACK` when used.
+- Execution is depth-walked, never assumed. A signal that cannot fill at the requested size is `NO_FILL` and is never counted as a trade, in code and as a database CHECK constraint. Every candidate is simulated under BASE/+1c/+2c/+3c and all four are persisted.
+- Schema: `supabase/migrations/20260826180000_weather_lab_research_schema.sql`, twelve `weather_lab_*` tables, service_role + RLS enabled with no policies, sharing nothing with Sports Shadow. `weather_lab_experiments.mode` is CHECK-constrained to `'PAPER'`, so a live row cannot be inserted even by a caller that bypasses the application. Safety contract test `supabase/tests/weather_lab_schema.sql` is wired into Audit CI and asserts the paper-only constraint, the NO_FILL-is-empty constraint, RLS coverage, and the absence of any credential/live-order column.
+- Frozen experiment `weather-intraday-v1`: min net edge 0.05, price band 0.02-0.90, min confidence 0.25, max dispersion 6F, 100 contracts, slippage buffer 0.01, only `INTRADAY_OBSERVATION_EDGE` enabled. Config is hashed; changing any threshold changes the hash and starts a NEW experiment. The other five strategy classes exist in the taxonomy but stay disabled until each has its own pre-registered rule.
+- Collector `scripts/weather-lab-collect.ts` (Bun) ran end to end against live Kalshi and live weather feeds. It is read-only and has no order path.
+- BUG FOUND AND FIXED BY RUNNING IT: the observation floor was being applied to next-day events. Today's observed maximum does not bound tomorrow's maximum, and it also mislabelled next-day events as `INTRADAY_OBSERVATION_EDGE`. Now gated by `observationFloorApplies()` with regression tests.
+- OPEN CALIBRATION GATE — DO NOT TREAT CURRENT SIGNALS AS EDGE. In the live smoke run the model assigned 27.6% to an NYC 84-85F bucket the market priced at 1c, with observed max 75.92F at ~13:00 local against a consensus mean of 82.4F. The deterministic and ensemble feeds forecast a whole-day maximum and do not condition on a day already running well below forecast, so the distribution is too warm and too wide late in the settlement window. Truncating at the observed maximum is not sufficient; the intraday trajectory must shift the distribution, not just floor it. Any "ENTER" produced before this is resolved is model error, not edge.
+- Lovable specification: `docs/WEATHER_LOVABLE_BUILD_SPEC.md`. Recommendation is to REUSE the existing Lovable project rather than create a second one, with isolation by `weather_lab_` table prefix, a new `/weather-lab` route, and a rule that any diff touching `src/lib/sports-shadow/`, `src/routes/sports-shadow.tsx` or a `sports_shadow_*` table is a defect. No Lovable credits have been spent; the UI has not been built.
+- Acceptance gate is pre-registered in code as constants, not inputs: >=50 independent station-days minimum (100 preferred, 200 strong), profit factor >=1.3, positive net P/L and ROI, must survive top-1% and top-5% winner removal, no single-event concentration above 50% of gross wins, bounded drawdown. The independent unit is the station-day, not the bucket.
+
+### WEATHER-LAB-2 Calibration gate — two model defects found and fixed; system now fails closed
+
+- Status: CALIBRATION DIAGNOSTIC COMPLETE; TWO DEFECTS FIXED; SYSTEM CORRECTLY REFUSES TO TRADE; ONE BLOCKER REMAINS BEFORE COLLECTION. PAPER/RESEARCH ONLY.
+- The WEATHER-LAB-1 calibration gate was investigated rather than deferred, because the smoke run's signals were implausible. Both defects below were found by running the system, not by reading it.
+
+**Defect 1 — the model ignored the intraday trajectory.**
+
+- Diagnostic: 355 station-days across all five candidate cities, 2026-06-15 to 2026-08-24, using the Open-Meteo historical *forecast* archive against reanalysis actuals so there is no lookahead.
+- Finding: how far the observed maximum so far sits from the forecast strongly predicts how far the final daily maximum will sit from that forecast. Blending toward the observation cuts mean absolute error by 21.9% at 10:00 local, 37.0% at 12:00, 52.6% at 13:00, 80.1% at 14:00, 92.3% at 15:00 and 97.6% at 16:00. Correlation of (observed - forecast) with (actual - forecast) rises from 0.45 at 10:00 to 0.99 at 16:00.
+- Present in every city, not just NYC. Optimal blend weight by 14:00-15:00 is 1.00 everywhere; LA saturates earliest (13:00).
+- Fix: `INTRADAY_CONDITIONING_SCHEDULE` in `probability.ts`. Conditioned mean is `F + w(hour) * (O - F)`; conditioned sigma is `sigma * sigmaScale(hour)`. Schedule frozen at w = 0.12/0.16/0.21/0.30/0.45/0.74/1.00 and sigmaScale = 0.94/0.91/0.88/0.82/0.69/0.53/0.37 for local hours 08-14, carried forward thereafter, sigmaScale floored at 0.05 so the distribution can never become degenerate.
+- TRAIN/OOS DISCIPLINE: 2026-06-15 to 2026-08-24 is now a CONSUMED training window for this schedule. Do not re-fit it against forward paper results. Forward collection is the untouched out-of-sample test.
+- Strategic implication worth keeping: by 14:00 local the weight is already 1.00 and residual sigma is roughly a third of the day-ahead value, i.e. the outcome is close to determined — which is the regime WEATHER-STRATEGY-1 already showed the market prices correctly (96-100c NO asks). The plausible window is the middle of the day, roughly 11:00-13:00, not the end of it.
+
+**Defect 2 — MEASUREMENT BASIS MISMATCH (the more serious one).**
+
+- After fixing defect 1 the model produced 90.8% on an NYC "79F or below" bucket the market priced at 14c. That signal was investigated rather than accepted.
+- Finding: on 2026-08-26, KNYC (Central Park) ran **7-10F cooler than the Open-Meteo grid point** for the same hours, while the grid sat essentially on its own forecast (grid max-so-far 83.5F vs forecast 82.4F; KNYC max-so-far 77.0F). Mean station-minus-grid offset that day was -3.75F across 13 observations.
+- Therefore the entire "day is running 6.5F cold" anomaly was a **station-versus-grid basis artifact, not weather**. The market was right and the model was systematically biased cold by roughly the station-grid offset. This would have produced confident, systematically wrong paper entries.
+- Fix: `MeasurementBasis` (`STATION` | `GRID`) is now a required field on every forecast. When an observation's basis differs from any forecast's basis, `buildDistribution` sets `basisMismatch`, suppresses conditioning **and** refuses to let the observation truncate the distribution, and `decideEntry` rejects with `MEASUREMENT_BASIS_MISMATCH`. The type system now makes an undeclared basis a compile error.
+- Current live behaviour after the fix: **0 paper entries**, because the only enabled mechanism (`INTRADAY_OBSERVATION_EDGE`) needs a station observation and all present forecasts are grid basis. This is the correct fail-closed outcome — the system refuses to trade rather than trading on a fictitious anomaly.
+
+**Remaining blocker before any forward collection can produce evidence.**
+
+- The system needs **station-basis forecasts** so the observation and forecast are comparable. NOAA NBM station guidance (the per-station text bulletins, already used in the failed WEATHER-STRATEGY-3 work and therefore a known-accessible feed) is the natural source. The alternative is an explicit per-station, per-hour bias correction of the grid feeds, which is a fitted parameter and would need its own train window.
+- Until that lands, `INTRADAY_OBSERVATION_EDGE` cannot fire, and the collector will keep correctly recording zero entries.
+- Verification at this commit: full suite 2,233 passed / 9 skipped across 143 files (205 weather-lab tests); `tsc --noEmit` clean; `npm run build` succeeds; `git diff --check` clean.
+- Audit CI `32992513422` passed on the prior commit `908d6c3`, including the `schema-contract` job, which replayed the weather lab migration against real Postgres and passed `supabase/tests/weather_lab_schema.sql` (paper-only CHECK, NO_FILL-is-empty CHECK, RLS coverage, no credential/live-order columns).
+- No production deployment, no Sports Shadow change, no Supabase modification, no Lovable credits, no orders, `LIVE_EXECUTION_IMPLEMENTED=false` unchanged, `main` untouched.
+
+### WEATHER-DECISION-1 Independent adversarial review — hybrid architecture REDESIGNED, not confirmed
+
+- Status: REVIEW COMPLETE. VERDICT: REDESIGN (wallet-trigger architecture) + READY_FOR_MINIMAL_BACKTEST (mechanism-level alternatives). PAPER/RESEARCH ONLY.
+- Full memo delivered in-conversation; this entry is the durable summary. Reviewed branches `weather-us-translation-research` (HEAD at time of review `7b3bcec`) and `weather-hybrid-preflight` (HEAD `eb0901c`, fixed to `f6397fe`).
+- **Reproducibility defect found and fixed on `weather-hybrid-preflight`:** `scripts/research-weather-hybrid-preflight.mjs` contained `\b?`, invalid JS regex syntax (`SyntaxError: Nothing to repeat`). The committed source could not execute; every reported number came only from an undocumented CI-only patch step. Fixed at `f6397fe`; verified the corrected source reproduces run `33010063930`'s exact numbers (BeefSlayer 38/24, ColdMath 7/7).
+- **`TARGET_BUCKET_NOT_FOUND` (79% of BeefSlayer's direct-copy signals) root-caused, not a bug:** Kalshi's own bucket ladder for a city/date is frequently centered 5-10F away from the international platform's ladder for the same nominal date (each platform centers on its own forecast). Further independent evidence the platforms are not forecast/settlement-equivalent. Confirms REJECT for literal copy; does not block the event-only hybrid funnel.
+- **BeefSlayer mechanism reverse-engineered with real weather reconstruction (two verified examples, 2026-04-30 NYC and 2026-06-08 NYC):** BeefSlayer buys/sells within the SAME DAY, often within 15-45 minutes, tracking real observed-temperature threshold crossings (verified against ERA5 hourly reanalysis — entry/exit timing lines up with the temperature crossing bucket boundaries) and harvesting the resulting international-platform repricing rather than holding to settlement. One example showed a 10c source fill against a contemporaneous 98c Kalshi ask for the nominally "same" bucket — a further settlement/basis divergence, not evidence of transferable forecast skill. Working conclusion: BeefSlayer's edge, to the extent real, is a **microstructure/latency edge on a thin, slow-repricing, settlement-divergent venue**, not necessarily a forecasting edge that transfers to Kalshi.
+- **Trigger-funnel "100% event exists / open" finding is real but overstated:** Kalshi runs its daily-high series every day regardless of any wallet, so "event exists" is close to tautological, and "open" (before `close_time`, ~05:00 UTC next day) does not mean the price was still non-degenerate at trigger time. Direct-copy artifact quote distribution partially reassures this (median ask ~11.5-12c, not uniformly dead-zone), but the funnel headline should not be read as evidence of a live tradable opportunity by itself.
+- **NBM station-basis audit run for real** (`scripts/weather-lab-basis-audit.ts`, 25 days, cycles 12/15/18/21Z, FHR<=6, 485 matched samples): NBH/NBS station-text guidance is materially closer to the true station basis than the raw Open-Meteo grid (which showed a 7-10F offset). Per station: NYC (KNYC) n=157 mean bias -1.29F MAE 1.78F SD 1.90F; Chicago (KORD) n=82 mean +0.25F MAE 0.85F SD 1.08F; LA (KLAX) n=82 mean +0.12F MAE 1.52F SD 1.81F; SF (KSFO) n=82 mean -2.27F MAE 2.67F SD 2.48F; Miami (KMIA) n=82 mean -0.77F MAE 2.35F SD 3.45F. Chicago/LA look close to directly usable; NYC/SF need real correction; Miami shows a genuine -11.92F fat-tail miss from a real short-lead forecast bust (two independent cycles agreed on 90F while observed was 78.08F), not a parsing artifact.
+- **NBM bias is NOT stable enough across the day for a single additive constant yet:** NYC's per-local-hour bias on this 25-day sample ranges from -0.1F to -2.3F with no clean monotone pattern, on only 6-14 samples per hour cell. This sample is too small to defensibly separate real diurnal bias from noise. A causal per-station correction needs a materially longer calibration window (60-90+ days) before any station reaches `CALIBRATED`; on the current evidence most/all stations should report `INSUFFICIENT_HISTORY` rather than being calibrated now.
+- **Three wallet-free alternative strategies proposed, ranked by near-term testability:** (1) NBM-cycle-revision repricing lag — mechanical, scheduled, cheaply backtestable off the already-validated 45+ day NBM archive by adapting `research-weather-hybrid-preflight.mjs`'s existing simulate/quote logic; (2) observation-threshold-crossing repricing lag on Kalshi itself — directly tests whether BeefSlayer's own reverse-engineered mechanism exists on the more efficient venue, forward-paper-testable only; (3) cross-platform implied-forecast divergence — market-level signal, not dependent on any single wallet's continued activity, addresses the ColdMath-activity-collapse problem, but the international side's own book is thin (~$200-300 lifetime volume observed on a live NYC bucket), which caps its capacity story too.
+- **Capacity is real but modest:** live NYC depth check found ~$980 total resting size within 5c of best on a near-tail bucket; the international platform's own per-bucket lifetime volume was observed at ~$200-300. Nothing in evidence supports more than low-hundreds-to-low-thousands of dollars per opportunity; this is not a large-notional strategy under any current evidence.
+- No production deployment, no Sports Shadow change, no Supabase modification, no Lovable credits, no orders, `LIVE_EXECUTION_IMPLEMENTED=false` unchanged, `main` untouched.

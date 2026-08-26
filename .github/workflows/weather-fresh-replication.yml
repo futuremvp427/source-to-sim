@@ -1,0 +1,43 @@
+name: Weather Fresh Replication
+
+on:
+  push:
+    branches: [weather-us-translation-research]
+    paths:
+      - .github/workflows/weather-fresh-replication.yml
+      - scripts/research-weather-nbm.mjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  replicate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run untouched earlier-window NBM replication
+        env:
+          START_DATE: "2026-05-20"
+          END_DATE: "2026-07-19"
+          TRAIN_END: "2026-06-30"
+          OOS_START: "2026-07-01"
+          QUOTE_MAX_DELAY_SECONDS: "1800"
+          CONTRACTS: "100"
+          MIN_TRAIN_TRADES: "20"
+          MIN_OOS_TRADES: "10"
+        run: node scripts/research-weather-nbm.mjs
+      - name: Show report
+        if: always()
+        run: cat research-output/weather-nbm-oos.md || true
+      - name: Upload replication evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-fresh-replication
+          path: research-output/
+          if-no-files-found: warn

@@ -1,0 +1,55 @@
+name: Weather Cash-Flow Audit
+
+on:
+  push:
+    branches: [weather-us-translation-research]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cashflow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Rebuild leading wallets from the /activity cash ledger
+        env:
+          WALLET_LOOKBACK_DAYS: "240"
+        run: node scripts/research-weather-wallet-cashflow-audit.mjs
+      - name: Show cash-flow report
+        if: always()
+        run: cat research-output/weather-wallet-cashflow-audit.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-wallet-cashflow-audit
+          path: research-output/
+
+  basket-fee-floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Live NO-basket scan with explicit fee floor
+        env:
+          BASKET_PASSES: "2"
+          BASKET_PASS_GAP_MS: "60000"
+        run: node scripts/research-weather-basket-live-fee-floor.mjs
+      - name: Show basket report
+        if: always()
+        run: cat research-output/weather-basket-fee-floor.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-basket-fee-floor
+          path: research-output/

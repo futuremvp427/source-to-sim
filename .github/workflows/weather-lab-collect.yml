@@ -1,0 +1,48 @@
+name: Weather Lab Collect
+
+# Read-only forward collection for the independent US intraday weather value
+# experiment. Paper/research only: this workflow cannot place an order, and the
+# collector it runs has no live-execution code path.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cities:
+        description: "Comma-separated audited cities (default NYC)"
+        required: false
+        default: "NYC"
+  schedule:
+    # Hourly through the US afternoon, when the intraday mechanism under test
+    # actually operates. UTC.
+    - cron: "0 15-23 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: weather-us-translation-research
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Collect model-vs-market snapshot
+        env:
+          WEATHER_LAB_CITIES: ${{ github.event.inputs.cities || 'NYC' }}
+          WEATHER_LAB_CONTRACTS: "100"
+        run: bun scripts/weather-lab-collect.ts
+      - name: Show collection report
+        if: always()
+        run: cat research-output/weather-lab-collection.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-lab-collection-${{ github.run_id }}
+          path: research-output/

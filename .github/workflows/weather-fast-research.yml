@@ -1,0 +1,46 @@
+name: Weather Fast Research
+
+on:
+  push:
+    branches: [weather-us-translation-research]
+    paths:
+      - scripts/research-weather-basket-arb.mjs
+      - scripts/research-weather-basket-live-depth.mjs
+      - scripts/research-badatmath-open-risk.mjs
+      - .github/workflows/weather-fast-research.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  falsify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Check badatmath open-position survivorship risk
+        run: node scripts/research-badatmath-open-risk.mjs
+      - name: Test exhaustive weather basket arbitrage
+        env:
+          START_DATE: "2026-07-31"
+          END_DATE: "2026-08-24"
+          CONTRACTS: "100"
+        run: node scripts/research-weather-basket-arb.mjs
+      - name: Scan current all-leg order-book depth read-only
+        run: node scripts/research-weather-basket-live-depth.mjs
+      - name: Show focused reports
+        if: always()
+        run: |
+          cat research-output/badatmath-open-risk.md 2>/dev/null || true
+          cat research-output/weather-basket-arb.md 2>/dev/null || true
+      - name: Upload focused research
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-fast-research
+          path: research-output/
+          if-no-files-found: warn

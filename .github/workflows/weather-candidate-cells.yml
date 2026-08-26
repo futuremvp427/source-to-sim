@@ -1,0 +1,33 @@
+name: Weather Candidate Cells
+
+on:
+  push:
+    branches: [weather-us-translation-research]
+    paths:
+      - scripts/research-weather-candidate-cells.mjs
+      - .github/workflows/weather-candidate-cells.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cells:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Stress selected target-city regime cells
+        run: node scripts/research-weather-candidate-cells.mjs
+      - name: Show report
+        if: always()
+        run: cat research-output/weather-candidate-cells.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-candidate-cells
+          path: research-output/

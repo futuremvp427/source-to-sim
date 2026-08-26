@@ -1,0 +1,33 @@
+name: Weather Basket Leg Risk
+
+on:
+  push:
+    branches: [weather-us-translation-research]
+    paths:
+      - scripts/research-weather-basket-leg-risk.mjs
+      - .github/workflows/weather-basket-leg-risk.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  leg-risk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Model current sequential basket risk
+        run: node scripts/research-weather-basket-leg-risk.mjs
+      - name: Show report
+        if: always()
+        run: cat research-output/weather-basket-leg-risk.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-basket-leg-risk
+          path: research-output/

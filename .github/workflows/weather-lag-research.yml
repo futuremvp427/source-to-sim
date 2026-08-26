@@ -1,0 +1,110 @@
+name: Weather Lag Research
+
+on:
+  push:
+    branches: [weather-us-translation-research]
+    paths:
+      - scripts/research-weather-lag.mjs
+      - scripts/research-weather-late-day.mjs
+      - scripts/research-weather-nbm.mjs
+      - scripts/research-weather-wallets.mjs
+      - scripts/research-weather-closed-positions.mjs
+      - scripts/research-weather-cheap-value.mjs
+      - scripts/research-badatmath-event-net.mjs
+      - scripts/research-badatmath-open-risk.mjs
+      - scripts/research-weather-basket-arb.mjs
+      - .github/workflows/weather-lag-research.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run public weather-wallet reverse engineering
+        env:
+          WALLET_LOOKBACK_DAYS: "90"
+          WALLET_TRADE_LIMIT: "10000"
+        run: node scripts/research-weather-wallets.mjs
+      - name: Run realized-PnL wallet decomposition
+        env:
+          WALLET_LOOKBACK_DAYS: "180"
+          WALLET_CLOSED_LIMIT: "5000"
+        run: node scripts/research-weather-closed-positions.mjs
+      - name: Run badatmath event-net decomposition
+        env:
+          BADATMATH_LOOKBACK_DAYS: "180"
+          BADATMATH_CLOSED_LIMIT: "10000"
+        run: node scripts/research-badatmath-event-net.mjs
+      - name: Run badatmath open-position survivorship-risk check
+        run: node scripts/research-badatmath-open-risk.mjs
+      - name: Run fresh-holdout cheap YES bucket value test
+        env:
+          START_DATE: "2026-05-01"
+          END_DATE: "2026-07-19"
+          TRAIN_END: "2026-06-30"
+          OOS_START: "2026-07-01"
+          QUOTE_MAX_DELAY_SECONDS: "1800"
+          CONTRACTS: "100"
+          MIN_TRAIN_TRADES: "20"
+          MIN_OOS_TRADES: "10"
+        run: node scripts/research-weather-cheap-value.mjs
+      - name: Run exhaustive weather basket arbitrage test
+        env:
+          START_DATE: "2026-07-31"
+          END_DATE: "2026-08-24"
+          CONTRACTS: "100"
+        run: node scripts/research-weather-basket-arb.mjs
+      - name: Run no-hindsight public-data dead-bucket lag backtest
+        env:
+          START_DATE: "2026-07-20"
+          END_DATE: "2026-08-24"
+          PRIMARY_MARGIN_F: "2"
+          QUOTE_MAX_DELAY_SECONDS: "600"
+          CONTRACTS: "100"
+        run: node scripts/research-weather-lag.mjs
+      - name: Run frozen late-day train/OOS test
+        env:
+          START_DATE: "2026-07-20"
+          END_DATE: "2026-08-24"
+          TRAIN_END: "2026-08-11"
+          OOS_START: "2026-08-12"
+          QUOTE_MAX_DELAY_SECONDS: "300"
+          CONTRACTS: "100"
+          MIN_TRAIN_TRADES: "15"
+          MIN_OOS_TRADES: "10"
+        run: node scripts/research-weather-late-day.mjs
+      - name: Run previous-day NBM probabilistic train/OOS test
+        env:
+          START_DATE: "2026-07-20"
+          END_DATE: "2026-08-24"
+          TRAIN_END: "2026-08-11"
+          OOS_START: "2026-08-12"
+          QUOTE_MAX_DELAY_SECONDS: "1800"
+          CONTRACTS: "100"
+          MIN_TRAIN_TRADES: "20"
+          MIN_OOS_TRADES: "10"
+        run: node scripts/research-weather-nbm.mjs
+      - name: Show reports
+        if: always()
+        run: |
+          for report in research-output/*.md; do
+            if [ -f "$report" ]; then
+              echo "===== $report ====="
+              cat "$report"
+            fi
+          done
+      - name: Upload research output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-strategy-research
+          path: research-output/
+          if-no-files-found: warn
