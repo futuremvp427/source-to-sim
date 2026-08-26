@@ -83,3 +83,26 @@ Research-only. No orders, no Lovable, no live trading. `LIVE_EXECUTION_IMPLEMENT
 - **FAIL GATE:** No genuinely matched pairs found, or all found gaps are smaller than round-trip cost.
 
 None of these were tuned after being written. Results follow in a separate section once the scripts have run.
+
+## Shortlist 3 result — C. Cross-venue price dislocation (live snapshot, run 2026-08-26)
+
+Found a genuinely matched, low-ambiguity pair meeting the entry-rule's "verified same underlying fact" bar: the September 2026 FOMC meeting, listed on both venues with an explicit official resolution source (federalreserve.gov FOMC statement) on Polymarket's own market description, and Kalshi's `KXFED-26SEP` threshold ladder for the same meeting.
+
+Reconstructed both venues' implied probability for "no change" by properly combining ladder legs (Kalshi: `P(Above 3.50%) - P(Above 3.75%)` from the threshold ladder; Polymarket: read directly off its own discrete-bucket market):
+
+| Venue | Implied P(no change) |
+|---|---:|
+| Kalshi (from threshold ladder) | ~66.0% |
+| Polymarket (direct bucket) | 66.5% |
+
+Gap ~0.5 percentage points -- smaller than the round-trip taker fee on EITHER venue alone at this price (Kalshi's quadratic fee at p=0.665 is ~1.56% of notional; Polymarket's category fee at the same price is ~0.7-0.9%), before even considering the second leg or spread. **No executable dislocation found in this specific live check.** A second category (government shutdown) was probed for a second matched pair; no reliably identical Kalshi series ticker was found for it within the time budget of this minimal test.
+
+**Verdict for C: REJECTED for this live snapshot** (a genuinely matched pair existed, so this is a real negative result, not a data-availability `DATA_INSUFFICIENT`). This does not rule out dislocation existing at OTHER moments or on thinner/less-covered event pairs -- a $54M-volume, actively-arbitraged market like the Fed decision is exactly where professional cross-venue arbitrageurs would already have closed any gap; a smaller, less-followed matched pair might behave differently, which is the honest caveat rather than a claim this kills the whole category.
+
+## Phase 5 — wallet search result (documented incomplete lead, not a full test)
+
+Two approaches were tried within this session's scope:
+1. Resolve the polymm-linked handle `@b00k13` to a `0x...` address via public unauthenticated Polymarket endpoints (profile search, public-search, direct profile-page fetch). **Not resolved** -- none of the tried endpoints returned the address.
+2. Scan Polymarket's public sports leaderboard at both all-time and monthly granularity for a smaller, more mechanism-legible profitable wallet. **All-time top entries: $7M-$23M lifetime profit. Monthly top entries: $500K-$3.6M for a single month.** Both are large-fund/team scale, not a legible, retail-copyable mechanism, and using either would repeat the exact "wallet profitability is not evidence copying works" mistake this project has already been warned against twice in the weather work.
+
+**This is reported as an honest gap, not a rejection of the wallet-mining category.** A real next step, if pursued, would be a lower-percentile leaderboard scan (e.g., rank 200-500 by profit) or a volume-normalized ROI screen rather than raw profit, which was out of scope for this minimal pass.
