@@ -1,0 +1,54 @@
+name: Microstructure Shootout
+
+# Non-weather strategy discovery: liquidity-shock mean reversion (H) and
+# passive maker value (B), preregistered in docs/STRATEGY_DISCOVERY_BOARD.md.
+# Uses Kalshi MLB game markets. Read-only, public data only.
+
+on:
+  push:
+    branches: [strategy-discovery-research]
+    paths:
+      - scripts/research-microstructure-shootout.mjs
+      - .github/workflows/microstructure-shootout.yml
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "Lookback window in days"
+        required: false
+        default: "30"
+      max_markets:
+        description: "Max distinct events sampled"
+        required: false
+        default: "300"
+
+permissions:
+  contents: read
+
+jobs:
+  shootout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Syntax check
+        run: node --check scripts/research-microstructure-shootout.mjs
+      - name: Run microstructure shootout
+        env:
+          LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '30' }}
+          MAX_MARKETS: ${{ github.event.inputs.max_markets || '300' }}
+          CONTRACTS: "100"
+          QUOTE_MAX_LAG_SECONDS: "300"
+        run: node scripts/research-microstructure-shootout.mjs
+      - name: Show report
+        if: always()
+        run: cat research-output/microstructure-shootout.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: microstructure-shootout
+          path: research-output/
+          if-no-files-found: warn
