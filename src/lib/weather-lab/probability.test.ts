@@ -4,6 +4,9 @@ import {
   buildDistribution,
   confidenceScore,
   distributionSum,
+  INTRADAY_CONDITIONING_SCHEDULE,
+  intradayConditioning,
+  MIN_SIGMA_SCALE,
   normalCdf,
   ProbabilityInputError,
   type ModelForecast,
@@ -22,6 +25,7 @@ const BUCKETS = NYC.map(parseBucket);
 const forecast = (over: Partial<ModelForecast> = {}): ModelForecast => ({
   source: "NBM",
   sourceId: "nbm",
+  basis: "STATION",
   meanF: 84,
   sdF: 2,
   weight: 1,
@@ -112,19 +116,19 @@ describe("buildDistribution", () => {
 
   describe("observation floor", () => {
     it("zeroes every bucket already excluded by the observed maximum", () => {
-      const d = buildDistribution({ buckets: BUCKETS, forecasts: [forecast()], observedMaxF: 86 });
+      const d = buildDistribution({ buckets: BUCKETS, forecasts: [forecast()], observedMaxF: 86, observationBasis: "STATION" });
       expect(d.buckets.find((b) => b.ticker === "T80")!.probability).toBe(0);
       expect(d.buckets.find((b) => b.ticker === "B80.5")!.probability).toBe(0);
       expect(d.buckets.find((b) => b.ticker === "B84.5")!.probability).toBe(0);
     });
 
     it("still sums to one after truncation", () => {
-      const d = buildDistribution({ buckets: BUCKETS, forecasts: [forecast()], observedMaxF: 86 });
+      const d = buildDistribution({ buckets: BUCKETS, forecasts: [forecast()], observedMaxF: 86, observationBasis: "STATION" });
       expect(distributionSum(d)).toBeCloseTo(1, 9);
     });
 
     it("keeps only the surviving mass of a straddling bucket", () => {
-      const d = buildDistribution({ buckets: BUCKETS, forecasts: [forecast({ meanF: 85 })], observedMaxF: 85 });
+      const d = buildDistribution({ buckets: BUCKETS, forecasts: [forecast({ meanF: 85 })], observedMaxF: 85, observationBasis: "STATION" });
       const straddling = d.buckets.find((b) => b.ticker === "B84.5")!;
       expect(straddling.probability).toBeGreaterThan(0);
       expect(straddling.probability).toBeLessThan(1);
@@ -132,14 +136,14 @@ describe("buildDistribution", () => {
 
     it("shifts mass upward relative to the unconstrained forecast", () => {
       const free = buildDistribution({ buckets: BUCKETS, forecasts: [forecast()] });
-      const floored = buildDistribution({ buckets: BUCKETS, forecasts: [forecast()], observedMaxF: 86 });
+      const floored = buildDistribution({ buckets: BUCKETS, forecasts: [forecast()], observedMaxF: 86, observationBasis: "STATION" });
       const freeTail = free.buckets.find((b) => b.ticker === "T87")!.probability;
       const flooredTail = floored.buckets.find((b) => b.ticker === "T87")!.probability;
       expect(flooredTail).toBeGreaterThan(freeTail);
     });
 
     it("records the floor it applied", () => {
-      const d = buildDistribution({ buckets: BUCKETS, forecasts: [forecast()], observedMaxF: 86 });
+      const d = buildDistribution({ buckets: BUCKETS, forecasts: [forecast()], observedMaxF: 86, observationBasis: "STATION" });
       expect(d.observationFloorF).toBe(86);
     });
   });
@@ -186,5 +190,187 @@ describe("confidenceScore", () => {
     const few = confidenceScore({ modelDispersionF: 1, sourceCount: 1, dominantProbability: 0.6 });
     const many = confidenceScore({ modelDispersionF: 1, sourceCount: 4, dominantProbability: 0.6 });
     expect(many).toBeGreaterThan(few);
+  });
+});
+
+describe("intradayConditioning", () => {
+  it("applies no conditioning before the schedule starts", () => {
+    const c = intradayConditioning(5);
+    expect(c.weight).toBe(0);
+    expect(c.sigmaScale).toBe(1);
+  });
+
+  it("increases weight monotonically through the day", () => {
+    const hours = [8, 10, 12, 13, 14];
+    const weights = hours.map((h) => intradayConditioning(h).weight);
+    for (let i = 1; i < weights.length; i++) {
+      expect(weights[i]!).toBeGreaterThan(weights[i - 1]!);
+    }
+  });
+
+  it("tightens sigma monotonically through the day", () => {
+    const scales = [8, 10, 12, 13, 14, 16].map((h) => intradayConditioning(h).sigmaScale);
+    for (let i = 1; i < scales.length; i++) {
+      expect(scales[i]!).toBeLessThan(scales[i - 1]!);
+    }
+  });
+
+  it("carries the final row forward past the end of the schedule", () => {
+    expect(intradayConditioning(23).weight).toBe(1);
+  });
+
+  it("never returns a zero sigma scale, which would be a degenerate distribution", () => {
+    for (const h of [18, 20, 23]) {
+      expect(intradayConditioning(h).sigmaScale).toBeGreaterThanOrEqual(MIN_SIGMA_SCALE);
+    }
+  });
+
+  it("uses a frozen schedule so it cannot be tuned at runtime", () => {
+    expect(Object.isFrozen(INTRADAY_CONDITIONING_SCHEDULE)).toBe(true);
+  });
+
+  it("rejects a non-finite hour", () => {
+    expect(() => intradayConditioning(Number.NaN)).toThrow(ProbabilityInputError);
+  });
+});
+
+describe("buildDistribution with intraday conditioning", () => {
+  it("reproduces the live smoke-run defect when conditioning is absent", () => {
+    // Consensus 82.4F, observed 75.9F at 13:00: truncation alone leaves far too
+    // much mass on 84-85F, which the market priced at ~1c.
+    const d = buildDistribution({
+      buckets: BUCKETS,
+      forecasts: [forecast({ meanF: 82.4, sdF: 1.6 })],
+      observedMaxF: 75.92,
+      observationBasis: "STATION",
+    });
+    expect(d.buckets.find((b) => b.ticker === "B84.5")!.probability).toBeGreaterThan(0.1);
+  });
+
+  it("collapses that mass once the day is known to be running cold", () => {
+    const d = buildDistribution({
+      buckets: BUCKETS,
+      forecasts: [forecast({ meanF: 82.4, sdF: 1.6 })],
+      observedMaxF: 75.92,
+      observationBasis: "STATION",
+      decisionLocalHour: 13,
+    });
+    expect(d.buckets.find((b) => b.ticker === "B84.5")!.probability).toBeLessThan(0.01);
+  });
+
+  it("shifts the consensus toward the observation by the scheduled weight", () => {
+    const d = buildDistribution({
+      buckets: BUCKETS,
+      forecasts: [forecast({ meanF: 82.4, sdF: 1.6 })],
+      observedMaxF: 75.92,
+      observationBasis: "STATION",
+      decisionLocalHour: 13,
+    });
+    const w = intradayConditioning(13).weight;
+    expect(d.intradayWeight).toBe(w);
+    // Floor still applies, so the reported consensus cannot fall below observed.
+    expect(d.consensusMeanF).toBeGreaterThanOrEqual(75.92);
+  });
+
+  it("does not condition a next-day event that has no observation", () => {
+    const d = buildDistribution({
+      buckets: BUCKETS,
+      forecasts: [forecast({ meanF: 82.4 })],
+      decisionLocalHour: 13,
+    });
+    expect(d.intradayWeight).toBe(0);
+    expect(d.intradaySigmaScale).toBe(1);
+  });
+
+  it("still sums to one under conditioning", () => {
+    const d = buildDistribution({
+      buckets: BUCKETS,
+      forecasts: [forecast({ meanF: 82.4 }), forecast({ sourceId: "b", meanF: 84 })],
+      observedMaxF: 79,
+      observationBasis: "STATION",
+      decisionLocalHour: 12,
+    });
+    expect(distributionSum(d)).toBeCloseTo(1, 9);
+  });
+
+  it("sharpens the distribution as the day progresses", () => {
+    const early = buildDistribution({
+      buckets: BUCKETS, forecasts: [forecast({ meanF: 84 })], observedMaxF: 83, observationBasis: "STATION", decisionLocalHour: 9,
+    });
+    const late = buildDistribution({
+      buckets: BUCKETS, forecasts: [forecast({ meanF: 84 })], observedMaxF: 83, observationBasis: "STATION", decisionLocalHour: 15,
+    });
+    const maxProb = (d: typeof early) => Math.max(...d.buckets.map((b) => b.probability));
+    expect(maxProb(late)).toBeGreaterThan(maxProb(early));
+  });
+
+  it("reports the conditioning factors it used", () => {
+    const d = buildDistribution({
+      buckets: BUCKETS, forecasts: [forecast()], observedMaxF: 80, observationBasis: "STATION", decisionLocalHour: 14,
+    });
+    expect(d.intradayWeight).toBe(1);
+    expect(d.intradaySigmaScale).toBeCloseTo(0.37, 6);
+  });
+});
+
+describe("measurement basis guard", () => {
+  it("suppresses conditioning when the observation is on a different basis", () => {
+    // This is the 2026-08-26 defect: a STATION observation differenced against a
+    // GRID forecast produced a fictitious cold anomaly.
+    const d = buildDistribution({
+      buckets: BUCKETS,
+      forecasts: [forecast({ meanF: 82.4, sdF: 1.6, basis: "GRID" })],
+      observedMaxF: 75.92,
+      observationBasis: "STATION",
+      decisionLocalHour: 13,
+    });
+    expect(d.basisMismatch).toBe(true);
+    expect(d.intradayWeight).toBe(0);
+    expect(d.mismatchedBases).toContain("nbm:GRID");
+  });
+
+  it("does not let an out-of-basis observation truncate the distribution either", () => {
+    const d = buildDistribution({
+      buckets: BUCKETS,
+      forecasts: [forecast({ meanF: 82.4, basis: "GRID" })],
+      observedMaxF: 86,
+      observationBasis: "STATION",
+    });
+    expect(d.observationFloorF).toBeNull();
+    // The 79-or-below bucket keeps mass, because an 86F grid-basis reading
+    // cannot be trusted to have excluded it on the station basis.
+    expect(d.buckets.find((b) => b.ticker === "T80")!.probability).toBeGreaterThan(0);
+  });
+
+  it("conditions normally when bases agree", () => {
+    const d = buildDistribution({
+      buckets: BUCKETS,
+      forecasts: [forecast({ meanF: 82.4, basis: "STATION" })],
+      observedMaxF: 75.92,
+      observationBasis: "STATION",
+      decisionLocalHour: 13,
+    });
+    expect(d.basisMismatch).toBe(false);
+    expect(d.intradayWeight).toBeGreaterThan(0);
+  });
+
+  it("reports no mismatch when there is no observation to compare", () => {
+    const d = buildDistribution({ buckets: BUCKETS, forecasts: [forecast({ basis: "GRID" })] });
+    expect(d.basisMismatch).toBe(false);
+    expect(d.mismatchedBases).toEqual([]);
+  });
+
+  it("flags every offending source, not just the first", () => {
+    const d = buildDistribution({
+      buckets: BUCKETS,
+      forecasts: [
+        forecast({ sourceId: "a", basis: "GRID" }),
+        forecast({ sourceId: "b", basis: "GRID" }),
+        forecast({ sourceId: "c", basis: "STATION" }),
+      ],
+      observedMaxF: 80,
+      observationBasis: "STATION",
+    });
+    expect(d.mismatchedBases).toHaveLength(2);
   });
 });

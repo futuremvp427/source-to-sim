@@ -316,3 +316,33 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - OPEN CALIBRATION GATE — DO NOT TREAT CURRENT SIGNALS AS EDGE. In the live smoke run the model assigned 27.6% to an NYC 84-85F bucket the market priced at 1c, with observed max 75.92F at ~13:00 local against a consensus mean of 82.4F. The deterministic and ensemble feeds forecast a whole-day maximum and do not condition on a day already running well below forecast, so the distribution is too warm and too wide late in the settlement window. Truncating at the observed maximum is not sufficient; the intraday trajectory must shift the distribution, not just floor it. Any "ENTER" produced before this is resolved is model error, not edge.
 - Lovable specification: `docs/WEATHER_LOVABLE_BUILD_SPEC.md`. Recommendation is to REUSE the existing Lovable project rather than create a second one, with isolation by `weather_lab_` table prefix, a new `/weather-lab` route, and a rule that any diff touching `src/lib/sports-shadow/`, `src/routes/sports-shadow.tsx` or a `sports_shadow_*` table is a defect. No Lovable credits have been spent; the UI has not been built.
 - Acceptance gate is pre-registered in code as constants, not inputs: >=50 independent station-days minimum (100 preferred, 200 strong), profit factor >=1.3, positive net P/L and ROI, must survive top-1% and top-5% winner removal, no single-event concentration above 50% of gross wins, bounded drawdown. The independent unit is the station-day, not the bucket.
+
+### WEATHER-LAB-2 Calibration gate — two model defects found and fixed; system now fails closed
+
+- Status: CALIBRATION DIAGNOSTIC COMPLETE; TWO DEFECTS FIXED; SYSTEM CORRECTLY REFUSES TO TRADE; ONE BLOCKER REMAINS BEFORE COLLECTION. PAPER/RESEARCH ONLY.
+- The WEATHER-LAB-1 calibration gate was investigated rather than deferred, because the smoke run's signals were implausible. Both defects below were found by running the system, not by reading it.
+
+**Defect 1 — the model ignored the intraday trajectory.**
+
+- Diagnostic: 355 station-days across all five candidate cities, 2026-06-15 to 2026-08-24, using the Open-Meteo historical *forecast* archive against reanalysis actuals so there is no lookahead.
+- Finding: how far the observed maximum so far sits from the forecast strongly predicts how far the final daily maximum will sit from that forecast. Blending toward the observation cuts mean absolute error by 21.9% at 10:00 local, 37.0% at 12:00, 52.6% at 13:00, 80.1% at 14:00, 92.3% at 15:00 and 97.6% at 16:00. Correlation of (observed - forecast) with (actual - forecast) rises from 0.45 at 10:00 to 0.99 at 16:00.
+- Present in every city, not just NYC. Optimal blend weight by 14:00-15:00 is 1.00 everywhere; LA saturates earliest (13:00).
+- Fix: `INTRADAY_CONDITIONING_SCHEDULE` in `probability.ts`. Conditioned mean is `F + w(hour) * (O - F)`; conditioned sigma is `sigma * sigmaScale(hour)`. Schedule frozen at w = 0.12/0.16/0.21/0.30/0.45/0.74/1.00 and sigmaScale = 0.94/0.91/0.88/0.82/0.69/0.53/0.37 for local hours 08-14, carried forward thereafter, sigmaScale floored at 0.05 so the distribution can never become degenerate.
+- TRAIN/OOS DISCIPLINE: 2026-06-15 to 2026-08-24 is now a CONSUMED training window for this schedule. Do not re-fit it against forward paper results. Forward collection is the untouched out-of-sample test.
+- Strategic implication worth keeping: by 14:00 local the weight is already 1.00 and residual sigma is roughly a third of the day-ahead value, i.e. the outcome is close to determined — which is the regime WEATHER-STRATEGY-1 already showed the market prices correctly (96-100c NO asks). The plausible window is the middle of the day, roughly 11:00-13:00, not the end of it.
+
+**Defect 2 — MEASUREMENT BASIS MISMATCH (the more serious one).**
+
+- After fixing defect 1 the model produced 90.8% on an NYC "79F or below" bucket the market priced at 14c. That signal was investigated rather than accepted.
+- Finding: on 2026-08-26, KNYC (Central Park) ran **7-10F cooler than the Open-Meteo grid point** for the same hours, while the grid sat essentially on its own forecast (grid max-so-far 83.5F vs forecast 82.4F; KNYC max-so-far 77.0F). Mean station-minus-grid offset that day was -3.75F across 13 observations.
+- Therefore the entire "day is running 6.5F cold" anomaly was a **station-versus-grid basis artifact, not weather**. The market was right and the model was systematically biased cold by roughly the station-grid offset. This would have produced confident, systematically wrong paper entries.
+- Fix: `MeasurementBasis` (`STATION` | `GRID`) is now a required field on every forecast. When an observation's basis differs from any forecast's basis, `buildDistribution` sets `basisMismatch`, suppresses conditioning **and** refuses to let the observation truncate the distribution, and `decideEntry` rejects with `MEASUREMENT_BASIS_MISMATCH`. The type system now makes an undeclared basis a compile error.
+- Current live behaviour after the fix: **0 paper entries**, because the only enabled mechanism (`INTRADAY_OBSERVATION_EDGE`) needs a station observation and all present forecasts are grid basis. This is the correct fail-closed outcome — the system refuses to trade rather than trading on a fictitious anomaly.
+
+**Remaining blocker before any forward collection can produce evidence.**
+
+- The system needs **station-basis forecasts** so the observation and forecast are comparable. NOAA NBM station guidance (the per-station text bulletins, already used in the failed WEATHER-STRATEGY-3 work and therefore a known-accessible feed) is the natural source. The alternative is an explicit per-station, per-hour bias correction of the grid feeds, which is a fitted parameter and would need its own train window.
+- Until that lands, `INTRADAY_OBSERVATION_EDGE` cannot fire, and the collector will keep correctly recording zero entries.
+- Verification at this commit: full suite 2,233 passed / 9 skipped across 143 files (205 weather-lab tests); `tsc --noEmit` clean; `npm run build` succeeds; `git diff --check` clean.
+- Audit CI `32992513422` passed on the prior commit `908d6c3`, including the `schema-contract` job, which replayed the weather lab migration against real Postgres and passed `supabase/tests/weather_lab_schema.sql` (paper-only CHECK, NO_FILL-is-empty CHECK, RLS coverage, no credential/live-order columns).
+- No production deployment, no Sports Shadow change, no Supabase modification, no Lovable credits, no orders, `LIVE_EXECUTION_IMPLEMENTED=false` unchanged, `main` untouched.

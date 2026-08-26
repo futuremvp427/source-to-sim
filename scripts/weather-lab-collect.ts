@@ -212,7 +212,9 @@ async function collectCity(cityKey: string, now: Date) {
       .filter((d) => d.source !== "STATION_OBSERVATION")
       .map((d) => {
         const v = d.value as { maxF: number };
-        return { source: d.source, sourceId: d.sourceId, meanF: v.maxF, sdF: sigma.sigmaF, weight: 1 };
+        // Open-Meteo feeds are GRID basis; the NWS station observation is STATION
+        // basis. Declaring this lets the engine refuse to difference them.
+        return { source: d.source, sourceId: d.sourceId, basis: "GRID" as const, meanF: v.maxF, sdF: sigma.sigmaF, weight: 1 };
       });
 
     if (forecasts.length === 0) {
@@ -224,7 +226,18 @@ async function collectCity(cityKey: string, now: Date) {
       ? obs.datum.value.observedMaxF
       : null;
 
-    const distribution = buildDistribution({ buckets, forecasts, observedMaxF });
+    // Local decision hour drives the frozen intraday conditioning schedule.
+    const decisionLocalHour = Number(
+      new Intl.DateTimeFormat("en-GB", { timeZone: site.timezone, hour: "2-digit", hour12: false }).format(now),
+    );
+
+    const distribution = buildDistribution({
+      buckets,
+      forecasts,
+      observedMaxF,
+      observationBasis: "STATION",
+      decisionLocalHour,
+    });
 
     // --- market side -------------------------------------------------------
     for (const leg of legs) {
@@ -277,6 +290,7 @@ async function collectCity(cityKey: string, now: Date) {
           modelDispersionF: distribution.modelDispersionF,
           settlementVerified: settlement.status === "SETTLEMENT_VERIFIED",
           observationFloorApplied: distribution.observationFloorF !== null,
+          basisMismatch: distribution.basisMismatch,
           fill: base,
         });
         decision = d.decision;
@@ -334,6 +348,11 @@ async function collectCity(cityKey: string, now: Date) {
       modelDispersionF: distribution.modelDispersionF,
       confidence: distribution.confidence,
       observationFloorF: distribution.observationFloorF,
+      decisionLocalHour,
+      intradayWeight: distribution.intradayWeight,
+      intradaySigmaScale: distribution.intradaySigmaScale,
+      basisMismatch: distribution.basisMismatch,
+      mismatchedBases: distribution.mismatchedBases,
       sigmaBasis: sigma.basis,
       sigmaF: sigma.sigmaF,
       contributingSources: distribution.contributingSources,

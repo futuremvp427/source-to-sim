@@ -157,13 +157,20 @@ export function decideEntry(params: {
   modelDispersionF: number;
   settlementVerified: boolean;
   observationFloorApplied: boolean;
+  /** True when the distribution mixed measurement bases; never tradable. */
+  basisMismatch?: boolean;
   fill: FillResult;
 }): EntryDecision {
-  const { inputs, gate, confidence, modelDispersionF, settlementVerified, observationFloorApplied, fill } = params;
+  const {
+    inputs, gate, confidence, modelDispersionF, settlementVerified,
+    observationFloorApplied, basisMismatch = false, fill,
+  } = params;
   const edge = computeEdge(inputs);
   const reasons: string[] = [];
 
   if (!settlementVerified) reasons.push("SETTLEMENT_UNVERIFIED");
+  // A model built by differencing incompatible measurement bases is not a model.
+  if (basisMismatch) reasons.push("MEASUREMENT_BASIS_MISMATCH");
   if (fill.status !== "FILLED") reasons.push(`NOT_FILLABLE:${fill.status}${fill.reason ? `:${fill.reason}` : ""}`);
   if (edge.netEdge < gate.minNetEdge) reasons.push("NET_EDGE_BELOW_THRESHOLD");
   if (inputs.executablePriceUsd > gate.maxPriceUsd) reasons.push("PRICE_ABOVE_MAX");
