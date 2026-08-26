@@ -5,6 +5,7 @@ on:
     branches: [weather-us-translation-research]
     paths:
       - scripts/research-weather-lag.mjs
+      - scripts/research-weather-late-day.mjs
       - .github/workflows/weather-lag-research.yml
   workflow_dispatch:
 
@@ -20,7 +21,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Run no-hindsight public-data lag backtest
+      - name: Run no-hindsight public-data dead-bucket lag backtest
         env:
           START_DATE: "2026-07-20"
           END_DATE: "2026-08-24"
@@ -28,16 +29,30 @@ jobs:
           QUOTE_MAX_DELAY_SECONDS: "600"
           CONTRACTS: "100"
         run: node scripts/research-weather-lag.mjs
-      - name: Show report
+      - name: Run frozen late-day train/OOS test
+        env:
+          START_DATE: "2026-07-20"
+          END_DATE: "2026-08-24"
+          TRAIN_END: "2026-08-11"
+          OOS_START: "2026-08-12"
+          QUOTE_MAX_DELAY_SECONDS: "300"
+          CONTRACTS: "100"
+          MIN_TRAIN_TRADES: "15"
+          MIN_OOS_TRADES: "10"
+        run: node scripts/research-weather-late-day.mjs
+      - name: Show reports
         if: always()
         run: |
-          if [ -f research-output/weather-lag-backtest.md ]; then
-            cat research-output/weather-lag-backtest.md
-          fi
+          for report in research-output/*.md; do
+            if [ -f "$report" ]; then
+              echo "===== $report ====="
+              cat "$report"
+            fi
+          done
       - name: Upload research output
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: weather-lag-backtest
+          name: weather-strategy-research
           path: research-output/
           if-no-files-found: warn
