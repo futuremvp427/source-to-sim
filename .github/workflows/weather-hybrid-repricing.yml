@@ -1,0 +1,50 @@
+name: Weather Hybrid Repricing
+
+# Short-horizon repricing test: does a BeefSlayer trade predict short-horizon
+# U.S. Kalshi price movement (a scalp), as opposed to hold-to-settlement P/L
+# (already tested separately and rejected). Read-only, public data only.
+
+on:
+  push:
+    branches: [weather-hybrid-preflight]
+    paths:
+      - scripts/research-weather-hybrid-repricing.mjs
+      - .github/workflows/weather-hybrid-repricing.yml
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "Lookback window in days"
+        required: false
+        default: "120"
+
+permissions:
+  contents: read
+
+jobs:
+  repricing:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Syntax check
+        run: node --check scripts/research-weather-hybrid-repricing.mjs
+      - name: Run short-horizon repricing test
+        env:
+          LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '120' }}
+          CONTRACTS: "100"
+          QUOTE_MAX_LAG_SECONDS: "300"
+          CONTROLS_PER_TRIGGER: "2"
+        run: node scripts/research-weather-hybrid-repricing.mjs
+      - name: Show report
+        if: always()
+        run: cat research-output/weather-hybrid-repricing.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-hybrid-repricing
+          path: research-output/
+          if-no-files-found: warn
