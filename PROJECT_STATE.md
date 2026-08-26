@@ -229,3 +229,19 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - Implementation: `scripts/research-weather-late-day.mjs`; workflow updated at `35d77f29be9f7ca500ae9db0f631462ec5db4000`.
 - Anti-overfitting rule: do not keep changing these parameters after seeing this result. The next and final serious weather hypothesis, if pursued, is a separate probabilistic NBM-vs-market mispricing test with its own frozen train/OOS protocol.
 - No production deployment was performed; Sports Shadow was untouched; Lovable/Codex credits were not used; `LIVE_EXECUTION_IMPLEMENTED=false` remains unchanged.
+
+### WEATHER-STRATEGY-3 Previous-day NBM probabilistic mispricing
+
+- Status: FAILED OUT-OF-SAMPLE; DO NOT BUILD/DEPLOY OR RETUNE ON THE SAME OOS WINDOW.
+- Primary workflow run: `32927555964`.
+- Protocol: previous-day NOAA NBM v5 NBP 13Z forecast, FHR35/UTC00 daytime maximum; model probability from QMD `TXNMN` mean and `TXNSD` standard deviation; first Kalshi public 1-minute BBO at/after 16:00Z on the forecast-run date; at most one selected trade per station-day.
+- Evidence: 594 market rows with archived forecast + contemporaneous quote; 104 independent settled station-day events.
+- Baseline top-bucket accuracy: NBM model 41.3%; Kalshi market snapshot 49.0%.
+- TRAIN-selected frozen rule: model confidence >=80%, model edge over executable ask >=10 percentage points, ask <=80c.
+- TRAIN result: 20 trades, 18 wins / 2 losses = 90.0% win rate; +$325.27 after-fee P/L; +22.1% ROI on cost using 100-contract research sizing.
+- OOS result on untouched 2026-08-12 through 2026-08-24 dates: 10 trades, 7 wins / 3 losses = 70.0% win rate; -$39.83 after-fee P/L; -5.4% ROI.
+- Acceptance requirement was >=75% OOS win rate plus positive OOS P/L/ROI and minimum OOS count. Result: FAIL.
+- Interpretation: the attractive 90% training result did not survive unseen data. This is evidence of instability/overfit for the tested rule, not evidence of a proven edge.
+- Reproducibility: `scripts/research-weather-nbm.mjs`, `.github/workflows/weather-lag-research.yml`, and `docs/WEATHER_STRATEGY_FALSIFICATION.md`.
+- Hard stop for this research family: do not loosen thresholds, switch model parameters, or mine the same OOS period to force a pass. A future weather project would require a genuinely new hypothesis and a new untouched holdout period.
+- No production deployment was performed; Sports Shadow was untouched; no Lovable/Codex credits or trading credentials were used; `LIVE_EXECUTION_IMPLEMENTED=false` remains unchanged.
