@@ -6,6 +6,7 @@ on:
     paths:
       - scripts/research-weather-lag.mjs
       - scripts/research-weather-late-day.mjs
+      - scripts/inspect-nbm-format.mjs
       - .github/workflows/weather-lag-research.yml
   workflow_dispatch:
 
@@ -21,6 +22,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      - name: Inspect one archived NBM probabilistic bulletin
+        run: node scripts/inspect-nbm-format.mjs
       - name: Run no-hindsight public-data dead-bucket lag backtest
         env:
           START_DATE: "2026-07-20"
