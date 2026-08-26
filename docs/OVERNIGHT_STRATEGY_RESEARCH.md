@@ -56,7 +56,7 @@ But it is **not yet proven executable**. The remaining risk is almost entirely m
 
 ### Live-depth falsification and collateral-return correction
 
-A current read-only six-leg depth scan materially reduced confidence in immediate executability. Chicago and San Francisco had complete six-leg depth at the scan snapshot but were **negative after taker fees at every tested size**. Chicago ranged from -$0.07 at 1 contract/leg to -$0.77 at 25/leg, with 50/100 not fully fillable. San Francisco ranged from -$0.03 at 1/leg to -$12.73 at 100/leg. NYC, Los Angeles, and Miami each lacked a YES bid on at least one bucket, so a complete NO basket was not available. This means historical candle edge is not enough; the live market can be efficiently priced or incompletely quoted.
+Two prospective read-only scans one hour apart both materially reduced confidence in immediate executability. At the first scan, Chicago and San Francisco had complete six-leg depth but were negative after taker fees at every tested size; NYC, Los Angeles and Miami were incomplete because at least one bucket lacked a YES bid. At the second scan (~05:19 ET), the same qualitative pattern persisted: NYC/LA/Miami still lacked one leg; Chicago was -$0.08 at 1 contract/leg, -$0.53 at 10/leg and -$1.30 at 25/leg, with 50/100 not fully fillable; San Francisco was -$0.08 at 1/leg, -$1.01 at 10/leg and -$16.79 at 100/leg. No profitable fully fillable basket was observed in either prospective scan. This is now stronger evidence that the 49/50 historical candle result may represent transient/intra-minute or non-depth-backed quotes rather than routinely executable arbitrage.
 
 A separate Kalshi mechanism changes the capital-efficiency analysis: **Collateral Return** can return guaranteed collateral early on mutually exclusive NO positions. Kalshi documents that when `netting_enabled` is set for an event, guaranteed payout across hedged mutually-exclusive NO positions is returned to available cash rather than requiring the full gross position cost to remain tied up. Current live weather events expose `mutually_exclusive=true` and `collateral_return_type=MECNET`, consistent with this mechanism. Therefore the earlier statement that roughly $496-$499 must remain tied until settlement was too conservative. However, this does **not** create an executable profit by itself and does not solve partial-fill or quote-movement risk. The event's netting choice is locked from the first order, and positions receiving collateral return can have selling restrictions, so the simulator must model this explicitly.
 
@@ -68,7 +68,7 @@ Kalshi's current public weather pages explicitly label these daily-high events a
 
 ## Current ranking of research families (not deployment ranking)
 
-1. **Exhaustive-bucket NO basket / structural arb** — strongest hypothesis structurally because completed baskets remove weather outcome risk; 49/50 historical events had an after-fee displayed edge and 35/50 survived +2c-per-leg stress, but the first live depth snapshot showed no profitable complete basket. Keep at #1 only as a prospective microstructure test, not a deployment candidate.
+1. **Exhaustive-bucket NO basket / structural arb** — strongest hypothesis structurally because completed baskets remove weather outcome risk; 49/50 historical events had an after-fee displayed edge and 35/50 survived +2c-per-leg stress, but two consecutive live depth snapshots showed no profitable complete basket. Keep at #1 only as a prospective microstructure test, not a deployment candidate; demote if the final scan is also negative.
 2. **Maskache2 mechanism** — 76.1% event-positive endpoint reconstruction and broad price-band profitability; still needs exact lifecycle/entry-timing reconstruction and target-venue replay.
 3. **ColdMath segmented mechanism** — strong official all-time Weather ranking and highly segmented behavior; likely multiple sub-strategies, not one price rule.
 4. **BeefSlayer asymmetric value** — officially top-tier Weather profit and profitable reconstructed cheap-tail cohorts, but lower win rate and meaningful loss tail.
@@ -91,7 +91,7 @@ Kalshi's current public weather pages explicitly label these daily-high events a
 
 ## Running next
 
-- Repeat live structural-basket scans to estimate how often complete profitable depth actually appears.
+- One more prospective structural-basket scan before the final ranking; demote/reject if complete profitable depth remains absent.
 - Add collateral-return-aware capital accounting and sequential-fill leg-risk simulation.
 - Continue lifecycle reconstruction of Maskache2/ColdMath/BeefSlayer as fallback families.
 - The production application is untouched and `LIVE_EXECUTION_IMPLEMENTED=false` remains unchanged.
