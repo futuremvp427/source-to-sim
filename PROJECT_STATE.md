@@ -200,7 +200,7 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - Conclusion: same-airport, same-date, same-bucket translation is not economically exact and must not promote to production `EXACT_MATCH` or authenticated-preview eligibility.
 - Added deterministic evaluator/tests: `src/lib/pmus/weather-settlement-equivalence.ts` and `src/lib/pmus/weather-settlement-equivalence.test.ts`.
 - Evidence report: `docs/WEATHER_TRANSLATION_HISTORICAL_EVIDENCE.md`.
-- Same-source-entry-price BUY/hold sensitivity for six observed BUY examples totals -$75.12751, but this is explicitly not executable PM-US P/L because contemporaneous historical PM-US BBO/quote snapshots were not recovered and exits/hedges are incomplete.
+- Same-source-entry-price BUY/hold sensitivity for six observed BUY examples totals -$75.12751, but this is explicitly not executable PM-US P&L because contemporaneous historical PM-US BBO/quote snapshots were not recovered and exits/hedges are incomplete.
 - Historical executable US counterfactual P/L remains UNVERIFIED. Future work may recover or prospectively collect contemporaneous target-venue quotes, but it cannot erase the observed settlement-source divergence.
 - No production deployment was performed; Lovable was not used; live execution remains disabled.
 
@@ -222,7 +222,7 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - Research-only workflow run: `32927058789`.
 - Candidate rows: 358 total; 232 training rows (2026-07-20 through 2026-08-11) and 126 reserved OOS rows (2026-08-12 through 2026-08-24).
 - Tested fixed grid: local decision hour 15/16/17/18; observed maximum unchanged for 60/120/180 minutes; maximum YES ask 60/70/75/80/85/90c.
-- Training acceptance required at least 15 trades, >=75% win rate, and positive after-fee P/L.
+- Training acceptance required at least 15 trades, >=75% win rate, and positive after-fee P&L.
 - Result: no rule met the preregistered training minimums. Therefore no rule was frozen and the OOS set was not touched for strategy selection.
 - OOS acceptance status: FAIL / NOT ENTERED.
 - Some low-win-rate cheap-YES rules had positive training expectancy because occasional wins paid many losses, but they do not satisfy the requested high-win-rate objective and are not evidence for a >=75% strategy.
@@ -238,10 +238,26 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - Evidence: 594 market rows with archived forecast + contemporaneous quote; 104 independent settled station-day events.
 - Baseline top-bucket accuracy: NBM model 41.3%; Kalshi market snapshot 49.0%.
 - TRAIN-selected frozen rule: model confidence >=80%, model edge over executable ask >=10 percentage points, ask <=80c.
-- TRAIN result: 20 trades, 18 wins / 2 losses = 90.0% win rate; +$325.27 after-fee P/L; +22.1% ROI on cost using 100-contract research sizing.
-- OOS result on untouched 2026-08-12 through 2026-08-24 dates: 10 trades, 7 wins / 3 losses = 70.0% win rate; -$39.83 after-fee P/L; -5.4% ROI.
-- Acceptance requirement was >=75% OOS win rate plus positive OOS P/L/ROI and minimum OOS count. Result: FAIL.
+- TRAIN result: 20 trades, 18 wins / 2 losses = 90.0% win rate; +$325.27 after-fee P&L; +22.1% ROI on cost using 100-contract research sizing.
+- OOS result on untouched 2026-08-12 through 2026-08-24 dates: 10 trades, 7 wins / 3 losses = 70.0% win rate; -$39.83 after-fee P&L; -5.4% ROI.
+- Acceptance requirement was >=75% OOS win rate plus positive OOS P&L/ROI and minimum OOS count. Result: FAIL.
 - Interpretation: the attractive 90% training result did not survive unseen data. This is evidence of instability/overfit for the tested rule, not evidence of a proven edge.
 - Reproducibility: `scripts/research-weather-nbm.mjs`, `.github/workflows/weather-lag-research.yml`, and `docs/WEATHER_STRATEGY_FALSIFICATION.md`.
 - Hard stop for this research family: do not loosen thresholds, switch model parameters, or mine the same OOS period to force a pass. A future weather project would require a genuinely new hypothesis and a new untouched holdout period.
 - No production deployment was performed; Sports Shadow was untouched; no Lovable/Codex credits or trading credentials were used; `LIVE_EXECUTION_IMPLEMENTED=false` remains unchanged.
+
+### WEATHER-STRATEGY-4 Public profitable-wallet archetypes
+
+- Status: REVERSE ENGINEERING COMPLETE FOR FIRST 90-DAY PASS; NO STRATEGY PROMOTED YET.
+- Research workflow: `32928556191`; public Polymarket Data API plus IEM station observations; no credentials/orders/Lovable/Codex credits.
+- HighTempTation recent sample: 2,274 weather markets; median first BUY 96.0c; 96.7% of BUYs above 55c. Of 225 usable same-day U.S. station rows, 210 (93.3%) were already `DEAD_HIGH` when the first BUY occurred; median first-BUY time ~13.87 local. Interpretation: primarily near-certainty / information-reaction carry, not a day-ahead forecast edge.
+- Weatherstappen recent sample: 865 weather markets; median first BUY 98.0c; 94.3% of BUYs above 55c. Of 31 usable same-day U.S. rows, 24 (77.4%) were `DEAD_HIGH`. Same broad certainty/carry archetype.
+- BeefSlayer recent sample: 394 weather markets; median first BUY 8.9c; 62.3% of BUYs below 20c. Of 100 usable same-day U.S. rows, only 1 was `DEAD_HIGH`; 66 were below the target bucket and 30 already inside it. Interpretation: forecast/tail-value archetype with genuine outcome risk, materially different from HighTempTation.
+- ColdMath recent sample: 403 weather markets; median first BUY 2.2c; 62.0% of BUYs below 20c; 843 BUY / 0 SELL rows. Usable U.S. first-BUY median ~04:32 local and 8/12 were below the target bucket. Interpretation: early forecast-first/tail-value hold-to-resolution archetype.
+- Maskache2 recent sample: 1,312 weather markets; median first BUY 12.6c; 56.8% of BUYs below 20c. Of 205 usable U.S. rows, 154 (75.1%) were below the target bucket and only 2 were `DEAD_HIGH`. Interpretation: predictive/tail-value archetype.
+- JoeTheMeteorologist recent sample: 267 weather markets; median first BUY 7.0c; 72.5% of BUYs below 20c; only 5 usable U.S. same-day rows, too small for a station-state conclusion.
+- badatmath recent sample: 1,442 weather markets; median first BUY 23.5c; 35 usable U.S. same-day first buys and no late >=15:00 starts; among 30 rows with station evidence, 25 (83.3%) were below the target bucket. Interpretation: forecast-first rather than dead-bucket carry.
+- Key distinction: the visually impressive ~97% win-rate wallets are mostly buying near-certainty outcomes around 93-99c after observed temperature has already invalidated a lower bucket. That is consistent with the prior Kalshi dead-bucket result where 180/180 outcomes were correct but no executable NO ask was <=95c. High win rate does not imply a large or reproducible edge.
+- Most promising new research family: forecast-first low-price/tail value as represented by BeefSlayer / ColdMath / Maskache2, not the certainty-carry family. This requires a genuinely new untouched holdout and richer forecast-state-at-entry reconstruction; do not reuse/tune the failed WEATHER-STRATEGY-3 OOS window.
+- Implementation: `scripts/research-weather-wallets.mjs`; workflow updated on `weather-us-translation-research`.
+- No production deployment; Sports Shadow unchanged; `LIVE_EXECUTION_IMPLEMENTED=false` remains unchanged.
