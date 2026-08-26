@@ -6,7 +6,7 @@ on:
     paths:
       - scripts/research-weather-lag.mjs
       - scripts/research-weather-late-day.mjs
-      - scripts/inspect-nbm-format.mjs
+      - scripts/research-weather-nbm.mjs
       - .github/workflows/weather-lag-research.yml
   workflow_dispatch:
 
@@ -22,8 +22,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Inspect one archived NBM probabilistic bulletin
-        run: node scripts/inspect-nbm-format.mjs
       - name: Run no-hindsight public-data dead-bucket lag backtest
         env:
           START_DATE: "2026-07-20"
@@ -43,6 +41,17 @@ jobs:
           MIN_TRAIN_TRADES: "15"
           MIN_OOS_TRADES: "10"
         run: node scripts/research-weather-late-day.mjs
+      - name: Run previous-day NBM probabilistic train/OOS test
+        env:
+          START_DATE: "2026-07-20"
+          END_DATE: "2026-08-24"
+          TRAIN_END: "2026-08-11"
+          OOS_START: "2026-08-12"
+          QUOTE_MAX_DELAY_SECONDS: "1800"
+          CONTRACTS: "100"
+          MIN_TRAIN_TRADES: "20"
+          MIN_OOS_TRADES: "10"
+        run: node scripts/research-weather-nbm.mjs
       - name: Show reports
         if: always()
         run: |
