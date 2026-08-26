@@ -1,0 +1,40 @@
+name: Weather Hybrid Preflight
+
+on:
+  push:
+    branches:
+      - weather-hybrid-preflight
+    paths:
+      - "scripts/research-weather-hybrid-preflight.mjs"
+      - ".github/workflows/weather-hybrid-preflight.yml"
+      - "docs/HYBRID_PREFLIGHT_PLAN.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run wallet to US historical preflight
+        env:
+          LOOKBACK_DAYS: "120"
+          CONTRACTS: "100"
+          QUOTE_MAX_LAG_SECONDS: "300"
+        run: node scripts/research-weather-hybrid-preflight.mjs
+      - name: Show report
+        if: always()
+        run: cat research-output/weather-hybrid-preflight.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-hybrid-preflight
+          path: research-output/
+          if-no-files-found: warn
