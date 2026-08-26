@@ -104,6 +104,17 @@ function marketLocation(market: UsMarket): string | null {
 }
 
 /**
+ * Threshold evidence deliberately comes from the human-readable question, not
+ * a generic slug scan. ISO dates such as 2026-08-26 contain hyphenated numbers
+ * that the shared numeric-range parser can otherwise mistake for a temperature
+ * bucket. Strip ISO dates first and fail closed when no real threshold remains.
+ */
+function translationThreshold(question: string | null | undefined) {
+  const withoutIsoDates = (question ?? "").replace(/\b\d{4}-\d{2}-\d{2}\b/g, " ");
+  return extractThreshold(withoutIsoDates);
+}
+
+/**
  * Evaluate one international weather source market against one US candidate.
  *
  * Requirements for research candidacy:
@@ -172,8 +183,8 @@ export function assessWeatherTranslation(
     });
   }
 
-  const sourceThreshold = extractThreshold(`${source.question ?? ""} ${source.slug ?? ""}`);
-  const targetThreshold = extractThreshold(`${market.question ?? ""} ${market.slug ?? ""}`);
+  const sourceThreshold = translationThreshold(source.question);
+  const targetThreshold = translationThreshold(market.question);
   if (!sourceThreshold || !targetThreshold) {
     return result("UNVERIFIED", "Temperature bucket/threshold could not be proven on both markets.", {
       station: corridor.station,
