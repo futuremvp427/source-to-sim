@@ -1,0 +1,47 @@
+name: Source Ingest Validation
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  baseline-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Create exact pre-fix detached worktree
+        run: git worktree add --detach /tmp/source-ingest-baseline 06260f82e0d716ca650374dea0655ba46a1f7d09
+      - name: Install baseline dependencies
+        working-directory: /tmp/source-ingest-baseline
+        run: bun install --frozen-lockfile
+      - name: Baseline worker.server test — exact command
+        working-directory: /tmp/source-ingest-baseline
+        run: bunx vitest run src/lib/sports-shadow/worker.server.test.ts
+
+  current-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install current dependencies
+        run: bun install --frozen-lockfile
+      - name: Source-poll regression suite
+        run: bunx vitest run src/lib/sports-shadow/source-poll.server.test.ts
+      - name: Current worker.server test — same command as baseline
+        run: bunx vitest run src/lib/sports-shadow/worker.server.test.ts
+      - name: Full test suite
+        run: bun run test
+      - name: Typecheck
+        run: bun ./node_modules/typescript/bin/tsc --noEmit
+      - name: Production build
+        run: bun run build
