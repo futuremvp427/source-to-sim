@@ -175,3 +175,19 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - First paper position: PENDING.
 - Dashboard verification: PENDING.
 - Live execution unchanged: `LIVE_EXECUTION_IMPLEMENTED=false`.
+
+### WEATHER-US TRANSLATION RESEARCH
+
+- Status: FEATURE BRANCH ONLY; NOT DEPLOYED; RESEARCH/PAPER GATE ONLY.
+- Branch: `weather-us-translation-research`, based from deployed/main SHA `aafe7a5f0966abb4a30de07b96bd1932ad8d356f`.
+- Goal: test whether selected international weather-trader signals can be translated onto US venues without pretending the contracts are economically identical.
+- First audited corridors only: Los Angeles/KLAX, San Francisco/KSFO, Miami/KMIA.
+- NYC and Chicago are intentionally excluded because the observed international and PM-US products use different stations. All other cities fail closed until separately audited.
+- Translation candidacy requires an open US market plus same audited city, same calendar date, and exact same temperature threshold/range shape, numbers, and units.
+- A translation candidate is explicitly `settlementEquivalence=UNPROVEN` and `previewEligible=false`.
+- Existing `EXACT_MATCH` authenticated-preview gate is unchanged. `TRANSLATION_CANDIDATE` is rejected by `decidePreviewAction` and cannot sign or submit an order.
+- Added: `src/lib/pmus/weather-translation.ts` and `src/lib/pmus/weather-translation.test.ts`.
+- Regression coverage: LA/SF/Miami positive research candidates; NYC/Chicago/unverified cities rejected; wrong date, bucket, units, closed markets rejected; missing threshold remains UNVERIFIED; multiple candidates are preserved rather than silently selected; translation status cannot unlock authenticated preview.
+- Next evidence gate before any translated paper-copy activation: historical settlement-agreement replay for KLAX/KSFO/KMIA and source-trader trade replay against contemporaneous PM-US/Kalshi prices.
+- Production Sports Shadow is intentionally untouched by this branch so the currently aligned deployment/runtime SHA is not disturbed and no Lovable credits are required for this research change.
+- Live execution unchanged: `LIVE_EXECUTION_IMPLEMENTED=false`.
