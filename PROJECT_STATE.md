@@ -222,7 +222,7 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - Research-only workflow run: `32927058789`.
 - Candidate rows: 358 total; 232 training rows (2026-07-20 through 2026-08-11) and 126 reserved OOS rows (2026-08-12 through 2026-08-24).
 - Tested fixed grid: local decision hour 15/16/17/18; observed maximum unchanged for 60/120/180 minutes; maximum YES ask 60/70/75/80/85/90c.
-- Training acceptance required at least 15 trades, >=75% win rate, and positive after-fee P&L.
+- Training acceptance required at least 15 trades, >=75% win rate, and positive after-fee P/L.
 - Result: no rule met the preregistered training minimums. Therefore no rule was frozen and the OOS set was not touched for strategy selection.
 - OOS acceptance status: FAIL / NOT ENTERED.
 - Some low-win-rate cheap-YES rules had positive training expectancy because occasional wins paid many losses, but they do not satisfy the requested high-win-rate objective and are not evidence for a >=75% strategy.
@@ -261,3 +261,19 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - Most promising new research family: forecast-first low-price/tail value as represented by BeefSlayer / ColdMath / Maskache2, not the certainty-carry family. This requires a genuinely new untouched holdout and richer forecast-state-at-entry reconstruction; do not reuse/tune the failed WEATHER-STRATEGY-3 OOS window.
 - Implementation: `scripts/research-weather-wallets.mjs`; workflow updated on `weather-us-translation-research`.
 - No production deployment; Sports Shadow unchanged; `LIVE_EXECUTION_IMPLEMENTED=false` remains unchanged.
+
+### WEATHER-STRATEGY-5 Candidate backend stress
+
+- Status: RESEARCH COMPLETE FOR THIS PASS; NOTHING PROMOTED TO PRODUCTION OR LIVE TRADING.
+- Full evidence: `docs/WEATHER_CANDIDATE_BACKEND_STRESS.md`; Claude handoff: `docs/CLAUDE_STRATEGY_HANDOFF.md`.
+- Comprehensive candidate run `32959085859`: wallet stability, five-city basket stress, corrected cheap-value OOS, and repeated live prospective basket depth all completed successfully.
+- Wallet transferability run `32959222539`: SUCCESS. Basket sequential leg-risk run `32959356012`: SUCCESS.
+- Maskache2 240-day stress: 760 events, 76.1% event-positive, +$175,574.88 diagnostic endpoint P/L, 39.2% proxy ROI, PF 4.13x, max DD -$8,808.27, 6/8 positive months, bootstrap win-rate interval 73.0%-79.1%, and +$39,405.71 remains after deleting the largest 5% winning events. First and second halves are both positive with nearly identical event-positive rates.
+- Maskache2 price segmentation matters: 20-55c has 322 events / 75.5% event-positive / +$87,480.78 diagnostic P/L; 55-90c has 155 / 99.4% / +$80,400.87; >=90c is 97.8% event-positive but -$5,227.95. High win rate alone is explicitly rejected as a promotion criterion.
+- Five-target-city Maskache2 subset: 166 events, 72.3% event-positive, +23.6% proxy ROI, PF 2.49x. NYC is the only large city slice (120 events, 71.7%, +28.6% proxy ROI); Miami is negative. Source contracts remain non-equivalent to U.S. contracts, so this is only a research prior.
+- BeefSlayer remains the strongest fallback wallet archetype: 466-event 240-day stability slice, 54.7% event-positive, +27.7% proxy ROI, PF 2.37x, 6/8 positive months, +$5,551.57 remains after deleting top 5% winners. Its five-target-city share is 46.5% (376/809 all-event reconstruction), target subset 63.3% event-positive, +14.0% proxy ROI, PF 2.70x. Recent/second-half edge weakened materially; fresh validation is mandatory.
+- ColdMath is DEMOTED as a wholesale strategy prior despite 81.7% event-positive: only 2/8 positive months, max DD -$94,334.16, second half -$31,927.78 / PF 0.59x, and P/L becomes -$52,230.51 after removing the top 5% winners. Narrow sub-regimes may be researched separately only with fresh preregistration.
+- Exhaustive NO basket historical anomaly expanded to 125 events across NYC/CHI/LA/SF/MIA: 120/125 displayed positive, 106/125 at +1c/leg stress, 80/125 at +2c, 67/125 at +3c. However, repeated prospective live scans found 0 profitable complete baskets at every tested size and frequent missing legs. Current leg-risk scan had only SF complete and it was negative at every size; 100/leg full guaranteed P/L -$20.54 with $77.12 minimum optimized prefix risk. Structural basket is therefore INCONCLUSIVE/WATCH-ONLY, not a current taker implementation candidate.
+- Corrected archived-market cheap-tail NBM test recovered 640 forecast+quote rows across 240 station-days. Frozen TRAIN: 21 trades, 14.3% wins, +$154.01, +105.5% proxy ROI. OOS: only 6 baseline trades (16.7% wins, +$56.31); at +2c only 3 trades remain (+$73.38). Acceptance required >=10 OOS trades, so FAIL due insufficient sample. Do not retune this OOS.
+- Updated primary research hypothesis: independently build a U.S.-settlement-specific probability/value model inspired by Maskache2/BeefSlayer behavior, using source-wallet activity only as a feature/trigger rather than a blind copy. Test 20-55c and 55-90c as separate regimes; avoid assuming >=90c is safe. Prioritize NYC first because it has the only large Maskache2 target-city sample, then validate each other city separately.
+- No production deployment, no Sports Shadow changes, no real orders, no Lovable/Codex credits, and `LIVE_EXECUTION_IMPLEMENTED=false` remains unchanged.
