@@ -5,6 +5,7 @@ on:
     branches: [weather-us-translation-research]
     paths:
       - scripts/research-weather-basket-arb.mjs
+      - scripts/research-weather-basket-live-depth.mjs
       - scripts/research-badatmath-open-risk.mjs
       - .github/workflows/weather-fast-research.yml
   workflow_dispatch:
@@ -29,6 +30,8 @@ jobs:
           END_DATE: "2026-08-24"
           CONTRACTS: "100"
         run: node scripts/research-weather-basket-arb.mjs
+      - name: Scan current all-leg order-book depth read-only
+        run: node scripts/research-weather-basket-live-depth.mjs
       - name: Show focused reports
         if: always()
         run: |
