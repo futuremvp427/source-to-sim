@@ -22,6 +22,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      - name: Patch preflight regex typo
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/research-weather-hybrid-preflight.mjs')
+          s = p.read_text()
+          s = s.replace(r'\b?', r'\b')
+          p.write_text(s)
+          PY
+          node --check scripts/research-weather-hybrid-preflight.mjs
       - name: Run wallet to US historical preflight
         env:
           LOOKBACK_DAYS: "120"
