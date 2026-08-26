@@ -6,6 +6,7 @@ on:
       - weather-hybrid-preflight
     paths:
       - "scripts/research-weather-hybrid-preflight.mjs"
+      - "scripts/research-weather-hybrid-trigger-funnel.mjs"
       - ".github/workflows/weather-hybrid-preflight.yml"
       - "docs/HYBRID_PREFLIGHT_PLAN.md"
   workflow_dispatch:
@@ -32,15 +33,22 @@ jobs:
           p.write_text(s)
           PY
           node --check scripts/research-weather-hybrid-preflight.mjs
+          node --check scripts/research-weather-hybrid-trigger-funnel.mjs
       - name: Run wallet to US historical preflight
         env:
           LOOKBACK_DAYS: "120"
           CONTRACTS: "100"
           QUOTE_MAX_LAG_SECONDS: "300"
         run: node scripts/research-weather-hybrid-preflight.mjs
-      - name: Show report
+      - name: Run event-level wallet trigger funnel
+        env:
+          LOOKBACK_DAYS: "120"
+        run: node scripts/research-weather-hybrid-trigger-funnel.mjs
+      - name: Show reports
         if: always()
-        run: cat research-output/weather-hybrid-preflight.md || true
+        run: |
+          cat research-output/weather-hybrid-preflight.md || true
+          cat research-output/weather-hybrid-trigger-funnel.md || true
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4
