@@ -1,0 +1,35 @@
+name: Weather Wallet US Transferability
+
+on:
+  push:
+    branches: [weather-us-translation-research]
+    paths:
+      - scripts/research-weather-wallet-us-transfer.mjs
+      - .github/workflows/weather-wallet-transfer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  transferability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Test leading-wallet US-city transferability
+        env:
+          WALLET_CLOSED_LIMIT: "10000"
+        run: node scripts/research-weather-wallet-us-transfer.mjs
+      - name: Show report
+        if: always()
+        run: cat research-output/weather-wallet-us-transfer.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-wallet-us-transfer
+          path: research-output/
