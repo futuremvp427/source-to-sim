@@ -1,0 +1,116 @@
+name: Weather Candidate Backend Tests
+
+on:
+  push:
+    branches: [weather-us-translation-research]
+    paths:
+      - scripts/research-weather-wallet-stability.mjs
+      - scripts/research-weather-basket-stress.mjs
+      - scripts/research-weather-basket-prospective.mjs
+      - scripts/research-weather-cheap-value.mjs
+      - .github/workflows/weather-candidate-backend.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wallet-stability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Stress wallet temporal stability and concentration
+        env:
+          WALLET_LOOKBACK_DAYS: "240"
+          WALLET_CLOSED_LIMIT: "10000"
+          BOOTSTRAPS: "2000"
+        run: node scripts/research-weather-wallet-stability.mjs
+      - name: Show report
+        if: always()
+        run: cat research-output/weather-wallet-stability.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wallet-stability
+          path: research-output/
+
+  basket-stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Expand structural basket stress to five cities
+        env:
+          START_DATE: "2026-07-31"
+          END_DATE: "2026-08-24"
+          CONTRACTS: "100"
+        run: node scripts/research-weather-basket-stress.mjs
+      - name: Show report
+        if: always()
+        run: cat research-output/weather-basket-stress.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: basket-stress
+          path: research-output/
+
+  cheap-value-oos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run fresh archived-quote cheap-tail train/OOS test
+        env:
+          START_DATE: "2026-05-01"
+          END_DATE: "2026-07-19"
+          TRAIN_END: "2026-06-30"
+          OOS_START: "2026-07-01"
+          QUOTE_MAX_DELAY_SECONDS: "1800"
+          CONTRACTS: "100"
+          MIN_TRAIN_TRADES: "20"
+          MIN_OOS_TRADES: "10"
+        run: node scripts/research-weather-cheap-value.mjs
+      - name: Show report
+        if: always()
+        run: cat research-output/weather-cheap-value-oos.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cheap-value-oos
+          path: research-output/
+
+  prospective-depth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Repeated live read-only depth scan
+        env:
+          ROUNDS: "5"
+          PAUSE_MS: "30000"
+        run: node scripts/research-weather-basket-prospective.mjs
+      - name: Show report
+        if: always()
+        run: cat research-output/weather-basket-prospective.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prospective-depth
+          path: research-output/
