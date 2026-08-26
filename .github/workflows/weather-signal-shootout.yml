@@ -1,0 +1,51 @@
+name: Weather Signal Shootout
+
+# Wallet-free strategy shootout: does NBM cycle revision, real station
+# observation threshold crossing, or their combination predict Kalshi price
+# movement, versus a matched market-only control. BeefSlayer-as-trigger is
+# REJECTED and is not part of this test. Read-only, public data only.
+
+on:
+  push:
+    branches: [weather-hybrid-preflight]
+    paths:
+      - scripts/research-weather-signal-shootout.mjs
+      - .github/workflows/weather-signal-shootout.yml
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "Lookback window in days"
+        required: false
+        default: "100"
+
+permissions:
+  contents: read
+
+jobs:
+  shootout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Syntax check
+        run: node --check scripts/research-weather-signal-shootout.mjs
+      - name: Run wallet-free weather signal shootout
+        env:
+          LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '100' }}
+          CONTRACTS: "100"
+          QUOTE_MAX_LAG_SECONDS: "300"
+          CONTROLS_PER_SIGNAL: "1"
+        run: node scripts/research-weather-signal-shootout.mjs
+      - name: Show report
+        if: always()
+        run: cat research-output/weather-signal-shootout.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-signal-shootout
+          path: research-output/
+          if-no-files-found: warn
