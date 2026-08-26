@@ -203,3 +203,29 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - Same-source-entry-price BUY/hold sensitivity for six observed BUY examples totals -$75.12751, but this is explicitly not executable PM-US P/L because contemporaneous historical PM-US BBO/quote snapshots were not recovered and exits/hedges are incomplete.
 - Historical executable US counterfactual P/L remains UNVERIFIED. Future work may recover or prospectively collect contemporaneous target-venue quotes, but it cannot erase the observed settlement-source divergence.
 - No production deployment was performed; Lovable was not used; live execution remains disabled.
+
+### WEATHER-STRATEGY-1 Dead-bucket same-day lag
+
+- Status: FALSIFIED AS A PRACTICAL PRICED EDGE IN THE TESTED WINDOW; DO NOT BUILD/DEPLOY.
+- Research-only workflow run: `32926865872` (reconfirmed in run `32927058789`).
+- Window: 2026-07-20 through 2026-08-24, 36 days each for KLAX, KSFO, KMIA.
+- Signal: timestamped station maximum had already exceeded a bounded Kalshi daily-high bucket ceiling by at least 2 F; candidate NO quote had to appear within 10 minutes.
+- Outcome correctness: 180/180 candidate buckets ultimately resolved NO; 0 false-dead signals.
+- Price reality: 0 opportunities had inferred executable NO ask <= 75c, 80c, 85c, 90c, or 95c. Minimum observed NO ask was 96c; median was 100c.
+- Conclusion: the market repriced already-dead buckets too quickly for the simple stale-price hypothesis to provide a meaningful edge after fees. A 100% outcome hit rate here is not a profitable 100% trading strategy because there were no adequately priced entries.
+- Implementation: `scripts/research-weather-lag.mjs` plus `.github/workflows/weather-lag-research.yml`.
+- Public historical data only; no credentials, previews, orders, Lovable, or live trading used.
+
+### WEATHER-STRATEGY-2 Late-day max-stagnation train/OOS
+
+- Status: FAILED PREREGISTERED TRAINING GATE; OOS NOT ENTERED; DO NOT PARAMETER-TUNE INTO A PASS.
+- Research-only workflow run: `32927058789`.
+- Candidate rows: 358 total; 232 training rows (2026-07-20 through 2026-08-11) and 126 reserved OOS rows (2026-08-12 through 2026-08-24).
+- Tested fixed grid: local decision hour 15/16/17/18; observed maximum unchanged for 60/120/180 minutes; maximum YES ask 60/70/75/80/85/90c.
+- Training acceptance required at least 15 trades, >=75% win rate, and positive after-fee P/L.
+- Result: no rule met the preregistered training minimums. Therefore no rule was frozen and the OOS set was not touched for strategy selection.
+- OOS acceptance status: FAIL / NOT ENTERED.
+- Some low-win-rate cheap-YES rules had positive training expectancy because occasional wins paid many losses, but they do not satisfy the requested high-win-rate objective and are not evidence for a >=75% strategy.
+- Implementation: `scripts/research-weather-late-day.mjs`; workflow updated at `35d77f29be9f7ca500ae9db0f631462ec5db4000`.
+- Anti-overfitting rule: do not keep changing these parameters after seeing this result. The next and final serious weather hypothesis, if pursued, is a separate probabilistic NBM-vs-market mispricing test with its own frozen train/OOS protocol.
+- No production deployment was performed; Sports Shadow was untouched; Lovable/Codex credits were not used; `LIVE_EXECUTION_IMPLEMENTED=false` remains unchanged.
