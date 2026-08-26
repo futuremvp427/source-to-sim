@@ -11,6 +11,7 @@ on:
       - scripts/research-weather-closed-positions.mjs
       - scripts/research-weather-cheap-value.mjs
       - scripts/research-badatmath-event-net.mjs
+      - scripts/research-badatmath-open-risk.mjs
       - scripts/research-weather-basket-arb.mjs
       - .github/workflows/weather-lag-research.yml
   workflow_dispatch:
@@ -42,6 +43,8 @@ jobs:
           BADATMATH_LOOKBACK_DAYS: "180"
           BADATMATH_CLOSED_LIMIT: "10000"
         run: node scripts/research-badatmath-event-net.mjs
+      - name: Run badatmath open-position survivorship-risk check
+        run: node scripts/research-badatmath-open-risk.mjs
       - name: Run fresh-holdout cheap YES bucket value test
         env:
           START_DATE: "2026-05-01"
