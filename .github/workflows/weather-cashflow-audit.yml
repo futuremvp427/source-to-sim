@@ -3,10 +3,6 @@ name: Weather Cash-Flow Audit
 on:
   push:
     branches: [weather-us-translation-research]
-    paths:
-      - scripts/research-weather-wallet-cashflow-audit.mjs
-      - scripts/research-weather-basket-live-fee-floor.mjs
-      - .github/workflows/weather-cashflow-audit.yml
   workflow_dispatch:
 
 permissions:
