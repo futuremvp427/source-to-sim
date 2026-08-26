@@ -288,3 +288,74 @@ Claude should return, for each candidate:
 Explicitly state where Claude disagrees with this handoff. The purpose is falsification, not consensus.
 
 No strategy in this document is approved for live trading.
+
+---
+
+# Claude's independent verdict (appended, does not edit the record above)
+
+Full evidence: `docs/WEATHER_CLAUDE_INDEPENDENT_AUDIT.md`.
+
+The handoff above asked for falsification rather than consensus. The measurement
+underpinning its own ranking did not survive.
+
+## The decisive objection
+
+Every wallet ranking above rests on `sum(/closed-positions.realizedPnl)`. That endpoint
+only reports positions that actually **closed**. A wallet that abandons worthless losing
+tokens rather than redeeming them never files those events, so the endpoint returns a
+survivorship-filtered view.
+
+This document already contains the evidence that the method is unsafe — `badatmath` was
+quarantined precisely because its endpoint total would not reconcile against public
+leaderboard profit. The conclusion was applied to one wallet and not to the others.
+
+Rebuilding the same wallets from the `/activity` cash ledger:
+
+| Wallet | Reported events | Reported P/L | Reported win | TRUE events | TRUE P/L | TRUE win | Missing events | Hidden P/L |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Maskache2 | 760 | +$199,479 | 72.2% | 1,325 | **+$62,168** | **32.6%** | 565 (42.6%) | -$61,665 |
+| BeefSlayer | 809 | +$56,784 | 58.7% | 692 | **+$63,242** | **58.2%** | 13 (1.9%) | -$615 |
+| ColdMath | 2,433 | +$103,028 | 75.9% | 2,370 | **+$105,718** | **80.2%** | 79 (3.3%) | -$2,004 |
+
+## Where Claude disagrees
+
+1. **Candidate A is rejected, not promising.** Maskache2's whole lifetime net cash is
+   +$44,205. The claim of +$175,574.88 on weather alone is impossible against its own
+   ledger. Its NYC 20–55c headline cell is 36 events / 50.0% / +$3,125 / 7.8% ROI, not
+   52 / 78.8% / +$15,723 / 44.0%, and its halves run +$3,175 then -$50.
+2. **Candidate B is the strongest candidate, not the fallback.** BeefSlayer redeems, so
+   its ledger reconciles, and the endpoint *understates* it by ~18%.
+3. **The ColdMath demotion is wrong on the numbers.** True ledger: 8/9 positive months
+   (not 2/8), max DD -$3,619 (not -$94,334), second half +$23,021 (not -$31,928),
+   +$29,923 after removing top 5% winners (not -$52,230). The instability was
+   `realizedPnl` noise. The real objection is different: the wallet stopped trading
+   (707 → 284 → 102 → 2 → 14 monthly events; last activity 2026-08-19).
+
+## Where Claude agrees
+
+- The NO basket is not executable, and the basket *structure* assumption was correct
+  (6 exhaustive legs, `mutually_exclusive: true`, MECNET verified live). An initial
+  suspicion that overlapping threshold markets contaminated it was checked and is wrong.
+- Every previously frozen strategy stays frozen. None were retuned.
+- High win rate is not edge; `>=90c` remains economically bad on the true ledger too.
+- International contracts are not settlement-equivalent to US contracts.
+
+## What the handoff missed
+
+- **The fee floor.** Kalshi taker fee `ceil(0.07·P·(1−P)·C·100)/100` costs ~$4.92 per
+  100-contract six-leg basket, so the basket profits only if the six best NO asks sum to
+  ≤ $4.9508. Observed sums were $5.00–$5.13. The basket is foreclosed structurally, not
+  merely unobserved.
+- **The same fee crushes cheap tails.** Rounded up per contract, it is $0.01 at P=0.05 —
+  20% of premium, ~12% at BeefSlayer's median 8.2c entry. BeefSlayer earned its edge on
+  international contracts with no such charge. No prior cheap-tail test modelled this.
+- **BeefSlayer's actual mechanism.** 68.6% of first entries land 12–24h after 00Z of the
+  target date; only 6.1% precede the weather date. It is intraday information reaction on
+  cheap tails — a different mechanism from every forecast-first hypothesis this project
+  has tested and failed.
+- **Settlement source changed again.** Live rules now cite *The Weather Company*, not NWS
+  CLI. Three distinct sources are now in play, so any US replay built on NWS CLI measures
+  a rule no longer in force.
+- **Selection bias survives the fix.** These wallets were chosen because they were already
+  profitable. Correcting the measurement does not make backward-looking wallet economics
+  an unbiased forward estimate.
