@@ -80,6 +80,30 @@ function tradable(market: UsMarket): boolean {
 }
 
 /**
+ * The legacy compatibility extractor predates the US-weather translation work
+ * and does not yet include San Francisco. Keep the new research gate local and
+ * explicit instead of broadening the production EXACT matcher as a side effect.
+ */
+function translationLocation(text: string | null | undefined): string | null {
+  const raw = (text ?? "").toLowerCase().replace(/[-_]/g, " ");
+  if (/\bsan francisco\b/.test(raw)) return "san francisco";
+  if (/\blos angeles\b/.test(raw)) return "los angeles";
+  if (/\bmiami\b/.test(raw)) return "miami";
+  if (/\bnew york\b|\bnyc\b/.test(raw)) return "new york";
+  if (/\bchicago\b/.test(raw)) return "chicago";
+  return extractLocation(raw);
+}
+
+function sourceLocation(source: SourceMarket): string | null {
+  if (source.location) return translationLocation(source.location);
+  return translationLocation(`${source.question ?? ""} ${source.slug ?? ""}`);
+}
+
+function marketLocation(market: UsMarket): string | null {
+  return translationLocation(`${market.question ?? ""} ${market.slug ?? ""}`);
+}
+
+/**
  * Evaluate one international weather source market against one US candidate.
  *
  * Requirements for research candidacy:
@@ -106,25 +130,25 @@ export function assessWeatherTranslation(
     });
   }
 
-  const sourceLocation = source.location ?? extractLocation(source.question ?? source.slug);
-  const targetLocation = extractLocation(market.question ?? market.slug);
-  if (!sourceLocation || !targetLocation) {
+  const sourceLoc = sourceLocation(source);
+  const targetLoc = marketLocation(market);
+  if (!sourceLoc || !targetLoc) {
     return result("UNVERIFIED", "Location could not be proven on both markets.", {
       usMarketSlug: market.slug ?? null,
     });
   }
 
-  if (sourceLocation !== targetLocation) {
+  if (sourceLoc !== targetLoc) {
     return result("NOT_TRANSLATABLE", "International and US market locations differ.", {
       usMarketSlug: market.slug ?? null,
     });
   }
 
-  const corridor = CORRIDOR_BY_LOCATION.get(sourceLocation as WeatherTranslationCorridor["location"]);
+  const corridor = CORRIDOR_BY_LOCATION.get(sourceLoc as WeatherTranslationCorridor["location"]);
   if (!corridor) {
     return result(
       "NOT_TRANSLATABLE",
-      `${sourceLocation} is not in the audited same-airport translation corridor list.`,
+      `${sourceLoc} is not in the audited same-airport translation corridor list.`,
       { usMarketSlug: market.slug ?? null },
     );
   }
@@ -148,8 +172,8 @@ export function assessWeatherTranslation(
     });
   }
 
-  const sourceThreshold = extractThreshold(source.question ?? source.slug);
-  const targetThreshold = extractThreshold(market.question ?? market.slug);
+  const sourceThreshold = extractThreshold(`${source.question ?? ""} ${source.slug ?? ""}`);
+  const targetThreshold = extractThreshold(`${market.question ?? ""} ${market.slug ?? ""}`);
   if (!sourceThreshold || !targetThreshold) {
     return result("UNVERIFIED", "Temperature bucket/threshold could not be proven on both markets.", {
       station: corridor.station,
