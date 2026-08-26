@@ -10,11 +10,11 @@
 import type { Venue } from "./types";
 
 /** Bump on any material change to eligibility.ts's classification rules. */
-export const CLASSIFIER_VERSION = "classifier_v2_all_sports_full_contest";
+export const CLASSIFIER_VERSION = "classifier_v3_wnba_canonical_participants";
 /** Bump on any material change to episode.ts's DCA aggregation window/rules or sell-tracking semantics. */
 export const EPISODE_VERSION = "episode_v1_dca_buy_sell";
 /** Generic participant identity now participates in cross-venue matching. */
-export const RESOLVER_VERSION = "resolver_v2_generic_participants_rule_fingerprint";
+export const RESOLVER_VERSION = "resolver_v3_league_scoped_participants_source_event_rules";
 /** Bump on any material change to router.ts's venue-selection rule. */
 export const ROUTER_VERSION = "router_v1_fillratio_then_cost";
 /** Bump on any material change to depth-walk.ts's execution-simulation math or the notional tier ladder. */

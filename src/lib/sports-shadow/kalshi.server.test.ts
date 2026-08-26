@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { clearKalshiDiscoveryCache, discoverKalshiMlbMarkets, fetchKalshiBook, KALSHI_HOST, MAX_PAGES_PER_SERIES, type KalshiNetworkDeps } from "./kalshi.server";
+import { clearKalshiDiscoveryCache, discoverKalshiMlbMarkets, fetchKalshiBook, KALSHI_HOST, KALSHI_NO_RETRY_AFTER_COOLDOWN_MS, MAX_PAGES_PER_SERIES, type KalshiNetworkDeps } from "./kalshi.server";
 import { buildKalshiObservationPatch } from "./observation";
 import { NO_OP_LEASE_CHECKPOINT } from "./sports-lease.server";
 
@@ -90,6 +90,14 @@ describe("discoverKalshiMlbMarkets", () => {
     const fetchImpl = vi.fn(async () => new Response("{}", { status: 429, headers: { "retry-after": "20" } }));
     await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl, recordHostRateLimit }))).rejects.toThrow(/429/);
     expect(recordHostRateLimit).toHaveBeenCalledWith(KALSHI_HOST, 20_000);
+  });
+
+  it("CANARY matcher: a Kalshi 429 without Retry-After records a longer venue-specific cooldown through the shared limiter", async () => {
+    clearKalshiDiscoveryCache();
+    const recordHostRateLimit = vi.fn(async () => {});
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 429 }));
+    await expect(discoverKalshiMlbMarkets(okDeps({ fetchImpl, recordHostRateLimit }))).rejects.toThrow(/429/);
+    expect(recordHostRateLimit).toHaveBeenCalledWith(KALSHI_HOST, KALSHI_NO_RETRY_AFTER_COOLDOWN_MS);
   });
 
   it("19. a 5xx fails explicitly", async () => {

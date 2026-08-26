@@ -29,14 +29,34 @@ describe("sport-agnostic Gamma classification", () => {
     expect(r.status).toBe("ELIGIBLE");
     expect(r.league).toBe("wnba");
     expect(r.betType).toBe("MONEYLINE");
-    expect(r.awayTeam).toBe("GENERIC:indiana fever");
-    expect(r.homeTeam).toBe("GENERIC:chicago sky");
+    expect(r.awayTeam).toBe("WNBA:IND");
+    expect(r.homeTeam).toBe("WNBA:CHI");
   });
 
   it("infers WNBA from the canonical slug when structured sport is absent", () => {
     const r = classifyGammaMarket(gamma({ events: [{ sport: null, teams: gamma().events?.[0]?.teams ?? [] }] }));
     expect(r.status).toBe("ELIGIBLE");
     expect(r.league).toBe("wnba");
+    expect(r.awayTeam).toBe("WNBA:IND");
+    expect(r.homeTeam).toBe("WNBA:CHI");
+  });
+
+  it("uses the canonical WNBA slug and strips total qualifiers from real O/U titles", () => {
+    const r = classifyGammaMarket(
+      gamma({
+        slug: "wnba-chi-conn-2026-08-25-total-167pt5",
+        question: "Chicago Sky vs. Connecticut Sun: O/U 167.5",
+        groupItemTitle: "O/U 167.5",
+        sportsMarketType: "totals",
+        line: 167.5,
+        events: [{ sport: { sport: "wnba" }, teams: [] }],
+      }),
+    );
+    expect(r.status).toBe("ELIGIBLE");
+    expect(r.betType).toBe("TOTAL");
+    expect(r.line).toBe(167.5);
+    expect(r.awayTeam).toBe("WNBA:CHI");
+    expect(r.homeTeam).toBe("WNBA:CONN");
   });
 
   it("accepts a full-match WTA winner from an A-vs-B question even without team objects", () => {
@@ -75,6 +95,8 @@ describe("sport-agnostic Gamma classification", () => {
     expect(r.status).toBe("ELIGIBLE");
     expect(r.betType).toBe("SPREAD");
     expect(r.line).toBe(-4.5);
+    expect(r.awayTeam).toBe("WNBA:WSH");
+    expect(r.homeTeam).toBe("WNBA:POR");
   });
 
   it("still rejects a Valorant Map 1 winner as a partial contest", () => {
@@ -144,8 +166,8 @@ describe("sport-agnostic PM-US candidate normalization", () => {
     expect(c?.status).toBe("ELIGIBLE");
     expect(c?.league).toBe("wnba");
     expect(c?.betType).toBe("MONEYLINE");
-    expect(c?.awayTeam).toBe("GENERIC:indiana fever");
-    expect(c?.homeTeam).toBe("GENERIC:chicago sky");
+    expect(c?.awayTeam).toBe("WNBA:IND");
+    expect(c?.homeTeam).toBe("WNBA:CHI");
     expect(c?.sides[0]?.teamAbbreviation).toBe("Indiana Fever");
   });
 

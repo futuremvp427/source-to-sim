@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { CAPABILITY_PROBE_MAX_AGE_MS, probeKalshiCapability, probePmusCapability, refreshVenueCapabilityIfStale, type CapabilityRepository, type VenueCapabilityRow } from "./capability.server";
+import { CAPABILITY_PROBE_MAX_AGE_MS, probeKalshiCapability, probePmusCapability, refreshVenueCapabilityIfStale, type CapabilityProbeDeps, type CapabilityRepository, type VenueCapabilityRow } from "./capability.server";
+import { KALSHI_HOST } from "./kalshi.server";
 
 function fakeRepo(): CapabilityRepository & { rows: Map<string, VenueCapabilityRow> } {
   const rows = new Map<string, VenueCapabilityRow>();
@@ -12,6 +13,21 @@ function fakeRepo(): CapabilityRepository & { rows: Map<string, VenueCapabilityR
     async get(venue) {
       return rows.get(venue) ?? null;
     },
+  };
+}
+
+function probeDeps(
+  repo: CapabilityRepository,
+  fetchImpl: typeof fetch | ReturnType<typeof vi.fn>,
+  overrides: Partial<CapabilityProbeDeps> = {},
+): CapabilityProbeDeps {
+  return {
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    repo,
+    reserveRequestSlot: vi.fn(async () => 0),
+    getHostCooldown: vi.fn(async () => ({ blocked: false, reason: null })),
+    recordHostRateLimit: vi.fn(async () => {}),
+    ...overrides,
   };
 }
 
@@ -28,7 +44,7 @@ describe("FINAL BUILD Part 8/4: venue capability probing", () => {
       }
       throw new Error(`unexpected URL: ${u}`);
     });
-    const row = await probePmusCapability({ fetchImpl: fetchImpl as unknown as typeof fetch, repo });
+    const row = await probePmusCapability(probeDeps(repo, fetchImpl));
     expect(row.discoveryAvailable).toBe(true);
     expect(row.orderbookAvailable).toBe(true);
     expect(repo.rows.get("PMUS")?.venue).toBe("PMUS"); // persisted via repo.upsert, not just returned
@@ -43,7 +59,7 @@ describe("FINAL BUILD Part 8/4: venue capability probing", () => {
       if (u.includes("/book")) return new Response("Unauthorized", { status: 401 });
       throw new Error(`unexpected URL: ${u}`);
     });
-    const row = await probePmusCapability({ fetchImpl: fetchImpl as unknown as typeof fetch, repo });
+    const row = await probePmusCapability(probeDeps(repo, fetchImpl));
     expect(row.discoveryAvailable).toBe(true);
     expect(row.orderbookAvailable).toBe(false);
     expect(row.detail).toMatch(/401/);
@@ -52,7 +68,7 @@ describe("FINAL BUILD Part 8/4: venue capability probing", () => {
   it("PM-US: discovery itself fails -> both discovery and orderbook reported unavailable, no orderbook probe even attempted", async () => {
     const repo = fakeRepo();
     const fetchImpl = vi.fn(async () => new Response("error", { status: 500 }));
-    const row = await probePmusCapability({ fetchImpl: fetchImpl as unknown as typeof fetch, repo });
+    const row = await probePmusCapability(probeDeps(repo, fetchImpl));
     expect(row.discoveryAvailable).toBe(false);
     expect(row.orderbookAvailable).toBe(false);
     expect(fetchImpl).toHaveBeenCalledTimes(1); // never attempted the orderbook probe
@@ -63,7 +79,7 @@ describe("FINAL BUILD Part 8/4: venue capability probing", () => {
     const fetchImpl = vi.fn(async () => {
       throw new Error("DNS resolution failed");
     });
-    const row = await probePmusCapability({ fetchImpl: fetchImpl as unknown as typeof fetch, repo });
+    const row = await probePmusCapability(probeDeps(repo, fetchImpl));
     expect(row.discoveryAvailable).toBe(false);
     expect(row.detail).toMatch(/DNS/);
   });
@@ -76,7 +92,7 @@ describe("FINAL BUILD Part 8/4: venue capability probing", () => {
       if (u.includes("/orderbook")) return new Response(JSON.stringify({ orderbook_fp: {} }), { status: 200 });
       throw new Error(`unexpected URL: ${u}`);
     });
-    const row = await probeKalshiCapability({ fetchImpl: fetchImpl as unknown as typeof fetch, repo });
+    const row = await probeKalshiCapability(probeDeps(repo, fetchImpl));
     expect(row.venue).toBe("KALSHI");
     expect(row.discoveryAvailable).toBe(true);
     expect(row.orderbookAvailable).toBe(true);
@@ -90,9 +106,32 @@ describe("FINAL BUILD Part 8/4: venue capability probing", () => {
       if (u.includes("/orderbook")) return new Response("Unauthorized", { status: 401 });
       throw new Error(`unexpected URL: ${u}`);
     });
-    const row = await probeKalshiCapability({ fetchImpl: fetchImpl as unknown as typeof fetch, repo });
+    const row = await probeKalshiCapability(probeDeps(repo, fetchImpl));
     expect(row.discoveryAvailable).toBe(true);
     expect(row.orderbookAvailable).toBe(false);
+  });
+
+  it("Kalshi: discovery 429 records the shared host cooldown and does not probe orderbook", async () => {
+    const repo = fakeRepo();
+    const recordHostRateLimit = vi.fn(async () => {});
+    const fetchImpl = vi.fn(async () => new Response("rate limited", { status: 429, headers: { "retry-after": "30" } }));
+    const row = await probeKalshiCapability(probeDeps(repo, fetchImpl, { recordHostRateLimit }));
+    expect(row.discoveryAvailable).toBe(false);
+    expect(row.orderbookAvailable).toBe(false);
+    expect(row.detail).toBe("HTTP 429");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(recordHostRateLimit).toHaveBeenCalledWith(KALSHI_HOST, 30_000);
+  });
+
+  it("Kalshi: active host cooldown suppresses capability fetches instead of rediscovering the same 429", async () => {
+    const repo = fakeRepo();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ markets: [{ ticker: "t" }] }), { status: 200 }));
+    const getHostCooldown = vi.fn(async () => ({ blocked: true, reason: "429 retry-after active" }));
+    const row = await probeKalshiCapability(probeDeps(repo, fetchImpl, { getHostCooldown }));
+    expect(row.discoveryAvailable).toBe(false);
+    expect(row.orderbookAvailable).toBe(false);
+    expect(row.detail).toMatch(/cooldown active.*429 retry-after active/);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 
@@ -108,7 +147,7 @@ describe("RECONCILIATION FIX (2026-08-22): refreshVenueCapabilityIfStale test co
 
   it("probes and persists BOTH venues when no row exists yet for either", async () => {
     const repo = fakeRepo();
-    await refreshVenueCapabilityIfStale(Date.parse("2026-08-22T20:00:00Z"), { fetchImpl: okFetch as unknown as typeof fetch, repo });
+    await refreshVenueCapabilityIfStale(Date.parse("2026-08-22T20:00:00Z"), probeDeps(repo, okFetch));
     expect(repo.rows.has("PMUS")).toBe(true);
     expect(repo.rows.has("KALSHI")).toBe(true);
   });
@@ -123,7 +162,7 @@ describe("RECONCILIATION FIX (2026-08-22): refreshVenueCapabilityIfStale test co
       if (String(url).includes("v1/events")) pmusProbed = true;
       return okFetch(url);
     });
-    await refreshVenueCapabilityIfStale(nowMs, { fetchImpl: fetchImpl as unknown as typeof fetch, repo });
+    await refreshVenueCapabilityIfStale(nowMs, probeDeps(repo, fetchImpl));
     expect(pmusProbed).toBe(false); // PM-US skipped -- fresh
     expect(repo.rows.has("KALSHI")).toBe(true); // KALSHI still probed -- had no row at all
   });
@@ -138,7 +177,7 @@ describe("RECONCILIATION FIX (2026-08-22): refreshVenueCapabilityIfStale test co
       if (String(url).includes("v1/events")) pmusProbed = true;
       return okFetch(url);
     });
-    await refreshVenueCapabilityIfStale(nowMs, { fetchImpl: fetchImpl as unknown as typeof fetch, repo });
+    await refreshVenueCapabilityIfStale(nowMs, probeDeps(repo, fetchImpl));
     expect(pmusProbed).toBe(true);
   });
 
@@ -149,7 +188,7 @@ describe("RECONCILIATION FIX (2026-08-22): refreshVenueCapabilityIfStale test co
       if (venue === "PMUS") throw new Error("db unavailable for PMUS read");
       return originalGet(venue);
     };
-    await refreshVenueCapabilityIfStale(Date.parse("2026-08-22T20:00:00Z"), { fetchImpl: okFetch as unknown as typeof fetch, repo });
+    await refreshVenueCapabilityIfStale(Date.parse("2026-08-22T20:00:00Z"), probeDeps(repo, okFetch));
     expect(repo.rows.has("KALSHI")).toBe(true);
   });
 
@@ -160,7 +199,7 @@ describe("RECONCILIATION FIX (2026-08-22): refreshVenueCapabilityIfStale test co
       if (row.venue === "KALSHI") throw new Error("db unavailable for KALSHI write");
       return originalUpsert(row);
     };
-    await refreshVenueCapabilityIfStale(Date.parse("2026-08-22T20:00:00Z"), { fetchImpl: okFetch as unknown as typeof fetch, repo });
+    await refreshVenueCapabilityIfStale(Date.parse("2026-08-22T20:00:00Z"), probeDeps(repo, okFetch));
     expect(repo.rows.has("PMUS")).toBe(true);
   });
 
@@ -175,7 +214,7 @@ describe("RECONCILIATION FIX (2026-08-22): refreshVenueCapabilityIfStale test co
       inFlight -= 1;
       return result;
     });
-    await refreshVenueCapabilityIfStale(Date.parse("2026-08-22T20:00:00Z"), { fetchImpl: fetchImpl as unknown as typeof fetch, repo });
+    await refreshVenueCapabilityIfStale(Date.parse("2026-08-22T20:00:00Z"), probeDeps(repo, fetchImpl));
     expect(maxInFlight).toBe(1);
   });
 });

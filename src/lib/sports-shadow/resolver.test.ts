@@ -894,3 +894,166 @@ describe("CODEX P1-5: postponement/cancellation TREATMENT must be classified, no
     expect(r.reasonCode).toBe("NEAR_RULE_MISMATCH");
   });
 });
+
+describe("MATCHER ZERO-EXACT canary regressions", () => {
+  const WNBA_SOURCE_RULES =
+    'If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. The result will be determined based on the final score including any overtime periods.';
+  const WNBA_COMPATIBLE_TARGET_RULES =
+    "This market will settle to the winner of the game. Overtime is included if played. If the game is delayed, postponed, or suspended, this market will remain open until the game has been completed.";
+  const WNBA_PMUS_LFMP_RULES =
+    "Overtime is included if played. If game delayed/postponed/suspended and not rescheduled to a date within two weeks, market settles to last fair market price. Outcome sourced from WNBA.";
+
+  function wnbaSource(overrides: Partial<SourceSignal> = {}): SourceSignal {
+    return {
+      betType: "TOTAL",
+      awayTeam: "WNBA:CHI",
+      homeTeam: "WNBA:CONN",
+      gameStartTime: "2026-08-25T23:00:00Z",
+      line: 167.5,
+      selectedOutcomeRaw: "Under",
+      conditionId: "0xwnba",
+      sourceRulesDescription: WNBA_SOURCE_RULES,
+      sourceGameId: "13002511",
+      eventSlug: "wnba-chi-conn-2026-08-25",
+      marketSlug: "wnba-chi-conn-2026-08-25-total-167pt5",
+      ...overrides,
+    };
+  }
+
+  function wnbaPmusCandidate(overrides: Partial<PmusCandidate> = {}): PmusCandidate {
+    return {
+      status: "ELIGIBLE",
+      reasonCode: "ELIGIBLE_FULL_GAME_TOTAL",
+      betType: "TOTAL",
+      eventId: "88567",
+      eventSlug: "wnba-chi-conn-2026-08-25",
+      gameId: "13002511",
+      marketId: "pmus-wnba-total-1675",
+      marketSlug: "tsc-wnba-chi-conn-2026-08-25-167pt5",
+      scheduledStartAt: "2026-08-25T23:00:00Z",
+      league: "wnba",
+      awayTeam: "WNBA:CHI",
+      homeTeam: "WNBA:CONN",
+      line: 167.5,
+      active: true,
+      closed: false,
+      marketStatus: "MARKET_STATUS_OPEN",
+      question: "Chicago vs. Connecticut",
+      rulesDescription: WNBA_PMUS_LFMP_RULES,
+      sides: [
+        { description: "Over", teamAbbreviation: null, long: true },
+        { description: "Under", teamAbbreviation: null, long: false },
+      ],
+      ...overrides,
+    };
+  }
+
+  it("WNBA real O/U shape reaches the candidate evaluator instead of false NONE, but PM-US LFMP settlement stays NEAR", () => {
+    const r = resolvePmusMatch(wnbaSource(), [wnbaPmusCandidate()]);
+    expect(r.status).toBe("NEAR");
+    expect(r.reasonCode).toBe("NEAR_RULE_MISMATCH");
+    expect(r.reason).toBe("total side matched: UNDER 167.5");
+    expect(r.targetAwayTeam).toBe("WNBA:CHI");
+    expect(r.targetHomeTeam).toBe("WNBA:CONN");
+    expect(r.candidateCounts.total).toBe(1);
+    expect(r.settlementProfile?.extraInnings).toBe("EXACT_COMPATIBLE");
+    expect(r.settlementProfile?.postponement).toBe("KNOWN_INCOMPATIBLE");
+  });
+
+  it("WNBA totals still require an exact line", () => {
+    const r = resolvePmusMatch(wnbaSource(), [wnbaPmusCandidate({ line: 168.5, rulesDescription: WNBA_COMPATIBLE_TARGET_RULES })]);
+    expect(r.status).toBe("NEAR");
+    expect(r.reasonCode).toBe("NEAR_DIFFERENT_LINE");
+    expect(r.reason).toContain("does not match source line 167.5");
+  });
+
+  it("same WNBA teams on a different date/start time do not false-match", () => {
+    const r = resolvePmusMatch(
+      wnbaSource(),
+      [wnbaPmusCandidate({ eventSlug: "wnba-chi-conn-2026-08-26", marketSlug: "tsc-wnba-chi-conn-2026-08-26-167pt5", scheduledStartAt: "2026-08-26T23:00:00Z" })],
+    );
+    expect(r.status).not.toBe("EXACT");
+    expect(r.reasonCode).toBe("UNVERIFIED_AMBIGUOUS_GAME");
+  });
+
+  it("WNBA city-only PM-US moneyline sides can prove orientation when source slug supplies league identity", () => {
+    const r = resolvePmusMatch(
+      wnbaSource({ betType: "MONEYLINE", line: null, selectedOutcomeRaw: "Chicago Sky", marketSlug: "wnba-chi-conn-2026-08-25" }),
+      [
+        wnbaPmusCandidate({
+          betType: "MONEYLINE",
+          reasonCode: "ELIGIBLE_FULL_GAME_MONEYLINE",
+          line: null,
+          rulesDescription: WNBA_COMPATIBLE_TARGET_RULES,
+          sides: [
+            { description: "Chicago", teamAbbreviation: "Chicago", teamName: "Chicago", long: true },
+            { description: "Connecticut", teamAbbreviation: "Connecticut", teamName: "Connecticut", long: false },
+          ],
+        }),
+      ],
+    );
+    expect(r.status).toBe("EXACT");
+    expect(r.targetSide).toEqual({ kind: "TEAM", team: "WNBA:CHI" });
+    expect(r.targetPmusOrientation).toBe("LONG");
+  });
+
+  it("WNBA spread orientation remains tied to the matched side's LONG/SHORT flag", () => {
+    const r = resolvePmusMatch(
+      wnbaSource({
+        betType: "SPREAD",
+        line: 5.5,
+        selectedOutcomeRaw: "Connecticut Sun",
+        marketSlug: "wnba-chi-conn-2026-08-25-spread-home-5pt5",
+      }),
+      [
+        wnbaPmusCandidate({
+          betType: "SPREAD",
+          reasonCode: "ELIGIBLE_FULL_GAME_SPREAD",
+          line: -5.5,
+          rulesDescription: WNBA_COMPATIBLE_TARGET_RULES,
+          sides: [
+            { description: "Chicago -5.5", teamAbbreviation: "Chicago", teamName: "Chicago", long: true },
+            { description: "Connecticut +5.5", teamAbbreviation: "Connecticut", teamName: "Connecticut", long: false },
+          ],
+        }),
+      ],
+    );
+    expect(r.status).toBe("EXACT");
+    expect(r.targetSide).toEqual({ kind: "TEAM", team: "WNBA:CONN" });
+    expect(r.targetPmusOrientation).toBe("SHORT");
+  });
+
+  it("current CLE/LAA PM-US moneyline remains NEAR because source cancellation is 50-50 while PM-US settles stale unresolved games to LFMP", () => {
+    const r = resolvePmusMatch(
+      source({
+        awayTeam: "CLE",
+        homeTeam: "LAA",
+        selectedOutcomeRaw: "Cleveland Guardians",
+        eventSlug: "mlb-cle-laa-2026-08-25",
+        marketSlug: "mlb-cle-laa-2026-08-25",
+        gameStartTime: "2026-08-26T01:38:00Z",
+        sourceRulesDescription:
+          'This market will resolve to "Cleveland Guardians" if the Cleveland Guardians win the game. If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, or ends in a tie, this market will resolve 50-50.',
+      }),
+      [
+        pmusCandidate({
+          awayTeam: "CLE",
+          homeTeam: "LAA",
+          eventSlug: "mlb-cle-laa-2026-08-25",
+          marketSlug: "aec-mlb-cle-laa-2026-08-25",
+          marketId: "490503",
+          scheduledStartAt: "2026-08-26T01:38:00Z",
+          sides: [
+            { description: "Cleveland Guardians", teamAbbreviation: "cle", long: true },
+            { description: "Los Angeles Angels", teamAbbreviation: "laa", long: false },
+          ],
+          rulesDescription:
+            "Extra innings are included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from MLB.",
+        }),
+      ],
+    );
+    expect(r.status).toBe("NEAR");
+    expect(r.reasonCode).toBe("NEAR_RULE_MISMATCH");
+    expect(r.settlementProfile?.postponement).toBe("KNOWN_INCOMPATIBLE");
+  });
+});

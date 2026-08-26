@@ -81,6 +81,42 @@ describe("fetchSourceMarketMetadata", () => {
     });
   });
 
+  it("CANARY matcher: maps the real WNBA O/U title without polluting the home team and preserves event-level overtime rules", async () => {
+    const fixture = [
+      {
+        conditionId: "0xwnba",
+        slug: "wnba-chi-conn-2026-08-25-total-167pt5",
+        question: "Chicago Sky vs. Connecticut Sun: O/U 167.5",
+        groupItemTitle: "O/U 167.5",
+        sportsMarketType: "totals",
+        line: 167.5,
+        gameStartTime: "2026-08-25 23:00:00+00",
+        description:
+          'If the combined total is less than 168, this market will resolve to "Under". If the game is postponed, this market will remain open until the game has been completed. If the game is canceled entirely, with no make-up game, this market will resolve 50-50.',
+        events: [
+          {
+            gameId: 13002511,
+            slug: "wnba-chi-conn-2026-08-25",
+            sport: { sport: "wnba" },
+            teams: [],
+            description:
+              'Chicago Sky vs. Connecticut Sun. If the game is canceled entirely, with no make-up game, this market will resolve 50-50. The result will be determined based on the final score including any overtime periods.',
+          },
+        ],
+      },
+    ];
+
+    const result = await fetchSourceMarketMetadata("0xwnba", fakeGammaDeps(fakeFetch(fixture)));
+    expect(result.status).toBe("ELIGIBLE");
+    expect(result.league).toBe("wnba");
+    expect(result.betType).toBe("TOTAL");
+    expect(result.line).toBe(167.5);
+    expect(result.awayTeam).toBe("WNBA:CHI");
+    expect(result.homeTeam).toBe("WNBA:CONN");
+    expect(result.sourceRulesDescription).toContain("including any overtime periods");
+    expect(result.sourceRulesDescription).toContain("resolve 50-50");
+  });
+
   it("returns an INELIGIBLE result rather than throwing for a prop market", async () => {
     const propFixture = [
       {

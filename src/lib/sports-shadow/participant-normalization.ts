@@ -1,4 +1,4 @@
-import { normalizeMlbTeamName } from "./team-normalization";
+import { normalizeKnownLeagueTeamName } from "./team-normalization";
 
 /**
  * Conservative fallback registry for canonical Polymarket sports slug prefixes.
@@ -67,7 +67,10 @@ function normalizeGeneric(raw: string): string | null {
  */
 export function normalizeParticipantName(raw: string | null | undefined, league: string | null | undefined): string | null {
   if (!raw) return null;
-  if ((league ?? "").toLowerCase() === "mlb") return normalizeMlbTeamName(raw);
+  const normalizedLeague = (league ?? "").trim().toLowerCase();
+  const known = normalizeKnownLeagueTeamName(raw, league);
+  if (known) return known;
+  if (normalizedLeague === "mlb" || normalizedLeague === "wnba") return null;
   return normalizeGeneric(raw);
 }
 
@@ -85,6 +88,7 @@ export function parseVersusParticipants(text: string | null | undefined): { away
 
   // Strip common partial-market suffixes from the second participant text.
   home = home.replace(/\s+-\s+(?:match|game|map|set)\b.*$/i, "").trim();
+  home = home.replace(/\s*:\s*(?:o\/u|over\/under|total|spread|moneyline)\b.*$/i, "").trim();
   if (!away || !home) return null;
   return { away, home };
 }

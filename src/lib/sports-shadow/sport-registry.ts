@@ -20,7 +20,7 @@
  *   documentation only and is NOT queried.
  */
 
-import { normalizeMlbTeamName } from "./team-normalization";
+import { normalizeMlbTeamName, normalizeWnbaTeamName } from "./team-normalization";
 import type { BetType } from "./types";
 
 export type CanonicalSlugParticipants = { away: string; home: string; betType: BetType; line: number | null };
@@ -120,7 +120,14 @@ const ADAPTERS: SportAdapter[] = [
   // Basketball. Full-contest moneyline/spread/total only; quarters/halves/player props are
   // excluded by the generic classifier's period/prop rejections.
   adapter({ league: "nba", displayLeague: "NBA", sport: "basketball", pmusLeaguePath: "nba", kalshiSeriesUnverified: ["KXNBAGAME"] }),
-  adapter({ league: "wnba", displayLeague: "WNBA", sport: "basketball", pmusLeaguePath: "wnba" }),
+  adapter({
+    league: "wnba",
+    displayLeague: "WNBA",
+    sport: "basketball",
+    pmusLeaguePath: "wnba",
+    canonicalSlugParticipants: canonicalFullContestSlugParser("wnba", normalizeWnbaTeamName),
+    canonicalSlugShape: canonicalSlugShape("wnba"),
+  }),
   // Football.
   adapter({ league: "nfl", displayLeague: "NFL", sport: "football", pmusLeaguePath: "nfl", kalshiSeriesUnverified: ["KXNFLGAME"] }),
   // Hockey. Overtime/settlement treatment is proven per-signal by the resolver, not assumed.

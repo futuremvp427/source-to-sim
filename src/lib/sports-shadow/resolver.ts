@@ -31,6 +31,7 @@
  */
 
 import { normalizeTeamName } from "./team-normalization";
+import { inferSportsLeagueFromSlug, normalizeParticipantName } from "./participant-normalization";
 import type { BetType, SettlementCompatibility } from "./types";
 import type { KalshiCandidate } from "./kalshi";
 import type { PmusCandidate } from "./pmus";
@@ -152,8 +153,10 @@ function analyzeExtraInnings(text: string | null): RuleDimensionStatus {
   if (!text) return "UNVERIFIED";
   // Negative pattern checked FIRST: "not included" contains "included" as a substring, so the
   // positive pattern below would otherwise false-match it.
-  if (/extra innings?\s*(are|is)?\s*(not\s+included|excluded|not\s+counted)/i.test(text)) return "KNOWN_INCOMPATIBLE";
-  if (/extra innings?\s*(are|is)?\s*(included|counted)/i.test(text)) return "EXACT_COMPATIBLE";
+  if (/(extra innings?|overtime(?:\s+periods?)?)\s*(are|is)?\s*(not\s+included|excluded|not\s+counted)/i.test(text)) return "KNOWN_INCOMPATIBLE";
+  if (/(extra innings?|overtime(?:\s+periods?)?)\s*(are|is)?\s*(included|counted)|includ\w+\s+(?:any\s+)?(extra innings?|overtime(?:\s+periods?)?)/i.test(text)) {
+    return "EXACT_COMPATIBLE";
+  }
   return "UNVERIFIED";
 }
 
@@ -265,13 +268,15 @@ type SourceOutcome =
   | { kind: "TOTAL"; direction: "OVER" | "UNDER"; line: number };
 
 function parseSourceOutcome(source: SourceSignal): SourceOutcome | null {
+  const sourceLeague = inferSportsLeagueFromSlug(source.marketSlug) ?? inferSportsLeagueFromSlug(source.eventSlug);
+  const normalizeSourceTeam = (raw: string): string | null => (sourceLeague ? normalizeParticipantName(raw, sourceLeague) : null) ?? normalizeTeamName(raw);
   if (source.betType === "MONEYLINE") {
-    const team = normalizeTeamName(source.selectedOutcomeRaw);
+    const team = normalizeSourceTeam(source.selectedOutcomeRaw);
     if (!team || (team !== source.awayTeam && team !== source.homeTeam)) return null;
     return { kind: "MONEYLINE", team };
   }
   if (source.betType === "SPREAD") {
-    const team = normalizeTeamName(source.selectedOutcomeRaw);
+    const team = normalizeSourceTeam(source.selectedOutcomeRaw);
     if (!team || (team !== source.awayTeam && team !== source.homeTeam)) return null;
     if (source.line === null || !Number.isFinite(source.line)) return null;
     return { kind: "SPREAD", team, line: source.line };
@@ -443,11 +448,23 @@ function sideOrientation(side: { long: boolean | null }): PmusOrientation | null
   return null;
 }
 
+function pmusSideTeamIdentity(side: PmusCandidate["sides"][number], league: string | null): string | null {
+  const normalizeLeagueTeam = (raw: string | null | undefined): string | null => (league ? normalizeParticipantName(raw ?? null, league) : null);
+  return (
+    normalizeLeagueTeam(side.teamName) ??
+    normalizeLeagueTeam(side.teamAbbreviation) ??
+    normalizeLeagueTeam(side.description) ??
+    normalizeTeamName(side.teamName ?? null) ??
+    normalizeTeamName(side.teamAbbreviation ?? null) ??
+    normalizeTeamName(side.description ?? null)
+  );
+}
+
 function evaluatePmusCandidate(source: SourceSignal, outcome: SourceOutcome, candidate: PmusCandidate): PmusEvalOutcome | null {
   if (candidate.betType !== source.betType) return null; // not a candidate for this query at all
 
   if (outcome.kind === "MONEYLINE") {
-    const side = candidate.sides.find((s) => s.teamAbbreviation && normalizeTeamName(s.teamAbbreviation) === outcome.team);
+    const side = candidate.sides.find((s) => pmusSideTeamIdentity(s, candidate.league) === outcome.team);
     if (!side) return { status: "UNVERIFIED", candidate, targetSide: null, pmusOrientation: null, profile: null, reason: "source team not found among PM-US market sides" };
     const orientation = sideOrientation(side);
     if (orientation === null) {
@@ -464,8 +481,8 @@ function evaluatePmusCandidate(source: SourceSignal, outcome: SourceOutcome, can
     // s.long === null/undefined is already excluded by this filter -- sideOrientation
     // below is therefore guaranteed non-null for any matchingSide found here.
     const matchingSide = candidate.sides.find((s) => {
-      if (!s.teamAbbreviation || s.long === null || s.long === undefined || candidate.line === null) return false;
-      const code = normalizeTeamName(s.teamAbbreviation);
+      if (s.long === null || s.long === undefined || candidate.line === null) return false;
+      const code = pmusSideTeamIdentity(s, candidate.league);
       if (code !== outcome.team) return false;
       const impliedLine = s.long ? candidate.line : -candidate.line;
       return Math.abs(impliedLine - outcome.line) < 1e-9;

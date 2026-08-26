@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeTeamName, teamsMatch } from "./team-normalization";
+import { normalizeKnownLeagueTeamName, normalizeTeamName, normalizeWnbaTeamName, teamsMatch } from "./team-normalization";
 
 describe("normalizeTeamName", () => {
   it("normalizes full names, aliases, and abbreviations from every venue to one canonical code", () => {
@@ -10,6 +10,12 @@ describe("normalizeTeamName", () => {
     expect(normalizeTeamName("bal")).toBe("BAL");
     // Kalshi sometimes truncates city names in sub_titles (e.g. "Los Angeles D").
     expect(normalizeTeamName("Los Angeles D")).toBe("LAD");
+    expect(normalizeTeamName("Los Angeles A")).toBe("LAA");
+    expect(normalizeTeamName("Chicago C")).toBe("CHC");
+    expect(normalizeTeamName("Chicago WS")).toBe("CWS");
+    expect(normalizeTeamName("New York Y")).toBe("NYY");
+    expect(normalizeTeamName("New York M")).toBe("NYM");
+    expect(normalizeTeamName("AZ")).toBe("ARI");
     expect(normalizeTeamName("Athletics")).toBe("ATH");
     expect(normalizeTeamName("A's")).toBe("ATH");
     // Kalshi event.title uses bare city names (confirmed live, e.g. "Minnesota vs San Diego"),
@@ -28,6 +34,14 @@ describe("normalizeTeamName", () => {
     expect(normalizeTeamName("Chicago")).toBeNull();
     expect(normalizeTeamName("Los Angeles")).toBeNull();
     expect(normalizeTeamName("New York")).toBeNull();
+  });
+
+  it("maps WNBA city-only aliases only when league evidence says WNBA", () => {
+    expect(normalizeWnbaTeamName("Chicago Sky")).toBe("WNBA:CHI");
+    expect(normalizeWnbaTeamName("Chicago")).toBe("WNBA:CHI");
+    expect(normalizeKnownLeagueTeamName("Connecticut", "wnba")).toBe("WNBA:CONN");
+    expect(normalizeTeamName("Chicago")).toBeNull();
+    expect(normalizeTeamName("Chicago Sky")).toBe("GENERIC:chicago sky");
   });
 
   it("returns null for an unrecognized team string instead of guessing", () => {

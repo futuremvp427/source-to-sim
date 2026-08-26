@@ -32,6 +32,7 @@ type RawGammaEventTeam = { name?: string; ordering?: string };
 type RawGammaEvent = {
   gameId?: number | string;
   slug?: string;
+  description?: string | null;
   sport?: { sport?: string } | null;
   teams?: RawGammaEventTeam[];
 };
@@ -65,6 +66,19 @@ function unverifiedResult(conditionId: string, reasonCode: "UNVERIFIED_FETCH_FAI
     marketSlug: null,
     sourceRulesDescription: null,
   };
+}
+
+function combineRulesDescription(...parts: (string | null | undefined)[]): string | null {
+  const seen = new Set<string>();
+  const clean = parts
+    .map((part) => (part ?? "").trim())
+    .filter((part) => part.length > 0)
+    .filter((part) => {
+      if (seen.has(part)) return false;
+      seen.add(part);
+      return true;
+    });
+  return clean.length > 0 ? clean.join("\n\n") : null;
 }
 
 async function pacedGetGamma(conditionId: string, deps: GammaNetworkDeps, deadlineAtMs?: number): Promise<unknown> {
@@ -155,6 +169,6 @@ export async function fetchSourceMarketMetadata(conditionId: string, deps: Parti
     sourceGameId: event?.gameId !== undefined ? String(event.gameId) : null,
     eventSlug: event?.slug ?? null,
     marketSlug: market.slug ?? null,
-    sourceRulesDescription: market.description ?? null,
+    sourceRulesDescription: combineRulesDescription(market.description, event?.description),
   };
 }

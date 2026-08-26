@@ -12,8 +12,10 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import { getHostCooldown, parseRetryAfterMs, recordHostRateLimitReporting, reserveRequestSlot } from "../http-rate-limit.server";
 import { KALSHI_BASE_URL } from "./kalshi.server";
 import { runtimeFetch } from "./runtime-fetch.server";
+import { wrapRecordHostRateLimitWithTelemetry } from "./telemetry.server";
 import type { Venue } from "./types";
 import { PMUS_PUBLIC_BASE } from "../pmus/us-markets.server";
 
@@ -57,16 +59,58 @@ export const supabaseCapabilityRepository: CapabilityRepository = {
 
 const PROBE_TIMEOUT_MS = 8_000;
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Bounded, read-only, unauthenticated GET. Never throws -- a network failure IS the
  * capability signal, not an exception the caller must handle separately. Parses the
  * body once here (never re-fetched by the caller just to inspect its shape).
+ *
+ * Uses the same host-level cooldown/reservation discipline as the venue discovery and
+ * orderbook capture paths. Capability checks run outside the source lease and can happen
+ * even with zero pending signals, so they must not become an unpaced side channel that
+ * rediscovers or amplifies a Kalshi/PM-US 429.
  */
-async function probeGet(url: string, fetchImpl: typeof fetch): Promise<{ ok: boolean; status: number | null; detail: string | null; json: unknown | null }> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+async function probeGet(url: string, deps: CapabilityProbeDeps): Promise<{ ok: boolean; status: number | null; detail: string | null; json: unknown | null }> {
+  const host = new URL(url).host;
+  const deadlineAtMs = Date.now() + PROBE_TIMEOUT_MS;
   try {
-    const response = await fetchImpl(url, { headers: { Accept: "application/json" }, signal: controller.signal });
+    const cooldown = await deps.getHostCooldown(host);
+    if (cooldown.blocked) {
+      return { ok: false, status: null, detail: `cooldown active: ${cooldown.reason ?? "unknown reason"}`, json: null };
+    }
+    if (Date.now() >= deadlineAtMs) {
+      return { ok: false, status: null, detail: "capability probe deadline reached after cooldown check", json: null };
+    }
+    const waitMs = await deps.reserveRequestSlot(host, deadlineAtMs);
+    if (waitMs > 0) await sleep(waitMs);
+    if (Date.now() >= deadlineAtMs) {
+      return { ok: false, status: null, detail: "capability probe deadline reached after request pacing", json: null };
+    }
+  } catch (err) {
+    return { ok: false, status: null, detail: err instanceof Error ? err.message : "host pacing unavailable", json: null };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(1, deadlineAtMs - Date.now()));
+  try {
+    const response = await deps.fetchImpl(url, { headers: { Accept: "application/json" }, signal: controller.signal });
+    if (response.status === 429) {
+      let recordError: string | null = null;
+      try {
+        await deps.recordHostRateLimit(host, parseRetryAfterMs(response.headers.get("retry-after")));
+      } catch (err) {
+        recordError = err instanceof Error ? err.message : "unknown cooldown persistence failure";
+      }
+      return {
+        ok: false,
+        status: response.status,
+        detail: recordError ? `HTTP 429; cooldown persistence failed: ${recordError}` : "HTTP 429",
+        json: null,
+      };
+    }
     if (!response.ok) return { ok: false, status: response.status, detail: `HTTP ${response.status}`, json: null };
     try {
       return { ok: true, status: response.status, detail: null, json: await response.json() };
@@ -80,8 +124,20 @@ async function probeGet(url: string, fetchImpl: typeof fetch): Promise<{ ok: boo
   }
 }
 
-export type CapabilityProbeDeps = { fetchImpl: typeof fetch; repo: CapabilityRepository };
-const defaultDeps: CapabilityProbeDeps = { fetchImpl: runtimeFetch, repo: supabaseCapabilityRepository };
+export type CapabilityProbeDeps = {
+  fetchImpl: typeof fetch;
+  repo: CapabilityRepository;
+  reserveRequestSlot: (host: string, deadlineAtMs?: number) => Promise<number>;
+  getHostCooldown: (host: string) => Promise<{ blocked: boolean; reason: string | null }>;
+  recordHostRateLimit: (host: string, retryAfterMs: number | null) => Promise<void>;
+};
+const defaultDeps: CapabilityProbeDeps = {
+  fetchImpl: runtimeFetch,
+  repo: supabaseCapabilityRepository,
+  reserveRequestSlot,
+  getHostCooldown,
+  recordHostRateLimit: wrapRecordHostRateLimitWithTelemetry(recordHostRateLimitReporting),
+};
 
 /**
  * Probes PM-US: /v1/events (discovery) and one real market's /book (orderbook) --
@@ -90,7 +146,7 @@ const defaultDeps: CapabilityProbeDeps = { fetchImpl: runtimeFetch, repo: supaba
  */
 export async function probePmusCapability(deps: Partial<CapabilityProbeDeps> = {}): Promise<VenueCapabilityRow> {
   const d = { ...defaultDeps, ...deps };
-  const discovery = await probeGet(`${PMUS_PUBLIC_BASE}/v1/events?limit=1&active=true&closed=false&category=sports`, d.fetchImpl);
+  const discovery = await probeGet(`${PMUS_PUBLIC_BASE}/v1/events?limit=1&active=true&closed=false&category=sports`, d);
   let orderbookAvailable = false;
   let orderbookDetail: string | null = "no discovered market to probe";
   if (discovery.ok) {
@@ -100,7 +156,7 @@ export async function probePmusCapability(deps: Partial<CapabilityProbeDeps> = {
     const json = discovery.json as { events?: { markets?: { slug?: string }[] }[] } | null;
     const slug = json?.events?.[0]?.markets?.[0]?.slug;
     if (slug) {
-      const book = await probeGet(`${PMUS_PUBLIC_BASE}/v1/markets/${encodeURIComponent(slug)}/book`, d.fetchImpl);
+      const book = await probeGet(`${PMUS_PUBLIC_BASE}/v1/markets/${encodeURIComponent(slug)}/book`, d);
       orderbookAvailable = book.ok;
       orderbookDetail = book.detail;
     }
@@ -119,14 +175,14 @@ export async function probePmusCapability(deps: Partial<CapabilityProbeDeps> = {
 /** Probes Kalshi: /markets (discovery) and one real market's /orderbook -- same reused-slug approach as PM-US. */
 export async function probeKalshiCapability(deps: Partial<CapabilityProbeDeps> = {}): Promise<VenueCapabilityRow> {
   const d = { ...defaultDeps, ...deps };
-  const discovery = await probeGet(`${KALSHI_BASE_URL}/markets?series_ticker=KXMLBGAME&status=open&limit=1`, d.fetchImpl);
+  const discovery = await probeGet(`${KALSHI_BASE_URL}/markets?series_ticker=KXMLBGAME&status=open&limit=1`, d);
   let orderbookAvailable = false;
   let orderbookDetail: string | null = "no discovered market to probe";
   if (discovery.ok) {
     const json = discovery.json as { markets?: { ticker?: string }[] } | null;
     const ticker = json?.markets?.[0]?.ticker;
     if (ticker) {
-      const book = await probeGet(`${KALSHI_BASE_URL}/markets/${encodeURIComponent(ticker)}/orderbook`, d.fetchImpl);
+      const book = await probeGet(`${KALSHI_BASE_URL}/markets/${encodeURIComponent(ticker)}/orderbook`, d);
       orderbookAvailable = book.ok;
       orderbookDetail = book.detail;
     }

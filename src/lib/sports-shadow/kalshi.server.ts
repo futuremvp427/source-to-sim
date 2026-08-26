@@ -33,6 +33,7 @@ const PAGE_LIMIT = 200;
 /** Bounded: at most 10 pages per series per endpoint (markets and events each), well under Kalshi's documented max limit of 1000/page. */
 export const MAX_PAGES_PER_SERIES = 10;
 const DISCOVERY_CACHE_TTL_MS = 5 * 60 * 1000;
+export const KALSHI_NO_RETRY_AFTER_COOLDOWN_MS = 5 * 60 * 1000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -99,7 +100,8 @@ async function pacedGetJson<T>(path: string, deps: KalshiNetworkDeps, deadlineAt
       // recordHostRateLimit is already hard-bounded to 5s regardless of this caller's own
       // deadline, so it is always recorded now rather than silently discarding an
       // already-observed 429 fact once the deadline has passed.
-      await deps.recordHostRateLimit(KALSHI_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
+      const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+      await deps.recordHostRateLimit(KALSHI_HOST, retryAfterMs ?? KALSHI_NO_RETRY_AFTER_COOLDOWN_MS);
       throw new Error(`${KALSHI_HOST} rate limited (429) on ${path}`);
     }
     if (!response.ok) {

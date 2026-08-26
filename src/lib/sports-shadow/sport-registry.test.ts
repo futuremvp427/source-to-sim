@@ -37,7 +37,7 @@ describe("sport registry (sport-agnostic orchestration)", () => {
 
   it("gives no slug-derived identity to sports without an audited code table", () => {
     for (const adapterEntry of listSportAdapters()) {
-      if (adapterEntry.league === "mlb") {
+      if (adapterEntry.league === "mlb" || adapterEntry.league === "wnba") {
         expect(adapterEntry.canonicalSlugParticipants).not.toBeNull();
       } else {
         expect(adapterEntry.canonicalSlugParticipants).toBeNull();
@@ -53,6 +53,13 @@ describe("sport registry (sport-agnostic orchestration)", () => {
     expect(parse("mlb-tex-cws-2026-08-25-f5-total-4pt5")).toBeNull();
     expect(parse("mlb-tex-cws-2026-08-25-judge-hr")).toBeNull();
     expect(parse("mlb-zzz-yyy-2026-08-25")).toBeNull();
+  });
+
+  it("WNBA adapter parses audited full-game slugs and rejects unknown teams", () => {
+    const parse = getSportAdapter("wnba")!.canonicalSlugParticipants!;
+    expect(parse("wnba-chi-conn-2026-08-25-total-167pt5")).toEqual({ away: "WNBA:CHI", home: "WNBA:CONN", betType: "TOTAL", line: 167.5 });
+    expect(parse("wnba-ny-sea-2026-08-25")?.betType).toBe("MONEYLINE");
+    expect(parse("wnba-zzz-yyy-2026-08-25")).toBeNull();
   });
 
   it("canonicalLeagueLabel never defaults to a hard-coded sport", () => {

@@ -6,12 +6,16 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 
 ## Current Production State
 
-- Sports Shadow cron is disabled after the failed production canary.
-- `sports-shadow-cycle-observation`: `active=false`
-- `sports-shadow-cycle-source`: `active=false`
-- `sports-shadow-cycle-settlement`: `active=false`
+- Sports Shadow cron was observed active at the start of the 2026-08-26 end-to-end repair mission after the prior controlled observation restart.
+- `sports-shadow-cycle-observation`: expected `active=true`, schedule `10 seconds` while controlled observation is running.
+- `sports-shadow-cycle-source`: expected `active=true`, schedule `30 seconds` while controlled observation is running.
+- `sports-shadow-cycle-settlement`: expected `active=true`, schedule `* * * * *` while controlled observation is running.
 - Legacy `sports-shadow-cycle` job: absent in the latest verified production state.
 - Live execution is disabled. `LIVE_EXECUTION_IMPLEMENTED=false`.
+- Current deployed/runtime SHA at the start of the matcher-zero investigation: `c2628ce68022ee1f71847da736b6792aaf273887`.
+- Current production epoch at the start of the matcher-zero investigation: `7fe4b859-bbe3-445e-aadf-2f2e8ffa78af`.
+- Runtime provenance was aligned with deployed SHA before the matcher-zero repair began.
+- Source ingestion and Phase-2 signal classification were producing current-epoch signals before the matcher-zero repair began.
 - Failed-canary deployed commit SHA: `09faae89f97f4e128f6f1318b1ded558afd8096c`.
 - Failed canary timestamp: 2026-08-25 UTC production canary; exact start/end should be read from production telemetry before final incident closure.
 - Failed canary counts: 2,378 source fills, 24 signals, 0 matches, 0 observations, 0 paper fills, 0 paper positions, 0 settlements.
@@ -108,4 +112,66 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - Telemetry: SOURCE `pending_selected`, `pending_fresh_selected`, `pending_processed`; `WalletPollResult`/`WalletSummary` carry the same fields.
 - Tests: `src/lib/sports-shadow/phase2-liveness.test.ts` (11 cases: proportional reserve, non-zero Phase-2 slice, fresh-first ordering incl. small queues, determinism, venue reserve intact); `starvation-regression.test.ts` and `source-poll.test.ts` green; `worker.server.test.ts` 97/97 green — its earlier failures were solely Vitest's 5s default against 4-7s concurrency-ordering tests, now raised test-only via `vite.config.ts` (`test.testTimeout = 30_000`). No production timeout was raised to pass tests.
 - Operational follow-up: `SPORTS_SHADOW_GIT_SHA` must be set to `3d76826bad01ec36f2632b2b0c576a8e4d329604` before new epoch data is treated as authoritative; automated rotation was declined, so it needs the operator's secure form.
+- Live execution unchanged: `LIVE_EXECUTION_IMPLEMENTED=false`.
+
+### MATCHER ZERO-EXACT INVESTIGATION
+
+- Status: CODE FIXED LOCALLY; DEPLOYMENT AND END-TO-END PRODUCTION COPY VERIFICATION PENDING.
+- Previous production distribution supplied at mission start: 0 EXACT / 5 NEAR / 20 NONE / 12 UNVERIFIED.
+- Expanded production distribution observed from `sports_market_matches` during the investigation: PM-US NEAR 202, PM-US NONE 54, PM-US UNVERIFIED 12, KALSHI 0 durable match rows, EXACT 0.
+- Representative WNBA false-rejection evidence: signal `d0467589-77cd-48b3-975d-e551e13594a1`, source market `wnba-chi-conn-2026-08-25-total-167pt5`, was stored with home participant `GENERIC:connecticut sun o u 167 5`, causing PM-US NONE / `NONE_NO_CANDIDATE` even though PM-US listed the `Chicago vs. Connecticut` WNBA event.
+- Representative MLB rule evidence: signal `e38dd159-8618-4c01-9288-9571c9a53215` correctly found CLE @ LAA on PM-US, but remained NEAR because source Gamma rules settle canceled/no-makeup/tie cases at 50-50 while PM-US settles delayed/postponed/suspended games not rescheduled within two weeks to last fair market price. This is a legitimate economic incompatibility, not a parser bug.
+- Actual defects found:
+  - WNBA source titles of the form `Team A vs. Team B: O/U ...` polluted the parsed home participant.
+  - WNBA lacked an audited canonical slug/team adapter, so current-epoch WNBA signals could fail before meaningful PM-US market evaluation.
+  - PM-US side matching used MLB/global team normalization and could not safely orient WNBA city-only PM-US sides under known WNBA league context.
+  - Source rule metadata persisted only market-level Gamma descriptions and discarded event-level rule text such as WNBA overtime language.
+  - Kalshi live MLB payloads use abbreviations such as `Los Angeles A`, `Chicago WS`, `Chicago C`, `New York Y`, and `New York M`; those were missing from the audited MLB alias table.
+  - Kalshi 429 responses without `Retry-After` used the generic fallback cooldown, which was too short for the observed production rate-limit cadence.
+  - Capability probes bypassed the shared host cooldown/reservation path and could amplify venue rate limits outside normal discovery/paper observation flow.
+- Legitimate rejection categories preserved:
+  - PM-US/Kalshi delayed/canceled settlement rules that resolve to last fair market price remain NEAR against source contracts that resolve no-makeup/tie/cancel outcomes to 50-50.
+  - Missing source or target rule text remains UNVERIFIED.
+  - Same teams on different dates/start times do not false-match.
+  - Totals still require exact line equality.
+  - Spread and moneyline side orientation remain tied to explicit venue side evidence.
+  - Partial-game/prop/set/map/exotic markets remain excluded by the classifier and resolver tests.
+- Implementation:
+  - Added league-scoped WNBA canonical identities and a WNBA sport adapter.
+  - Stripped market suffixes from `A vs B: O/U/total/spread/moneyline` title parsing.
+  - Made source and PM-US side parsing use league-aware participant normalization only when league identity is known.
+  - Combined Gamma market and event descriptions into source settlement-rule evidence.
+  - Recognized overtime wording in the extra-period settlement dimension without relaxing postponement/cancellation compatibility.
+  - Added live-observed Kalshi MLB aliases.
+  - Persisted a 5-minute Kalshi cooldown when a 429 lacks `Retry-After`.
+  - Routed capability probes through shared host cooldown, reservation, and 429 persistence.
+- Files changed: `src/lib/sports-shadow/all-sports.test.ts`, `src/lib/sports-shadow/capability.server.ts`, `src/lib/sports-shadow/capability.server.test.ts`, `src/lib/sports-shadow/epoch.ts`, `src/lib/sports-shadow/kalshi.server.ts`, `src/lib/sports-shadow/kalshi.server.test.ts`, `src/lib/sports-shadow/participant-normalization.ts`, `src/lib/sports-shadow/resolver.ts`, `src/lib/sports-shadow/resolver.test.ts`, `src/lib/sports-shadow/source-metadata.server.ts`, `src/lib/sports-shadow/source-metadata.server.test.ts`, `src/lib/sports-shadow/sport-registry.ts`, `src/lib/sports-shadow/sport-registry.test.ts`, `src/lib/sports-shadow/team-normalization.ts`, `src/lib/sports-shadow/team-normalization.test.ts`.
+- Regression tests:
+  - WNBA real O/U title parses CHI/CONN without the line suffix contaminating the home team.
+  - WNBA PM-US candidate evaluation reaches rule compatibility instead of false NONE.
+  - Compatible WNBA city-only PM-US moneyline sides can produce EXACT under compatible source/target rules.
+  - Current CLE/LAA PM-US remains NEAR under live-observed incompatible rules.
+  - Genuine compatible rules can still produce EXACT.
+  - Missing rules remain UNVERIFIED.
+  - Same teams on different dates do not false-match.
+  - Totals require exact line equality.
+  - Spread orientation remains LONG/SHORT-derived.
+  - Moneyline side orientation remains LONG/SHORT-derived.
+  - Kalshi no-`Retry-After` 429 records the 5-minute shared host cooldown.
+  - Capability probes respect host cooldown and persist Kalshi 429s.
+- Local verification before deployment:
+  - Targeted matcher/capability suite: 11 files passed, 417 tests passed.
+  - Full Vitest: 130 files passed, 1 skipped; 2,005 tests passed, 9 skipped.
+  - TypeScript: PASS.
+  - Production build: PASS.
+  - `git diff --check`: PASS.
+- Final fix commit SHA: PENDING.
+- Final deployed SHA: PENDING.
+- Runtime SHA: PENDING.
+- Production results: PENDING.
+- First legitimate EXACT: PENDING.
+- First quote observation: PENDING.
+- First paper fill: PENDING.
+- First paper position: PENDING.
+- Dashboard verification: PENDING.
 - Live execution unchanged: `LIVE_EXECUTION_IMPLEMENTED=false`.
