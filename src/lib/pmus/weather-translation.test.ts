@@ -195,6 +195,22 @@ describe("weather translation fails closed", () => {
     expect(result.status).toBe("UNVERIFIED");
   });
 
+  it("does not misread an ISO date as a temperature range", () => {
+    const result = assessWeatherTranslation(
+      source(
+        "Highest temperature in Miami on 2026-08-26",
+        "highest-temperature-in-miami-on-2026-08-26",
+      ),
+      openMarket({
+        slug: "us-miami-high-2026-08-26",
+        question: "Highest temperature in Miami on 2026-08-26",
+        endDate: "2026-08-27T00:00:00Z",
+      }),
+    );
+
+    expect(result.status).toBe("UNVERIFIED");
+  });
+
   it("does not return closed US markets as candidates", () => {
     const result = assessWeatherTranslation(
       source(
