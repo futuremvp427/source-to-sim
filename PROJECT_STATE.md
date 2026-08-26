@@ -191,3 +191,15 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - Next evidence gate before any translated paper-copy activation: historical settlement-agreement replay for KLAX/KSFO/KMIA and source-trader trade replay against contemporaneous PM-US/Kalshi prices.
 - Production Sports Shadow is intentionally untouched by this branch so the currently aligned deployment/runtime SHA is not disturbed and no Lovable credits are required for this research change.
 - Live execution unchanged: `LIVE_EXECUTION_IMPLEMENTED=false`.
+
+### WEATHER-TRANSLATION-1 Settlement-source equivalence
+
+- Status: DIVERGENCE OBSERVED; RESEARCH-ONLY; NO PROMOTION.
+- Historical replay: 9 independent target-linked station/date observations across KLAX, KSFO, and KMIA; 8 agreements and 1 divergence (88.9% observed agreement in this small search-selected sample).
+- Decisive counterexample: KSFO on 2026-07-03. The international Wunderground-based 68-69 F contract resolved YES, while NWS CLISFO reported a 70 F daily maximum; a PM-US-style 68-69 F bucket therefore resolves NO.
+- Conclusion: same-airport, same-date, same-bucket translation is not economically exact and must not promote to production `EXACT_MATCH` or authenticated-preview eligibility.
+- Added deterministic evaluator/tests: `src/lib/pmus/weather-settlement-equivalence.ts` and `src/lib/pmus/weather-settlement-equivalence.test.ts`.
+- Evidence report: `docs/WEATHER_TRANSLATION_HISTORICAL_EVIDENCE.md`.
+- Same-source-entry-price BUY/hold sensitivity for six observed BUY examples totals -$75.12751, but this is explicitly not executable PM-US P/L because contemporaneous historical PM-US BBO/quote snapshots were not recovered and exits/hedges are incomplete.
+- Historical executable US counterfactual P/L remains UNVERIFIED. Future work may recover or prospectively collect contemporaneous target-venue quotes, but it cannot erase the observed settlement-source divergence.
+- No production deployment was performed; Lovable was not used; live execution remains disabled.
