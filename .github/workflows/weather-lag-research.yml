@@ -10,6 +10,7 @@ on:
       - scripts/research-weather-wallets.mjs
       - scripts/research-weather-closed-positions.mjs
       - scripts/research-weather-cheap-value.mjs
+      - scripts/research-badatmath-event-net.mjs
       - .github/workflows/weather-lag-research.yml
   workflow_dispatch:
 
@@ -35,6 +36,11 @@ jobs:
           WALLET_LOOKBACK_DAYS: "180"
           WALLET_CLOSED_LIMIT: "5000"
         run: node scripts/research-weather-closed-positions.mjs
+      - name: Run badatmath event-net decomposition
+        env:
+          BADATMATH_LOOKBACK_DAYS: "180"
+          BADATMATH_CLOSED_LIMIT: "10000"
+        run: node scripts/research-badatmath-event-net.mjs
       - name: Run fresh-holdout cheap YES bucket value test
         env:
           START_DATE: "2026-05-01"
