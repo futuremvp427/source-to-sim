@@ -1,0 +1,29 @@
+#!/usr/bin/env node
+
+/**
+ * Diagnostic event-level regime stability for leading source wallets in five
+ * US cities. Tests whether apparent value survives when split by city, event
+ * average-price regime, and chronology. Source contracts remain non-equivalent
+ * to US contracts; this only narrows hypotheses for future US-specific tests.
+ */
+import { mkdir, writeFile } from "node:fs/promises";
+const DATA="https://data-api.polymarket.com",LIMIT=Number(process.env.WALLET_CLOSED_LIMIT??"10000");
+const WALLETS=[["Maskache2","0x1f66796b45581868376365aef54b51eb84184c8d"],["BeefSlayer","0x331bf91c132af9d921e1908ca0979363fc47193f"]];
+const CITY=new Map([["new york city","NYC"],["new york","NYC"],["san francisco","SF"],["miami","MIA"],["chicago","CHI"],["los angeles","LA"]]);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function get(u){let last;for(let i=0;i<5;i++){try{const r=await fetch(u,{headers:{"User-Agent":"source-to-sim-us-regimes/1.0"}});if(r.ok)return r.json();last=new Error(`${r.status}: ${(await r.text()).slice(0,140)}`);if(![429,500,502,503,504].includes(r.status))throw last;}catch(e){last=e;}await sleep(Math.min(5000,400*2**i));}throw last;}
+async function closed(addr){const a=[];for(let off=0;off<LIMIT;off+=50){const p=new URLSearchParams({user:addr,limit:"50",offset:String(off),sortBy:"TIMESTAMP",sortDirection:"DESC"}),x=await get(`${DATA}/closed-positions?${p}`);if(!Array.isArray(x)||!x.length)break;a.push(...x);if(x.length<50)break;await sleep(40);}return a;}
+function city(title){const m=String(title??"").match(/highest temperature in (.+?) (?:be|on )/i);if(!m)return null;return CITY.get(m[1].trim().replace(/,?\s+(CA|FL|NY|IL)$/i,"").toLowerCase())??null;}
+function group(xs,f){const m=new Map();for(const x of xs){const k=f(x),a=m.get(k)??[];a.push(x);m.set(k,a);}return m;}
+function band(p){if(p<.05)return"<5c";if(p<.10)return"5-10c";if(p<.20)return"10-20c";if(p<=.55)return"20-55c";if(p<.90)return"55-90c";return">=90c";}
+function eventTs(ps){const a=ps.map(p=>Number(p.timestamp)).filter(Number.isFinite);return a.length?Math.min(...a):null;}
+function aggregate(rows){const ev=[];for(const[id,ps]of group(rows,p=>p.eventSlug||p.conditionId)){const bought=ps.reduce((a,p)=>a+(Number(p.totalBought)||0),0),cost=ps.reduce((a,p)=>a+(Number(p.avgPrice)||0)*(Number(p.totalBought)||0),0),avg=bought?cost/bought:0,pnl=ps.reduce((a,p)=>a+(Number(p.realizedPnl)||0),0);ev.push({id,city:city(ps[0].title),band:band(avg),avg,pnl,cost,ts:eventTs(ps)});}return ev.filter(e=>e.city);}
+function met(xs){const pnl=xs.reduce((a,e)=>a+e.pnl,0),cost=xs.reduce((a,e)=>a+e.cost,0),wins=xs.filter(e=>e.pnl>0).length,gw=xs.filter(e=>e.pnl>0).reduce((a,e)=>a+e.pnl,0),gl=-xs.filter(e=>e.pnl<0).reduce((a,e)=>a+e.pnl,0);return{n:xs.length,wins,wr:xs.length?wins/xs.length:null,pnl,roi:cost?pnl/cost:null,pf:gl?gw/gl:null};}
+function split(xs){const s=[...xs].sort((a,b)=>(a.ts??0)-(b.ts??0)),i=Math.floor(s.length/2);return{first:met(s.slice(0,i)),second:met(s.slice(i))};}
+const pct=x=>x==null?"n/a":`${(100*x).toFixed(1)}%`,money=x=>`$${x.toFixed(2)}`;
+async function main(){const out=[];for(const[name,addr]of WALLETS){process.stdout.write(`Fetching ${name} ... `);const rows=(await closed(addr)).filter(p=>/highest temperature/i.test(p.title??""));console.log(rows.length);const ev=aggregate(rows),cells=[];for(const[c,ces]of group(ev,e=>e.city))for(const[b,x]of group(ces,e=>e.band)){const m=met(x),sp=split(x);cells.push({city:c,band:b,...m,first:sp.first,second:sp.second});}const regimes=[];for(const b of ["20-55c","55-90c"]){const x=ev.filter(e=>e.band===b),m=met(x),sp=split(x);regimes.push({band:b,...m,first:sp.first,second:sp.second});}out.push({name,events:ev.length,overall:met(ev),regimes,cells});}
+let md=`# U.S.-City Wallet Regime Stability\n\nDiagnostic source-wallet event netting for NYC/SF/MIA/CHI/LA. Source contracts are not settlement-equivalent to U.S. venues. The purpose is to identify which price/city hypotheses deserve independent U.S.-specific modeling.\n`;
+for(const r of out){md+=`\n## ${r.name}\n\n| Regime | Events | Win rate | P/L | Proxy ROI | PF | First-half win/P&L | Second-half win/P&L |\n|---|---:|---:|---:|---:|---:|---|---|\n${r.regimes.map(x=>`| ${x.band} | ${x.n} | ${pct(x.wr)} | ${money(x.pnl)} | ${pct(x.roi)} | ${x.pf==null?"n/a":x.pf.toFixed(2)+"x"} | ${pct(x.first.wr)} / ${money(x.first.pnl)} | ${pct(x.second.wr)} / ${money(x.second.pnl)} |`).join("\n")}\n\n### City x regime cells\n\n| City | Regime | Events | Win rate | P/L | ROI | PF | First half P/L | Second half P/L |\n|---|---|---:|---:|---:|---:|---:|---:|---:|\n${r.cells.filter(x=>x.n>=5).sort((a,b)=>a.city.localeCompare(b.city)||a.band.localeCompare(b.band)).map(x=>`| ${x.city} | ${x.band} | ${x.n} | ${pct(x.wr)} | ${money(x.pnl)} | ${pct(x.roi)} | ${x.pf==null?"n/a":x.pf.toFixed(2)+"x"} | ${money(x.first.pnl)} | ${money(x.second.pnl)} |`).join("\n")}\n`;}
+md+=`\n## Guardrails\n\n- Small cells are unstable; cells below five events are omitted from the table but remain in JSON.\n- Chronological halves are diagnostic stability checks, not untouched OOS because the wallet strategy itself was discovered from historical behavior.\n- Any eventual U.S. strategy must price the exact target settlement contract independently and use fresh OOS/forward paper data.\n- No credentials, orders, production deployment or live trading are used.\n`;
+await mkdir("research-output",{recursive:true});await writeFile("research-output/weather-wallet-us-regimes.md",md);await writeFile("research-output/weather-wallet-us-regimes.json",JSON.stringify({generatedAt:new Date().toISOString(),out},null,2)+"\n");console.log(md);}
+main().catch(e=>{console.error(e.stack||e);process.exitCode=1;});
