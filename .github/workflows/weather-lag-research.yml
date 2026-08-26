@@ -8,6 +8,7 @@ on:
       - scripts/research-weather-late-day.mjs
       - scripts/research-weather-nbm.mjs
       - scripts/research-weather-wallets.mjs
+      - scripts/research-weather-closed-positions.mjs
       - .github/workflows/weather-lag-research.yml
   workflow_dispatch:
 
@@ -28,6 +29,11 @@ jobs:
           WALLET_LOOKBACK_DAYS: "90"
           WALLET_TRADE_LIMIT: "10000"
         run: node scripts/research-weather-wallets.mjs
+      - name: Run realized-PnL wallet decomposition
+        env:
+          WALLET_LOOKBACK_DAYS: "180"
+          WALLET_CLOSED_LIMIT: "5000"
+        run: node scripts/research-weather-closed-positions.mjs
       - name: Run no-hindsight public-data dead-bucket lag backtest
         env:
           START_DATE: "2026-07-20"
