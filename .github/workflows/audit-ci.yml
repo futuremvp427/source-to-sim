@@ -74,6 +74,10 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/reserve_http_request_slot.sql
+      - name: Verify Weather Lab research schema safety contract
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/weather_lab_schema.sql
       - name: Verify Sports Forward Shadow Phase 1 schema contract (Task 12A)
         env:
           PGPASSWORD: postgres
