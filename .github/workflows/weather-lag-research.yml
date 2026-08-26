@@ -11,6 +11,7 @@ on:
       - scripts/research-weather-closed-positions.mjs
       - scripts/research-weather-cheap-value.mjs
       - scripts/research-badatmath-event-net.mjs
+      - scripts/research-weather-basket-arb.mjs
       - .github/workflows/weather-lag-research.yml
   workflow_dispatch:
 
@@ -20,7 +21,7 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -52,6 +53,12 @@ jobs:
           MIN_TRAIN_TRADES: "20"
           MIN_OOS_TRADES: "10"
         run: node scripts/research-weather-cheap-value.mjs
+      - name: Run exhaustive weather basket arbitrage test
+        env:
+          START_DATE: "2026-07-31"
+          END_DATE: "2026-08-24"
+          CONTRACTS: "100"
+        run: node scripts/research-weather-basket-arb.mjs
       - name: Run no-hindsight public-data dead-bucket lag backtest
         env:
           START_DATE: "2026-07-20"
