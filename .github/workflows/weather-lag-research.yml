@@ -7,6 +7,7 @@ on:
       - scripts/research-weather-lag.mjs
       - scripts/research-weather-late-day.mjs
       - scripts/research-weather-nbm.mjs
+      - scripts/research-weather-wallets.mjs
       - .github/workflows/weather-lag-research.yml
   workflow_dispatch:
 
@@ -16,12 +17,17 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      - name: Run public weather-wallet reverse engineering
+        env:
+          WALLET_LOOKBACK_DAYS: "90"
+          WALLET_TRADE_LIMIT: "10000"
+        run: node scripts/research-weather-wallets.mjs
       - name: Run no-hindsight public-data dead-bucket lag backtest
         env:
           START_DATE: "2026-07-20"
