@@ -1,0 +1,43 @@
+name: Weather Lag Research
+
+on:
+  push:
+    branches: [weather-us-translation-research]
+    paths:
+      - scripts/research-weather-lag.mjs
+      - .github/workflows/weather-lag-research.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run no-hindsight public-data lag backtest
+        env:
+          START_DATE: "2026-07-20"
+          END_DATE: "2026-08-24"
+          PRIMARY_MARGIN_F: "2"
+          QUOTE_MAX_DELAY_SECONDS: "600"
+          CONTRACTS: "100"
+        run: node scripts/research-weather-lag.mjs
+      - name: Show report
+        if: always()
+        run: |
+          if [ -f research-output/weather-lag-backtest.md ]; then
+            cat research-output/weather-lag-backtest.md
+          fi
+      - name: Upload research output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-lag-backtest
+          path: research-output/
+          if-no-files-found: warn
