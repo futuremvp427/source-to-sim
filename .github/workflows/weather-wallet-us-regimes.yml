@@ -1,0 +1,35 @@
+name: Weather Wallet US Regimes
+
+on:
+  push:
+    branches: [weather-us-translation-research]
+    paths:
+      - scripts/research-weather-wallet-us-regimes.mjs
+      - .github/workflows/weather-wallet-us-regimes.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regimes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Test target-city price-regime stability
+        env:
+          WALLET_CLOSED_LIMIT: "10000"
+        run: node scripts/research-weather-wallet-us-regimes.mjs
+      - name: Show report
+        if: always()
+        run: cat research-output/weather-wallet-us-regimes.md || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-wallet-us-regimes
+          path: research-output/
