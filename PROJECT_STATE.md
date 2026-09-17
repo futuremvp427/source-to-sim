@@ -175,3 +175,25 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - First paper position: PENDING.
 - Dashboard verification: PENDING.
 - Live execution unchanged: `LIVE_EXECUTION_IMPLEMENTED=false`.
+
+## KALSHI SAME-VENUE (KALSHI -> KALSHI) COPY ROUTE
+
+- Status: SOURCE-INDEPENDENT ADAPTER COMPLETE (OUTCOME B). NO VERIFIED PUBLIC-TRADER TRANSPORT EXISTS; NONE FABRICATED.
+- Objective: bypass Polymarket -> Kalshi economic-equivalence matching by copying a Kalshi public trader's own activity on the EXACT same Kalshi ticker and side.
+- Pre-work check: branch `feature/kalshi-same-venue-copy-source` / PR #61 content is NOT present in this workspace (only `main` and lovable backup branches are available locally), so nothing was duplicated.
+- Files added:
+  - `src/lib/sports-shadow/kalshi-source.ts` (pure; no network, Supabase, clock, or env access)
+  - `src/lib/sports-shadow/kalshi-source.test.ts` (11 focused tests)
+  - `docs/KALSHI_SAME_VENUE_SOURCE.md`
+- Files modified: `PROJECT_STATE.md` only. No existing Sports Shadow module, migration, or historical cross-venue result was changed.
+- Routing contract: a normalized same-venue trade carries `route: "SAME_VENUE_KALSHI"`; `requiresCrossVenueResolution()` is false for it and the adapter module does not reference `resolver.ts` or any `pmus*` module (asserted statically in test 2).
+- Fail-closed required evidence per source event: trader id, source trade id, verified Kalshi ticker shape, YES|NO, BUY|SELL, quantity > 0, integer priceCents in [1,99], positive unix-seconds timestamp. Nothing is inferred or defaulted.
+- Dedupe: `KALSHI_SRC:<traderId>:<sourceTradeId>`, reused as `EligibleFill.eventKey` so the existing `episode.ts` duplicate guard and the DB event_key unique constraint both apply.
+- Reuse (nothing reimplemented): `episode.ts` lifecycle reducer (BUY / ADD-DCA / partial SELL / full SELL, exit fractions), observation capture, `paper.server.ts` deterministic paper execution and positions, Kalshi book normalization and fees, sizing, settlement, leases, epochs, telemetry, dashboard.
+- Position identity: `conditionId = ticker`, `asset = ticker:SIDE`, so YES and NO legs of one ticker are never merged.
+- Trader qualification: `KalshiTraderQualification.approvedForPaperCopy` must be set by a deliberate external decision; a null/absent/unapproved watchlist entry yields `REJECT_TRADER_NOT_QUALIFIED`. No numeric thresholds invented; an `evidence` bag holds later criteria (performance windows, trade count, repeatability, concentration, categories, liquidity, holding duration, entry-to-detection latency, realized vs unrealized, copy slippage, fees, drawdown, single-win dependence).
+- Verified Kalshi trader source exists: NO. Kalshi documents market data/orderbooks, ANONYMOUS public market trades (no trader identity), and portfolio endpoints scoped to the authenticated account only. No documented endpoint returns another specific trader's or leaderboard account's trades.
+- Remaining blocker: the five evidence items listed in `docs/KALSHI_SAME_VENUE_SOURCE.md` (documented cross-account activity endpoint, stable public trader id, per-trade id, full per-trade fields, documented rate limits/terms). `KalshiTraderActivitySource` stays an interface with no production implementation.
+- Tests run: `kalshi-source.test.ts` 11/11 pass; `episode.test.ts` + `kalshi.test.ts` + `resolver.test.ts` + `deployment-readiness.test.ts` 206/206 pass; TypeScript check PASS; production build PASS. Full suite not run (change is additive and isolated; budget-bounded).
+- Safety state unchanged: `LIVE_EXECUTION_IMPLEMENTED=false`; kill switch/activation state untouched; no live-order path added or reachable; real orders placed = 0; no Supabase migration created; no risk, dedupe, lease, settlement, sizing, or fail-closed protection loosened.
+- Next smallest step: obtain or rule out a documented Kalshi cross-account trader-activity source. If one is confirmed, implement exactly one `KalshiTraderActivitySource` transport plus a persistence path that writes admitted events as source fills with `route=SAME_VENUE_KALSHI`, and wire the worker to skip venue matching for those rows.
