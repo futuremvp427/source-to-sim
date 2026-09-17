@@ -78,7 +78,7 @@ describe("kalshi same-venue source adapter", () => {
 
   it("4. a BUY produces a paper-entry intent via the existing lifecycle reducer", () => {
     const fill = toEligibleFill(admitOk(), 1_756_000_001_000);
-    const [decision] = processFillsForTest([fill]);
+    const decision = at(processFillsForTest([fill]), 0);
     expect(decision.kind).toBe("NEW_EPISODE");
     expect(decision.shouldTriggerBurst).toBe(true);
   });
@@ -90,12 +90,13 @@ describe("kalshi same-venue source adapter", () => {
       2_000,
     );
     const decisions = processFillsForTest([first, second]);
-    expect(decisions[0].kind).toBe("NEW_EPISODE");
-    expect(decisions[1].kind).toBe("AGGREGATED_BUY");
-    const state = "nextState" in decisions[1] ? decisions[1].nextState : null;
-    expect(state?.totalShares).toBe(200);
-    expect(state?.vwap).toBeCloseTo(0.45, 12);
-    expect(state?.buyFillCount).toBe(2);
+    expect(at(decisions, 0).kind).toBe("NEW_EPISODE");
+    const add = at(decisions, 1);
+    expect(add.kind).toBe("AGGREGATED_BUY");
+    if (add.kind !== "AGGREGATED_BUY") throw new Error("unreachable");
+    expect(add.nextState.totalShares).toBe(200);
+    expect(add.nextState.vwap).toBeCloseTo(0.45, 12);
+    expect(add.nextState.buyFillCount).toBe(2);
   });
 
   it("6. a partial SELL feeds proportional exit logic", () => {
@@ -104,16 +105,16 @@ describe("kalshi same-venue source adapter", () => {
       admitOk({ sourceTradeId: "s", action: "SELL", quantity: 40, sourceTsSeconds: 1_756_000_120 }),
       2_000,
     );
-    const decisions = processFillsForTest([buy, sell]);
-    const exit = decisions[1];
-    expect(exit.kind).toBe("SELL_RECORDED");
-    if (exit.kind !== "SELL_RECORDED") throw new Error("unreachable");
+    const exit = at(processFillsForTest([buy, sell]), 1);
+    if (exit.kind !== "SELL_RECORDED") throw new Error(`expected SELL_RECORDED, got ${exit.kind}`);
     expect(exit.isPreEpoch).toBe(false);
     expect(exit.trackedShares).toBe(40);
     expect(exit.untrackedShares).toBe(0);
     expect(computeExitFraction(exit.trackedShares, 100)).toBeCloseTo(0.4, 12);
-    expect(remainingShares(exit.nextState!)).toBe(60);
-    expect(isEpisodeOpen(exit.nextState!)).toBe(true);
+    const state = exit.nextState;
+    if (state === null) throw new Error("expected episode state");
+    expect(remainingShares(state)).toBe(60);
+    expect(isEpisodeOpen(state)).toBe(true);
   });
 
   it("7. a full SELL closes the copied paper position", () => {
@@ -122,12 +123,13 @@ describe("kalshi same-venue source adapter", () => {
       admitOk({ sourceTradeId: "s", action: "SELL", quantity: 100, sourceTsSeconds: 1_756_000_120 }),
       2_000,
     );
-    const decisions = processFillsForTest([buy, sell]);
-    const exit = decisions[1];
+    const exit = at(processFillsForTest([buy, sell]), 1);
     if (exit.kind !== "SELL_RECORDED") throw new Error(`expected SELL_RECORDED, got ${exit.kind}`);
     expect(computeExitFraction(exit.trackedShares, 100)).toBe(1);
-    expect(remainingShares(exit.nextState!)).toBe(0);
-    expect(isEpisodeOpen(exit.nextState!)).toBe(false);
+    const state = exit.nextState;
+    if (state === null) throw new Error("expected episode state");
+    expect(remainingShares(state)).toBe(0);
+    expect(isEpisodeOpen(state)).toBe(false);
   });
 
   it("8. a duplicate source event cannot execute twice", () => {
@@ -140,7 +142,7 @@ describe("kalshi same-venue source adapter", () => {
     // Reducer-level safety net too: same eventKey twice yields DUPLICATE_FILL.
     const fill = toEligibleFill(trade, 1_000);
     const decisions = processFillsForTest([fill, { ...fill, sourceTs: fill.sourceTs + 1 }]);
-    expect(decisions[1].kind).toBe("DUPLICATE_FILL");
+    expect(at(decisions, 1).kind).toBe("DUPLICATE_FILL");
   });
 
   it("9. malformed or incomplete trader events fail closed with a specific reason", () => {
