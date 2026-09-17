@@ -20,6 +20,13 @@ import { LIVE_EXECUTION_IMPLEMENTED } from "../live-safety/core";
 const TICKER = "KXMLBGAME-26AUG25CHCCIN-CHC";
 const TRADER = "kalshi-trader-0001";
 
+function at<T>(values: readonly T[], index: number): T {
+  const value = values[index];
+  if (value === undefined) throw new Error(`expected a decision at index ${index}`);
+  return value;
+}
+
+
 function watchlistWith(...traderIds: string[]): KalshiTraderWatchlist {
   const map = new Map<string, KalshiTraderQualification>(traderIds.map((id) => [id, { traderId: id, approvedForPaperCopy: true }]));
   return { get: (traderId) => map.get(traderId) ?? null };
