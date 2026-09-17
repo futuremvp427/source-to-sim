@@ -1,132 +1,196 @@
 /**
- * Same-venue Kalshi source routing — PURE logic only.
+ * SAME-VENUE (Kalshi -> Kalshi) source adapter — PURE module.
  *
- * This module is the first implementation step for a Kalshi->Kalshi copy-research path.
- * It deliberately does NOT fetch Kalshi Social/leaderboard data, place orders, touch
- * Supabase, or reuse the cross-venue resolver. Its only job is to validate one already-
- * observed Kalshi source trade and turn it into a deterministic direct route to the exact
- * same Kalshi market ticker and side.
+ * Purpose: a Kalshi public trader's own activity already names a VERIFIED Kalshi market
+ * ticker and side, so it must NEVER be pushed through the Polymarket->Kalshi
+ * economic-equivalence resolver (`resolver.ts`). This module normalizes such an event,
+ * validates it fail-closed, derives a stable dedupe key, applies the trader
+ * qualification/watchlist gate, and emits an `EligibleFill` for the EXISTING lifecycle
+ * reducer (`episode.ts` -> observation -> paper.server.ts). It performs no I/O: no
+ * network, no Supabase, no clock, no env.
  *
- * Why this exists separately from resolver.ts:
- * - resolver.ts proves economic equivalence across DIFFERENT venues/contracts;
- * - a public Kalshi trader trade copied to the SAME Kalshi market already carries the
- *   authoritative target market ticker, so inventing a second fuzzy/economic match would
- *   add failure modes without adding evidence;
- * - this direct route is intentionally labeled KALSHI_SAME_VENUE rather than EXACT so it
- *   cannot contaminate the historical EXACT/NEAR/NONE/UNVERIFIED cross-venue metrics.
+ * Safety: this module cannot place orders. It only produces PAPER-path inputs.
+ * LIVE_EXECUTION_IMPLEMENTED stays false; nothing here touches a live order path.
  *
- * Live trading remains out of scope. A later server adapter may feed canonical public
- * activity into this function only after the public activity source contract is verified.
+ * Transport status: as of this commit there is NO verified Kalshi interface that returns a
+ * SPECIFIC public trader's trades (see docs/KALSHI_SAME_VENUE_SOURCE.md). Therefore this
+ * file intentionally ships the `KalshiTraderActivitySource` INTERFACE ONLY, with no
+ * production implementation and no simulated/fake transport.
  */
 
-export type KalshiSourceSide = "YES" | "NO";
-export type KalshiSourceAction = "BUY" | "SELL";
+import type { EligibleFill, FillSide } from "./episode";
 
-/** Canonical activity shape expected AFTER a future source adapter has parsed evidence. */
-export type KalshiSourceTrade = {
+export type KalshiContractSide = "YES" | "NO";
+
+export type KalshiTraderSourceEvent = {
+  traderId: unknown;
+  sourceTradeId: unknown;
+  marketTicker: unknown;
+  contractSide: unknown;
+  action: unknown;
+  quantity: unknown;
+  priceCents: unknown;
+  sourceTsSeconds: unknown;
+};
+
+export type NormalizedKalshiSourceTrade = {
+  route: "SAME_VENUE_KALSHI";
+  traderId: string;
   sourceTradeId: string;
-  traderHandle: string;
   marketTicker: string;
-  side: KalshiSourceSide;
-  action: KalshiSourceAction;
-  contracts: number;
-  /** Dollar probability price, e.g. 0.63. */
+  contractSide: KalshiContractSide;
+  action: FillSide;
+  quantity: number;
   price: number;
-  /** Epoch milliseconds when the source trade occurred. */
-  sourceTsMs: number;
+  priceCents: number;
+  sourceTs: number;
+  eventKey: string;
 };
 
-export type SameVenueKalshiRoute = {
-  routeKind: "KALSHI_SAME_VENUE";
-  sourceTradeId: string;
-  traderHandle: string;
-  marketTicker: string;
-  side: KalshiSourceSide;
-  action: KalshiSourceAction;
-  contracts: number;
-  sourcePrice: number;
-  sourceTsMs: number;
-  /** Explicit proof that no cross-venue resolver was involved. */
-  matchingBasis: "SOURCE_MARKET_TICKER";
+export type KalshiSourceRejection = { ok: false; reasonCode: KalshiSourceRejectCode; reason: string };
+export type KalshiSourceAcceptance = { ok: true; trade: NormalizedKalshiSourceTrade };
+export type KalshiSourceNormalizationResult = KalshiSourceAcceptance | KalshiSourceRejection;
+
+export type KalshiSourceRejectCode =
+  | "REJECT_MISSING_TRADER_ID"
+  | "REJECT_MISSING_TRADE_ID"
+  | "REJECT_MISSING_TICKER"
+  | "REJECT_INVALID_SIDE"
+  | "REJECT_INVALID_ACTION"
+  | "REJECT_INVALID_QUANTITY"
+  | "REJECT_INVALID_PRICE"
+  | "REJECT_INVALID_TIMESTAMP"
+  | "REJECT_TRADER_NOT_QUALIFIED"
+  | "REJECT_DUPLICATE_EVENT";
+
+function trimmedString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+const TICKER_PATTERN = /^[A-Z0-9]+(?:-[A-Z0-9.]+)*$/;
+
+export function isVerifiedKalshiTicker(value: unknown): value is string {
+  const ticker = trimmedString(value);
+  return ticker !== null && ticker.length <= 128 && TICKER_PATTERN.test(ticker);
+}
+
+export function deriveKalshiSourceEventKey(traderId: string, sourceTradeId: string): string {
+  return `KALSHI_SRC:${traderId}:${sourceTradeId}`;
+}
+
+export type KalshiTraderQualification = {
+  traderId: string;
+  approvedForPaperCopy: boolean;
+  evidence?: Readonly<Record<string, unknown>>;
 };
 
-export type SameVenueKalshiRejectCode =
-  | "MISSING_SOURCE_TRADE_ID"
-  | "MISSING_TRADER_HANDLE"
-  | "INVALID_MARKET_TICKER"
-  | "INVALID_SIDE"
-  | "INVALID_ACTION"
-  | "INVALID_CONTRACTS"
-  | "INVALID_PRICE"
-  | "INVALID_SOURCE_TIMESTAMP";
+export type KalshiTraderWatchlist = {
+  get(traderId: string): KalshiTraderQualification | null;
+};
 
-export type SameVenueKalshiRouteDecision =
-  | { status: "ROUTABLE"; route: SameVenueKalshiRoute }
-  | { status: "REJECTED"; reasonCode: SameVenueKalshiRejectCode; reason: string };
-
-const KALSHI_TICKER_RE = /^[A-Z0-9][A-Z0-9._:-]{1,199}$/;
-
-function nonEmpty(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
+export function isTraderQualified(watchlist: KalshiTraderWatchlist | null, traderId: string): boolean {
+  if (watchlist === null) return false;
+  const record = watchlist.get(traderId);
+  return record !== null && record !== undefined && record.approvedForPaperCopy === true;
 }
 
-function reject(reasonCode: SameVenueKalshiRejectCode, reason: string): SameVenueKalshiRouteDecision {
-  return { status: "REJECTED", reasonCode, reason };
-}
+export function normalizeKalshiTraderEvent(raw: KalshiTraderSourceEvent): KalshiSourceNormalizationResult {
+  const traderId = trimmedString(raw.traderId);
+  if (traderId === null) return { ok: false, reasonCode: "REJECT_MISSING_TRADER_ID", reason: "trader identifier missing" };
 
-/**
- * Build a deterministic direct route from one canonical Kalshi source trade.
- *
- * Fail-closed invariants:
- * - no guessed ticker;
- * - no guessed YES/NO side;
- * - no guessed BUY/SELL action;
- * - no zero/negative/NaN quantity or price;
- * - no synthesized timestamp.
- */
-export function buildSameVenueKalshiRoute(trade: KalshiSourceTrade): SameVenueKalshiRouteDecision {
-  if (!nonEmpty(trade.sourceTradeId)) return reject("MISSING_SOURCE_TRADE_ID", "source trade id is required");
-  if (!nonEmpty(trade.traderHandle)) return reject("MISSING_TRADER_HANDLE", "trader handle is required");
+  const sourceTradeId = trimmedString(raw.sourceTradeId);
+  if (sourceTradeId === null) return { ok: false, reasonCode: "REJECT_MISSING_TRADE_ID", reason: "source trade identifier missing" };
 
-  const marketTicker = nonEmpty(trade.marketTicker) ? trade.marketTicker.trim().toUpperCase() : "";
-  if (!KALSHI_TICKER_RE.test(marketTicker)) {
-    return reject("INVALID_MARKET_TICKER", "Kalshi market ticker is missing or malformed");
+  if (!isVerifiedKalshiTicker(raw.marketTicker)) {
+    return { ok: false, reasonCode: "REJECT_MISSING_TICKER", reason: "kalshi market ticker missing or not a verified ticker shape" };
   }
-  if (trade.side !== "YES" && trade.side !== "NO") {
-    return reject("INVALID_SIDE", "source side must be YES or NO");
+  const marketTicker = (raw.marketTicker as string).trim();
+
+  if (raw.contractSide !== "YES" && raw.contractSide !== "NO") {
+    return { ok: false, reasonCode: "REJECT_INVALID_SIDE", reason: "contract side must be exactly YES or NO" };
   }
-  if (trade.action !== "BUY" && trade.action !== "SELL") {
-    return reject("INVALID_ACTION", "source action must be BUY or SELL");
+  const contractSide: KalshiContractSide = raw.contractSide;
+
+  if (raw.action !== "BUY" && raw.action !== "SELL") {
+    return { ok: false, reasonCode: "REJECT_INVALID_ACTION", reason: "action must be exactly BUY or SELL" };
   }
-  if (!Number.isFinite(trade.contracts) || trade.contracts <= 0) {
-    return reject("INVALID_CONTRACTS", "source contracts must be a positive finite number");
+  const action: FillSide = raw.action;
+
+  const quantity = raw.quantity;
+  if (typeof quantity !== "number" || !Number.isFinite(quantity) || quantity <= 0) {
+    return { ok: false, reasonCode: "REJECT_INVALID_QUANTITY", reason: "quantity must be a finite number > 0" };
   }
-  if (!Number.isFinite(trade.price) || trade.price <= 0 || trade.price > 1) {
-    return reject("INVALID_PRICE", "source price must be in the interval (0, 1]");
+
+  const priceCents = raw.priceCents;
+  if (typeof priceCents !== "number" || !Number.isInteger(priceCents) || priceCents < 1 || priceCents > 99) {
+    return { ok: false, reasonCode: "REJECT_INVALID_PRICE", reason: "priceCents must be an integer in [1,99]" };
   }
-  if (!Number.isFinite(trade.sourceTsMs) || trade.sourceTsMs <= 0) {
-    return reject("INVALID_SOURCE_TIMESTAMP", "source timestamp must be a positive epoch-millisecond value");
+
+  const sourceTs = raw.sourceTsSeconds;
+  if (typeof sourceTs !== "number" || !Number.isFinite(sourceTs) || sourceTs <= 0) {
+    return { ok: false, reasonCode: "REJECT_INVALID_TIMESTAMP", reason: "sourceTsSeconds must be a positive unix-seconds value" };
   }
 
   return {
-    status: "ROUTABLE",
-    route: {
-      routeKind: "KALSHI_SAME_VENUE",
-      sourceTradeId: trade.sourceTradeId.trim(),
-      traderHandle: trade.traderHandle.trim(),
+    ok: true,
+    trade: {
+      route: "SAME_VENUE_KALSHI",
+      traderId,
+      sourceTradeId,
       marketTicker,
-      side: trade.side,
-      action: trade.action,
-      contracts: trade.contracts,
-      sourcePrice: trade.price,
-      sourceTsMs: trade.sourceTsMs,
-      matchingBasis: "SOURCE_MARKET_TICKER",
+      contractSide,
+      action,
+      quantity,
+      price: priceCents / 100,
+      priceCents,
+      sourceTs,
+      eventKey: deriveKalshiSourceEventKey(traderId, sourceTradeId),
     },
   };
 }
 
-/** Stable idempotency key for persistence once the server-side source adapter is wired. */
-export function kalshiSourceDedupeKey(trade: Pick<KalshiSourceTrade, "traderHandle" | "sourceTradeId">): string | null {
-  if (!nonEmpty(trade.traderHandle) || !nonEmpty(trade.sourceTradeId)) return null;
-  return `kalshi:${trade.traderHandle.trim().toLowerCase()}:${trade.sourceTradeId.trim()}`;
+export function admitKalshiSourceEvent(
+  raw: KalshiTraderSourceEvent,
+  watchlist: KalshiTraderWatchlist | null,
+  seenEventKeys: ReadonlySet<string> = new Set(),
+): KalshiSourceNormalizationResult {
+  const normalized = normalizeKalshiTraderEvent(raw);
+  if (!normalized.ok) return normalized;
+
+  if (!isTraderQualified(watchlist, normalized.trade.traderId)) {
+    return { ok: false, reasonCode: "REJECT_TRADER_NOT_QUALIFIED", reason: "trader is not approved for paper copy" };
+  }
+  if (seenEventKeys.has(normalized.trade.eventKey)) {
+    return { ok: false, reasonCode: "REJECT_DUPLICATE_EVENT", reason: "source event already processed" };
+  }
+  return normalized;
+}
+
+export function toEligibleFill(trade: NormalizedKalshiSourceTrade, detectedAtMs: number): EligibleFill {
+  return {
+    eventKey: trade.eventKey,
+    wallet: trade.traderId,
+    conditionId: trade.marketTicker,
+    asset: `${trade.marketTicker}:${trade.contractSide}`,
+    side: trade.action,
+    shares: trade.quantity,
+    price: trade.price,
+    sourceTs: trade.sourceTs,
+    detectedAt: detectedAtMs,
+  };
+}
+
+export function targetLegForTrade(trade: NormalizedKalshiSourceTrade): { venue: "KALSHI"; ticker: string; side: KalshiContractSide } {
+  return { venue: "KALSHI", ticker: trade.marketTicker, side: trade.contractSide };
+}
+
+export function requiresCrossVenueResolution(trade: Pick<NormalizedKalshiSourceTrade, "route">): boolean {
+  return trade.route !== "SAME_VENUE_KALSHI";
+}
+
+export interface KalshiTraderActivitySource {
+  readonly sourceName: string;
+  fetchNewActivity(input: { traderId: string; sinceTsSeconds: number; signal?: AbortSignal }): Promise<KalshiTraderSourceEvent[]>;
 }
