@@ -2,7 +2,7 @@
 
 ## Status
 
-Implementation started on branch `feature/kalshi-same-venue-copy-source`.
+Source-independent adapter complete on branch `feature/kalshi-same-venue-copy-source`.
 
 This path is **paper/research only**. It does not place live orders and does not change the existing Polymarket-source Sports Shadow production path.
 
@@ -12,35 +12,46 @@ The existing Sports Shadow system accepts a Polymarket source trade and then tri
 
 A Kalshi leaderboard/social source trade copied to the **same Kalshi market** does not need that translation step. If public source evidence contains the exact Kalshi market ticker and YES/NO side, the copy-research path can route by the source market identifier itself.
 
-The first implementation step is `src/lib/sports-shadow/kalshi-source.ts`:
+## Implemented
 
-- validates a canonical Kalshi public-source trade;
+`src/lib/sports-shadow/kalshi-source.ts` now:
+
+- validates untrusted trader activity fail-closed;
+- requires a stable trader id and source trade id;
+- requires an explicit verified-format Kalshi market ticker;
 - preserves BUY/SELL and YES/NO exactly;
-- requires a concrete Kalshi market ticker;
-- creates a deterministic same-venue route using that ticker;
-- labels it `KALSHI_SAME_VENUE`, not `EXACT`, so it cannot contaminate historical cross-venue matching metrics;
-- creates a stable source idempotency key;
+- creates stable dedupe identity `KALSHI_SRC:<traderId>:<sourceTradeId>`;
+- applies an explicit paper-copy trader qualification gate;
+- bridges directly into the existing `episode.ts` lifecycle reducer;
+- preserves exact ticker + side as target identity;
+- marks the path `SAME_VENUE_KALSHI` so the cross-venue resolver is bypassed;
+- defines `KalshiTraderActivitySource` as the one future transport interface;
 - performs no network, database, order, or live-trading action.
 
-## Architecture target
+Tests prove existing BUY, ADD/DCA, partial SELL, full SELL, duplicate-event, and fail-closed behavior can be reused directly.
+
+## Architecture
 
 ```text
-Kalshi public leaderboard/social profile
+verified Kalshi public trader activity
         |
         v
-verified public-activity source adapter
+KalshiTraderActivitySource
         |
         v
-canonical KalshiSourceTrade
+fail-closed normalization + qualification + dedupe
         |
         v
-same-venue validation + dedupe
+SAME_VENUE_KALSHI route
         |
         v
 exact source market ticker + YES/NO side
         |
         v
-existing Kalshi quote / observation / paper-fill infrastructure
+existing lifecycle reducer
+        |
+        v
+existing Kalshi observation / sizing / paper-fill infrastructure
         |
         v
 paper position lifecycle + settlement + P&L
@@ -52,7 +63,6 @@ Keep and reuse:
 
 - worker leases/fencing;
 - rate-limit infrastructure;
-- source-event deduplication concepts;
 - episode/lifecycle handling;
 - Kalshi market and order-book code;
 - quote observation;
@@ -68,28 +78,29 @@ Bypass for this path:
 - Gamma source metadata;
 - Polymarket condition-ID translation;
 - PM-US/Kalshi cross-venue fuzzy/economic matching;
-- `EXACT/NEAR/NONE/UNVERIFIED` as the proof that a same-venue source ticker maps to itself.
+- `EXACT/NEAR/NONE/UNVERIFIED` as proof that a same-venue source ticker maps to itself.
 
-## Hard gates before server wiring
+## Hard external gate
 
-1. **Public activity evidence must be verified.** Do not hard-code an undocumented profile/activity endpoint until its request/response behavior has been independently observed and recorded.
-2. **Every trade must have a stable source identity.** If the public feed has no trade ID, design a deterministic composite key only after verifying which fields are immutable and sufficiently discriminating.
-3. **Market ticker and side must be explicit.** If either is absent, the event stays unrouteable; no text guessing.
-4. **No live trading.** The initial adapter feeds only the paper/research ledger.
-5. **Historical cross-venue path stays intact.** Same-venue work is additive until it passes its own forward paper validation.
-6. **Trader qualification is separate from trade ingestion.** Leaderboard rank/profit/volume filters may decide which public profiles to observe, but they must never alter the meaning of a detected source trade.
-7. **Observed-source timing is durable.** Persist the source trade timestamp and detection timestamp separately so copy latency can be measured without hindsight.
+The remaining blocker is source transport, not lifecycle or Kalshi paper execution.
+
+Do not implement a production transport until a supported Kalshi source can provide:
+
+1. another public trader's activity;
+2. stable trader/profile identity;
+3. stable per-trade identity;
+4. exact ticker, side, action, quantity, execution price, and timestamp;
+5. documented rate limits/terms permitting the read use.
+
+See `docs/KALSHI_SAME_VENUE_SOURCE.md` for the detailed source contract.
 
 ## Next implementation sequence
 
-1. Verify the public Kalshi Social/leaderboard activity source contract and capture representative payloads.
-2. Add a server-only source adapter that emits canonical `KalshiSourceTrade` records and contains no order code.
-3. Add persistence for source trades with deterministic dedupe and source/detection timestamps.
-4. Wire those records into the existing episode/lifecycle reducer.
-5. Add a same-venue Kalshi observation/paper route that targets the exact source ticker and side.
-6. Add dashboard provenance distinguishing `POLYMARKET_CROSS_VENUE` from `KALSHI_SAME_VENUE`.
-7. Run forward paper validation; only after that consider any separate live-promotion design.
+1. Verify or rule out a supported public Kalshi trader-activity source.
+2. If verified, implement exactly one server-only `KalshiTraderActivitySource` transport.
+3. Add durable persistence for normalized source events and detection latency.
+4. Wire direct same-venue events into existing paper observation/execution without invoking cross-venue matching.
+5. Add provenance and dashboard reporting for `SAME_VENUE_KALSHI`.
+6. Run forward paper validation before any promotion discussion.
 
-## Current external evidence
-
-As of September 2026, Kalshi publicly exposes a Social leaderboard and public profile pages, and Kalshi Pro advertises a public live-trades tape. Kalshi's documented API provides public market data plus authenticated access to a user's own orders/trades, but the documented API material reviewed so far does **not** establish an official public API for another user's complete trade history. Therefore the public profile/activity transport remains an explicit research gate rather than an assumed API contract.
+No live-trading implementation is part of this path.
