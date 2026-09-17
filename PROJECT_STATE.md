@@ -153,7 +153,7 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
   - Current CLE/LAA PM-US remains NEAR under live-observed incompatible rules.
   - Genuine compatible rules can still produce EXACT.
   - Missing rules remain UNVERIFIED.
-  - Same teams on different dates do not false-match.
+  - Same teams on different dates/start times do not false-match.
   - Totals require exact line equality.
   - Spread orientation remains LONG/SHORT-derived.
   - Moneyline side orientation remains LONG/SHORT-derived.
@@ -175,3 +175,14 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - First paper position: PENDING.
 - Dashboard verification: PENDING.
 - Live execution unchanged: `LIVE_EXECUTION_IMPLEMENTED=false`.
+
+### KALSHI SAME-VENUE SOURCE PATH (2026-09-17)
+
+- Status: IMPLEMENTATION STARTED ON ISOLATED FEATURE BRANCH; PRODUCTION PATH UNCHANGED.
+- Branch: `feature/kalshi-same-venue-copy-source`.
+- Base commit: `aafe7a5f0966abb4a30de07b96bd1932ad8d356f`.
+- Goal: add a paper/research Kalshi-to-Kalshi source path that uses the exact source Kalshi market ticker and side, bypassing cross-venue contract matching only for same-venue source evidence.
+- Initial implementation: `src/lib/sports-shadow/kalshi-source.ts`, `src/lib/sports-shadow/kalshi-source.test.ts`, and `docs/KALSHI_SAME_VENUE_COPY.md`.
+- Safety: no network source adapter yet, no database migration yet, no order path, no live execution, and no change to the existing Polymarket-source/cross-venue production worker.
+- Hard gate: the public Kalshi source-trade transport/payload contract must be verified before server wiring. Public Social leaderboard/profile pages and a public live-trades tape are known to exist, but the documented API material reviewed so far does not establish an official public per-trader trade-history endpoint.
+- Next: verify the public source contract; add a server-only adapter; persist source/detection timestamps with deterministic dedupe; wire same-venue paper observation through the existing Kalshi infrastructure; validate forward in paper mode before any promotion discussion.
