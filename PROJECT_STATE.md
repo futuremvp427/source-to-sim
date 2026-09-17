@@ -197,3 +197,31 @@ Read PROJECT_STATE.md before beginning substantive work. Do not reopen a CLOSED 
 - Tests run: `kalshi-source.test.ts` 11/11 pass; `episode.test.ts` + `kalshi.test.ts` + `resolver.test.ts` + `deployment-readiness.test.ts` 206/206 pass; TypeScript check PASS; production build PASS. Full suite not run (change is additive and isolated; budget-bounded).
 - Safety state unchanged: `LIVE_EXECUTION_IMPLEMENTED=false`; kill switch/activation state untouched; no live-order path added or reachable; real orders placed = 0; no Supabase migration created; no risk, dedupe, lease, settlement, sizing, or fail-closed protection loosened.
 - Next smallest step: obtain or rule out a documented Kalshi cross-account trader-activity source. If one is confirmed, implement exactly one `KalshiTraderActivitySource` transport plus a persistence path that writes admitted events as source fills with `route=SAME_VENUE_KALSHI`, and wire the worker to skip venue matching for those rows.
+
+## 2026-09-17 — Kalshi public-trader source contract investigation (NOT VERIFIED)
+
+Investigation only; no production code changed.
+
+- **Verdict**: NOT VERIFIED. Kalshi exposes no legitimate read-only surface returning a
+  specific public trader's activity with the fields required for same-venue copying.
+- **Inspected**: Trade API v2 OpenAPI (schemas + tag list), `/markets/trades`,
+  `/historical/trades`, `/portfolio/*`, `/historical/positions`, `kalshi.com/social` and
+  `/social/leaderboard` (live fetch blocked by a Vercel bot checkpoint), help-center articles
+  on Leaderboard / Social posting / Inner Circle / Community Guidelines, documented rate
+  limits and Developer Agreement, third-party Apify profile scrapers.
+- **Available**: trade-level fields exist but only anonymously (`trade_id`, `ticker`,
+  `taker_outcome_side`, `taker_book_side`, `count_fp`, price fields, `created_time`).
+  Identity exists only as an opt-in leaderboard username with aggregate profit/volume/count.
+- **Missing**: per-trade trader/account identifier, per-account BUY/SELL direction,
+  entry-vs-exit distinguishability, any documented delegated/consent API (Inner Circle is an
+  in-app gate with no published schema).
+- **Files changed**: `docs/KALSHI_SAME_VENUE_SOURCE.md` (appended investigation section),
+  `PROJECT_STATE.md` (this entry). No source files, no migration.
+- **Reused**: existing same-venue adapter `src/lib/sports-shadow/kalshi-source.ts` and its
+  11-test suite, untouched. No competing adapter created.
+- **Transport / persistence / worker route**: not implemented (would have required fabricated
+  data).
+- **Safety**: `LIVE_EXECUTION_IMPLEMENTED=false` unchanged; no order path; real orders = 0;
+  no dedupe/lease/sizing/settlement protection loosened.
+- **Next step**: obtain a written answer from Kalshi on a supported consenting-trader read
+  interface (and any Inner Circle API schema) before writing any transport.
