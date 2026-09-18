@@ -227,7 +227,14 @@ export async function processPendingSameVenueEvents(deps: {
   workerId: string;
   limit?: number;
   signal?: AbortSignal;
+  /**
+   * Fee model. Defaults to the EXISTING documented Kalshi taker-fee model. Injectable so
+   * the fee fail-closed branch and the sizing branch can each be exercised deterministically
+   * in tests; production always uses the default.
+   */
+  computeFee?: (fills: readonly ConsumedLevel[]) => FeeResult;
 }): Promise<ProcessOutcome> {
+  const computeFee = deps.computeFee ?? ((fills: readonly ConsumedLevel[]) => computeTakerFeeForFills("KALSHI", fills));
   const rows = await deps.repo.claimPendingEvents(deps.workerId, deps.limit ?? 25);
   const outcome: ProcessOutcome = { claimed: rows.length, executed: 0, skipped: 0, failed: 0, targetedTickers: [] };
 
