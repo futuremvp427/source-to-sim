@@ -108,7 +108,7 @@ class MemoryRepo implements SameVenueRepository {
     const pos = this.positions.get(key) ?? { contractsOpen: 0, avgEntryPrice: null, realized: 0, status: "OPEN" as const };
     if (input.action === "EXIT") {
       const sell = Math.min(input.contracts, pos.contractsOpen);
-      pos.realized += ((input.vwap ?? 0) - (pos.avgEntryPrice ?? 0)) * sell - (input.feeUsd ?? 0);
+      pos.realized += ((input.vwap ?? 0) - (pos.avgEntryPrice ?? 0)) * sell;
       pos.contractsOpen -= sell;
       pos.status = pos.contractsOpen <= 0 ? "CLOSED" : "OPEN";
     } else {
@@ -350,6 +350,45 @@ describe("same-venue Kalshi paper pipeline (source-independent)", () => {
     });
     expect(outcome.executed).toBe(1);
     expect(repo.fills.every((f) => f.contracts === 0 && f.fillStatus === "NONE" && f.bookStaleReason === "rate limited")).toBe(true);
+    expect(repo.positions.size).toBe(0);
+  });
+
+  it("15. ADD sizing is proportional to the source DCA fraction, not a fresh full tier", async () => {
+    const repo = new MemoryRepo();
+    await setupWithBuy(repo);
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    const entry = repo.fills.find((f) => f.action === "ENTRY" && f.notionalTierUsd === 20)!;
+
+    await admitSameVenueSourceEvent(
+      rawEvent({ sourceTradeId: "t-quarter-add", quantity: 25, sourceTsSeconds: 1_700_000_600 }),
+      { repo, now: () => 1_700_000_620_000 },
+    );
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    const add = repo.fills.find((f) => f.action === "ADD" && f.notionalTierUsd === 20)!;
+
+    expect(entry.contracts).toBeGreaterThan(0);
+    expect(add.contracts).toBeCloseTo(entry.contracts * 0.25, 6);
+  });
+
+  it("16. an ADD never fabricates a new follower position when the ENTRY could not fill", async () => {
+    const repo = new MemoryRepo();
+    await setupWithBuy(repo);
+    await processPendingSameVenueEvents({
+      repo,
+      fetchBook: async () => ({ ...BOOK, staleReason: "rate limited", askLevels: [], bidLevels: [] }),
+      workerId: "w1",
+    });
+    expect(repo.positions.size).toBe(0);
+
+    await admitSameVenueSourceEvent(
+      rawEvent({ sourceTradeId: "t-add-after-missed-entry", quantity: 25, sourceTsSeconds: 1_700_000_600 }),
+      { repo, now: () => 1_700_000_620_000 },
+    );
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+
+    const adds = repo.fills.filter((f) => f.action === "ADD");
+    expect(adds).toHaveLength(SPORTS_SHADOW_NOTIONALS_USD.length);
+    expect(adds.every((f) => f.contracts === 0 && f.fillStatus === "REJECTED" && f.rejectReason === "NO_OPEN_POSITION_FOR_ADD")).toBe(true);
     expect(repo.positions.size).toBe(0);
   });
 });
