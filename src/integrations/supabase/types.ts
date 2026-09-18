@@ -1749,6 +1749,298 @@ export type Database = {
         }
         Relationships: []
       }
+      sports_shadow_kalshi_paper_fills: {
+        Row: {
+          action: string
+          all_in_cost_usd: number | null
+          book_observed_at: string | null
+          book_stale_reason: string | null
+          contract_side: string
+          contracts: number
+          created_at: string
+          detected_at: string
+          episode_key: string | null
+          fee_model_version: string | null
+          fee_usd: number | null
+          fill_status: string
+          id: string
+          market_ticker: string
+          notional_tier_usd: number
+          reject_reason: string | null
+          source_event_id: string
+          source_ts: number
+          trader_id: string
+          vwap: number | null
+        }
+        Insert: {
+          action: string
+          all_in_cost_usd?: number | null
+          book_observed_at?: string | null
+          book_stale_reason?: string | null
+          contract_side: string
+          contracts?: number
+          created_at?: string
+          detected_at: string
+          episode_key?: string | null
+          fee_model_version?: string | null
+          fee_usd?: number | null
+          fill_status: string
+          id?: string
+          market_ticker: string
+          notional_tier_usd: number
+          reject_reason?: string | null
+          source_event_id: string
+          source_ts: number
+          trader_id: string
+          vwap?: number | null
+        }
+        Update: {
+          action?: string
+          all_in_cost_usd?: number | null
+          book_observed_at?: string | null
+          book_stale_reason?: string | null
+          contract_side?: string
+          contracts?: number
+          created_at?: string
+          detected_at?: string
+          episode_key?: string | null
+          fee_model_version?: string | null
+          fee_usd?: number | null
+          fill_status?: string
+          id?: string
+          market_ticker?: string
+          notional_tier_usd?: number
+          reject_reason?: string | null
+          source_event_id?: string
+          source_ts?: number
+          trader_id?: string
+          vwap?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sports_shadow_kalshi_paper_fills_source_event_id_fkey"
+            columns: ["source_event_id"]
+            isOneToOne: false
+            referencedRelation: "sports_shadow_kalshi_source_events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sports_shadow_kalshi_paper_positions: {
+        Row: {
+          avg_entry_price: number | null
+          contract_side: string
+          contracts_open: number
+          fees_usd: number
+          id: string
+          market_ticker: string
+          notional_tier_usd: number
+          opened_at: string
+          realized_pnl_usd: number
+          status: string
+          trader_id: string
+          updated_at: string
+        }
+        Insert: {
+          avg_entry_price?: number | null
+          contract_side: string
+          contracts_open?: number
+          fees_usd?: number
+          id?: string
+          market_ticker: string
+          notional_tier_usd: number
+          opened_at?: string
+          realized_pnl_usd?: number
+          status?: string
+          trader_id: string
+          updated_at?: string
+        }
+        Update: {
+          avg_entry_price?: number | null
+          contract_side?: string
+          contracts_open?: number
+          fees_usd?: number
+          id?: string
+          market_ticker?: string
+          notional_tier_usd?: number
+          opened_at?: string
+          realized_pnl_usd?: number
+          status?: string
+          trader_id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      sports_shadow_kalshi_settlements: {
+        Row: {
+          contract_side: string
+          created_at: string
+          gross_pnl_usd: number | null
+          id: string
+          market_ticker: string
+          net_pnl_usd: number | null
+          notional_tier_usd: number
+          settlement_source: string | null
+          settlement_status: string
+          settlement_timestamp: string | null
+          settlement_value: number | null
+          total_fees_usd: number | null
+          trader_id: string
+          updated_at: string
+        }
+        Insert: {
+          contract_side: string
+          created_at?: string
+          gross_pnl_usd?: number | null
+          id?: string
+          market_ticker: string
+          net_pnl_usd?: number | null
+          notional_tier_usd: number
+          settlement_source?: string | null
+          settlement_status?: string
+          settlement_timestamp?: string | null
+          settlement_value?: number | null
+          total_fees_usd?: number | null
+          trader_id: string
+          updated_at?: string
+        }
+        Update: {
+          contract_side?: string
+          created_at?: string
+          gross_pnl_usd?: number | null
+          id?: string
+          market_ticker?: string
+          net_pnl_usd?: number | null
+          notional_tier_usd?: number
+          settlement_source?: string | null
+          settlement_status?: string
+          settlement_timestamp?: string | null
+          settlement_value?: number | null
+          total_fees_usd?: number | null
+          trader_id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      sports_shadow_kalshi_source_events: {
+        Row: {
+          action: string
+          claimed_at: string | null
+          claimed_by: string | null
+          contract_side: string
+          created_at: string
+          detected_at: string
+          episode_key: string | null
+          event_key: string
+          experiment_epoch_id: string | null
+          id: string
+          market_ticker: string
+          processed_at: string | null
+          quantity: number
+          raw: Json | null
+          route: string
+          source_name: string | null
+          source_price: number
+          source_price_cents: number
+          source_trade_id: string
+          source_ts: number
+          status: string
+          status_reason: string | null
+          trader_id: string
+        }
+        Insert: {
+          action: string
+          claimed_at?: string | null
+          claimed_by?: string | null
+          contract_side: string
+          created_at?: string
+          detected_at: string
+          episode_key?: string | null
+          event_key: string
+          experiment_epoch_id?: string | null
+          id?: string
+          market_ticker: string
+          processed_at?: string | null
+          quantity: number
+          raw?: Json | null
+          route?: string
+          source_name?: string | null
+          source_price: number
+          source_price_cents: number
+          source_trade_id: string
+          source_ts: number
+          status?: string
+          status_reason?: string | null
+          trader_id: string
+        }
+        Update: {
+          action?: string
+          claimed_at?: string | null
+          claimed_by?: string | null
+          contract_side?: string
+          created_at?: string
+          detected_at?: string
+          episode_key?: string | null
+          event_key?: string
+          experiment_epoch_id?: string | null
+          id?: string
+          market_ticker?: string
+          processed_at?: string | null
+          quantity?: number
+          raw?: Json | null
+          route?: string
+          source_name?: string | null
+          source_price?: number
+          source_price_cents?: number
+          source_trade_id?: string
+          source_ts?: number
+          status?: string
+          status_reason?: string | null
+          trader_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sports_shadow_kalshi_source_events_experiment_epoch_id_fkey"
+            columns: ["experiment_epoch_id"]
+            isOneToOne: false
+            referencedRelation: "sports_shadow_experiment_epochs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      sports_shadow_kalshi_trader_qualification: {
+        Row: {
+          approved_for_paper_copy: boolean
+          created_at: string
+          decided_at: string | null
+          decided_by: string | null
+          display_handle: string | null
+          evidence: Json | null
+          trader_id: string
+          updated_at: string
+        }
+        Insert: {
+          approved_for_paper_copy?: boolean
+          created_at?: string
+          decided_at?: string | null
+          decided_by?: string | null
+          display_handle?: string | null
+          evidence?: Json | null
+          trader_id: string
+          updated_at?: string
+        }
+        Update: {
+          approved_for_paper_copy?: boolean
+          created_at?: string
+          decided_at?: string | null
+          decided_by?: string | null
+          display_handle?: string | null
+          evidence?: Json | null
+          trader_id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       sports_shadow_lifecycle_triggers: {
         Row: {
           add_fraction: number | null
@@ -2652,6 +2944,25 @@ export type Database = {
         Args: { p_id: string; p_lease_seconds: number; p_worker_id: string }
         Returns: number
       }
+      admit_sports_shadow_kalshi_source_event: {
+        Args: {
+          p_action: string
+          p_contract_side: string
+          p_detected_at: string
+          p_event_key: string
+          p_experiment_epoch_id?: string
+          p_market_ticker: string
+          p_quantity: number
+          p_raw?: Json
+          p_source_name?: string
+          p_source_price: number
+          p_source_price_cents: number
+          p_source_trade_id: string
+          p_source_ts: number
+          p_trader_id: string
+        }
+        Returns: Json
+      }
       advance_paper_buy_notification_cursor: {
         Args: { p_last_created_at: string; p_last_trade_id: string }
         Returns: undefined
@@ -2676,6 +2987,40 @@ export type Database = {
           payout: number
           realized_pnl: number
         }[]
+      }
+      claim_sports_shadow_kalshi_source_events: {
+        Args: { p_limit?: number; p_worker_id: string }
+        Returns: {
+          action: string
+          claimed_at: string | null
+          claimed_by: string | null
+          contract_side: string
+          created_at: string
+          detected_at: string
+          episode_key: string | null
+          event_key: string
+          experiment_epoch_id: string | null
+          id: string
+          market_ticker: string
+          processed_at: string | null
+          quantity: number
+          raw: Json | null
+          route: string
+          source_name: string | null
+          source_price: number
+          source_price_cents: number
+          source_trade_id: string
+          source_ts: number
+          status: string
+          status_reason: string | null
+          trader_id: string
+        }[]
+        SetofOptions: {
+          from: "*"
+          to: "sports_shadow_kalshi_source_events"
+          isOneToOne: false
+          isSetofReturn: true
+        }
       }
       count_durable_ordinal_fills: {
         Args: { p_tuple_prefixes: string[]; p_wallet: string }
@@ -2739,6 +3084,29 @@ export type Database = {
           isOneToOne: true
           isSetofReturn: false
         }
+      }
+      finalize_sports_shadow_kalshi_paper_fill: {
+        Args: {
+          p_action: string
+          p_all_in_cost_usd: number
+          p_book_observed_at: string
+          p_book_stale_reason: string
+          p_contract_side: string
+          p_contracts: number
+          p_detected_at: string
+          p_episode_key: string
+          p_fee_model_version: string
+          p_fee_usd: number
+          p_fill_status: string
+          p_market_ticker: string
+          p_notional_tier_usd: number
+          p_reject_reason: string
+          p_source_event_id: string
+          p_source_ts: number
+          p_trader_id: string
+          p_vwap: number
+        }
+        Returns: boolean
       }
       finalize_sports_shadow_lifecycle_decision: {
         Args: {
@@ -3108,12 +3476,12 @@ export type Tables<
   DefaultSchemaTableNameOrOptions extends
     | keyof (DefaultSchema["Tables"] & DefaultSchema["Views"])
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
         DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -3137,11 +3505,11 @@ export type TablesInsert<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -3162,11 +3530,11 @@ export type TablesUpdate<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -3187,11 +3555,11 @@ export type Enums<
   DefaultSchemaEnumNameOrOptions extends
     | keyof DefaultSchema["Enums"]
     | { schema: keyof DatabaseWithoutInternals },
-  EnumName extends DefaultSchemaEnumNameOrOptions extends {
+  EnumName extends (DefaultSchemaEnumNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaEnumNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -3204,11 +3572,11 @@ export type CompositeTypes<
   PublicCompositeTypeNameOrOptions extends
     | keyof DefaultSchema["CompositeTypes"]
     | { schema: keyof DatabaseWithoutInternals },
-  CompositeTypeName extends PublicCompositeTypeNameOrOptions extends {
+  CompositeTypeName extends (PublicCompositeTypeNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"]
-    : never = never,
+    : never) = never,
 > = PublicCompositeTypeNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }

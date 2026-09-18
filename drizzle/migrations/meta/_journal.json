@@ -1,0 +1,13 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1789699998651,
+      "tag": "0000_sports_shadow_same_venue_kalshi_source",
+      "breakpoints": true
+    }
+  ]
+}
