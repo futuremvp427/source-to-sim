@@ -67,6 +67,21 @@ function mapRow(row: SourceEventRow): AdmittedSameVenueEvent {
   };
 }
 
+type RpcArgs = Record<string, unknown>;
+
+/**
+ * The generated RPC arg types model every SQL parameter as non-nullable, while these
+ * functions legitimately accept NULL for optional/absent values (no fee, no reject reason,
+ * no episode key). This is a typing-only shim over the SAME typed client -- it changes no
+ * runtime behaviour and grants no extra privilege.
+ */
+async function callRpc<T>(name: string, args: RpcArgs): Promise<T> {
+  const rpc = supabaseAdmin.rpc as unknown as (n: string, a: RpcArgs) => Promise<{ data: unknown; error: { message: string } | null }>;
+  const { data, error } = await rpc(name, args);
+  if (error) throw new Error(error.message);
+  return data as T;
+}
+
 export const supabaseSameVenueRepository: SameVenueRepository = {
   async getQualification(traderId): Promise<KalshiTraderQualification | null> {
     const { data, error } = await supabaseAdmin
@@ -84,7 +99,7 @@ export const supabaseSameVenueRepository: SameVenueRepository = {
   },
 
   async admitEvent(trade, detectedAtMs, sourceName) {
-    const { data, error } = await supabaseAdmin.rpc("admit_sports_shadow_kalshi_source_event", {
+    const result = await callRpc<{ admitted?: boolean; duplicate?: boolean; id?: string | null } | null>("admit_sports_shadow_kalshi_source_event", {
       p_event_key: trade.eventKey,
       p_trader_id: trade.traderId,
       p_source_trade_id: trade.sourceTradeId,
@@ -98,18 +113,15 @@ export const supabaseSameVenueRepository: SameVenueRepository = {
       p_detected_at: new Date(detectedAtMs).toISOString(),
       p_source_name: sourceName,
     });
-    if (error) throw new Error(error.message);
-    const result = (data ?? {}) as { admitted?: boolean; duplicate?: boolean; id?: string | null };
-    return { admitted: result.admitted === true, duplicate: result.duplicate === true, id: result.id ?? null };
+    return { admitted: result?.admitted === true, duplicate: result?.duplicate === true, id: result?.id ?? null };
   },
 
   async claimPendingEvents(workerId, limit) {
-    const { data, error } = await supabaseAdmin.rpc("claim_sports_shadow_kalshi_source_events", {
+    const rows = await callRpc<SourceEventRow[] | null>("claim_sports_shadow_kalshi_source_events", {
       p_worker_id: workerId,
       p_limit: limit,
     });
-    if (error) throw new Error(error.message);
-    return ((data ?? []) as SourceEventRow[]).map(mapRow);
+    return (rows ?? []).map(mapRow);
   },
 
   async listPositionHistory(traderId, marketTicker, contractSide) {
@@ -137,15 +149,15 @@ export const supabaseSameVenueRepository: SameVenueRepository = {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (data === null) return null;
+    const avg = data.avg_entry_price as number | string | null;
     return {
-      contracts_open: undefined,
       contractsOpen: num(data.contracts_open as number | string),
-      avgEntryPrice: data.avg_entry_price === null ? null : num(data.avg_entry_price as number | string),
-    } as unknown as { contractsOpen: number; avgEntryPrice: number | null };
+      avgEntryPrice: avg === null ? null : num(avg),
+    };
   },
 
   async finalizePaperFill(input) {
-    const { data, error } = await supabaseAdmin.rpc("finalize_sports_shadow_kalshi_paper_fill", {
+    const applied = await callRpc<boolean | null>("finalize_sports_shadow_kalshi_paper_fill", {
       p_source_event_id: input.sourceEventId,
       p_trader_id: input.traderId,
       p_market_ticker: input.marketTicker,
@@ -165,8 +177,7 @@ export const supabaseSameVenueRepository: SameVenueRepository = {
       p_source_ts: input.sourceTs,
       p_detected_at: new Date(input.detectedAtMs).toISOString(),
     });
-    if (error) throw new Error(error.message);
-    return data === true;
+    return applied === true;
   },
 
   async markEvent(eventId, status, statusReason, episodeKey) {
