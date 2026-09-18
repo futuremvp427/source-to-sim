@@ -16,9 +16,9 @@
  * live-execution switch anywhere in this file. LIVE_EXECUTION_IMPLEMENTED stays false.
  */
 
-import { SPORTS_SHADOW_NOTIONALS_USD, walkBuyDepth, walkSellDepth } from "./depth-walk";
-import { computeExitFraction, decideFill, type EligibleFill, type EpisodeDecision, type OpenEpisodeState } from "./episode";
-import { computeTakerFeeForFills } from "./fees";
+import { SPORTS_SHADOW_NOTIONALS_USD, walkBuyDepth, walkSellDepth, type ConsumedLevel } from "./depth-walk";
+import { computeExitFraction, decideFill, remainingShares, type EligibleFill, type EpisodeDecision, type OpenEpisodeState } from "./episode";
+import { computeTakerFeeForFills, type FeeResult } from "./fees";
 import {
   isTraderQualified,
   normalizeKalshiTraderEvent,
