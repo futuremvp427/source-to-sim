@@ -259,7 +259,7 @@ export async function processPendingSameVenueEvents(deps: {
     });
     outcome.targetedTickers.push(leg.ticker);
 
-    const book = await deps.fetchBook({ ticker: leg.ticker, side: leg.side, signal: deps.signal });
+    const book = await deps.fetchBook({ ticker: leg.ticker, side: leg.side, ...(deps.signal ? { signal: deps.signal } : {}) });
 
     for (const tier of SPORTS_SHADOW_NOTIONALS_USD) {
       // Fail closed on a stale/failed book: record the attempt, never fabricate a fill.
@@ -367,7 +367,7 @@ export async function runKalshiSourceIngestCycle(deps: {
   const result: IngestCycleResult = { configured: true, fetched: 0, admitted: 0, duplicates: 0, rejected: 0 };
   for (const trader of deps.traders) {
     if (deps.signal?.aborted === true) break;
-    const events = await deps.source.fetchNewActivity({ traderId: trader.traderId, sinceTsSeconds: trader.sinceTsSeconds, signal: deps.signal });
+    const events = await deps.source.fetchNewActivity({ traderId: trader.traderId, sinceTsSeconds: trader.sinceTsSeconds, ...(deps.signal ? { signal: deps.signal } : {}) });
     result.fetched += events.length;
     for (const raw of events) {
       const admitted = await admitSameVenueSourceEvent(raw, { repo: deps.repo, now: deps.now, sourceName: deps.source.sourceName });
