@@ -273,3 +273,52 @@ Real orders placed: 0. No dedupe/lease/sizing/settlement/fail-closed rule weaken
 
 REMAINING BLOCKER: a VERIFIED external Kalshi trader activity feed. That is now the only
 blocker — every stage after it exists, is durable and is tested.
+
+## 2026-09-18 — Same-venue Kalshi PAPER hardening pass (source-independent)
+
+Scope: source/test code only. The DB hardening patch (idempotent admission on both
+identities, 15-minute stale PROCESSING reclaim, gross realized_pnl_usd vs separate
+fees_usd, settlement next_check_at/check_attempt_count, find_open_sports_shadow_kalshi_positions,
+finalize_sports_shadow_kalshi_settlement) was applied to the database by the owner; no
+migration was written or applied here.
+
+Implemented
+1. ADD/DCA sizing now matches the cross-venue lifecycle exactly: `followerActionForDecision`
+   carries `addFraction = new source BUY shares / source remaining shares BEFORE the add`
+   (the same formula as source-poll.server.ts), and the buy branch requests
+   `tier * addFraction` instead of a fresh full tier per DCA.
+2. ADD with no OPEN follower position in that tier (e.g. the ENTRY never filled) records
+   fill_status REJECTED / contracts 0 / reject_reason NO_OPEN_FOLLOWER_POSITION_FOR_ADD and
+   never opens a position out of an ADD.
+3. Fee fail-closed on ENTRY/ADD/EXIT: FULL/PARTIAL depth alone is no longer sufficient. An
+   absent or invalid fee records REJECTED with contracts 0 (which cannot mutate a position,
+   per the RPC's own `p_contracts <= 0` guard). The fee model is injectable for tests only;
+   production always uses the documented Kalshi model.
+4. New same-venue settlement runner (pure `kalshi-same-venue-settlement.ts` + driver in
+   `kalshi-same-venue.server.ts`): reads DUE OPEN positions via
+   find_open_sports_shadow_kalshi_positions, checks resolution via the EXISTING
+   exchange-authoritative checkKalshiSettlement, applies 10-min/x2/6-hour backoff for
+   PENDING, and finalizes via finalize_sports_shadow_kalshi_settlement. Terminal P&L:
+   realized_pnl_usd is prior GROSS EXIT P&L; WIN remaining = contracts_open * (1 - avg),
+   LOSS remaining = contracts_open * (0 - avg), PUSH/VOID/CANCELED add zero; gross total =
+   prior + remaining; net = gross - fees_usd exactly once. Open contracts with no valid
+   avg entry price fail closed to terminal VOID with NULL P&L. Bounded by a deadline checked
+   before each position. NO cron/schedule registered.
+
+Files changed
+- src/lib/sports-shadow/kalshi-same-venue.ts (ADD sizing, ADD/fee fail-closed)
+- src/lib/sports-shadow/kalshi-same-venue-settlement.ts (new, pure)
+- src/lib/sports-shadow/kalshi-same-venue.server.ts (settlement repository + runner)
+- src/lib/sports-shadow/kalshi-same-venue.test.ts (fee stub + tests 15-17)
+- src/lib/sports-shadow/kalshi-same-venue-settlement.test.ts (new, 7 tests)
+
+Tests: same-venue 17/17, same-venue settlement 7/7, kalshi-source 11/11, episode 49/49,
+paper.server 23/23, settlement.server 9/9, settlement.orchestrator 16/16, fees 21/21,
+kalshi 58/58. TypeScript clean. Production build clean.
+
+Safety: PAPER/RESEARCH ONLY, LIVE_EXECUTION_IMPLEMENTED=false, no order endpoints, real
+orders = 0, source feed still null/inert, no cron/schedule/publish changes.
+
+Remaining blocker: a verified external Kalshi trader activity feed. Everything downstream
+of it — admission, dedupe, lifecycle, sizing, fee gating, paper positions, settlement P&L —
+now exists and is tested.

@@ -16,9 +16,9 @@
  * live-execution switch anywhere in this file. LIVE_EXECUTION_IMPLEMENTED stays false.
  */
 
-import { SPORTS_SHADOW_NOTIONALS_USD, walkBuyDepth, walkSellDepth } from "./depth-walk";
-import { computeExitFraction, decideFill, type EligibleFill, type EpisodeDecision, type OpenEpisodeState } from "./episode";
-import { computeTakerFeeForFills } from "./fees";
+import { SPORTS_SHADOW_NOTIONALS_USD, walkBuyDepth, walkSellDepth, type ConsumedLevel } from "./depth-walk";
+import { computeExitFraction, decideFill, remainingShares, type EligibleFill, type EpisodeDecision, type OpenEpisodeState } from "./episode";
+import { computeTakerFeeForFills, type FeeResult } from "./fees";
 import {
   isTraderQualified,
   normalizeKalshiTraderEvent,
@@ -164,22 +164,42 @@ export function replayEpisodeState(history: readonly AdmittedSameVenueEvent[], e
   return state;
 }
 
-export type FollowerAction = { action: "ENTRY" | "ADD" | "EXIT"; episodeKey: string | null; exitFraction: number | null };
+export type FollowerAction = {
+  action: "ENTRY" | "ADD" | "EXIT";
+  episodeKey: string | null;
+  exitFraction: number | null;
+  /**
+   * ADD sizing, matching the EXISTING cross-venue lifecycle semantics exactly
+   * (source-poll.server.ts's own `addFraction`): new source BUY shares divided by the
+   * source's remaining tracked shares BEFORE this add. The follower therefore scales the
+   * SAME tier proportionally and never adds a fresh full tier for every DCA.
+   */
+  addFraction: number | null;
+};
 
 /** Maps an episode decision onto the follower action, or null when nothing should execute. */
-export function followerActionForDecision(decision: EpisodeDecision, openBeforeSell: OpenEpisodeState | null): FollowerAction | null {
+export function followerActionForDecision(decision: EpisodeDecision, openBefore: OpenEpisodeState | null): FollowerAction | null {
   switch (decision.kind) {
     case "NEW_EPISODE":
     case "NEW_EPISODE_AFTER_30M":
-      return { action: "ENTRY", episodeKey: decision.episodeKey, exitFraction: null };
-    case "AGGREGATED_BUY":
-      return { action: "ADD", episodeKey: decision.episodeKey, exitFraction: null };
+      return { action: "ENTRY", episodeKey: decision.episodeKey, exitFraction: null, addFraction: null };
+    case "AGGREGATED_BUY": {
+      // Identical formula to the cross-venue path: shares / remaining-before-the-add.
+      // Fails closed (no follower ADD at all) when there is no remaining source
+      // inventory to scale against -- never silently promoted to a full extra tier.
+      if (openBefore === null) return null;
+      const remainingBefore = remainingShares(openBefore);
+      if (!(remainingBefore > 0)) return null;
+      const addFraction = decision.fill.shares / remainingBefore;
+      if (!Number.isFinite(addFraction) || addFraction <= 0) return null;
+      return { action: "ADD", episodeKey: decision.episodeKey, exitFraction: null, addFraction };
+    }
     case "SELL_RECORDED": {
-      if (decision.trackedShares <= 0 || openBeforeSell === null) return null;
-      const remainingBefore = Math.max(0, openBeforeSell.totalShares - openBeforeSell.sellShares);
+      if (decision.trackedShares <= 0 || openBefore === null) return null;
+      const remainingBefore = remainingShares(openBefore);
       const fraction = computeExitFraction(decision.trackedShares, remainingBefore);
       if (fraction === null || fraction <= 0) return null;
-      return { action: "EXIT", episodeKey: decision.episodeKey, exitFraction: fraction };
+      return { action: "EXIT", episodeKey: decision.episodeKey, exitFraction: fraction, addFraction: null };
     }
     default:
       return null;
@@ -207,7 +227,14 @@ export async function processPendingSameVenueEvents(deps: {
   workerId: string;
   limit?: number;
   signal?: AbortSignal;
+  /**
+   * Fee model. Defaults to the EXISTING documented Kalshi taker-fee model. Injectable so
+   * the fee fail-closed branch and the sizing branch can each be exercised deterministically
+   * in tests; production always uses the default.
+   */
+  computeFee?: (fills: readonly ConsumedLevel[]) => FeeResult;
 }): Promise<ProcessOutcome> {
+  const computeFee = deps.computeFee ?? ((fills: readonly ConsumedLevel[]) => computeTakerFeeForFills("KALSHI", fills));
   const rows = await deps.repo.claimPendingEvents(deps.workerId, deps.limit ?? 25);
   const outcome: ProcessOutcome = { claimed: rows.length, executed: 0, skipped: 0, failed: 0, targetedTickers: [] };
 
@@ -287,58 +314,114 @@ export async function processPendingSameVenueEvents(deps: {
         continue;
       }
 
-      if (follower.action === "EXIT") {
-        const position = await deps.repo.getOpenPosition(row.traderId, leg.ticker, leg.side, tier);
-        if (position === null || position.contractsOpen <= 0) continue;
-        const requested = position.contractsOpen * (follower.exitFraction ?? 0);
-        if (!(requested > 0)) continue;
-        const walk = walkSellDepth(book.bidLevels, requested);
-        const fee = walk.fills.length > 0 ? computeTakerFeeForFills("KALSHI", walk.fills) : null;
-        await deps.repo.finalizePaperFill({
+      /** Records one tier's research outcome. `contracts: 0` can never mutate a position. */
+      const record = (input: Omit<SameVenuePaperFillInput, "sourceEventId" | "traderId" | "marketTicker" | "contractSide" | "notionalTierUsd" | "bookObservedAtMs" | "bookStaleReason" | "episodeKey" | "sourceTs" | "detectedAtMs">) =>
+        deps.repo.finalizePaperFill({
           sourceEventId: row.id,
           traderId: row.traderId,
           marketTicker: leg.ticker,
           contractSide: leg.side,
-          action: "EXIT",
           notionalTierUsd: tier,
-          contracts: walk.filledContracts,
-          vwap: walk.averageExecutionPrice,
-          feeUsd: fee !== null && fee.valid ? fee.feeUsd : null,
-          feeModelVersion: fee?.feeModelVersion ?? null,
-          allInCostUsd: walk.filledContracts > 0 ? walk.proceedsUsd - (fee !== null && fee.valid ? fee.feeUsd : 0) : null,
-          fillStatus: walk.status,
-          rejectReason: walk.invalidReason,
           bookObservedAtMs: book.observedAtMs,
           bookStaleReason: null,
           episodeKey: follower.episodeKey,
           sourceTs: row.sourceTs,
           detectedAtMs: row.detectedAtMs,
+          ...input,
         });
+
+      if (follower.action === "EXIT") {
+        const position = await deps.repo.getOpenPosition(row.traderId, leg.ticker, leg.side, tier);
+        if (position === null || position.contractsOpen <= 0) continue;
+        const requested = Math.min(position.contractsOpen, position.contractsOpen * (follower.exitFraction ?? 0));
+        if (!(requested > 0)) continue;
+        const walk = walkSellDepth(book.bidLevels, requested);
+        const fee = walk.filledContracts > 0 && walk.fills.length > 0 ? computeFee(walk.fills) : null;
+        // FEE FAIL-CLOSED: FULL/PARTIAL depth alone is NOT enough. Without a valid fee the
+        // net economics are unknown, so nothing may mutate the paper position.
+        if (walk.status !== "FULL" && walk.status !== "PARTIAL") {
+          await record({ action: "EXIT", contracts: 0, vwap: null, feeUsd: null, feeModelVersion: null, allInCostUsd: null, fillStatus: walk.status, rejectReason: walk.invalidReason });
+        } else if (fee === null || !fee.valid) {
+          await record({
+            action: "EXIT",
+            contracts: 0,
+            vwap: null,
+            feeUsd: fee?.feeUsd ?? null,
+            feeModelVersion: fee?.feeModelVersion ?? null,
+            allInCostUsd: null,
+            fillStatus: "REJECTED",
+            rejectReason: `KALSHI fee UNVERIFIED${fee?.reason ? `: ${fee.reason}` : ""}`,
+          });
+        } else {
+          await record({
+            action: "EXIT",
+            contracts: walk.filledContracts,
+            vwap: walk.averageExecutionPrice,
+            feeUsd: fee.feeUsd,
+            feeModelVersion: fee.feeModelVersion,
+            allInCostUsd: walk.proceedsUsd - fee.feeUsd,
+            fillStatus: walk.status,
+            rejectReason: null,
+          });
+        }
         continue;
       }
 
-      const walk = walkBuyDepth(book.askLevels, tier);
-      const fee = walk.fills.length > 0 ? computeTakerFeeForFills("KALSHI", walk.fills) : null;
-      await deps.repo.finalizePaperFill({
-        sourceEventId: row.id,
-        traderId: row.traderId,
-        marketTicker: leg.ticker,
-        contractSide: leg.side,
-        action: follower.action,
-        notionalTierUsd: tier,
-        contracts: walk.contractsFilled,
-        vwap: walk.averageExecutionPrice,
-        feeUsd: fee !== null && fee.valid ? fee.feeUsd : null,
-        feeModelVersion: fee?.feeModelVersion ?? null,
-        allInCostUsd: walk.contractsFilled > 0 ? walk.filledNotionalUsd + (fee !== null && fee.valid ? fee.feeUsd : 0) : null,
-        fillStatus: walk.status,
-        rejectReason: walk.invalidReason,
-        bookObservedAtMs: book.observedAtMs,
-        bookStaleReason: null,
-        episodeKey: follower.episodeKey,
-        sourceTs: row.sourceTs,
-        detectedAtMs: row.detectedAtMs,
-      });
+      // ADD FAIL-CLOSED: a source ADD with no OPEN follower position in this tier (e.g.
+      // the original ENTRY never filled) records a rejected research outcome and NEVER
+      // opens a brand-new position out of an ADD.
+      if (follower.action === "ADD") {
+        const position = await deps.repo.getOpenPosition(row.traderId, leg.ticker, leg.side, tier);
+        if (position === null || position.contractsOpen <= 0) {
+          await record({
+            action: "ADD",
+            contracts: 0,
+            vwap: null,
+            feeUsd: null,
+            feeModelVersion: null,
+            allInCostUsd: null,
+            fillStatus: "REJECTED",
+            rejectReason: "NO_OPEN_FOLLOWER_POSITION_FOR_ADD",
+          });
+          continue;
+        }
+      }
+
+      // ADD sizing mirrors the cross-venue lifecycle exactly: the tier is SCALED by the
+      // source's own add fraction, never re-spent in full.
+      const requestedNotionalUsd = follower.action === "ADD" ? tier * (follower.addFraction ?? 0) : tier;
+      if (!(requestedNotionalUsd > 0)) {
+        await record({ action: follower.action, contracts: 0, vwap: null, feeUsd: null, feeModelVersion: null, allInCostUsd: null, fillStatus: "REJECTED", rejectReason: "INVALID_SOURCE_ADD_FRACTION" });
+        continue;
+      }
+
+      const walk = walkBuyDepth(book.askLevels, requestedNotionalUsd);
+      const fee = walk.contractsFilled > 0 && walk.fills.length > 0 ? computeFee(walk.fills) : null;
+      if (walk.status !== "FULL" && walk.status !== "PARTIAL") {
+        await record({ action: follower.action, contracts: 0, vwap: null, feeUsd: null, feeModelVersion: null, allInCostUsd: null, fillStatus: walk.status, rejectReason: walk.invalidReason });
+      } else if (fee === null || !fee.valid) {
+        await record({
+          action: follower.action,
+          contracts: 0,
+          vwap: null,
+          feeUsd: fee?.feeUsd ?? null,
+          feeModelVersion: fee?.feeModelVersion ?? null,
+          allInCostUsd: null,
+          fillStatus: "REJECTED",
+          rejectReason: `KALSHI fee UNVERIFIED${fee?.reason ? `: ${fee.reason}` : ""}`,
+        });
+      } else {
+        await record({
+          action: follower.action,
+          contracts: walk.contractsFilled,
+          vwap: walk.averageExecutionPrice,
+          feeUsd: fee.feeUsd,
+          feeModelVersion: fee.feeModelVersion,
+          allInCostUsd: walk.filledNotionalUsd + fee.feeUsd,
+          fillStatus: walk.status,
+          rejectReason: null,
+        });
+      }
     }
 
     await deps.repo.markEvent(row.id, "PAPER_EXECUTED", null, follower.episodeKey);

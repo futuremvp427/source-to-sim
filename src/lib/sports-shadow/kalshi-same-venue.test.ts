@@ -166,6 +166,14 @@ async function fetchBook(input: { ticker: string; side: KalshiContractSide }): P
 let seenTickers: string[] = [];
 let seenSides: KalshiContractSide[] = [];
 
+/**
+ * Deterministic VALID fee stub. The real documented Kalshi model returns valid=false
+ * (its net-fee accumulator is unmodelable for a paper system), which is exactly the
+ * fail-closed branch test 17 exercises with the DEFAULT model; every other test needs a
+ * valid fee so the execution/sizing branches are reachable at all.
+ */
+const validFee = () => ({ feeUsd: 0.01, valid: true, netFeeComplete: true, reason: null, feeModelVersion: "TEST_FEE_V1", effectiveDate: "2026-01-01" });
+
 async function setupWithBuy(repo: MemoryRepo, detectedAtMs = 1_700_000_010_000): Promise<void> {
   repo.approve(TRADER);
   const admitted = await admitSameVenueSourceEvent(rawEvent(), { repo, now: () => detectedAtMs });
@@ -186,10 +194,10 @@ describe("same-venue Kalshi paper pipeline (source-independent)", () => {
   it("2. a restart/re-read cannot create a second paper execution", async () => {
     const repo = new MemoryRepo();
     await setupWithBuy(repo);
-    const first = await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    const first = await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
     const fillsAfterFirst = repo.fills.length;
     // Simulated restart: re-claim (nothing is PENDING) AND a forced replay of the same row.
-    const second = await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w2" });
+    const second = await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w2", computeFee: validFee });
     const replay = await repo.finalizePaperFill({ ...repo.fills[0]! });
     expect(first.executed).toBe(1);
     expect(second.claimed).toBe(0);
@@ -200,7 +208,7 @@ describe("same-venue Kalshi paper pipeline (source-independent)", () => {
   it("3. SAME_VENUE_KALSHI rows bypass the resolver / cross-venue matcher", async () => {
     const repo = new MemoryRepo();
     await setupWithBuy(repo);
-    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
     expect(assertSameVenueRoute({ route: SAME_VENUE_ROUTE })).toBe(true);
     expect(assertSameVenueRoute({ route: "CROSS_VENUE" })).toBe(false);
     // Static proof: the pipeline module imports no cross-venue module.
@@ -216,7 +224,7 @@ describe("same-venue Kalshi paper pipeline (source-independent)", () => {
     seenSides = [];
     repo.approve(TRADER);
     await admitSameVenueSourceEvent(rawEvent({ contractSide: "NO", sourceTradeId: "t-no" }), { repo, now: () => 1_700_000_010_000 });
-    const outcome = await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    const outcome = await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
     expect(outcome.targetedTickers).toEqual([TICKER]);
     expect(seenTickers).toEqual([TICKER]);
     expect(seenSides).toEqual(["NO"]);
@@ -226,7 +234,7 @@ describe("same-venue Kalshi paper pipeline (source-independent)", () => {
   it("5. BUY creates a paper ENTRY intent on every notional tier", async () => {
     const repo = new MemoryRepo();
     await setupWithBuy(repo);
-    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
     expect(repo.fills).toHaveLength(SPORTS_SHADOW_NOTIONALS_USD.length);
     expect(repo.fills.every((f) => f.action === "ENTRY" && f.contracts > 0)).toBe(true);
   });
@@ -234,9 +242,9 @@ describe("same-venue Kalshi paper pipeline (source-independent)", () => {
   it("6. a second BUY inside the window follows ADD/DCA", async () => {
     const repo = new MemoryRepo();
     await setupWithBuy(repo);
-    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
     await admitSameVenueSourceEvent(rawEvent({ sourceTradeId: "t-2", sourceTsSeconds: 1_700_000_600 }), { repo, now: () => 1_700_000_620_000 });
-    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
     const adds = repo.fills.filter((f) => f.action === "ADD");
     expect(adds).toHaveLength(SPORTS_SHADOW_NOTIONALS_USD.length);
   });
@@ -244,13 +252,13 @@ describe("same-venue Kalshi paper pipeline (source-independent)", () => {
   it("7. a partial SELL follows a proportional EXIT", async () => {
     const repo = new MemoryRepo();
     await setupWithBuy(repo);
-    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
     const openBefore = await repo.getOpenPosition(TRADER, TICKER, "YES", 5);
     await admitSameVenueSourceEvent(rawEvent({ sourceTradeId: "t-sell", action: "SELL", quantity: 50, sourceTsSeconds: 1_700_000_300 }), {
       repo,
       now: () => 1_700_000_320_000,
     });
-    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
     const exits = repo.fills.filter((f) => f.action === "EXIT");
     expect(exits.length).toBeGreaterThan(0);
     const after = await repo.getOpenPosition(TRADER, TICKER, "YES", 5);
@@ -261,12 +269,12 @@ describe("same-venue Kalshi paper pipeline (source-independent)", () => {
   it("8. a full SELL closes the paper lifecycle", async () => {
     const repo = new MemoryRepo();
     await setupWithBuy(repo);
-    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
     await admitSameVenueSourceEvent(rawEvent({ sourceTradeId: "t-full", action: "SELL", quantity: 100, sourceTsSeconds: 1_700_000_400 }), {
       repo,
       now: () => 1_700_000_420_000,
     });
-    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
     expect(await repo.getOpenPosition(TRADER, TICKER, "YES", 5)).toBeNull();
     expect([...repo.positions.values()].every((p) => p.status === "CLOSED")).toBe(true);
   });
@@ -277,7 +285,7 @@ describe("same-venue Kalshi paper pipeline (source-independent)", () => {
     expect(result.ok).toBe(false);
     expect(!result.ok && result.reasonCode).toBe("REJECT_TRADER_NOT_QUALIFIED");
     expect(repo.events).toHaveLength(0);
-    const outcome = await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    const outcome = await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
     expect(outcome.claimed).toBe(0);
     expect(repo.fills).toHaveLength(0);
   });
@@ -310,7 +318,7 @@ describe("same-venue Kalshi paper pipeline (source-independent)", () => {
     expect(row.sourceTs).toBe(1_700_000_000);
     expect(row.detectedAtMs).toBe(1_700_000_099_000);
     expect(row.detectedAtMs).not.toBe(row.sourceTs * 1000);
-    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
     expect(repo.fills[0]!.sourceTs).toBe(1_700_000_000);
     expect(repo.fills[0]!.detectedAtMs).toBe(1_700_000_099_000);
   });
@@ -347,9 +355,54 @@ describe("same-venue Kalshi paper pipeline (source-independent)", () => {
       repo,
       fetchBook: async () => ({ ...BOOK, staleReason: "rate limited", askLevels: [], bidLevels: [] }),
       workerId: "w1",
+      computeFee: validFee,
     });
     expect(outcome.executed).toBe(1);
     expect(repo.fills.every((f) => f.contracts === 0 && f.fillStatus === "NONE" && f.bookStaleReason === "rate limited")).toBe(true);
+    expect(repo.positions.size).toBe(0);
+  });
+
+  it("15. a 25-share ADD after a 100-share source ENTRY sizes ~25% of the ENTRY's contracts (never a fresh full tier)", async () => {
+    const repo = new MemoryRepo();
+    await setupWithBuy(repo);
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
+    const entry = repo.fills.find((f) => f.action === "ENTRY" && f.notionalTierUsd === 100)!;
+
+    await admitSameVenueSourceEvent(rawEvent({ sourceTradeId: "t-add-25", quantity: 25, sourceTsSeconds: 1_700_000_060 }), { repo, now: () => 1_700_000_070_000 });
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
+
+    const add = repo.fills.find((f) => f.action === "ADD" && f.notionalTierUsd === 100)!;
+    expect(add.fillStatus).toBe("FULL");
+    // 25 new source shares against 100 remaining source shares before the add => 25%.
+    expect(add.contracts / entry.contracts).toBeCloseTo(0.25, 3);
+    expect(add.contracts).toBeLessThan(entry.contracts);
+  });
+
+  it("16. an ADD after a missed ENTRY creates no follower position and records a fail-closed outcome", async () => {
+    const repo = new MemoryRepo();
+    await setupWithBuy(repo);
+    // ENTRY cannot fill: empty ask depth. No position is ever opened.
+    const emptyBook: SameVenueBook = { ...BOOK, askLevels: [], bidLevels: [] };
+    await processPendingSameVenueEvents({ repo, fetchBook: async () => emptyBook, workerId: "w1", computeFee: validFee });
+    expect(repo.positions.size).toBe(0);
+
+    await admitSameVenueSourceEvent(rawEvent({ sourceTradeId: "t-add-orphan", quantity: 25, sourceTsSeconds: 1_700_000_060 }), { repo, now: () => 1_700_000_070_000 });
+    await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1", computeFee: validFee });
+
+    const adds = repo.fills.filter((f) => f.action === "ADD");
+    expect(adds).toHaveLength(SPORTS_SHADOW_NOTIONALS_USD.length);
+    expect(adds.every((f) => f.fillStatus === "REJECTED" && f.contracts === 0 && f.rejectReason === "NO_OPEN_FOLLOWER_POSITION_FOR_ADD")).toBe(true);
+    expect(repo.positions.size).toBe(0);
+  });
+
+  it("17. an unverified fee cannot create or mutate a paper position (documented Kalshi model, no stub)", async () => {
+    const repo = new MemoryRepo();
+    await setupWithBuy(repo);
+    const outcome = await processPendingSameVenueEvents({ repo, fetchBook, workerId: "w1" });
+    expect(outcome.executed).toBe(1);
+    expect(repo.fills).toHaveLength(SPORTS_SHADOW_NOTIONALS_USD.length);
+    expect(repo.fills.every((f) => f.fillStatus === "REJECTED" && f.contracts === 0)).toBe(true);
+    expect(repo.fills.every((f) => (f.rejectReason ?? "").startsWith("KALSHI fee UNVERIFIED"))).toBe(true);
     expect(repo.positions.size).toBe(0);
   });
 });

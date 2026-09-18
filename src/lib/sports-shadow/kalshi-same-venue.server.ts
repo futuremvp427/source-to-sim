@@ -18,7 +18,13 @@
 
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
+import {
+  runSameVenueSettlementBatch,
+  type SameVenueSettlementBatchResult,
+  type SameVenueSettlementRepository,
+} from "./kalshi-same-venue-settlement";
 import { fetchKalshiBook } from "./kalshi.server";
+import { checkKalshiSettlement } from "./settlement.server";
 import type { KalshiContractSide, KalshiTraderActivitySource, KalshiTraderQualification } from "./kalshi-source";
 import {
   runKalshiSourceIngestCycle,
@@ -220,5 +226,67 @@ export async function runSameVenueIngestCycle(signal?: AbortSignal): Promise<Ing
     now: () => Date.now(),
     traders: [],
     ...(signal ? { signal } : {}),
+  });
+}
+
+/* ======================= SAME-VENUE PAPER SETTLEMENT (driver) =======================
+ * Reads DUE OPEN positions through the hardened RPC, checks Kalshi's own authoritative
+ * resolution via the EXISTING checkKalshiSettlement, and finalizes through the hardened
+ * settlement RPC. No cron/schedule is registered for this runner yet.
+ * ================================================================================= */
+
+export const supabaseSameVenueSettlementRepository: SameVenueSettlementRepository = {
+  async findDuePositions(limit) {
+    type Row = {
+      trader_id: string;
+      market_ticker: string;
+      contract_side: string;
+      notional_tier_usd: number | string;
+      contracts_open: number | string;
+      avg_entry_price: number | string | null;
+      realized_pnl_usd: number | string;
+      fees_usd: number | string;
+      check_attempt_count: number | string;
+    };
+    const rows = await callRpc<Row[] | null>("find_open_sports_shadow_kalshi_positions", { p_limit: limit });
+    return (rows ?? []).map((r) => ({
+      traderId: r.trader_id,
+      marketTicker: r.market_ticker,
+      contractSide: r.contract_side as KalshiContractSide,
+      notionalTierUsd: num(r.notional_tier_usd),
+      contractsOpen: num(r.contracts_open),
+      avgEntryPrice: r.avg_entry_price === null ? null : num(r.avg_entry_price),
+      realizedPnlUsd: num(r.realized_pnl_usd),
+      feesUsd: num(r.fees_usd),
+      checkAttemptCount: num(r.check_attempt_count),
+    }));
+  },
+
+  async finalizeSettlement(row) {
+    await callRpc<null>("finalize_sports_shadow_kalshi_settlement", {
+      p_trader_id: row.traderId,
+      p_market_ticker: row.marketTicker,
+      p_contract_side: row.contractSide,
+      p_notional_tier_usd: row.notionalTierUsd,
+      p_settlement_status: row.settlementStatus,
+      p_settlement_timestamp: row.settlementTimestampMs === null ? null : new Date(row.settlementTimestampMs).toISOString(),
+      p_settlement_value: row.settlementValue,
+      p_settlement_source: row.settlementSource,
+      p_gross_pnl_usd: row.grossPnlUsd,
+      p_total_fees_usd: row.totalFeesUsd,
+      p_net_pnl_usd: row.netPnlUsd,
+      p_next_check_at: row.nextCheckAtMs === null ? null : new Date(row.nextCheckAtMs).toISOString(),
+      p_check_attempt_count: row.checkAttemptCount,
+    });
+  },
+};
+
+/** Bounded, exchange-authoritative same-venue paper settlement pass. Not scheduled. */
+export async function runSameVenueSettlementCycle(options?: { limit?: number; deadlineAtMs?: number }): Promise<SameVenueSettlementBatchResult> {
+  return runSameVenueSettlementBatch({
+    repo: supabaseSameVenueSettlementRepository,
+    checkSettlement: (ticker, side) => checkKalshiSettlement(ticker, side),
+    ...(options?.limit === undefined ? {} : { limit: options.limit }),
+    ...(options?.deadlineAtMs === undefined ? {} : { deadlineAtMs: options.deadlineAtMs }),
   });
 }
