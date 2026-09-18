@@ -1873,12 +1873,14 @@ export type Database = {
       }
       sports_shadow_kalshi_settlements: {
         Row: {
+          check_attempt_count: number
           contract_side: string
           created_at: string
           gross_pnl_usd: number | null
           id: string
           market_ticker: string
           net_pnl_usd: number | null
+          next_check_at: string | null
           notional_tier_usd: number
           settlement_source: string | null
           settlement_status: string
@@ -1889,12 +1891,14 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          check_attempt_count?: number
           contract_side: string
           created_at?: string
           gross_pnl_usd?: number | null
           id?: string
           market_ticker: string
           net_pnl_usd?: number | null
+          next_check_at?: string | null
           notional_tier_usd: number
           settlement_source?: string | null
           settlement_status?: string
@@ -1905,12 +1909,14 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          check_attempt_count?: number
           contract_side?: string
           created_at?: string
           gross_pnl_usd?: number | null
           id?: string
           market_ticker?: string
           net_pnl_usd?: number | null
+          next_check_at?: string | null
           notional_tier_usd?: number
           settlement_source?: string | null
           settlement_status?: string
@@ -3108,6 +3114,24 @@ export type Database = {
         }
         Returns: boolean
       }
+      finalize_sports_shadow_kalshi_settlement: {
+        Args: {
+          p_check_attempt_count: number
+          p_contract_side: string
+          p_gross_pnl_usd: number
+          p_market_ticker: string
+          p_net_pnl_usd: number
+          p_next_check_at: string
+          p_notional_tier_usd: number
+          p_settlement_source: string
+          p_settlement_status: string
+          p_settlement_timestamp: string
+          p_settlement_value: number
+          p_total_fees_usd: number
+          p_trader_id: string
+        }
+        Returns: undefined
+      }
       finalize_sports_shadow_lifecycle_decision: {
         Args: {
           p_all_in_cost_usd: number
@@ -3160,6 +3184,20 @@ export type Database = {
           p_vwap: number
         }
         Returns: boolean
+      }
+      find_open_sports_shadow_kalshi_positions: {
+        Args: { p_limit?: number }
+        Returns: {
+          avg_entry_price: number
+          check_attempt_count: number
+          contract_side: string
+          contracts_open: number
+          fees_usd: number
+          market_ticker: string
+          notional_tier_usd: number
+          realized_pnl_usd: number
+          trader_id: string
+        }[]
       }
       find_open_sports_shadow_paper_positions: {
         Args: { p_limit: number }
