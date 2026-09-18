@@ -225,3 +225,51 @@ Investigation only; no production code changed.
   no dedupe/lease/sizing/settlement protection loosened.
 - **Next step**: obtain a written answer from Kalshi on a supported consenting-trader read
   interface (and any Inner Circle API schema) before writing any transport.
+
+## Session: Same-venue Kalshi PAPER path — source-independent downstream plumbing (2026-09-18)
+
+ARCHITECTURE NOW IMPLEMENTED
+future verified KalshiTraderActivitySource -> admitSameVenueSourceEvent (fail-closed
+normalization + DURABLE trader qualification gate) -> admit_sports_shadow_kalshi_source_event
+RPC (idempotent insert, event_key UNIQUE + (trader_id, source_trade_id) UNIQUE) ->
+claim_sports_shadow_kalshi_source_events (PENDING->PROCESSING, FOR UPDATE SKIP LOCKED) ->
+assertSameVenueRoute (fails closed; resolver / PM-US discovery / Gamma / cross-venue
+equivalence are NEVER invoked and never imported) -> episode.ts replay + decideFill
+(ENTRY / ADD-DCA / proportional EXIT / close) -> exact byte-identical Kalshi ticker + side ->
+read-only fetchKalshiBook -> walkBuyDepth / walkSellDepth + computeTakerFeeForFills across the
+existing 5 notional tiers -> finalize_sports_shadow_kalshi_paper_fill (fill row + atomic tier
+position mutation, UNIQUE (source_event_id, notional_tier_usd)) -> paper positions +
+settlement table for P&L attribution to the source trader.
+
+FILES CHANGED
+- drizzle/migrations/0000_sports_shadow_same_venue_kalshi_source.sql (new, applied)
+- src/lib/sports-shadow/kalshi-same-venue.ts (new, pure orchestration)
+- src/lib/sports-shadow/kalshi-same-venue.server.ts (new, Supabase + read-only book driver)
+- src/lib/sports-shadow/kalshi-same-venue.test.ts (new, 14 tests)
+- PROJECT_STATE.md
+Existing kalshi-source.ts adapter and its 11 tests were reused unchanged; no competing
+adapter was created; no cross-venue file was modified.
+
+SCHEMA DECISION: MIGRATION (additive), not reuse. sports_shadow_paper_fills requires
+NOT NULL signal_id and UNIQUE (observation_id, notional_tier_usd); a same-venue event has no
+cross-venue signal, venue-match row or dual-venue observation, so reuse would have overloaded
+those semantics and mixed same-venue rows into historical cross-venue EXACT/NEAR/NONE metrics.
+New isolated tables: sports_shadow_kalshi_trader_qualification, _source_events, _paper_fills,
+_paper_positions, _settlements. Reused as-is: episode.ts, depth-walk.ts, fees.ts,
+fetchKalshiBook, worker lease patterns, experiment-epoch provenance FK.
+
+WORKER INTEGRATION: processPendingSameVenueEvents is implemented and tested end-to-end
+against the durable contract, but no cron/schedule was registered and production stays inert:
+getConfiguredKalshiTraderActivitySource() returns null, so runSameVenueIngestCycle admits
+nothing. Production cron state was not modified. Nothing was published or deployed.
+
+TESTS: kalshi-same-venue 14/14, kalshi-source 11/11, episode 49/49, kalshi 58/58,
+paper.server 23/23, depth-walk 54/54, fees 21/21, deployment-readiness 5/5. TypeScript clean.
+Production build clean.
+
+SAFETY: PAPER/RESEARCH ONLY. LIVE_EXECUTION_IMPLEMENTED=false unchanged. No order
+construction, no order endpoint, no live-order path reachable (asserted by test 13).
+Real orders placed: 0. No dedupe/lease/sizing/settlement/fail-closed rule weakened.
+
+REMAINING BLOCKER: a VERIFIED external Kalshi trader activity feed. That is now the only
+blocker — every stage after it exists, is durable and is tested.
