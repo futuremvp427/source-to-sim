@@ -166,6 +166,14 @@ async function fetchBook(input: { ticker: string; side: KalshiContractSide }): P
 let seenTickers: string[] = [];
 let seenSides: KalshiContractSide[] = [];
 
+/**
+ * Deterministic VALID fee stub. The real documented Kalshi model returns valid=false
+ * (its net-fee accumulator is unmodelable for a paper system), which is exactly the
+ * fail-closed branch test 17 exercises with the DEFAULT model; every other test needs a
+ * valid fee so the execution/sizing branches are reachable at all.
+ */
+const validFee = () => ({ feeUsd: 0.01, valid: true, netFeeComplete: true, reason: null, feeModelVersion: "TEST_FEE_V1", effectiveDate: "2026-01-01" });
+
 async function setupWithBuy(repo: MemoryRepo, detectedAtMs = 1_700_000_010_000): Promise<void> {
   repo.approve(TRADER);
   const admitted = await admitSameVenueSourceEvent(rawEvent(), { repo, now: () => detectedAtMs });
