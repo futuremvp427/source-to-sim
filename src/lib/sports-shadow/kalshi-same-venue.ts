@@ -17,7 +17,7 @@
  */
 
 import { SPORTS_SHADOW_NOTIONALS_USD, walkBuyDepth, walkSellDepth } from "./depth-walk";
-import { computeExitFraction, decideFill, type EligibleFill, type EpisodeDecision, type OpenEpisodeState } from "./episode";
+import { computeExitFraction, decideFill, remainingShares, type EligibleFill, type EpisodeDecision, type OpenEpisodeState } from "./episode";
 import { computeTakerFeeForFills } from "./fees";
 import {
   isTraderQualified,
@@ -164,22 +164,28 @@ export function replayEpisodeState(history: readonly AdmittedSameVenueEvent[], e
   return state;
 }
 
-export type FollowerAction = { action: "ENTRY" | "ADD" | "EXIT"; episodeKey: string | null; exitFraction: number | null };
+export type FollowerAction = { action: "ENTRY" | "ADD" | "EXIT"; episodeKey: string | null; exitFraction: number | null; addFraction: number | null };
 
 /** Maps an episode decision onto the follower action, or null when nothing should execute. */
 export function followerActionForDecision(decision: EpisodeDecision, openBeforeSell: OpenEpisodeState | null): FollowerAction | null {
   switch (decision.kind) {
     case "NEW_EPISODE":
     case "NEW_EPISODE_AFTER_30M":
-      return { action: "ENTRY", episodeKey: decision.episodeKey, exitFraction: null };
-    case "AGGREGATED_BUY":
-      return { action: "ADD", episodeKey: decision.episodeKey, exitFraction: null };
+      return { action: "ENTRY", episodeKey: decision.episodeKey, exitFraction: null, addFraction: null };
+    case "AGGREGATED_BUY": {
+      if (openBeforeSell === null) return null;
+      const remainingBefore = remainingShares(openBeforeSell);
+      if (!(remainingBefore > 0)) return null;
+      const addFraction = decision.fill.shares / remainingBefore;
+      if (!Number.isFinite(addFraction) || addFraction <= 0) return null;
+      return { action: "ADD", episodeKey: decision.episodeKey, exitFraction: null, addFraction };
+    }
     case "SELL_RECORDED": {
       if (decision.trackedShares <= 0 || openBeforeSell === null) return null;
-      const remainingBefore = Math.max(0, openBeforeSell.totalShares - openBeforeSell.sellShares);
+      const remainingBefore = remainingShares(openBeforeSell);
       const fraction = computeExitFraction(decision.trackedShares, remainingBefore);
       if (fraction === null || fraction <= 0) return null;
-      return { action: "EXIT", episodeKey: decision.episodeKey, exitFraction: fraction };
+      return { action: "EXIT", episodeKey: decision.episodeKey, exitFraction: fraction, addFraction: null };
     }
     default:
       return null;
@@ -294,6 +300,7 @@ export async function processPendingSameVenueEvents(deps: {
         if (!(requested > 0)) continue;
         const walk = walkSellDepth(book.bidLevels, requested);
         const fee = walk.fills.length > 0 ? computeTakerFeeForFills("KALSHI", walk.fills) : null;
+        const executable = (walk.status === "FULL" || walk.status === "PARTIAL") && fee !== null && fee.valid;
         await deps.repo.finalizePaperFill({
           sourceEventId: row.id,
           traderId: row.traderId,
@@ -301,13 +308,13 @@ export async function processPendingSameVenueEvents(deps: {
           contractSide: leg.side,
           action: "EXIT",
           notionalTierUsd: tier,
-          contracts: walk.filledContracts,
-          vwap: walk.averageExecutionPrice,
-          feeUsd: fee !== null && fee.valid ? fee.feeUsd : null,
+          contracts: executable ? walk.filledContracts : 0,
+          vwap: executable ? walk.averageExecutionPrice : null,
+          feeUsd: executable ? fee.feeUsd : null,
           feeModelVersion: fee?.feeModelVersion ?? null,
-          allInCostUsd: walk.filledContracts > 0 ? walk.proceedsUsd - (fee !== null && fee.valid ? fee.feeUsd : 0) : null,
-          fillStatus: walk.status,
-          rejectReason: walk.invalidReason,
+          allInCostUsd: executable ? walk.proceedsUsd - fee.feeUsd : null,
+          fillStatus: executable ? walk.status : "REJECTED",
+          rejectReason: executable ? null : fee === null || !fee.valid ? `KALSHI fee UNVERIFIED${fee?.reason ? `: ${fee.reason}` : ""}` : walk.invalidReason ?? `KALSHI exit depth-walk status ${walk.status}`,
           bookObservedAtMs: book.observedAtMs,
           bookStaleReason: null,
           episodeKey: follower.episodeKey,
@@ -317,8 +324,39 @@ export async function processPendingSameVenueEvents(deps: {
         continue;
       }
 
-      const walk = walkBuyDepth(book.askLevels, tier);
+      let requestedNotionalUsd = tier;
+      if (follower.action === "ADD") {
+        const position = await deps.repo.getOpenPosition(row.traderId, leg.ticker, leg.side, tier);
+        const addFraction = follower.addFraction ?? 0;
+        if (position === null || position.contractsOpen <= 0 || !(addFraction > 0)) {
+          await deps.repo.finalizePaperFill({
+            sourceEventId: row.id,
+            traderId: row.traderId,
+            marketTicker: leg.ticker,
+            contractSide: leg.side,
+            action: "ADD",
+            notionalTierUsd: tier,
+            contracts: 0,
+            vwap: null,
+            feeUsd: null,
+            feeModelVersion: null,
+            allInCostUsd: null,
+            fillStatus: "REJECTED",
+            rejectReason: position === null || position.contractsOpen <= 0 ? "NO_OPEN_POSITION_FOR_ADD" : "INVALID_SOURCE_ADD_FRACTION",
+            bookObservedAtMs: book.observedAtMs,
+            bookStaleReason: null,
+            episodeKey: follower.episodeKey,
+            sourceTs: row.sourceTs,
+            detectedAtMs: row.detectedAtMs,
+          });
+          continue;
+        }
+        requestedNotionalUsd = tier * addFraction;
+      }
+
+      const walk = walkBuyDepth(book.askLevels, requestedNotionalUsd);
       const fee = walk.fills.length > 0 ? computeTakerFeeForFills("KALSHI", walk.fills) : null;
+      const executable = (walk.status === "FULL" || walk.status === "PARTIAL") && fee !== null && fee.valid;
       await deps.repo.finalizePaperFill({
         sourceEventId: row.id,
         traderId: row.traderId,
@@ -326,13 +364,13 @@ export async function processPendingSameVenueEvents(deps: {
         contractSide: leg.side,
         action: follower.action,
         notionalTierUsd: tier,
-        contracts: walk.contractsFilled,
-        vwap: walk.averageExecutionPrice,
-        feeUsd: fee !== null && fee.valid ? fee.feeUsd : null,
+        contracts: executable ? walk.contractsFilled : 0,
+        vwap: executable ? walk.averageExecutionPrice : null,
+        feeUsd: executable ? fee.feeUsd : null,
         feeModelVersion: fee?.feeModelVersion ?? null,
-        allInCostUsd: walk.contractsFilled > 0 ? walk.filledNotionalUsd + (fee !== null && fee.valid ? fee.feeUsd : 0) : null,
-        fillStatus: walk.status,
-        rejectReason: walk.invalidReason,
+        allInCostUsd: executable ? walk.filledNotionalUsd + fee.feeUsd : null,
+        fillStatus: executable ? walk.status : "REJECTED",
+        rejectReason: executable ? null : fee === null || !fee.valid ? `KALSHI fee UNVERIFIED${fee?.reason ? `: ${fee.reason}` : ""}` : walk.invalidReason ?? `KALSHI buy depth-walk status ${walk.status}`,
         bookObservedAtMs: book.observedAtMs,
         bookStaleReason: null,
         episodeKey: follower.episodeKey,
