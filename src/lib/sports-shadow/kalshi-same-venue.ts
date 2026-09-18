@@ -164,22 +164,42 @@ export function replayEpisodeState(history: readonly AdmittedSameVenueEvent[], e
   return state;
 }
 
-export type FollowerAction = { action: "ENTRY" | "ADD" | "EXIT"; episodeKey: string | null; exitFraction: number | null };
+export type FollowerAction = {
+  action: "ENTRY" | "ADD" | "EXIT";
+  episodeKey: string | null;
+  exitFraction: number | null;
+  /**
+   * ADD sizing, matching the EXISTING cross-venue lifecycle semantics exactly
+   * (source-poll.server.ts's own `addFraction`): new source BUY shares divided by the
+   * source's remaining tracked shares BEFORE this add. The follower therefore scales the
+   * SAME tier proportionally and never adds a fresh full tier for every DCA.
+   */
+  addFraction: number | null;
+};
 
 /** Maps an episode decision onto the follower action, or null when nothing should execute. */
-export function followerActionForDecision(decision: EpisodeDecision, openBeforeSell: OpenEpisodeState | null): FollowerAction | null {
+export function followerActionForDecision(decision: EpisodeDecision, openBefore: OpenEpisodeState | null): FollowerAction | null {
   switch (decision.kind) {
     case "NEW_EPISODE":
     case "NEW_EPISODE_AFTER_30M":
-      return { action: "ENTRY", episodeKey: decision.episodeKey, exitFraction: null };
-    case "AGGREGATED_BUY":
-      return { action: "ADD", episodeKey: decision.episodeKey, exitFraction: null };
+      return { action: "ENTRY", episodeKey: decision.episodeKey, exitFraction: null, addFraction: null };
+    case "AGGREGATED_BUY": {
+      // Identical formula to the cross-venue path: shares / remaining-before-the-add.
+      // Fails closed (no follower ADD at all) when there is no remaining source
+      // inventory to scale against -- never silently promoted to a full extra tier.
+      if (openBefore === null) return null;
+      const remainingBefore = remainingShares(openBefore);
+      if (!(remainingBefore > 0)) return null;
+      const addFraction = decision.fill.shares / remainingBefore;
+      if (!Number.isFinite(addFraction) || addFraction <= 0) return null;
+      return { action: "ADD", episodeKey: decision.episodeKey, exitFraction: null, addFraction };
+    }
     case "SELL_RECORDED": {
-      if (decision.trackedShares <= 0 || openBeforeSell === null) return null;
-      const remainingBefore = Math.max(0, openBeforeSell.totalShares - openBeforeSell.sellShares);
+      if (decision.trackedShares <= 0 || openBefore === null) return null;
+      const remainingBefore = remainingShares(openBefore);
       const fraction = computeExitFraction(decision.trackedShares, remainingBefore);
       if (fraction === null || fraction <= 0) return null;
-      return { action: "EXIT", episodeKey: decision.episodeKey, exitFraction: fraction };
+      return { action: "EXIT", episodeKey: decision.episodeKey, exitFraction: fraction, addFraction: null };
     }
     default:
       return null;
