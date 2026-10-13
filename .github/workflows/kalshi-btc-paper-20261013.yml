@@ -1,0 +1,321 @@
+name: Kalshi BTC 48-hour paper study
+
+on:
+  push:
+    branches: [research/kalshi-btc-paper-20261013]
+    paths:
+      - .github/workflows/kalshi-btc-paper-20261013.yml
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: kalshi-btc-forward-20261013
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Verify simulation accounting and causality
+        working-directory: experiments/kalshi-btc-20261013
+        run: python3 -m unittest -v test_runner.py
+      - name: Verify live public data without credentials
+        run: python3 experiments/kalshi-btc-20261013/runner.py --state paper-state/state.json --output bootstrap-output --duration-seconds 60 --require-valid-samples 3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: paper-state-bootstrap
+          path: paper-state/state.json
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-bootstrap-evidence
+          path: bootstrap-output
+          retention-days: 7
+          if-no-files-found: warn
+
+  collect_00:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: paper-state-bootstrap
+          path: paper-state
+      - name: Collect forward observations and run all frozen paper accounts
+        run: python3 experiments/kalshi-btc-20261013/runner.py --state paper-state/state.json --output paper-output-00 --duration-seconds 19800
+      - name: Evaluate without tuning
+        run: python3 experiments/kalshi-btc-20261013/analyze.py --state paper-state/state.json --output paper-output-00/evaluation.json --raw paper-output-00/observations.jsonl.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-state-00
+          path: paper-state/state.json
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-evidence-00
+          path: paper-output-00
+          retention-days: 7
+          if-no-files-found: warn
+
+  collect_01:
+    needs: collect_00
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: paper-state-00
+          path: paper-state
+      - name: Collect forward observations and run all frozen paper accounts
+        run: python3 experiments/kalshi-btc-20261013/runner.py --state paper-state/state.json --output paper-output-01 --duration-seconds 19800
+      - name: Evaluate without tuning
+        run: python3 experiments/kalshi-btc-20261013/analyze.py --state paper-state/state.json --output paper-output-01/evaluation.json --raw paper-output-01/observations.jsonl.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-state-01
+          path: paper-state/state.json
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-evidence-01
+          path: paper-output-01
+          retention-days: 7
+          if-no-files-found: warn
+
+  collect_02:
+    needs: collect_01
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: paper-state-01
+          path: paper-state
+      - name: Collect forward observations and run all frozen paper accounts
+        run: python3 experiments/kalshi-btc-20261013/runner.py --state paper-state/state.json --output paper-output-02 --duration-seconds 19800
+      - name: Evaluate without tuning
+        run: python3 experiments/kalshi-btc-20261013/analyze.py --state paper-state/state.json --output paper-output-02/evaluation.json --raw paper-output-02/observations.jsonl.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-state-02
+          path: paper-state/state.json
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-evidence-02
+          path: paper-output-02
+          retention-days: 7
+          if-no-files-found: warn
+
+  collect_03:
+    needs: collect_02
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: paper-state-02
+          path: paper-state
+      - name: Collect forward observations and run all frozen paper accounts
+        run: python3 experiments/kalshi-btc-20261013/runner.py --state paper-state/state.json --output paper-output-03 --duration-seconds 19800
+      - name: Evaluate without tuning
+        run: python3 experiments/kalshi-btc-20261013/analyze.py --state paper-state/state.json --output paper-output-03/evaluation.json --raw paper-output-03/observations.jsonl.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-state-03
+          path: paper-state/state.json
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-evidence-03
+          path: paper-output-03
+          retention-days: 7
+          if-no-files-found: warn
+
+  collect_04:
+    needs: collect_03
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: paper-state-03
+          path: paper-state
+      - name: Collect forward observations and run all frozen paper accounts
+        run: python3 experiments/kalshi-btc-20261013/runner.py --state paper-state/state.json --output paper-output-04 --duration-seconds 19800
+      - name: Evaluate without tuning
+        run: python3 experiments/kalshi-btc-20261013/analyze.py --state paper-state/state.json --output paper-output-04/evaluation.json --raw paper-output-04/observations.jsonl.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-state-04
+          path: paper-state/state.json
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-evidence-04
+          path: paper-output-04
+          retention-days: 7
+          if-no-files-found: warn
+
+  collect_05:
+    needs: collect_04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: paper-state-04
+          path: paper-state
+      - name: Collect forward observations and run all frozen paper accounts
+        run: python3 experiments/kalshi-btc-20261013/runner.py --state paper-state/state.json --output paper-output-05 --duration-seconds 19800
+      - name: Evaluate without tuning
+        run: python3 experiments/kalshi-btc-20261013/analyze.py --state paper-state/state.json --output paper-output-05/evaluation.json --raw paper-output-05/observations.jsonl.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-state-05
+          path: paper-state/state.json
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-evidence-05
+          path: paper-output-05
+          retention-days: 7
+          if-no-files-found: warn
+
+  collect_06:
+    needs: collect_05
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: paper-state-05
+          path: paper-state
+      - name: Collect forward observations and run all frozen paper accounts
+        run: python3 experiments/kalshi-btc-20261013/runner.py --state paper-state/state.json --output paper-output-06 --duration-seconds 19800
+      - name: Evaluate without tuning
+        run: python3 experiments/kalshi-btc-20261013/analyze.py --state paper-state/state.json --output paper-output-06/evaluation.json --raw paper-output-06/observations.jsonl.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-state-06
+          path: paper-state/state.json
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-evidence-06
+          path: paper-output-06
+          retention-days: 7
+          if-no-files-found: warn
+
+  collect_07:
+    needs: collect_06
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: paper-state-06
+          path: paper-state
+      - name: Collect forward observations and run all frozen paper accounts
+        run: python3 experiments/kalshi-btc-20261013/runner.py --state paper-state/state.json --output paper-output-07 --duration-seconds 19800
+      - name: Evaluate without tuning
+        run: python3 experiments/kalshi-btc-20261013/analyze.py --state paper-state/state.json --output paper-output-07/evaluation.json --raw paper-output-07/observations.jsonl.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-state-07
+          path: paper-state/state.json
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-evidence-07
+          path: paper-output-07
+          retention-days: 7
+          if-no-files-found: warn
+
+  collect_08:
+    needs: collect_07
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: paper-state-07
+          path: paper-state
+      - name: Collect forward observations and run all frozen paper accounts
+        run: python3 experiments/kalshi-btc-20261013/runner.py --state paper-state/state.json --output paper-output-08 --duration-seconds 19800
+      - name: Evaluate without tuning
+        run: python3 experiments/kalshi-btc-20261013/analyze.py --state paper-state/state.json --output paper-output-08/evaluation.json --raw paper-output-08/observations.jsonl.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-state-08
+          path: paper-state/state.json
+          retention-days: 7
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: paper-evidence-08
+          path: paper-output-08
+          retention-days: 7
+          if-no-files-found: warn

@@ -1,0 +1,38 @@
+{
+  "study_id": "kalshi-btc-forward-20261013-v1",
+  "duration_hours": 48,
+  "screen_hours": 24,
+  "settlement_drain_minutes": 30,
+  "poll_seconds": 5,
+  "series": "KXBTC15M",
+  "quantity_tiers": [10, 25, 50],
+  "bankroll_dollars_per_account": 1000,
+  "depth_fraction": 0.5,
+  "entry_latency_min_seconds": 5,
+  "order_expiry_seconds": 20,
+  "max_quote_request_seconds": 3,
+  "max_spot_age_seconds": 10,
+  "max_spread_dollars": 0.03,
+  "max_open_cost_dollars_per_account": 100,
+  "max_drawdown_fraction": 0.2,
+  "fee_rounding": "conservative_whole_cent_per_price_level",
+  "stress_extra_cost_dollars_per_contract_per_fill": 0.01,
+  "strategies": [
+    {"id": "late80_hold", "label": "Late favorite, hold", "window_seconds": [30,150], "price_range": [0.80,0.95], "take_profit": 0, "stop_loss": 0},
+    {"id": "late90_exit", "label": "Late favorite with exits", "window_seconds": [20,90], "price_range": [0.90,0.97], "take_profit": 0.02, "stop_loss": 0.04},
+    {"id": "momentum", "label": "Aligned spot and contract momentum", "window_seconds": [120,480], "price_range": [0.20,0.80], "take_profit": 0.08, "stop_loss": 0.05, "spot_return_60s": 0.0005, "contract_move_30s": 0.03},
+    {"id": "panic_fade", "label": "Fade a contract move without a matching spot move", "window_seconds": [120,480], "price_range": [0.10,0.75], "take_profit": 0.06, "stop_loss": 0.04, "contract_move_30s": 0.12, "max_abs_spot_return_30s": 0.0003},
+    {"id": "book_pressure", "label": "Persistent orderbook pressure", "window_seconds": [120,480], "price_range": [0.20,0.80], "take_profit": 0.05, "stop_loss": 0.04, "min_abs_skew": 0.65, "persistence_samples": 3, "contract_move_15s": 0.01},
+    {"id": "buffered_value", "label": "Volatility estimate with basis and probability cushions", "window_seconds": [90,600], "price_range": [0.10,0.90], "take_profit": 0, "stop_loss": 0, "min_edge_after_fees": 0.05, "probability_haircut": 0.08, "basis_uncertainty_dollars": 20, "variance_multiplier": 1.5625, "min_spot_history_seconds": 600}
+  ],
+  "qualification": {
+    "primary_quantity": 10,
+    "min_completed_markets_each_day": 30,
+    "require_positive_net_both_days": true,
+    "require_positive_stressed_holdout_net": true,
+    "confidence": "one-sided 95% lower bound, Bonferroni over six frozen strategies, one-hour block bootstrap including zero-trade observed markets",
+    "days_25_and_50_contracts": "capacity comparisons, not additional independent evidence",
+    "two_day_status": "screening only; never established profitability"
+  },
+  "safety": {"paper_only": true, "credentials_required": false, "venue_orders_supported": false, "live_promotion": false}
+}
