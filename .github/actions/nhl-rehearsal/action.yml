@@ -1,0 +1,477 @@
+name: NHL rehearsal segment
+inputs:
+  segment:
+    required: true
+    description: Segment identity
+runs:
+  using: composite
+  steps:
+    - name: Collect chunk 00
+      id: chunk_00
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 00
+    - name: Publish chunk 00
+      if: ${{ steps.chunk_00.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-00
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 01
+      id: chunk_01
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 01
+    - name: Publish chunk 01
+      if: ${{ steps.chunk_01.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-01
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 02
+      id: chunk_02
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 02
+    - name: Publish chunk 02
+      if: ${{ steps.chunk_02.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-02
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 03
+      id: chunk_03
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 03
+    - name: Publish chunk 03
+      if: ${{ steps.chunk_03.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-03
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 04
+      id: chunk_04
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 04
+    - name: Publish chunk 04
+      if: ${{ steps.chunk_04.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-04
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 05
+      id: chunk_05
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 05
+    - name: Publish chunk 05
+      if: ${{ steps.chunk_05.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-05
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 06
+      id: chunk_06
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 06
+    - name: Publish chunk 06
+      if: ${{ steps.chunk_06.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-06
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 07
+      id: chunk_07
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 07
+    - name: Publish chunk 07
+      if: ${{ steps.chunk_07.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-07
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 08
+      id: chunk_08
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 08
+    - name: Publish chunk 08
+      if: ${{ steps.chunk_08.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-08
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 09
+      id: chunk_09
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 09
+    - name: Publish chunk 09
+      if: ${{ steps.chunk_09.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-09
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 10
+      id: chunk_10
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 10
+    - name: Publish chunk 10
+      if: ${{ steps.chunk_10.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-10
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 11
+      id: chunk_11
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 11
+    - name: Publish chunk 11
+      if: ${{ steps.chunk_11.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-11
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 12
+      id: chunk_12
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 12
+    - name: Publish chunk 12
+      if: ${{ steps.chunk_12.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-12
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 13
+      id: chunk_13
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 13
+    - name: Publish chunk 13
+      if: ${{ steps.chunk_13.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-13
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 14
+      id: chunk_14
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 14
+    - name: Publish chunk 14
+      if: ${{ steps.chunk_14.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-14
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 15
+      id: chunk_15
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 15
+    - name: Publish chunk 15
+      if: ${{ steps.chunk_15.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-15
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 16
+      id: chunk_16
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 16
+    - name: Publish chunk 16
+      if: ${{ steps.chunk_16.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-16
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 17
+      id: chunk_17
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 17
+    - name: Publish chunk 17
+      if: ${{ steps.chunk_17.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-17
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 18
+      id: chunk_18
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 18
+    - name: Publish chunk 18
+      if: ${{ steps.chunk_18.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-18
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 19
+      id: chunk_19
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 19
+    - name: Publish chunk 19
+      if: ${{ steps.chunk_19.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-19
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 20
+      id: chunk_20
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 20
+    - name: Publish chunk 20
+      if: ${{ steps.chunk_20.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-20
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 21
+      id: chunk_21
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 21
+    - name: Publish chunk 21
+      if: ${{ steps.chunk_21.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-21
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 22
+      id: chunk_22
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 22
+    - name: Publish chunk 22
+      if: ${{ steps.chunk_22.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-22
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 23
+      id: chunk_23
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 23
+    - name: Publish chunk 23
+      if: ${{ steps.chunk_23.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-23
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 24
+      id: chunk_24
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 24
+    - name: Publish chunk 24
+      if: ${{ steps.chunk_24.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-24
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 25
+      id: chunk_25
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 25
+    - name: Publish chunk 25
+      if: ${{ steps.chunk_25.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-25
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 26
+      id: chunk_26
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 26
+    - name: Publish chunk 26
+      if: ${{ steps.chunk_26.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-26
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 27
+      id: chunk_27
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 27
+    - name: Publish chunk 27
+      if: ${{ steps.chunk_27.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-27
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 28
+      id: chunk_28
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 28
+    - name: Publish chunk 28
+      if: ${{ steps.chunk_28.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-28
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 29
+      id: chunk_29
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 29
+    - name: Publish chunk 29
+      if: ${{ steps.chunk_29.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-29
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 30
+      id: chunk_30
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 30
+    - name: Publish chunk 30
+      if: ${{ steps.chunk_30.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-30
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 31
+      id: chunk_31
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 31
+    - name: Publish chunk 31
+      if: ${{ steps.chunk_31.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-31
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 32
+      id: chunk_32
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 32
+    - name: Publish chunk 32
+      if: ${{ steps.chunk_32.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-32
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 33
+      id: chunk_33
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 33
+    - name: Publish chunk 33
+      if: ${{ steps.chunk_33.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-33
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 34
+      id: chunk_34
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 34
+    - name: Publish chunk 34
+      if: ${{ steps.chunk_34.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-34
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+    - name: Collect chunk 35
+      id: chunk_35
+      shell: bash
+      run: python3 experiments/kalshi-nhl-20261014/collector.py --work data --out checkpoint --seconds 540 --segment ${{ inputs.segment }} --chunk 35
+    - name: Publish chunk 35
+      if: ${{ steps.chunk_35.outputs.has_checkpoint == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: nhl-checkpoint-${{ inputs.segment }}-35
+        path: checkpoint/
+        if-no-files-found: error
+        retention-days: 5
+        compression-level: 9
+

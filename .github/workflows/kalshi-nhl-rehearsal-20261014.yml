@@ -1,0 +1,268 @@
+name: NHL Backup Data Rehearsal 2026-10-14
+on:
+  push:
+    branches: [research/kalshi-nhl-rehearsal-20261014]
+    paths:
+      - experiments/kalshi-nhl-20261014/**
+      - .github/workflows/kalshi-nhl-rehearsal-20261014.yml
+      - .github/actions/nhl-rehearsal/**
+permissions:
+  contents: read
+concurrency:
+  group: kalshi-nhl-data-rehearsal-20261014-v1
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Frozen unit tests
+        working-directory: experiments/kalshi-nhl-20261014
+        run: python3 -m unittest -v test_collector.py
+      - name: Live public-data bootstrap
+        run: python3 experiments/kalshi-nhl-20261014/collector.py --bootstrap --work data --out checkpoint --seconds 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: nhl-handoff-bootstrap
+          path: checkpoint/
+          if-no-files-found: error
+          retention-days: 5
+  collect_00:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: nhl-handoff-bootstrap
+          path: data/
+      - name: Verify exact preceding checkpoint
+        run: python3 experiments/kalshi-nhl-20261014/health_check.py data
+      - name: Collect and publish nine-minute evidence
+        uses: ./.github/actions/nhl-rehearsal
+        with:
+          segment: '00'
+      - name: Publish exact segment handoff
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: nhl-handoff-00
+          path: data/
+          if-no-files-found: error
+          retention-days: 5
+  collect_01:
+    needs: collect_00
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: nhl-handoff-00
+          path: data/
+      - name: Verify exact preceding checkpoint
+        run: python3 experiments/kalshi-nhl-20261014/health_check.py data
+      - name: Collect and publish nine-minute evidence
+        uses: ./.github/actions/nhl-rehearsal
+        with:
+          segment: '01'
+      - name: Publish exact segment handoff
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: nhl-handoff-01
+          path: data/
+          if-no-files-found: error
+          retention-days: 5
+  collect_02:
+    needs: collect_01
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: nhl-handoff-01
+          path: data/
+      - name: Verify exact preceding checkpoint
+        run: python3 experiments/kalshi-nhl-20261014/health_check.py data
+      - name: Collect and publish nine-minute evidence
+        uses: ./.github/actions/nhl-rehearsal
+        with:
+          segment: '02'
+      - name: Publish exact segment handoff
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: nhl-handoff-02
+          path: data/
+          if-no-files-found: error
+          retention-days: 5
+  collect_03:
+    needs: collect_02
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: nhl-handoff-02
+          path: data/
+      - name: Verify exact preceding checkpoint
+        run: python3 experiments/kalshi-nhl-20261014/health_check.py data
+      - name: Collect and publish nine-minute evidence
+        uses: ./.github/actions/nhl-rehearsal
+        with:
+          segment: '03'
+      - name: Publish exact segment handoff
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: nhl-handoff-03
+          path: data/
+          if-no-files-found: error
+          retention-days: 5
+  collect_04:
+    needs: collect_03
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: nhl-handoff-03
+          path: data/
+      - name: Verify exact preceding checkpoint
+        run: python3 experiments/kalshi-nhl-20261014/health_check.py data
+      - name: Collect and publish nine-minute evidence
+        uses: ./.github/actions/nhl-rehearsal
+        with:
+          segment: '04'
+      - name: Publish exact segment handoff
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: nhl-handoff-04
+          path: data/
+          if-no-files-found: error
+          retention-days: 5
+  collect_05:
+    needs: collect_04
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: nhl-handoff-04
+          path: data/
+      - name: Verify exact preceding checkpoint
+        run: python3 experiments/kalshi-nhl-20261014/health_check.py data
+      - name: Collect and publish nine-minute evidence
+        uses: ./.github/actions/nhl-rehearsal
+        with:
+          segment: '05'
+      - name: Publish exact segment handoff
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: nhl-handoff-05
+          path: data/
+          if-no-files-found: error
+          retention-days: 5
+  collect_06:
+    needs: collect_05
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: nhl-handoff-05
+          path: data/
+      - name: Verify exact preceding checkpoint
+        run: python3 experiments/kalshi-nhl-20261014/health_check.py data
+      - name: Collect and publish nine-minute evidence
+        uses: ./.github/actions/nhl-rehearsal
+        with:
+          segment: '06'
+      - name: Publish exact segment handoff
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: nhl-handoff-06
+          path: data/
+          if-no-files-found: error
+          retention-days: 5
+  collect_07:
+    needs: collect_06
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: nhl-handoff-06
+          path: data/
+      - name: Verify exact preceding checkpoint
+        run: python3 experiments/kalshi-nhl-20261014/health_check.py data
+      - name: Collect and publish nine-minute evidence
+        uses: ./.github/actions/nhl-rehearsal
+        with:
+          segment: '07'
+      - name: Publish exact segment handoff
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: nhl-handoff-07
+          path: data/
+          if-no-files-found: error
+          retention-days: 5
+  collect_08:
+    needs: collect_07
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: nhl-handoff-07
+          path: data/
+      - name: Verify exact preceding checkpoint
+        run: python3 experiments/kalshi-nhl-20261014/health_check.py data
+      - name: Collect and publish nine-minute evidence
+        uses: ./.github/actions/nhl-rehearsal
+        with:
+          segment: '08'
+      - name: Publish exact segment handoff
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: nhl-handoff-08
+          path: data/
+          if-no-files-found: error
+          retention-days: 5
+
