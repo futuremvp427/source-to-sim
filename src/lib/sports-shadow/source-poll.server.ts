@@ -1,7 +1,7 @@
 /**
  * Sports Forward Shadow source wallet poller — SERVER (network/DB) orchestration.
  *
- * One bounded, one-shot call per wallet: paginate data-api.polymarket.com/trades for
+ * One bounded, one-shot call per wallet: paginate data-api.polymarket.com/v2/trades for
  * ONE approved wallet, normalize via shadow-core.ts's already-proven
  * `normalizeSourceEvents`, persist every genuinely-new fill as durable evidence, then
  * retry EVERY currently-pending fill for this wallet (freshly inserted this poll, or
@@ -116,7 +116,8 @@ import {
   recordHostRateLimitReporting,
   reserveRequestSlot,
 } from "../http-rate-limit.server";
-import { buildTradesUrl, MAX_TRADES_OFFSET, PAGE_SIZE } from "../shadow.server";
+import { MAX_TRADES_OFFSET, PAGE_SIZE } from "../shadow.server";
+import { createV2TradesReader, decodeV2TradePage, tradePageHasMore } from "../polymarket-data-v2";
 import { normalizeSourceEvents, type NormalizedEvent, type RawTrade } from "../shadow-core";
 import { classifyUnverifiedDisposition, type UnverifiedReasonCode } from "./eligibility";
 import { computeExitFraction, decideFill, remainingShares, type EligibleFill, type OpenEpisodeState } from "./episode";
@@ -247,26 +248,17 @@ const defaultNetworkDeps: SourcePollNetworkDeps = {
 
 /**
  * Fails CLOSED and EXPLICITLY (throws) on cooldown, reservation failure, timeout,
- * non-2xx, or a non-array body — mirrors pmus.server.ts/kalshi.server.ts's `pacedGetJson`
+ * non-2xx, or a malformed v2 envelope — mirrors pmus.server.ts/kalshi.server.ts's `pacedGetJson`
  * exactly. shadow.server.ts's own `getJson` is private/not exported and tightly coupled
  * to its checkpoint model, so this is a small, deliberately independent fetcher against
- * the SAME shared host budget (`DATA_API_HOST`), reusing only `buildTradesUrl` — the URL
- * shape that is already the proven production contract for this endpoint.
+ * the SAME shared host budget (`DATA_API_HOST`). Cursor construction and validation
+ * live in the shared, dependency-free polymarket-data-v2 module.
  */
 async function pacedFetchTradesPage(
-  wallet: string,
-  offset: number,
+  url: string,
   deps: SourcePollNetworkDeps,
   deadlineAtMs: number = Number.POSITIVE_INFINITY,
   now: () => number = Date.now,
-  /**
-   * CODEX P1-1: the SAME `end` timestamp parameter shadow.server.ts's own
-   * fetchUntilCheckpointCovered already uses in production to walk successive time
-   * windows once the /trades offset ceiling is reached within one window -- never an
-   * invented/unsupported parameter. Undefined (default) preserves the exact prior
-   * behavior (paginate "now" backward with no window boundary).
-   */
-  endTs?: number,
 ): Promise<RawTrade[]> {
   if (now() >= deadlineAtMs) {
     throw new DeadlineExceededError(`${DATA_API_HOST} request skipped: caller deadline already reached`);
@@ -288,16 +280,15 @@ async function pacedFetchTradesPage(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const url = buildTradesUrl(PAGE_SIZE, offset, wallet, endTs);
     const response = await deps.fetchImpl(url, { headers: { Accept: "application/json" }, signal: controller.signal });
     if (response.status === 429) {
       // CODEX P2-2 (round 2): always recorded now, regardless of the caller's own
       // deadline -- see pmus.server.ts's identical pacedGetJson for the full rationale.
       await deps.recordHostRateLimit(DATA_API_HOST, parseRetryAfterMs(response.headers.get("retry-after")));
-      throw new Error(`${DATA_API_HOST} rate limited (429) on /trades offset=${offset}`);
+      throw new Error(`${DATA_API_HOST} rate limited (429) on /v2/trades`);
     }
     if (!response.ok) {
-      throw new Error(`${DATA_API_HOST} request failed (HTTP ${response.status}) on /trades offset=${offset}`);
+      throw new Error(`${DATA_API_HOST} request failed (HTTP ${response.status}) on /v2/trades`);
     }
     let json: unknown;
     try {
@@ -305,8 +296,7 @@ async function pacedFetchTradesPage(
     } catch (err) {
       throw new Error(`${DATA_API_HOST} /trades response was not valid JSON: ${err instanceof Error ? err.message : "unknown"}`);
     }
-    if (!Array.isArray(json)) throw new Error(`${DATA_API_HOST} /trades returned a non-array response`);
-    return json as RawTrade[];
+    return decodeV2TradePage(json);
   } finally {
     clearTimeout(timer);
   }
@@ -1476,6 +1466,9 @@ export async function pollSportsShadowWallet(
   let deadlineExceeded = false;
   // See the frontier stop's same-second/page-boundary guard below.
   let frontierStopArmed = false;
+  const fetchV2Page = createV2TradesReader(normalizedWallet, PAGE_SIZE, (url) =>
+    pacedFetchTradesPage(url, d.network, ingestDeadlineAtMs, d.now),
+  );
   try {
     for (let page = 0; page < maxPagesThisScan; page += 1) {
       const offset = page * PAGE_SIZE;
@@ -1519,7 +1512,7 @@ export async function pollSportsShadowWallet(
       // budget running out as a genuine upstream/network failure.
       let rows: RawTrade[];
       try {
-        rows = await pacedFetchTradesPage(normalizedWallet, offset, d.network, ingestDeadlineAtMs, d.now, windowEndTs);
+        rows = await fetchV2Page(offset, windowEndTs);
       } catch (err) {
         if (err instanceof DeadlineExceededError) {
           deadlineExceeded = true;
@@ -1565,7 +1558,7 @@ export async function pollSportsShadowWallet(
           coverageProvenCompleteThisScan = true; // proof this scan has walked continuously across the go-live boundary
           break;
         }
-        if (rows.length < PAGE_SIZE) {
+        if (!tradePageHasMore(rows, PAGE_SIZE)) {
           naturalEnd = true;
           coverageProvenCompleteThisScan = true; // genuine history-start reached -- nothing older exists to cover
           break;
@@ -1611,7 +1604,7 @@ export async function pollSportsShadowWallet(
       }
 
 
-      if (rows.length < PAGE_SIZE) {
+      if (!tradePageHasMore(rows, PAGE_SIZE)) {
         naturalEnd = true;
         break;
       }

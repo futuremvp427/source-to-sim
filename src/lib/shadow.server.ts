@@ -7,6 +7,7 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 import { fetchAllRows } from "./db-pagination";
+import { createV2TradesReader, decodeV2TradePage, tradePageHasMore } from "./polymarket-data-v2";
 import {
   classifyWorker,
   findAbandonedWorkers,
@@ -373,6 +374,7 @@ const SHARED_TRADES_FETCH_DEADLINE_MS = 45_000;
 async function getArray(url: string, signal?: AbortSignal, cache?: TradesRequestCache): Promise<Json[]> {
   const fetchOnce = async (fetchSignal?: AbortSignal, deadlineAt?: number): Promise<Json[]> => {
     const json = await getJson(url, 3, fetchSignal, deadlineAt);
+    if (new URL(url).pathname === "/v2/trades") return decodeV2TradePage(json);
     if (Array.isArray(json)) return json as Json[];
     if (json && typeof json === "object" && Array.isArray((json as { data?: unknown[] }).data)) {
       return (json as { data: Json[] }).data;
@@ -595,6 +597,8 @@ export function buildTradesUrl(
   wallet: string = TARGET_WALLET,
   endTs?: number,
 ): string {
+  // Legacy v1 URL utility retained for historical callers/tests. Active source
+  // ingestion uses createV2TradesReader below, which never sends an offset.
   const window = endTs === undefined ? "" : `&end=${endTs}`;
   return `${DATA_API}/trades?user=${wallet}&${TAKER_ONLY_PARAM}&limit=${limit}&offset=${offset}${window}`;
 }
@@ -623,7 +627,7 @@ export async function fetchFixedPages(
     const page = await fetchPage(p * pageSize);
     pagesFetched += 1;
     raw.push(...page);
-    if (page.length < pageSize) break;
+    if (!tradePageHasMore(page, pageSize)) break;
   }
   return { raw, pagesFetched };
 }
@@ -675,7 +679,7 @@ export async function fetchUntilCheckpointCovered(
       const page = await fetchPage(offset, endTs);
       pagesFetched += 1;
       raw.push(...page);
-      const exhausted = page.length < pageSize;
+      const exhausted = !tradePageHasMore(page, pageSize);
       // A malformed timestamp (null, "", non-numeric) must never falsely prove
       // coverage or window progression: Number(null) === 0 and Number("") === 0
       // would otherwise look like a genuine event older than any positive
@@ -739,9 +743,10 @@ async function fetchSourceWindow(
   cache?: TradesRequestCache,
   maxCatchupPages?: number,
 ): Promise<{ raw: Json[]; pagesFetched: number }> {
+  const fetchV2Page = createV2TradesReader(wallet, PAGE_SIZE, (url) => getArray(url, signal, cache));
   if (!bootstrapped) {
     return fetchFixedPages(
-      (offset) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet), signal, cache),
+      fetchV2Page,
       BOOTSTRAP_PAGES,
       PAGE_SIZE,
       signal,
@@ -753,7 +758,7 @@ async function fetchSourceWindow(
     );
   }
   return fetchUntilCheckpointCovered(
-    (offset, endTs) => getArray(buildTradesUrl(PAGE_SIZE, offset, wallet, endTs), signal, cache),
+    fetchV2Page,
     catchupBoundary,
     PAGE_SIZE,
     signal,
@@ -2467,7 +2472,7 @@ export async function loadDashboard() {
     degradedIdentityCount: (eventsRes.data ?? []).filter((e) => e.identity_degraded).length,
     sourceCompleteness: {
       status: "COMPLETE AS AVAILABLE FROM PUBLIC API" as const,
-      detail: `Public trade history requested with ${TAKER_ONLY_PARAM}, which returns maker and taker fills.`,
+      detail: "Public trade history requested through Data API v2 with taker_only=false, which returns maker and taker fills.",
     },
   };
 }

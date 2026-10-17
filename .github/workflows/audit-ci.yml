@@ -28,6 +28,9 @@ jobs:
 
   schema-contract:
     runs-on: ubuntu-latest
+    env:
+      SUPABASE_TELEMETRY_DISABLED: "1"
+      DO_NOT_TRACK: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -37,7 +40,7 @@ jobs:
         run: bun install --frozen-lockfile
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 2.121.0
       - name: Start local Supabase
         run: supabase start
       - name: Replay migrations from a clean database
@@ -46,6 +49,10 @@ jobs:
         env:
           SCHEMA_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
         run: python3 scripts/verify_schema_contract.py
+      - name: Verify Sports Shadow server-only table grants
+        env:
+          PGPASSWORD: postgres
+        run: psql -h 127.0.0.1 -p 54322 -U postgres -d postgres -v ON_ERROR_STOP=1 -f supabase/tests/sports_shadow_server_only_grants.sql
       - name: Verify experiment-scoped event isolation
         env:
           PGPASSWORD: postgres

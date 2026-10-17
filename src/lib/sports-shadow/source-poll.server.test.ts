@@ -336,14 +336,23 @@ const ELIGIBLE_METADATA: SourceMarketMetadata = {
   sourceRulesDescription: null,
 };
 
+
+/** V1 scenario arrays rendered through the actual v2 wire contract. Numeric
+ * cursors here are opaque fixture tokens, not production offset parameters. */
+function v2FixturePage(rows: unknown, offset: number = 0): unknown {
+  if (!Array.isArray(rows)) return rows; // malformed-body tests stay malformed
+  const more = rows.length >= PAGE_SIZE;
+  return { data: rows, pagination: { has_more: more, next_cursor: more ? String(offset + PAGE_SIZE) : null } };
+}
+
 function makeNetworkDeps(pages: Record<number, unknown> | ((offset: number) => unknown)): SourcePollNetworkDeps {
   return {
     fetchImpl: (async (url: string | URL) => {
       const u = new URL(String(url));
-      const offset = Number(u.searchParams.get("offset"));
+      const offset = Number(u.searchParams.get("cursor"));
       const body = typeof pages === "function" ? pages(offset) : pages[offset];
       if (body instanceof Error) throw body;
-      return new Response(JSON.stringify(body ?? []), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify(v2FixturePage(body ?? [], offset)), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch,
     reserveRequestSlot: async () => 0,
     getHostCooldown: async () => ({ blocked: false, reason: null }),
@@ -363,6 +372,51 @@ function makeDeps(overrides: Partial<WalletPollDeps> = {}): { repo: FakeRepo; de
     },
   };
 }
+
+describe("native v2 pages preserve source coverage and identity", () => {
+  const native = (hash: string, timestamp: number) => ({
+    proxy_wallet: WALLET, token_id: "asset-1", condition_id: "0xcondition-1",
+    transaction_hash: hash, event_id: "shared-parent-event", timestamp,
+    side: "BUY", size: 10, price: 0.5, title: "Native v2 source fixture", outcome: "Yes",
+  });
+
+  it("a short nonterminal page cannot strand a second native v2 fill", async () => {
+    const requested: string[] = [];
+    const network = makeNetworkDeps({});
+    network.fetchImpl = (async (url: string | URL) => {
+      requested.push(String(url));
+      const cursor = new URL(String(url)).searchParams.get("cursor");
+      return new Response(JSON.stringify({
+        data: [native(cursor ? "0xsecond" : "0xfirst", cursor ? 1_700_000_101 : 1_700_000_102)],
+        pagination: { has_more: !cursor, next_cursor: cursor ? null : "opaque/next+=" },
+      }), { status: 200 });
+    }) as typeof fetch;
+    const { repo, deps } = makeDeps({ network });
+    const first = await pollSportsShadowWallet(WALLET, 0, deps);
+    expect(first.error).toBeNull(); expect(first.pagesFetched).toBe(2); expect(first.newRows).toBe(2);
+    expect(first.sourceCoverageComplete).toBe(true);
+    const rows = [...repo.fillsByEventKey.values()].map((x) => x.row);
+    expect(rows.every((x) => x.asset === "asset-1" && x.conditionId === "0xcondition-1")).toBe(true);
+    expect(new Set(rows.map((x) => x.eventKey)).size).toBe(2);
+    expect(requested[1]).toContain("cursor=opaque%2Fnext%2B%3D");
+    const replay = await pollSportsShadowWallet(WALLET, 0, deps);
+    expect(replay.error).toBeNull(); expect(replay.newRows).toBe(0);
+    expect(repo.fillsByEventKey.size).toBe(2);
+  });
+
+  it("a repeated cursor discards the incomplete scan without advancing durable coverage", async () => {
+    const network = makeNetworkDeps({});
+    network.fetchImpl = (async () => new Response(JSON.stringify({
+      data: [native("0xfirst", 1_700_000_102)], pagination: { has_more: true, next_cursor: "stuck" },
+    }), { status: 200 })) as typeof fetch;
+    const { repo, deps } = makeDeps({ network });
+    const result = await pollSportsShadowWallet(WALLET, 0, deps);
+    expect(result.error).toContain("cursor did not advance");
+    expect(result.sourceCoverageComplete).toBe(false); expect(result.newRows).toBe(0);
+    expect(repo.fillsByEventKey.size).toBe(0);
+    expect(repo.upsertWalletCoverageCalls.every((x) => !x.coverageComplete)).toBe(true);
+  });
+});
 
 /* ------------------------------------------------------------------ */
 
@@ -501,13 +555,13 @@ describe("CODEX P1-1: durable source-coverage watermark -- the /trades offset ce
     return {
       fetchImpl: (async (url: string | URL) => {
         const u = new URL(String(url));
-        const offset = Number(u.searchParams.get("offset"));
+        const offset = Number(u.searchParams.get("cursor"));
         const end = u.searchParams.get("end") ?? "none";
         const pages = byWindow[end];
         if (!pages) throw new Error(`unexpected window end=${end} (offset=${offset})`);
         const body = typeof pages === "function" ? pages(offset) : pages[offset];
         if (body instanceof Error) throw body;
-        return new Response(JSON.stringify(body ?? []), { status: 200, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify(v2FixturePage(body ?? [], offset)), { status: 200, headers: { "content-type": "application/json" } });
       }) as typeof fetch,
       reserveRequestSlot: async () => 0,
       getHostCooldown: async () => ({ blocked: false, reason: null }),
@@ -560,8 +614,8 @@ describe("CODEX P1-1: durable source-coverage watermark -- the /trades offset ce
         fetchImpl: (async (url: string | URL) => {
           const u = new URL(String(url));
           expect(u.searchParams.has("end")).toBe(false); // no window boundary once coverage is complete
-          const offset = Number(u.searchParams.get("offset"));
-          return new Response(JSON.stringify(offset === 0 ? [overlapTrade] : []), { status: 200, headers: { "content-type": "application/json" } });
+          const offset = Number(u.searchParams.get("cursor"));
+          return new Response(JSON.stringify(v2FixturePage(offset === 0 ? [overlapTrade] : [], offset)), { status: 200, headers: { "content-type": "application/json" } });
         }) as typeof fetch,
         reserveRequestSlot: async () => 0,
         getHostCooldown: async () => ({ blocked: false, reason: null }),
@@ -659,7 +713,7 @@ describe("CODEX P1-1 (round 2): source coverage is a CONTINUOUS invariant -- a w
       fetchImpl: (async (url: string | URL) => {
         const u = new URL(String(url));
         expect(u.searchParams.get("end")).toBe(String(watermark)); // resumes from the PRESERVED watermark, not a fresh "from now" scan
-        return new Response(JSON.stringify([trade({ id: "pre-go-live-recovery", transactionHash: "0xtx-pre-go-live-recovery", timestamp: 1_699_998_000 })]), {
+        return new Response(JSON.stringify(v2FixturePage([trade({ id: "pre-go-live-recovery", transactionHash: "0xtx-pre-go-live-recovery", timestamp: 1_699_998_000 })])), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
@@ -685,10 +739,10 @@ describe("CODEX P1-1 (round 2): source coverage is a CONTINUOUS invariant -- a w
     const network: SourcePollNetworkDeps = {
       fetchImpl: (async (url: string | URL) => {
         const u = new URL(String(url));
-        const offset = Number(u.searchParams.get("offset"));
+        const offset = Number(u.searchParams.get("cursor"));
         const end = u.searchParams.get("end") ?? "top";
         return new Response(
-          JSON.stringify(Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `stuck-${end}-${offset}-${i}`, transactionHash: `0xtx-stuck-${end}-${offset}-${i}`, timestamp: 1_700_050_000 - offset }))),
+          JSON.stringify(v2FixturePage(Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `stuck-${end}-${offset}-${i}`, transactionHash: `0xtx-stuck-${end}-${offset}-${i}`, timestamp: 1_700_050_000 - offset })), offset)),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }) as typeof fetch,
@@ -1841,12 +1895,12 @@ function fullPageFetcher(callLog: number[]): SourcePollNetworkDeps {
       call += 1;
       callLog.push(call);
       const u = new URL(String(url));
-      const offset = Number(u.searchParams.get("offset"));
+      const offset = Number(u.searchParams.get("cursor"));
       // Always a FULL page with a unique tx hash per row, so pagination never finds a
       // natural short-page stop or an overlap -- it would keep going indefinitely
       // (bounded only by MAX_PAGES_PER_WALLET/MAX_TRADES_OFFSET) without a deadline.
       const rows = Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `p${offset}-${i}`, transactionHash: `0xtx-${offset}-${i}` }));
-      return new Response(JSON.stringify(rows), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify(v2FixturePage(rows, offset)), { status: 200, headers: { "content-type": "application/json" } });
     }) as typeof fetch,
     reserveRequestSlot: async () => 0,
     getHostCooldown: async () => ({ blocked: false, reason: null }),
@@ -1995,7 +2049,7 @@ describe("Task 13I / P1-T: pacedFetchTradesPage threads the caller's deadline in
     const network: SourcePollNetworkDeps = {
       fetchImpl: (async () => {
         fetchCalls += 1;
-        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify(v2FixturePage([])), { status: 200, headers: { "content-type": "application/json" } });
       }) as unknown as typeof fetch,
       // Simulates reserveRequestSlot's OWN real behavior (http-rate-limit.server.ts): a
       // granted wait that would land at/after the caller's deadline must be reported as
@@ -2025,7 +2079,7 @@ describe("Task 13I / P1-T: pacedFetchTradesPage threads the caller's deadline in
     let capturedDeadline: number | undefined = 0;
     let sawCall = false;
     const network: SourcePollNetworkDeps = {
-      fetchImpl: (async () => new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch,
+      fetchImpl: (async () => new Response(JSON.stringify(v2FixturePage([])), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch,
       reserveRequestSlot: async (_host: string, deadlineAtMs?: number) => {
         sawCall = true;
         capturedDeadline = deadlineAtMs;
@@ -2087,7 +2141,7 @@ describe("FINAL BUILD Part 3: Sports Shadow's own source wallet query must never
     const network: SourcePollNetworkDeps = {
       fetchImpl: (async (url: string | URL) => {
         requestedUrls.push(String(url));
-        return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify(v2FixturePage([])), { status: 200, headers: { "content-type": "application/json" } });
       }) as unknown as typeof fetch,
       reserveRequestSlot: async () => 0,
       getHostCooldown: async () => ({ blocked: false, reason: null }),
@@ -2095,7 +2149,11 @@ describe("FINAL BUILD Part 3: Sports Shadow's own source wallet query must never
     };
     await pollSportsShadowWallet(WALLET, 0, { repo, network });
     expect(requestedUrls.length).toBeGreaterThan(0);
-    for (const url of requestedUrls) expect(url).toContain("takerOnly=false");
+    for (const url of requestedUrls) {
+      expect(url).toContain("/v2/trades?");
+      expect(url).toContain("taker_only=false");
+      expect(new URL(url).searchParams.has("offset")).toBe(false);
+    }
   });
 });
 
@@ -2118,7 +2176,7 @@ describe("Task 13G / P1-Q: formal proof -- an incomplete scan can never create a
   function wavesNetwork(middleBatchEventKeys: Set<string>, getWave: () => number): SourcePollNetworkDeps {
     return {
       fetchImpl: (async (url: string | URL) => {
-        const offset = Number(new URL(String(url)).searchParams.get("offset"));
+        const offset = Number(new URL(String(url)).searchParams.get("cursor"));
         const wave = getWave();
         let rows: unknown[];
         if (offset === 0 && wave === 1) {
@@ -2134,7 +2192,7 @@ describe("Task 13G / P1-Q: formal proof -- an incomplete scan can never create a
         } else {
           rows = []; // beyond MIDDLE_BATCH -- natural end of mocked history
         }
-        return new Response(JSON.stringify(rows), { status: 200, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify(v2FixturePage(rows, offset)), { status: 200, headers: { "content-type": "application/json" } });
       }) as typeof fetch,
       reserveRequestSlot: async () => 0,
       getHostCooldown: async () => ({ blocked: false, reason: null }),
@@ -2196,7 +2254,7 @@ describe("Task 13G / P1-Q: formal proof -- an incomplete scan can never create a
     const network: SourcePollNetworkDeps = {
       fetchImpl: (async () => {
         fetchCalls += 1;
-        return new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify(v2FixturePage([])), { status: 200, headers: { "content-type": "application/json" } });
       }) as typeof fetch,
       reserveRequestSlot: async () => 0,
       getHostCooldown: async () => ({ blocked: false, reason: null }),
@@ -2419,7 +2477,7 @@ describe("Task 13G / P1-Q: formal proof -- an incomplete scan can never create a
     let wave = 1;
     const network: SourcePollNetworkDeps = {
       fetchImpl: (async (url: string | URL) => {
-        const offset = Number(new URL(String(url)).searchParams.get("offset"));
+        const offset = Number(new URL(String(url)).searchParams.get("cursor"));
         let rows: unknown[];
         if (offset === 0 && wave === 1) {
           rows = Array.from({ length: PAGE_SIZE }, (_, i) => trade({ id: `NEW_BATCH_1-${i}`, transactionHash: `0xtx-nb1-${i}` }));
@@ -2434,7 +2492,7 @@ describe("Task 13G / P1-Q: formal proof -- an incomplete scan can never create a
         } else {
           rows = [];
         }
-        return new Response(JSON.stringify(rows), { status: 200, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify(v2FixturePage(rows, offset)), { status: 200, headers: { "content-type": "application/json" } });
       }) as typeof fetch,
       reserveRequestSlot: async () => 0,
       getHostCooldown: async () => ({ blocked: false, reason: null }),
@@ -2656,7 +2714,7 @@ describe("Task 13E, C: the default network path (no fetchImpl override) uses the
       if (this !== globalThis) {
         throw new TypeError("Illegal invocation: function called with incorrect `this` reference.");
       }
-      return Promise.resolve(new Response("[]", { status: 200, headers: { "content-type": "application/json" } }));
+      return Promise.resolve(new Response(JSON.stringify(v2FixturePage([])), { status: 200, headers: { "content-type": "application/json" } }));
     }
     globalThis.fetch = brandedFetch as typeof fetch;
     return () => {
@@ -2723,8 +2781,8 @@ describe("Task 13G, Section 8: bootstrap performance under realistic wallet prof
       network: {
         fetchImpl: (async (url: string | URL) => {
           calls += 1;
-          const offset = Number(new URL(String(url)).searchParams.get("offset"));
-          return new Response(JSON.stringify(profilePage("moderate", offset)), { status: 200, headers: { "content-type": "application/json" } });
+          const offset = Number(new URL(String(url)).searchParams.get("cursor"));
+          return new Response(JSON.stringify(v2FixturePage(profilePage("moderate", offset), offset)), { status: 200, headers: { "content-type": "application/json" } });
         }) as typeof fetch,
         reserveRequestSlot: async () => 0,
         getHostCooldown: async () => ({ blocked: false, reason: null }),
@@ -2745,8 +2803,8 @@ describe("Task 13G, Section 8: bootstrap performance under realistic wallet prof
       network: {
         fetchImpl: (async (url: string | URL) => {
           calls += 1;
-          const offset = Number(new URL(String(url)).searchParams.get("offset"));
-          return new Response(JSON.stringify(profilePage("deep", offset)), { status: 200, headers: { "content-type": "application/json" } });
+          const offset = Number(new URL(String(url)).searchParams.get("cursor"));
+          return new Response(JSON.stringify(v2FixturePage(profilePage("deep", offset), offset)), { status: 200, headers: { "content-type": "application/json" } });
         }) as typeof fetch,
         reserveRequestSlot: async () => 0,
         getHostCooldown: async () => ({ blocked: false, reason: null }),
@@ -2771,8 +2829,8 @@ describe("Task 13G, Section 8: bootstrap performance under realistic wallet prof
       network: {
         fetchImpl: (async (url: string | URL) => {
           calls += 1;
-          const offset = Number(new URL(String(url)).searchParams.get("offset"));
-          return new Response(JSON.stringify(profilePage("bursty", offset)), { status: 200, headers: { "content-type": "application/json" } });
+          const offset = Number(new URL(String(url)).searchParams.get("cursor"));
+          return new Response(JSON.stringify(v2FixturePage(profilePage("bursty", offset), offset)), { status: 200, headers: { "content-type": "application/json" } });
         }) as typeof fetch,
         reserveRequestSlot: async () => 0,
         getHostCooldown: async () => ({ blocked: false, reason: null }),
@@ -2797,8 +2855,8 @@ describe("Task 13G, Section 8: bootstrap performance under realistic wallet prof
       network: {
         fetchImpl: (async (url: string | URL) => {
           calls += 1;
-          const offset = Number(new URL(String(url)).searchParams.get("offset"));
-          return new Response(JSON.stringify(profilePage("deep", offset)), { status: 200, headers: { "content-type": "application/json" } });
+          const offset = Number(new URL(String(url)).searchParams.get("cursor"));
+          return new Response(JSON.stringify(v2FixturePage(profilePage("deep", offset), offset)), { status: 200, headers: { "content-type": "application/json" } });
         }) as typeof fetch,
         reserveRequestSlot: async () => 500, // simulated 500ms pacing wait before every request
         getHostCooldown: async () => ({ blocked: false, reason: null }),

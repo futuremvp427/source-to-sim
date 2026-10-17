@@ -67,14 +67,16 @@ export function normalizeSourceEvents(raw: RawTrade[], wallet: string): Normaliz
 
   for (const r of raw) {
     const sourceNativeId = str(r["id"] ?? r["tradeId"] ?? r["eventId"] ?? "");
-    const txHash = str(r["transactionHash"] ?? r["txHash"] ?? "");
+    const txHash = str(r["transactionHash"] ?? r["transaction_hash"] ?? r["txHash"] ?? "");
     const rawLogIndex = r["logIndex"] ?? r["eventIndex"] ?? r["logIdx"];
     const logIndex =
       typeof rawLogIndex === "number" || typeof rawLogIndex === "string" ? String(rawLogIndex) : "";
     // Unknown/missing side is never copied as BUY (fail closed): skip the row.
     const side = parseSourceSide(r["side"]);
     if (side === null) continue;
-    const asset = str(r["asset"]);
+    // v2's event_id identifies the parent MARKET EVENT, not an individual fill.
+    // Do not add it to sourceNativeId above: that would collapse distinct trades.
+    const asset = str(r["asset"] ?? r["token_id"]);
     const shares = num(r["size"]);
     const price = num(r["price"]);
     const sourceTs = num(r["timestamp"]);
@@ -104,7 +106,7 @@ export function normalizeSourceEvents(raw: RawTrade[], wallet: string): Normaliz
       txHash: txHash || null,
       sourceNativeId: sourceNativeId || null,
       logIndex: logIndex || null,
-      conditionId: str(r["conditionId"]) || null,
+      conditionId: str(r["conditionId"] ?? r["condition_id"]) || null,
       asset,
       marketTitle: str(r["title"]) || "Unknown market",
       outcome: str(r["outcome"]) || null,

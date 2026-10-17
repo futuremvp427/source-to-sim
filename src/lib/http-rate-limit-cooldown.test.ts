@@ -866,7 +866,7 @@ describe("reservation fail-closed propagation into the full ingestion cycle", ()
     currentFake = recovered.supabaseAdmin;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response(JSON.stringify([]), { status: 200 })),
+      vi.fn(async () => new Response(JSON.stringify({ data: [], pagination: { has_more: false, next_cursor: null } }), { status: 200 })),
     );
     const second = runExperimentCycle(baseExperiment(), "tick-2");
     await vi.advanceTimersByTimeAsync(5_000);
