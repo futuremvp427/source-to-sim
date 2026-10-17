@@ -1,7 +1,7 @@
 # Five-wallet US sports paper test
 
 Study: `pmus-five-wallet-forward-20261017-v1`
-Measured through: **2026-10-17T20:24:26.026859+00:00**
+Measured through: **2026-10-17T20:34:49.847604+00:00**
 
 Collection ends: 2026-10-19T20:03:43.250398+00:00; settlement hard stop: 2026-10-21T20:03:43.250398+00:00
 
@@ -9,11 +9,11 @@ Each account starts with $1,000 fictional capital. Source account profits are no
 
 | Wallet | Status | Completed distinct markets | Net after modeled fees | Stress net | Open markets | Contracts bought | Elapsed source coverage |
 |---|---|---:|---:|---:|---:|---:|---:|
-| omnibus-076daa | SCREEN_PENDING | 0 | $0.00 | $0.00 | 2 | 20.00 | 99.8% |
-| mooseborzoii | SCREEN_PENDING | 0 | $0.00 | $0.00 | 2 | 20.00 | 99.8% |
-| HomeRunHazard | SCREEN_PENDING | 0 | $0.00 | $0.00 | 2 | 20.00 | 99.8% |
-| gmpm2 | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 99.8% |
-| ethanaz | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 99.9% |
+| omnibus-076daa | SCREEN_PENDING | 0 | $0.00 | $0.00 | 2 | 20.00 | 99.6% |
+| mooseborzoii | SCREEN_PENDING | 0 | $0.00 | $0.00 | 2 | 20.02 | 99.7% |
+| HomeRunHazard | SCREEN_PENDING | 0 | $0.00 | $0.00 | 6 | 60.00 | 99.7% |
+| gmpm2 | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 99.7% |
+| ethanaz | SCREEN_PENDING | 0 | $0.00 | $0.00 | 1 | 10.00 | 99.7% |
 
 `summary.json` contains cash, marks, mark coverage, observed drawdown, fees, timing, quantities and skip reasons.
 A successful source poll is not proof of a new fill. See each wallet's latest returned source-trade timestamp separately.
