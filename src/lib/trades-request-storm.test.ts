@@ -415,7 +415,7 @@ describe("fetchSourceWindow reuses the shared cache for a bootstrap fetch", () =
       "fetch",
       vi.fn(async () => {
         calls += 1;
-        return jsonResponse([{ timestamp: 1 }]);
+        return jsonResponse({ data: [{ timestamp: 1 }], pagination: { has_more: false, next_cursor: null } });
       }),
     );
 
