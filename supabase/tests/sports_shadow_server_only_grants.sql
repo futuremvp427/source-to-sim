@@ -13,10 +13,17 @@ BEGIN
     'sports_shadow_signals',
     'sports_market_matches',
     'sports_quote_observations',
+    'sports_shadow_wallet_cursor',
     'sports_shadow_experiment_epochs',
+    'sports_shadow_source_sell_events',
+    'sports_shadow_venue_capability',
     'sports_shadow_paper_fills',
     'sports_shadow_paper_positions',
     'sports_shadow_settlements',
+    'sports_shadow_telemetry_events',
+    'sports_shadow_integrity_audits',
+    'sports_shadow_alerts',
+    'sports_shadow_milestone_snapshots',
     'sports_shadow_wallet_coverage',
     'sports_shadow_lifecycle_triggers'
   ] LOOP
@@ -62,7 +69,7 @@ BEGIN
     EXECUTE format('SELECT 1 FROM public.%I LIMIT 1', v_table);
     RESET ROLE;
   END LOOP;
-  RAISE NOTICE 'Sports Shadow server-only grants: all ten tables passed';
+  RAISE NOTICE 'Sports Shadow server-only grants: all seventeen tables passed';
 END;
 $$;
 

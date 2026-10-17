@@ -62,11 +62,12 @@ frozen contract. RLS and service_role grants do not revoke those inherited
 default table privileges.
 
 The additive migration explicitly revokes table privileges from PUBLIC,
-anon and authenticated for those ten tables. It preserves service_role access,
+anon and authenticated for all seventeen reviewed Sports Shadow tables whose
+own migrations grant access only to service_role. It preserves service_role access,
 RLS, RPC privileges, rows, experiment state and unrelated default privileges.
 The schema-contract JSON and all existing tests remain unchanged. A real local
 database regression additionally checks every public-client table privilege,
-actual denied role-level SELECTs, preserved service-role DML and RLS on all ten.
+actual denied role-level SELECTs, preserved service-role DML and RLS on all seventeen.
 CI opts out of optional CLI telemetry and pins Supabase CLI 2.121.0.
 
 This repairs a test-database permission invariant; it does not establish the
