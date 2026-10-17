@@ -1,0 +1,556 @@
+[
+  {
+    "label": "gmp_chargers",
+    "source": {
+      "conditionId": "0xa70da744210533416edb26fb4ee19ea7a7acdaef6daabb5077c4dec89494b546",
+      "slug": "nfl-lac-kc-2026-10-18",
+      "outcomes": "[\"Chargers\", \"Chiefs\"]",
+      "clobTokenIds": "[\"25975613657668487250673927756557799100593582472155421789800705293576427824049\", \"58167714289864717825087991545150213770744040987591942526721915426213133665357\"]",
+      "gameStartTime": "2026-10-18 20:25:00+00",
+      "sportsMarketType": "moneyline",
+      "description": "In the upcoming NFL football game between Chargers and Chiefs, scheduled for October 18 at 4:25PM ET:\nThis market will resolve to \"Chargers\" if Chargers win the game.\nThis market will resolve to \"Chiefs\" if Chiefs win the game.\nOvertime is included if played.\nIf the game ends in a tie, this market will resolve 50-50.\nIf the game is postponed, this market will remain open until the game has been completed.\nIf the game is canceled entirely, with no make-up game, this market will resolve 50-50.",
+      "active": true,
+      "closed": false
+    },
+    "us": {
+      "id": "1198917",
+      "slug": "aec-nfl-lac-kc-2026-10-18",
+      "category": "sports",
+      "marketType": "moneyline",
+      "sportsMarketType": "football_team_full_game_winner",
+      "gameStartTime": "2026-10-18T20:25:00Z",
+      "description": "This market will settle to the winner of the Los Angeles Chargers vs Kansas City Chiefs NFL game scheduled for Oct 18, 2026. Overtime is included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from NFL.",
+      "marketSides": [
+        {
+          "id": "2397316",
+          "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+          "identifier": "aec-nfl-lac-kc-2026-10-18",
+          "createdAt": "2026-10-04T06:00:16Z",
+          "updatedAt": "2026-10-04T06:00:16Z",
+          "description": "Chargers",
+          "price": "0.2175",
+          "marketId": 1198917,
+          "long": true,
+          "teamId": 65,
+          "team": {
+            "id": 65,
+            "name": "Los Angeles Chargers",
+            "abbreviation": "lac",
+            "league": "nfl",
+            "record": "0-5",
+            "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/NFL+Team+Logos/LAC.png",
+            "alias": "Chargers",
+            "safeName": "LA Chargers",
+            "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_LosAngelesChargers_FacingRight_Icon%40160x160.png",
+            "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_LosAngelesChargers_FacingLeft_Icon%40160x160.png",
+            "colorPrimary": "#0080C6",
+            "providerId": 29,
+            "ordering": "away",
+            "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_LosAngelesChargers_L@320x320.png",
+            "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_LosAngelesChargers_R@320x320.png",
+            "displayAbbreviation": "LAC",
+            "conference": "",
+            "providerIds": [
+              {
+                "provider": "PROVIDER_SPORTSDATAIO",
+                "providerId": "29"
+              },
+              {
+                "provider": "PROVIDER_SPORTRADAR",
+                "providerId": "1f6dcffb-9823-43cd-9ff4-e7a8466749b5"
+              }
+            ],
+            "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_LosAngelesChargers_L@320x320.png",
+            "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_LosAngelesChargers_R@320x320.png",
+            "color": {
+              "light": "#0080C6",
+              "dark": "#0080C6"
+            },
+            "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO"
+          },
+          "quote": {
+            "value": "0.2175",
+            "currency": "USD"
+          },
+          "tradable": true
+        },
+        {
+          "id": "2397317",
+          "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+          "identifier": "aec-nfl-lac-kc-2026-10-18",
+          "createdAt": "2026-10-04T06:00:16Z",
+          "updatedAt": "2026-10-04T06:00:16Z",
+          "description": "Chiefs",
+          "price": "0.785",
+          "marketId": 1198917,
+          "long": false,
+          "teamId": 63,
+          "team": {
+            "id": 63,
+            "name": "Kansas City Chiefs",
+            "abbreviation": "kc",
+            "league": "nfl",
+            "record": "4-0",
+            "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/NFL+Team+Logos/KC.png",
+            "alias": "Chiefs",
+            "safeName": "KC Chiefs",
+            "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_KansasCityChiefs_FacingRight_Icon%40160x160.png",
+            "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_KansasCityChiefs_FacingLeft_Icon%40160x160.png",
+            "colorPrimary": "#E31837",
+            "providerId": 16,
+            "ordering": "home",
+            "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_KansasCityChiefs_L@320x320.png",
+            "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_KansasCityChiefs_R@320x320.png",
+            "displayAbbreviation": "KC",
+            "conference": "",
+            "providerIds": [
+              {
+                "provider": "PROVIDER_SPORTSDATAIO",
+                "providerId": "16"
+              },
+              {
+                "provider": "PROVIDER_SPORTRADAR",
+                "providerId": "6680d28d-d4d2-49f6-aace-5292d3ec02c2"
+              }
+            ],
+            "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_KansasCityChiefs_L@320x320.png",
+            "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_KansasCityChiefs_R@320x320.png",
+            "color": {
+              "light": "#E31837",
+              "dark": "#E31837"
+            },
+            "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO"
+          },
+          "quote": {
+            "value": "0.785",
+            "currency": "USD"
+          },
+          "tradable": true
+        }
+      ],
+      "feeCoefficient": 0.0695,
+      "active": true,
+      "closed": false,
+      "status": "MARKET_STATUS_OPEN",
+      "minimumTradeQty": 0.01
+    }
+  },
+  {
+    "label": "moose_wake",
+    "source": {
+      "conditionId": "0xa3dba03f757d793a93fa0c725931a2fe3285015b40f932f75c30d913e2725db3",
+      "slug": "cfb-wake-cah-2026-10-17",
+      "outcomes": "[\"Wake Forest\", \"California\"]",
+      "clobTokenIds": "[\"5411870310555561873716515055296075077719566285984836742893940100061561067886\", \"1847871903723572386030657508775121129439440822255612518858441850173003336832\"]",
+      "gameStartTime": "2026-10-18 02:30:00+00",
+      "sportsMarketType": "moneyline",
+      "description": "In the upcoming college football game between Wake Forest and California, scheduled for October 17 at 10:30PM ET:\nThis market will resolve to \"Wake Forest\" if Wake Forest win the game.\nThis market will resolve to \"California\" if California win the game.\nOvertime is included if played.\nIf the game ends in a tie, this market will resolve 50-50.\nIf the game is postponed, this market will remain open until the game has been completed.\nIf the game is canceled entirely, with no make-up game, this market will resolve 50-50.",
+      "active": true,
+      "closed": false
+    },
+    "us": {
+      "id": "1225098",
+      "slug": "aec-cfb-wake-cah-2026-10-17",
+      "category": "sports",
+      "marketType": "moneyline",
+      "sportsMarketType": "football_team_full_game_winner",
+      "gameStartTime": "2026-10-18T02:30:00Z",
+      "description": "This market will settle to the winner of the Wake Forest vs California College Football game scheduled for Oct 17, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+      "marketSides": [
+        {
+          "id": "2449678",
+          "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+          "identifier": "aec-cfb-wake-cah-2026-10-17",
+          "createdAt": "2026-10-05T17:30:52Z",
+          "updatedAt": "2026-10-05T17:30:52Z",
+          "description": "Demon Deacons",
+          "price": "0.7850",
+          "marketId": 1225098,
+          "long": true,
+          "teamId": 1095,
+          "team": {
+            "id": 1095,
+            "name": "Wake Forest",
+            "abbreviation": "wake",
+            "league": "cfb",
+            "record": "5-1",
+            "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/team_logos/football/cfb/_wake_50000034.png",
+            "alias": "Demon Deacons",
+            "safeName": "Wake Forest",
+            "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us/ncaa/Polymarket_Wake+Forest+Demon+Deacons_R%40160x160%40160x160.png",
+            "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us/ncaa/Polymarket_Wake+Forest+Demon+Deacons_L%40160x160%40160x160.png",
+            "colorPrimary": "#CEB888",
+            "providerId": 34,
+            "ordering": "away",
+            "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_Wake-Forest-Demon-Deacons_L@320x320.png",
+            "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_Wake-Forest-Demon-Deacons_R@320x320.png",
+            "displayAbbreviation": "WAKE",
+            "ranking": "21",
+            "conference": "Atlantic Coast",
+            "providerIds": [
+              {
+                "provider": "PROVIDER_SPORTSDATAIO",
+                "providerId": "34"
+              },
+              {
+                "provider": "PROVIDER_SPORTRADAR",
+                "providerId": "3ed1a496-46af-4c0e-be37-c76ee352d702"
+              }
+            ],
+            "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_Wake-Forest-Demon-Deacons_L@320x320.png",
+            "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_Wake-Forest-Demon-Deacons_R@320x320.png",
+            "color": {
+              "light": "#CEB888",
+              "dark": "#CEB888"
+            },
+            "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO"
+          },
+          "quote": {
+            "value": "0.7850",
+            "currency": "USD"
+          },
+          "tradable": true
+        },
+        {
+          "id": "2449679",
+          "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+          "identifier": "aec-cfb-wake-cah-2026-10-17",
+          "createdAt": "2026-10-05T17:30:52Z",
+          "updatedAt": "2026-10-05T17:30:52Z",
+          "description": "Golden Bears",
+          "price": "0.22",
+          "marketId": 1225098,
+          "long": false,
+          "teamId": 1238,
+          "team": {
+            "id": 1238,
+            "name": "California",
+            "abbreviation": "cah",
+            "league": "cfb",
+            "record": "3-3",
+            "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/team_logos/football/cfb/_cah_50000251.png",
+            "alias": "Golden Bears",
+            "safeName": "California",
+            "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us/ncaa/Polymarket_California+Golden+Bears_R%40160x160.png",
+            "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us/ncaa/Polymarket_California+Golden+Bears_L%40160x160.png",
+            "colorPrimary": "#003262",
+            "providerId": 251,
+            "ordering": "home",
+            "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_California-Golden-Bears_L@320x320.png",
+            "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_California-Golden-Bears_R@320x320.png",
+            "displayAbbreviation": "CAL",
+            "ranking": "0",
+            "conference": "Atlantic Coast",
+            "providerIds": [
+              {
+                "provider": "PROVIDER_SPORTSDATAIO",
+                "providerId": "251"
+              },
+              {
+                "provider": "PROVIDER_SPORTRADAR",
+                "providerId": "eed7f0d6-72e6-4488-8baa-5ee8e3375ba9"
+              }
+            ],
+            "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_California-Golden-Bears_L@320x320.png",
+            "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_California-Golden-Bears_R@320x320.png",
+            "color": {
+              "light": "#003262",
+              "dark": "#003262"
+            },
+            "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO"
+          },
+          "quote": {
+            "value": "0.22",
+            "currency": "USD"
+          },
+          "tradable": true
+        }
+      ],
+      "feeCoefficient": 0.0695,
+      "active": true,
+      "closed": false,
+      "status": "MARKET_STATUS_OPEN",
+      "minimumTradeQty": 0.01
+    }
+  },
+  {
+    "label": "omni_boston",
+    "source": {
+      "conditionId": "0xf90ac75f83860b8c7950dbed6a2a9191547d4bf364e61a25517a6faf9b529b03",
+      "slug": "nhl-bos-dal-2026-10-20",
+      "outcomes": "[\"Bruins\", \"Stars\"]",
+      "clobTokenIds": "[\"39929223518084170537064395725720689939218289579889797641741676701424374049747\", \"7065618234649770227065667610393353066284923196923807800830823909393154972843\"]",
+      "gameStartTime": "2026-10-21 00:00:00+00",
+      "sportsMarketType": "moneyline",
+      "description": "In the upcoming NHL game, scheduled for October 20 at 8:00PM ET:\nIf the Bruins win, the market will resolve to \"Bruins\".\nIf the Stars win, the market will resolve to \"Stars\".\nIf the game is postponed, this market will remain open until the game has been completed.\nIf the game is canceled entirely, with no make-up game, this market will resolve 50-50.\nThe result will be determined based on the final score including any overtime periods and shootouts. In the event of a shootout, one goal will be added to the winning team's score for the purpose of resolution.",
+      "active": true,
+      "closed": false
+    },
+    "us": {
+      "id": "1481055",
+      "slug": "aec-nhl-bos-dal-2026-10-20",
+      "category": "sports",
+      "marketType": "moneyline",
+      "sportsMarketType": "hockey_team_full_game_winner",
+      "gameStartTime": "2026-10-21T00:00:00Z",
+      "description": "This market will settle to the winner of the BOS Bruins vs DAL Stars NHL game scheduled for October 20, 2026 at 8:00PM ET (as of the listing of the event's first instrument). Overtime and any shootout are included if played. If the game is delayed, postponed, suspended or otherwise rescheduled to a date and time not within two days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+      "marketSides": [
+        {
+          "id": "2961588",
+          "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+          "identifier": "aec-nhl-bos-dal-2026-10-20",
+          "createdAt": "2026-10-16T04:06:09Z",
+          "updatedAt": "2026-10-16T04:06:09Z",
+          "description": "Bruins",
+          "price": "0.4200",
+          "marketId": 1481055,
+          "long": true,
+          "teamId": 1484,
+          "team": {
+            "id": 1484,
+            "name": "Bruins",
+            "abbreviation": "bos",
+            "league": "nhl",
+            "record": "45-27-10",
+            "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NHL/variant/BOS_dark.png",
+            "alias": "Bruins",
+            "safeName": "Boston Bruins",
+            "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NHL/variant/BOS_dark.png",
+            "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NHL/variant/BOS_dark.png",
+            "colorPrimary": "#e99802",
+            "providerId": 1,
+            "ordering": "away",
+            "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NHL/variant/BOS_light.png",
+            "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NHL/variant/BOS_light.png",
+            "displayAbbreviation": "BOS",
+            "providerIds": [
+              {
+                "provider": "PROVIDER_SPORTSDATAIO",
+                "providerId": "1"
+              },
+              {
+                "provider": "PROVIDER_SPORTRADAR",
+                "providerId": "4416ba1a-0f24-11e2-8525-18a905767e44"
+              },
+              {
+                "provider": "PROVIDER_OPTICODDS",
+                "providerId": "E24CA44A7824"
+              }
+            ],
+            "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NHL/variant/BOS_dark.png",
+            "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NHL/variant/BOS_dark.png",
+            "color": {
+              "light": "#e99802",
+              "dark": "#e99802"
+            },
+            "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO"
+          },
+          "quote": {
+            "value": "0.4200",
+            "currency": "USD"
+          },
+          "tradable": true
+        },
+        {
+          "id": "2961589",
+          "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+          "identifier": "aec-nhl-bos-dal-2026-10-20",
+          "createdAt": "2026-10-16T04:06:09Z",
+          "updatedAt": "2026-10-16T04:06:09Z",
+          "description": "Stars",
+          "price": "0.61",
+          "marketId": 1481055,
+          "long": false,
+          "teamId": 1501,
+          "team": {
+            "id": 1501,
+            "name": "Stars",
+            "abbreviation": "dal",
+            "league": "nhl",
+            "record": "50-20-12",
+            "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NHL/variant/DAL_dark.png",
+            "alias": "Stars",
+            "safeName": "Dallas Stars",
+            "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NHL/variant/DAL_dark.png",
+            "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NHL/variant/DAL_dark.png",
+            "colorPrimary": "#00843d",
+            "providerId": 18,
+            "ordering": "home",
+            "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NHL/variant/DAL_light.png",
+            "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NHL/variant/DAL_light.png",
+            "displayAbbreviation": "DAL",
+            "providerIds": [
+              {
+                "provider": "PROVIDER_SPORTSDATAIO",
+                "providerId": "18"
+              },
+              {
+                "provider": "PROVIDER_SPORTRADAR",
+                "providerId": "44157522-0f24-11e2-8525-18a905767e44"
+              },
+              {
+                "provider": "PROVIDER_OPTICODDS",
+                "providerId": "B0F665858968"
+              }
+            ],
+            "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NHL/variant/DAL_dark.png",
+            "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NHL/variant/DAL_dark.png",
+            "color": {
+              "light": "#00843d",
+              "dark": "#00843d"
+            },
+            "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO"
+          },
+          "quote": {
+            "value": "0.61",
+            "currency": "USD"
+          },
+          "tradable": true
+        }
+      ],
+      "feeCoefficient": 0.0695,
+      "active": true,
+      "closed": false,
+      "status": "MARKET_STATUS_OPEN",
+      "minimumTradeQty": 0.01
+    }
+  },
+  {
+    "label": "ethan_ohio",
+    "source": {
+      "conditionId": "0x4051174e9ccefce81be2b567c53a242be317cbb396ce23a46916a6727ce8453a",
+      "slug": "cfb-ohiost-ind-2026-10-17",
+      "outcomes": "[\"Ohio State\", \"Indiana\"]",
+      "clobTokenIds": "[\"34274580856978891687853635941762049657860761984151424897369112650409870755513\", \"105215753945998770725749693580468186688051682353358547097200302588678194340462\"]",
+      "gameStartTime": "2026-10-17 16:00:00+00",
+      "sportsMarketType": "moneyline",
+      "description": "In the upcoming college football game between Ohio State and Indiana, scheduled for October 17 at 12:00PM ET:\nThis market will resolve to \"Ohio State\" if Ohio State win the game.\nThis market will resolve to \"Indiana\" if Indiana win the game.\nOvertime is included if played.\nIf the game ends in a tie, this market will resolve 50-50.\nIf the game is postponed, this market will remain open until the game has been completed.\nIf the game is canceled entirely, with no make-up game, this market will resolve 50-50.",
+      "active": true,
+      "closed": false
+    },
+    "us": {
+      "id": "1229858",
+      "slug": "aec-cfb-ohiost-ind-2026-10-17",
+      "category": "sports",
+      "marketType": "moneyline",
+      "sportsMarketType": "football_team_full_game_winner",
+      "gameStartTime": "2026-10-17T16:00:00Z",
+      "description": "This market will settle to the winner of the Ohio State vs Indiana College Football game scheduled for Oct 17, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+      "marketSides": [
+        {
+          "id": "2459198",
+          "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+          "identifier": "aec-cfb-ohiost-ind-2026-10-17",
+          "createdAt": "2026-10-05T18:30:10Z",
+          "updatedAt": "2026-10-05T18:30:10Z",
+          "description": "Buckeyes",
+          "price": "0.6700",
+          "marketId": 1229858,
+          "long": true,
+          "teamId": 1129,
+          "team": {
+            "id": 1129,
+            "name": "Ohio State",
+            "abbreviation": "ohiost",
+            "league": "cfb",
+            "record": "5-1",
+            "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/team_logos/football/cfb/_ohiost_50000098.png",
+            "alias": "Buckeyes",
+            "safeName": "Ohio State",
+            "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us/ncaa/Polymarket_Ohio+State+Buckeyes_R%40160x160%40160x160.png",
+            "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us/ncaa/Polymarket_Ohio+State+Buckeyes_L%40160x160%40160x160.png",
+            "colorPrimary": "#BB0000",
+            "providerId": 98,
+            "ordering": "away",
+            "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_Ohio-State-Buckeyes_L@320x320.png",
+            "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_Ohio-State-Buckeyes_R@320x320.png",
+            "displayAbbreviation": "OSU",
+            "ranking": "4",
+            "conference": "Big Ten",
+            "providerIds": [
+              {
+                "provider": "PROVIDER_SPORTSDATAIO",
+                "providerId": "98"
+              },
+              {
+                "provider": "PROVIDER_SPORTRADAR",
+                "providerId": "9a6d6f3f-021e-4ddd-8fac-ac4766239d87"
+              }
+            ],
+            "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_Ohio-State-Buckeyes_L@320x320.png",
+            "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_Ohio-State-Buckeyes_R@320x320.png",
+            "color": {
+              "light": "#BB0000",
+              "dark": "#BB0000"
+            },
+            "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO"
+          },
+          "quote": {
+            "value": "0.6700",
+            "currency": "USD"
+          },
+          "tradable": true
+        },
+        {
+          "id": "2459199",
+          "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+          "identifier": "aec-cfb-ohiost-ind-2026-10-17",
+          "createdAt": "2026-10-05T18:30:10Z",
+          "updatedAt": "2026-10-05T18:30:10Z",
+          "description": "Hoosiers",
+          "price": "0.37",
+          "marketId": 1229858,
+          "long": false,
+          "teamId": 1124,
+          "team": {
+            "id": 1124,
+            "name": "Indiana",
+            "abbreviation": "ind",
+            "league": "cfb",
+            "record": "6-0",
+            "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/team_logos/football/cfb/_ind_50000093.png",
+            "alias": "Hoosiers",
+            "safeName": "Indiana",
+            "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us/ncaa/Polymarket_Indiana+Hoosiers_R%40160x160.png",
+            "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us/ncaa/Polymarket_Indiana+Hoosiers_L%40160x160.png",
+            "colorPrimary": "#990000",
+            "providerId": 93,
+            "ordering": "home",
+            "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_Indiana-Hoosiers_L@320x320.png",
+            "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_Indiana-Hoosiers_R@320x320.png",
+            "displayAbbreviation": "IND",
+            "ranking": "5",
+            "conference": "Big Ten",
+            "providerIds": [
+              {
+                "provider": "PROVIDER_SPORTSDATAIO",
+                "providerId": "93"
+              },
+              {
+                "provider": "PROVIDER_SPORTRADAR",
+                "providerId": "fa0eb091-8e35-49c7-b00f-269794a99a61"
+              }
+            ],
+            "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_Indiana-Hoosiers_L@320x320.png",
+            "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/CFB/Polymarket_CFB_Indiana-Hoosiers_R@320x320.png",
+            "color": {
+              "light": "#990000",
+              "dark": "#990000"
+            },
+            "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO"
+          },
+          "quote": {
+            "value": "0.37",
+            "currency": "USD"
+          },
+          "tradable": true
+        }
+      ],
+      "feeCoefficient": 0.0695,
+      "active": true,
+      "closed": false,
+      "status": "MARKET_STATUS_OPEN",
+      "minimumTradeQty": 0.01
+    }
+  }
+]

@@ -1,0 +1,90 @@
+{
+  "screened_at": "2026-10-17T19:39:49Z to 2026-10-17T19:43:20Z",
+  "basis": "Four additional active screenshot wallets with positive reported lifetime sports P&L and verified current US counterparts; selected for bounded operational testing, not validated profitability. Three have sampled prospective matches; ethanaz also has verified in-play US CFB counterparts. Negative-lifetime alternatives were excluded.",
+  "candidate_screen": [
+    {
+      "name": "ethanaz",
+      "wallet": "0xf28e42d20e4826f2b10a24bc952001697947cab2",
+      "reported_lifetime_realized_sports_pnl_usd": 907983.831119,
+      "selected": true,
+      "source_url": "https://data-api.polymarket.com/v2/leaderboard?user=0xf28e42d20e4826f2b10a24bc952001697947cab2&category=sports&time_period=all"
+    },
+    {
+      "name": "Sassy-Bucket",
+      "wallet": "0x4bff30af91642dc7d2b19a8664378fe55c45fc26",
+      "reported_lifetime_realized_sports_pnl_usd": -4650071.35624,
+      "selected": false,
+      "source_url": "https://data-api.polymarket.com/v2/leaderboard?user=0x4bff30af91642dc7d2b19a8664378fe55c45fc26&category=sports&time_period=all"
+    },
+    {
+      "name": "gmpm2",
+      "wallet": "0x67542c3219b37fd1610aad290676ff91cdbfe3bc",
+      "reported_lifetime_realized_sports_pnl_usd": 1654989.627856,
+      "selected": true,
+      "source_url": "https://data-api.polymarket.com/v2/leaderboard?user=0x67542c3219b37fd1610aad290676ff91cdbfe3bc&category=sports&time_period=all"
+    },
+    {
+      "name": "primm",
+      "wallet": "0xd38b71f3e8ed1af71983e5c309eac3dfa9b35029",
+      "reported_lifetime_realized_sports_pnl_usd": 3381170.726454,
+      "selected": false,
+      "source_url": "https://data-api.polymarket.com/v2/leaderboard?user=0xd38b71f3e8ed1af71983e5c309eac3dfa9b35029&category=sports&time_period=all"
+    },
+    {
+      "name": "mooseborzoii",
+      "wallet": "0x1f3a646ce5cbe2c70270e7a46161d89b7c7b895d",
+      "reported_lifetime_realized_sports_pnl_usd": 1070309.396757,
+      "selected": true,
+      "source_url": "https://data-api.polymarket.com/v2/leaderboard?user=0x1f3a646ce5cbe2c70270e7a46161d89b7c7b895d&category=sports&time_period=all"
+    },
+    {
+      "name": "justwins",
+      "wallet": "0xa2cced8bfae7d645f7f437fb76becf2fcbb70cbc",
+      "reported_lifetime_realized_sports_pnl_usd": -787596.592341,
+      "selected": false,
+      "source_url": "https://data-api.polymarket.com/v2/leaderboard?user=0xa2cced8bfae7d645f7f437fb76becf2fcbb70cbc&category=sports&time_period=all"
+    },
+    {
+      "name": "omnibus-076daa",
+      "wallet": "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c",
+      "reported_lifetime_realized_sports_pnl_usd": 3249853.990473,
+      "selected": true,
+      "source_url": "https://data-api.polymarket.com/v2/leaderboard?user=0x076daa87c4fe1a85402a9b6b8e0a866224388d4c&category=sports&time_period=all"
+    },
+    {
+      "name": "sulumos",
+      "wallet": "0x9db82de5a71ae539bc82f4d9ac3a007c7d742eff",
+      "reported_lifetime_realized_sports_pnl_usd": 226512.37833,
+      "selected": false,
+      "source_url": "https://data-api.polymarket.com/v2/leaderboard?user=0x9db82de5a71ae539bc82f4d9ac3a007c7d742eff&category=sports&time_period=all"
+    },
+    {
+      "name": "0x3DFb153c197D4C19D3B31c1ecD2c7B6860eeabAf-1722957908185",
+      "wallet": "0x3dfb153c197d4c19d3b31c1ecd2c7b6860eeabaf",
+      "reported_lifetime_realized_sports_pnl_usd": -3942544.519703,
+      "selected": false,
+      "source_url": "https://data-api.polymarket.com/v2/leaderboard?user=0x3dfb153c197d4c19d3b31c1ecd2c7b6860eeabaf&category=sports&time_period=all"
+    },
+    {
+      "name": "0xBc43c8bfBC4d77c2FC9011adaD38Ba43b88996d3-1765231687816",
+      "wallet": "0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3",
+      "reported_lifetime_realized_sports_pnl_usd": -157937.321241,
+      "selected": false,
+      "source_url": "https://data-api.polymarket.com/v2/leaderboard?user=0xbc43c8bfbc4d77c2fc9011adad38ba43b88996d3&category=sports&time_period=all"
+    },
+    {
+      "name": "corkmaster420blaezit",
+      "wallet": "0x6ac5bb06a9eb05641fd5e82640268b92f3ab4b6e",
+      "reported_lifetime_realized_sports_pnl_usd": -313652.971163,
+      "selected": false,
+      "source_url": "https://data-api.polymarket.com/v2/leaderboard?user=0x6ac5bb06a9eb05641fd5e82640268b92f3ab4b6e&category=sports&time_period=all"
+    },
+    {
+      "name": "BreakTheBank",
+      "wallet": "0xf0318c32136c2db7fec88b84869aee6a1106c80c",
+      "reported_lifetime_realized_sports_pnl_usd": 7866079.718986,
+      "selected": false,
+      "source_url": "https://data-api.polymarket.com/v2/leaderboard?user=0xf0318c32136c2db7fec88b84869aee6a1106c80c&category=sports&time_period=all"
+    }
+  ]
+}

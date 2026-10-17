@@ -1,0 +1,112 @@
+{
+  "study_id": "pmus-five-wallet-forward-20261017-v1",
+  "repository": "futuremvp427/source-to-sim",
+  "code_branch": "research/pmus-five-wallet-paper-20261017",
+  "state_branch": "research/pmus-five-wallet-state-20261017",
+  "mode": "PAPER_ONLY_PUBLIC_GETS",
+  "mapping_mode": "SAME_EVENT_TEAM_FOLLOW_US_RULES_KNOWN_DIFFERENCES_ACCEPTED",
+  "wallets": [
+    {
+      "name": "HomeRunHazard",
+      "address": "0x5268527977f700f9bf9b6d5cd843859e4e70135d"
+    },
+    {
+      "name": "ethanaz",
+      "address": "0xf28e42d20e4826f2b10a24bc952001697947cab2"
+    },
+    {
+      "name": "gmpm2",
+      "address": "0x67542c3219b37fd1610aad290676ff91cdbfe3bc"
+    },
+    {
+      "name": "mooseborzoii",
+      "address": "0x1f3a646ce5cbe2c70270e7a46161d89b7c7b895d"
+    },
+    {
+      "name": "omnibus-076daa",
+      "address": "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c"
+    }
+  ],
+  "entry_collection_hours": 48,
+  "maximum_settlement_drain_hours": 48,
+  "starting_capital_usd": "1000",
+  "maximum_contracts_per_market": "10",
+  "maximum_open_markets_per_account": 20,
+  "minimum_source_net_quantity": "1",
+  "taker_fee_coefficient": "0.0695",
+  "fee_model": "round_half_even(sum(theta*q*p*(1-p)), 0.01), conservative cumulative aggressive-order commission cap; no maker or taker rebates",
+  "stress_cost_per_contract_per_trade": "0.01",
+  "maximum_worse_entry_price": "0.03",
+  "minimum_observation_delay_seconds": 5,
+  "maximum_signal_age_seconds": 120,
+  "maximum_book_age_seconds": 60,
+  "maximum_http_cache_age_seconds": 20,
+  "poll_seconds": 20,
+  "feed_overlap_seconds": 600,
+  "checkpoint_seconds": 600,
+  "metadata_cache_seconds": 60,
+  "network_timeout_seconds": 12,
+  "maximum_response_bytes": 10000000,
+  "maximum_pages_per_read": 10,
+  "maximum_requests_per_second": 4,
+  "maximum_compressed_evidence_bytes": 524288000,
+  "startup_maximum_last_trade_age_seconds": 86400,
+  "minimum_completed_distinct_markets": 30,
+  "minimum_coverage": 0.95,
+  "maximum_drawdown_fraction": "0.20",
+  "bootstrap_seed": 20261017,
+  "bootstrap_samples": 3000,
+  "supported_leagues": [
+    "nfl",
+    "cfb",
+    "nba",
+    "nhl",
+    "mlb",
+    "wnba"
+  ],
+  "eligible_market_type": "full_game_binary_moneyline_only",
+  "game_phases": "pregame and in-play, tagged by scheduled start; actual game clock is not inferred",
+  "position_policy": "Fresh post-epoch executed BUY corroborated by current same-condition net inventory; open at most 10 contracts; target quantity = 10 * abs(current leader net) / peak abs(leader net) since that modeled opening. Fresh additions may restore the capped amount. Mirror net reductions and flips at current US bid/ask; a flip entry separately requires a fresh BUY on its actual token. No old holdings are imported and no previously consumed BUY is reused. This is a capped net-side signal follower, not a dollar-for-dollar replica.",
+  "foreign_resolution_policy": "Never infer a US settlement or paper SELL from a foreign resolution, redemption, absent metadata or a missing quote. Preserve held US contracts for verified US settlement.",
+  "us_settlement_policy": "Only when exact target status is MARKET_STATUS_RESOLVED and closed=true, official settlement slug and price are valid in [0,1], and the US long-side resolution price agrees. No modeled settlement trading commission.",
+  "stress_policy": "Additional $0.01 per actually simulated contract on each BUY/SELL; no extra settlement execution cost. This is an execution-cost sensitivity, not a prediction of price impact.",
+  "coverage_policy": "Credit at most 2*poll_seconds between complete wallet-filtered/window-filtered/paginated reads, clipped to collection. Terminal coverage denominator is the full planned 48 hours. Valid polling is not proof of new trades. Mark coverage uses complete liquidation valuations at US bids and modeled exit fees.",
+  "status_precedence": [
+    "SCREEN_PENDING while nonterminal",
+    "UNRESOLVED_SETTLEMENTS when held markets remain",
+    "INSUFFICIENT_TRADES/COVERAGE below 30 completed distinct markets or 95% planned source/complete-mark coverage",
+    "FAILED_SCREEN if base or stress net <= 0 or observed drawdown >20% starting capital",
+    "POSITIVE_BUT_UNCERTAIN if positive base/stress but event-cluster bootstrap lower percentile <=0",
+    "PROMISING_SCREEN_ONLY if all other gates pass and event-cluster bootstrap lower percentile >0"
+  ],
+  "statistics_limits": "Resample completed US event markets as clusters. This does not account for cross-game/day dependence, wallet selection or five simultaneous comparisons. A promising result is only a short screen, not durable-profit evidence.",
+  "portfolio_policy": "Five independent fictional accounts; report separately, never sum into a realizable portfolio.",
+  "slug_team_aliases": {
+    "nba": {
+      "nyk": "ny",
+      "sas": "sa"
+    },
+    "nhl": {
+      "tbl": "tb",
+      "utah": "uta"
+    }
+  },
+  "team_aliases": {
+    "nhl": {
+      "utah": "mammoth"
+    }
+  },
+  "readiness_conditions": [
+    "0xa70da744210533416edb26fb4ee19ea7a7acdaef6daabb5077c4dec89494b546",
+    "0xa3dba03f757d793a93fa0c725931a2fe3285015b40f932f75c30d913e2725db3",
+    "0xf90ac75f83860b8c7950dbed6a2a9191547d4bf364e61a25517a6faf9b529b03",
+    "0x4051174e9ccefce81be2b567c53a242be317cbb396ce23a46916a6727ce8453a"
+  ],
+  "frozen_before_forward_start": true,
+  "live_trading": false,
+  "venue_credentials": false,
+  "application_deployment": false,
+  "prior_experiments_unchanged": true,
+  "quantity_step_policy": "Read minimumTradeQty and require either 0.01 fractional-contract steps or 1 whole-contract steps; round target reductions/additions down to that verified step; unsupported values block entries.",
+  "maximum_metadata_http_cache_age_seconds": 300
+}
