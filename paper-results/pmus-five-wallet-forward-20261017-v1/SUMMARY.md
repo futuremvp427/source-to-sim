@@ -9,11 +9,11 @@ Each account starts with $1,000 fictional capital. Source account profits are no
 
 | Wallet | Status | Completed distinct markets | Net after modeled fees | Stress net | Open markets | Contracts bought | Elapsed source coverage |
 |---|---|---:|---:|---:|---:|---:|---:|
-| HomeRunHazard | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 0.0% |
-| ethanaz | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 0.0% |
-| gmpm2 | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 0.0% |
-| mooseborzoii | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 0.0% |
 | omnibus-076daa | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 0.0% |
+| mooseborzoii | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 0.0% |
+| HomeRunHazard | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 0.0% |
+| gmpm2 | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 0.0% |
+| ethanaz | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 0.0% |
 
 `summary.json` contains cash, marks, mark coverage, observed drawdown, fees, timing, quantities and skip reasons.
 A successful source poll is not proof of a new fill. See each wallet's latest returned source-trade timestamp separately.
