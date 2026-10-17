@@ -1,4 +1,4 @@
-# International source-reader repair — October 17, 2026
+# Source-reader and server-only schema repair — October 17, 2026
 
 The existing normalizer reads v1 camelCase fields. On a captured 2,000-row
 international Data API v2 slice, it retains none of the token, condition and
@@ -32,8 +32,8 @@ US contract mapping, a new source strategy, source profitability, US follower
 profitability, a healthy deployed worker, or a completed natural US copy.
 The existing EXACT/NO_TRADE matching gates and execution controls are unchanged.
 No account authentication, order, preview, live activation, new study, scheduler
-change, production schema change or historical ledger rewrite is part of this
-patch. Legacy General Shadow activity consumers are outside this trade-reader
+change, production schema application or historical ledger rewrite was performed.
+Legacy General Shadow activity consumers are outside this trade-reader
 patch and must not be mistaken for a completed app-wide v2 migration.
 
 Current matching evidence matters separately: sampled Miami and Los Angeles
@@ -52,3 +52,25 @@ trade through an approved EXACT mapping, US observation, paper fill, persisted
 position/dashboard and exit or settlement. The read-only project database
 inspection still returned a timeout during this review. Do not treat passing
 unit tests or an editor SHA as that runtime proof.
+
+## Server-only schema contract
+
+Clean-database CI on both this repair and unchanged main reported the same
+20 unexpected SELECT grants: ten Sports Shadow tables were accessible to
+anon/authenticated at the table privilege layer, contrary to the existing
+frozen contract. RLS and service_role grants do not revoke those inherited
+default table privileges.
+
+The additive migration explicitly revokes table privileges from PUBLIC,
+anon and authenticated for those ten tables. It preserves service_role access,
+RLS, RPC privileges, rows, experiment state and unrelated default privileges.
+The schema-contract JSON and all existing tests remain unchanged. A real local
+database regression additionally checks every public-client table privilege,
+actual denied role-level SELECTs, preserved service-role DML and RLS on all ten.
+CI opts out of optional CLI telemetry and pins Supabase CLI 2.121.0.
+
+This repairs a test-database permission invariant; it does not establish the
+production schema state or remove the separate US contract-matching blocker.
+Production SELECT 1 still timed out through Lovable, and the directly connected
+Supabase account did not have access to the project's database. CI results for
+this migration must be checked before claiming that its database checks passed.
