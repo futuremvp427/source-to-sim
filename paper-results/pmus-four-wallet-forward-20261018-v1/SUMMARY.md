@@ -1,7 +1,7 @@
 # Four-wallet US sports paper test
 
 Study: `pmus-four-wallet-forward-20261018-v1`
-Measured through: **2026-10-18T18:50:56.267641+00:00**
+Measured through: **2026-10-18T19:01:16.771737+00:00**
 
 Collection ends: 2026-10-20T15:34:35.330497+00:00; settlement hard stop: 2026-10-22T15:34:35.330497+00:00
 
@@ -10,7 +10,7 @@ Each account starts with $1,000 fictional capital. Source account profits are no
 | Wallet | Status | Completed distinct markets | Net after modeled fees | Stress net | Open markets | Contracts bought | Elapsed source coverage |
 |---|---|---:|---:|---:|---:|---:|---:|
 | ic4cream | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 100.0% |
-| para-Vision | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 100.0% |
+| para-Vision | SCREEN_PENDING | 0 | $0.00 | $0.00 | 1 | 10.00 | 100.0% |
 | monkeymashingkeyboard | SCREEN_PENDING | 0 | $0.00 | $0.00 | 4 | 40.00 | 100.0% |
 | alwaysfade | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 100.0% |
 
