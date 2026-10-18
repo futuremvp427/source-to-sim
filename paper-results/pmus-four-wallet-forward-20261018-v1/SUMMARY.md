@@ -1,7 +1,7 @@
 # Four-wallet US sports paper test
 
 Study: `pmus-four-wallet-forward-20261018-v1`
-Measured through: **2026-10-18T15:55:16.205593+00:00**
+Measured through: **2026-10-18T16:05:36.273683+00:00**
 
 Collection ends: 2026-10-20T15:34:35.330497+00:00; settlement hard stop: 2026-10-22T15:34:35.330497+00:00
 
@@ -10,8 +10,8 @@ Each account starts with $1,000 fictional capital. Source account profits are no
 | Wallet | Status | Completed distinct markets | Net after modeled fees | Stress net | Open markets | Contracts bought | Elapsed source coverage |
 |---|---|---:|---:|---:|---:|---:|---:|
 | ic4cream | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 99.9% |
-| para-Vision | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 99.9% |
-| monkeymashingkeyboard | SCREEN_PENDING | 0 | $0.00 | $0.00 | 1 | 10.00 | 100.0% |
+| para-Vision | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 100.0% |
+| monkeymashingkeyboard | SCREEN_PENDING | 0 | $0.00 | $0.00 | 2 | 20.00 | 100.0% |
 | alwaysfade | SCREEN_PENDING | 0 | $0.00 | $0.00 | 0 | 0 | 100.0% |
 
 `summary.json` contains cash, marks, mark coverage, observed drawdown, fees, timing, quantities and skip reasons.
