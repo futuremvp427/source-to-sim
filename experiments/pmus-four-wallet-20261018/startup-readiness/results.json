@@ -1,0 +1,185 @@
+{
+  "books": [
+    {
+      "book_at": "2026-10-18T15:31:32.026766+00:00",
+      "qualified": true,
+      "us_slug": "aec-nfl-car-phi-2026-10-18"
+    },
+    {
+      "book_at": "2026-10-18T15:31:36.920169+00:00",
+      "qualified": true,
+      "us_slug": "aec-nfl-dal-gb-2026-10-18"
+    },
+    {
+      "qualified": false,
+      "reason": "stale_http_cache",
+      "us_slug": "aec-nfl-ari-lar-2026-10-18"
+    },
+    {
+      "qualified": false,
+      "reason": "stale_http_cache",
+      "us_slug": "aec-nfl-bal-cle-2026-10-18"
+    }
+  ],
+  "ended_at": "2026-10-18T15:32:26.488777+00:00",
+  "follower_fills": 0,
+  "forward_study_started": false,
+  "http_calls": 17,
+  "http_errors": 1,
+  "live_orders": 0,
+  "mappings": [
+    {
+      "condition": "0x4bf48ea200ba9d253d5445ff5522f2e90ac4970d82da5a9fff6621308b5beeac",
+      "exact_approved": false,
+      "fee_coefficient": "0.0695",
+      "league": "nfl",
+      "mapping_class": "SAME_EVENT_TEAM_US_RULES_DIFFERENT_CONTINGENCIES",
+      "quantity_step": "0.01",
+      "sides": [
+        {
+          "long": true,
+          "outcome": "Panthers",
+          "token": "23830168081017919977585940888287745259637871438129079800143052949223046983431",
+          "us_outcome": "Panthers",
+          "us_side_id": "2397290"
+        },
+        {
+          "long": false,
+          "outcome": "Eagles",
+          "token": "82914188951367172748889970099274188856470123976613269922741757092429595203588",
+          "us_outcome": "Eagles",
+          "us_side_id": "2397291"
+        }
+      ],
+      "source_rules_sha256": "8e354a1cb26dc8b3aac7a8fb233e11e3599f0b62ac1c59b23e335b1f36a967ce",
+      "source_slug": "nfl-car-phi-2026-10-18",
+      "start_at": 1792342800,
+      "us_rules_sha256": "ff8955c973f0a83b63943fe7bfe9db846214bac7eb272f59bdb5ca018d6fd1d7",
+      "us_slug": "aec-nfl-car-phi-2026-10-18"
+    },
+    {
+      "condition": "0x340c1c3ad87ec9d60450284665ba1a386a213d818a9042fdfcc8e20e0521f624",
+      "exact_approved": false,
+      "fee_coefficient": "0.0695",
+      "league": "nfl",
+      "mapping_class": "SAME_EVENT_TEAM_US_RULES_DIFFERENT_CONTINGENCIES",
+      "quantity_step": "0.01",
+      "sides": [
+        {
+          "long": true,
+          "outcome": "Cowboys",
+          "token": "62216093420049586863764473589072732611021099987810862636177687263075853891357",
+          "us_outcome": "Cowboys",
+          "us_side_id": "2397326"
+        },
+        {
+          "long": false,
+          "outcome": "Packers",
+          "token": "21229555207265850108920299530398596306658389490025953671520798592653541449729",
+          "us_outcome": "Packers",
+          "us_side_id": "2397327"
+        }
+      ],
+      "source_rules_sha256": "dbb4bde0961bc56e9e2620fe1c02f1be9c445af076af7f7d631bb1c5776af1d5",
+      "source_slug": "nfl-dal-gb-2026-10-19",
+      "start_at": 1792369200,
+      "us_rules_sha256": "8550888ac4155112200ebd481a65a73067517876e73ab6b90cc3a853668a5f7d",
+      "us_slug": "aec-nfl-dal-gb-2026-10-18"
+    },
+    {
+      "condition": "0x4fed9ede15018d3a9b1f9c889716c8ac9a2a0f714b8941e83f7b9075ee9456c0",
+      "exact_approved": false,
+      "fee_coefficient": "0.0695",
+      "league": "nfl",
+      "mapping_class": "SAME_EVENT_TEAM_US_RULES_DIFFERENT_CONTINGENCIES",
+      "quantity_step": "0.01",
+      "sides": [
+        {
+          "long": true,
+          "outcome": "Cardinals",
+          "token": "33216666742975492751421562476851805465618404224140435977500888538165476940319",
+          "us_outcome": "Cardinals",
+          "us_side_id": "2397312"
+        },
+        {
+          "long": false,
+          "outcome": "Rams",
+          "token": "15318729743090268904166980550874072906310577297086103662928913955191908069396",
+          "us_outcome": "Rams",
+          "us_side_id": "2397313"
+        }
+      ],
+      "source_rules_sha256": "ef8e324189c2aa6c09ee8f2dc9c8abe2c4d6e23501e43a85074b0daa0670a9d5",
+      "source_slug": "nfl-ari-la-2026-10-18",
+      "start_at": 1792353900,
+      "us_rules_sha256": "2414fc2f12ae637cb1731adc1bb6288cc6b0f4ebe6cd8c2df17b873d3166741f",
+      "us_slug": "aec-nfl-ari-lar-2026-10-18"
+    },
+    {
+      "condition": "0x074b42abd259c29c1d0b35d6216713d0af4015ceb19fb35f7b39746e59467a01",
+      "exact_approved": false,
+      "fee_coefficient": "0.0695",
+      "league": "nfl",
+      "mapping_class": "SAME_EVENT_TEAM_US_RULES_DIFFERENT_CONTINGENCIES",
+      "quantity_step": "0.01",
+      "sides": [
+        {
+          "long": true,
+          "outcome": "Ravens",
+          "token": "44331440436538619785212909844251738564846748479342123218492838481139919800798",
+          "us_outcome": "Ravens",
+          "us_side_id": "2397294"
+        },
+        {
+          "long": false,
+          "outcome": "Browns",
+          "token": "17875375028376479120175962878124508401147822081147132756927534200520109752230",
+          "us_outcome": "Browns",
+          "us_side_id": "2397295"
+        }
+      ],
+      "source_rules_sha256": "897276d200f9abf48329a0a3b7e818ebdb00ee4060ead2dfa8116a9c4d2c4676",
+      "source_slug": "nfl-bal-cle-2026-10-18",
+      "start_at": 1792342800,
+      "us_rules_sha256": "d2ffbbbfbc7867247aa3298d8596c8b6a9f55c7ec923ab4291b53af0740ebe94",
+      "us_slug": "aec-nfl-bal-cle-2026-10-18"
+    }
+  ],
+  "mode": "READINESS_ONLY_NOT_FORWARD_STUDY",
+  "protocol_sha256": "1be659edf8286da821eacd314f81fee3c46f8a5ff52a16c4bb5d56cfb02f108f",
+  "started_at": "2026-10-18T15:31:23.326643+00:00",
+  "wallets": [
+    {
+      "has_more": false,
+      "latest_returned_trade_at": "2026-10-18T14:50:08+00:00",
+      "name": "ic4cream",
+      "received_at": "2026-10-18T15:31:27.937004+00:00",
+      "returned_rows": 49,
+      "wallet": "0x27f738fe203827445690339104aae35b20bc44b0"
+    },
+    {
+      "has_more": false,
+      "latest_returned_trade_at": "2026-10-18T00:05:23+00:00",
+      "name": "alwaysfade",
+      "received_at": "2026-10-18T15:31:31.086612+00:00",
+      "returned_rows": 8,
+      "wallet": "0xe5b70fd855af9258d9463992e4f1ed7987905ee3"
+    },
+    {
+      "has_more": true,
+      "latest_returned_trade_at": "2026-10-18T15:30:50+00:00",
+      "name": "monkeymashingkeyboard",
+      "received_at": "2026-10-18T15:31:34.435579+00:00",
+      "returned_rows": 100,
+      "wallet": "0x684baa57c338c2549aec0aa3f034f695d72a8409"
+    },
+    {
+      "has_more": true,
+      "latest_returned_trade_at": "2026-10-18T12:29:42+00:00",
+      "name": "para-Vision",
+      "received_at": "2026-10-18T15:31:38.174304+00:00",
+      "returned_rows": 100,
+      "wallet": "0x676c1bb692c76b57b06f1b93817515acfa5ce139"
+    }
+  ]
+}

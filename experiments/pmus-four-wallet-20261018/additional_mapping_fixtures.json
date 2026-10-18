@@ -1,0 +1,389 @@
+[
+  {
+    "source": {
+      "conditionId": "0x4bf48ea200ba9d253d5445ff5522f2e90ac4970d82da5a9fff6621308b5beeac",
+      "slug": "nfl-car-phi-2026-10-18",
+      "sportsMarketType": "moneyline",
+      "gameStartTime": "2026-10-18 17:00:00+00",
+      "description": "In the upcoming NFL football game between Panthers and Eagles, scheduled for October 18 at 1:00PM ET:\nThis market will resolve to \"Panthers\" if Panthers win the game.\nThis market will resolve to \"Eagles\" if Eagles win the game.\nOvertime is included if played.\nIf the game ends in a tie, this market will resolve 50-50.\nIf the game is postponed, this market will remain open until the game has been completed.\nIf the game is canceled entirely, with no make-up game, this market will resolve 50-50.",
+      "outcomes": "[\"Panthers\", \"Eagles\"]",
+      "clobTokenIds": "[\"23830168081017919977585940888287745259637871438129079800143052949223046983431\", \"82914188951367172748889970099274188856470123976613269922741757092429595203588\"]"
+    },
+    "us": {
+      "slug": "aec-nfl-car-phi-2026-10-18",
+      "category": "sports",
+      "marketType": "moneyline",
+      "sportsMarketType": "football_team_full_game_winner",
+      "gameStartTime": "2026-10-18T17:00:00Z",
+      "description": "This market will settle to the winner of the Carolina Panthers vs Philadelphia Eagles NFL game scheduled for Oct 18, 2026. Overtime is included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from NFL.",
+      "feeCoefficient": 0.0695,
+      "minimumTradeQty": 0.01,
+      "marketSides": [
+        {
+          "id": "2397290",
+          "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+          "identifier": "aec-nfl-car-phi-2026-10-18",
+          "createdAt": "2026-10-04T06:00:06Z",
+          "updatedAt": "2026-10-04T06:00:06Z",
+          "description": "Panthers",
+          "price": "0.6050",
+          "marketId": 1198904,
+          "long": true,
+          "teamId": 52,
+          "team": {
+            "id": 52,
+            "name": "Carolina Panthers",
+            "abbreviation": "car",
+            "league": "nfl",
+            "record": "2-2",
+            "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/NFL+Team+Logos/CAR.png",
+            "alias": "Panthers",
+            "safeName": "CAR Panthers",
+            "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_CarolinaPanthers_FacingRight_Icon%40160x160.png",
+            "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_CarolinaPanthers_FacingLeft_Icon%40160x160.png",
+            "colorPrimary": "#0085CA",
+            "providerId": 5,
+            "ordering": "away",
+            "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_CarolinaPanthers_L@320x320.png",
+            "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_CarolinaPanthers_R@320x320.png",
+            "displayAbbreviation": "CAR",
+            "conference": "",
+            "providerIds": [
+              {
+                "provider": "PROVIDER_SPORTSDATAIO",
+                "providerId": "5"
+              },
+              {
+                "provider": "PROVIDER_SPORTRADAR",
+                "providerId": "f14bf5cc-9a82-4a38-bc15-d39f75ed5314"
+              }
+            ],
+            "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_CarolinaPanthers_L@320x320.png",
+            "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_CarolinaPanthers_R@320x320.png",
+            "color": {
+              "light": "#0085CA",
+              "dark": "#0085CA"
+            },
+            "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO"
+          },
+          "quote": {
+            "value": "0.6075",
+            "currency": "USD"
+          },
+          "tradable": true
+        },
+        {
+          "id": "2397291",
+          "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+          "identifier": "aec-nfl-car-phi-2026-10-18",
+          "createdAt": "2026-10-04T06:00:06Z",
+          "updatedAt": "2026-10-04T06:00:06Z",
+          "description": "Eagles",
+          "price": "0.6075",
+          "marketId": 1198904,
+          "long": false,
+          "teamId": 73,
+          "team": {
+            "id": 73,
+            "name": "Philadelphia Eagles",
+            "abbreviation": "phi",
+            "league": "nfl",
+            "record": "2-3",
+            "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/NFL+Team+Logos/PHI.png",
+            "alias": "Eagles",
+            "safeName": "PHI Eagles",
+            "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_PhiladelphiaEagles_FacingRight_Icon%40160x160.png",
+            "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_PhiladelphiaEagles_FacingLeft_Icon%40160x160.png",
+            "colorPrimary": "#004C54",
+            "providerId": 26,
+            "ordering": "home",
+            "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_PhiladelphiaEagles_L@320x320.png",
+            "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_PhiladelphiaEagles_R@320x320.png",
+            "displayAbbreviation": "PHI",
+            "conference": "",
+            "providerIds": [
+              {
+                "provider": "PROVIDER_SPORTSDATAIO",
+                "providerId": "26"
+              },
+              {
+                "provider": "PROVIDER_SPORTRADAR",
+                "providerId": "386bdbf9-9eea-4869-bb9a-274b0bc66e80"
+              }
+            ],
+            "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_PhiladelphiaEagles_L@320x320.png",
+            "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_PhiladelphiaEagles_R@320x320.png",
+            "color": {
+              "light": "#004C54",
+              "dark": "#2C6C74"
+            },
+            "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO"
+          },
+          "quote": {
+            "value": "0.395",
+            "currency": "USD"
+          },
+          "tradable": true
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "conditionId": "0x340c1c3ad87ec9d60450284665ba1a386a213d818a9042fdfcc8e20e0521f624",
+      "slug": "nfl-dal-gb-2026-10-19",
+      "sportsMarketType": "moneyline",
+      "gameStartTime": "2026-10-19 00:20:00+00",
+      "description": "In the upcoming NFL football game between Cowboys and Packers, scheduled for October 18 at 8:20PM ET:\nThis market will resolve to \"Cowboys\" if Cowboys win the game.\nThis market will resolve to \"Packers\" if Packers win the game.\nOvertime is included if played.\nIf the game ends in a tie, this market will resolve 50-50.\nIf the game is postponed, this market will remain open until the game has been completed.\nIf the game is canceled entirely, with no make-up game, this market will resolve 50-50.",
+      "outcomes": "[\"Cowboys\", \"Packers\"]",
+      "clobTokenIds": "[\"62216093420049586863764473589072732611021099987810862636177687263075853891357\", \"21229555207265850108920299530398596306658389490025953671520798592653541449729\"]"
+    },
+    "us": {
+      "slug": "aec-nfl-dal-gb-2026-10-18",
+      "category": "sports",
+      "marketType": "moneyline",
+      "sportsMarketType": "football_team_full_game_winner",
+      "gameStartTime": "2026-10-19T00:20:00Z",
+      "description": "This market will settle to the winner of the Dallas Cowboys vs Green Bay Packers NFL game scheduled for Oct 18, 2026. Overtime is included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from NFL.",
+      "feeCoefficient": 0.0695,
+      "minimumTradeQty": 0.01,
+      "marketSides": [
+        {
+          "id": "2397326",
+          "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+          "identifier": "aec-nfl-dal-gb-2026-10-18",
+          "createdAt": "2026-10-04T06:00:19Z",
+          "updatedAt": "2026-10-04T06:00:19Z",
+          "description": "Cowboys",
+          "price": "0.4875",
+          "marketId": 1198922,
+          "long": true,
+          "teamId": 56,
+          "team": {
+            "id": 56,
+            "name": "Dallas Cowboys",
+            "abbreviation": "dal",
+            "league": "nfl",
+            "record": "2-3",
+            "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/NFL+Team+Logos/DAL.png",
+            "alias": "Cowboys",
+            "safeName": "DAL Cowboys",
+            "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_DallasCowboys_FacingRight_Icon%40160x160.png",
+            "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_DallasCowboys_FacingLeft_Icon%40160x160.png",
+            "colorPrimary": "#041E42",
+            "providerId": 9,
+            "ordering": "away",
+            "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_DallasCowboys_L@320x320.png",
+            "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_DallasCowboys_R@320x320.png",
+            "displayAbbreviation": "DAL",
+            "conference": "",
+            "providerIds": [
+              {
+                "provider": "PROVIDER_SPORTSDATAIO",
+                "providerId": "9"
+              },
+              {
+                "provider": "PROVIDER_SPORTRADAR",
+                "providerId": "e627eec7-bbae-4fa4-8e73-8e1d6bc5c060"
+              }
+            ],
+            "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_DallasCowboys_L@320x320.png",
+            "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_DallasCowboys_R@320x320.png",
+            "color": {
+              "light": "#0B1240",
+              "dark": "#4B6090"
+            },
+            "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO"
+          },
+          "quote": {
+            "value": "0.4900",
+            "currency": "USD"
+          },
+          "tradable": true
+        },
+        {
+          "id": "2397327",
+          "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+          "identifier": "aec-nfl-dal-gb-2026-10-18",
+          "createdAt": "2026-10-04T06:00:19Z",
+          "updatedAt": "2026-10-04T06:00:19Z",
+          "description": "Packers",
+          "price": "0.4900",
+          "marketId": 1198922,
+          "long": false,
+          "teamId": 59,
+          "team": {
+            "id": 59,
+            "name": "Green Bay Packers",
+            "abbreviation": "gb",
+            "league": "nfl",
+            "record": "3-2",
+            "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/NFL+Team+Logos/GB.png",
+            "alias": "Packers",
+            "safeName": "GB Packers",
+            "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_GreenBayPackers_FacingRight_Icon%40160x160.png",
+            "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_GreenBayPackers_FacingLeft_Icon%40160x160.png",
+            "colorPrimary": "#203731",
+            "providerId": 12,
+            "ordering": "home",
+            "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_GreenBayPackers_L@320x320.png",
+            "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_GreenBayPackers_R@320x320.png",
+            "displayAbbreviation": "GB",
+            "conference": "",
+            "providerIds": [
+              {
+                "provider": "PROVIDER_SPORTSDATAIO",
+                "providerId": "12"
+              },
+              {
+                "provider": "PROVIDER_SPORTRADAR",
+                "providerId": "a20471b4-a8d9-40c7-95ad-90cc30e46932"
+              }
+            ],
+            "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_GreenBayPackers_L@320x320.png",
+            "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_GreenBayPackers_R@320x320.png",
+            "color": {
+              "light": "#283E31",
+              "dark": "#4C655A"
+            },
+            "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO"
+          },
+          "quote": {
+            "value": "0.5125",
+            "currency": "USD"
+          },
+          "tradable": true
+        }
+      ]
+    }
+  },
+  {
+    "source": {
+      "conditionId": "0x4fed9ede15018d3a9b1f9c889716c8ac9a2a0f714b8941e83f7b9075ee9456c0",
+      "slug": "nfl-ari-la-2026-10-18",
+      "sportsMarketType": "moneyline",
+      "gameStartTime": "2026-10-18 20:05:00+00",
+      "description": "In the upcoming NFL football game between Cardinals and Rams, scheduled for October 18 at 4:05PM ET:\nThis market will resolve to \"Cardinals\" if Cardinals win the game.\nThis market will resolve to \"Rams\" if Rams win the game.\nOvertime is included if played.\nIf the game ends in a tie, this market will resolve 50-50.\nIf the game is postponed, this market will remain open until the game has been completed.\nIf the game is canceled entirely, with no make-up game, this market will resolve 50-50.",
+      "outcomes": "[\"Cardinals\", \"Rams\"]",
+      "clobTokenIds": "[\"33216666742975492751421562476851805465618404224140435977500888538165476940319\", \"15318729743090268904166980550874072906310577297086103662928913955191908069396\"]"
+    },
+    "us": {
+      "slug": "aec-nfl-ari-lar-2026-10-18",
+      "category": "sports",
+      "marketType": "moneyline",
+      "sportsMarketType": "football_team_full_game_winner",
+      "gameStartTime": "2026-10-18T20:05:00Z",
+      "description": "This market will settle to the winner of the Arizona Cardinals vs Los Angeles Rams NFL game scheduled for Oct 18, 2026. Overtime is included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from NFL.",
+      "feeCoefficient": 0.0695,
+      "minimumTradeQty": 0.01,
+      "marketSides": [
+        {
+          "id": "2397312",
+          "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+          "identifier": "aec-nfl-ari-lar-2026-10-18",
+          "createdAt": "2026-10-04T06:00:15Z",
+          "updatedAt": "2026-10-04T06:00:15Z",
+          "description": "Cardinals",
+          "price": "0.1225",
+          "marketId": 1198915,
+          "long": true,
+          "teamId": 48,
+          "team": {
+            "id": 48,
+            "name": "Arizona Cardinals",
+            "abbreviation": "ari",
+            "league": "nfl",
+            "record": "1-4",
+            "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/NFL+Team+Logos/ARZ.png",
+            "alias": "Cardinals",
+            "safeName": "ARI Cardinals",
+            "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_ArizonaCardinals_FacingRight_Icon%40160x160.png",
+            "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_ArizonaCardinals_FacingLeft_Icon%40160x160.png",
+            "colorPrimary": "#97233F",
+            "providerId": 1,
+            "ordering": "away",
+            "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_ArizonaCardinals_L@320x320.png",
+            "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_ArizonaCardinals_R@320x320.png",
+            "displayAbbreviation": "ARI",
+            "conference": "",
+            "providerIds": [
+              {
+                "provider": "PROVIDER_SPORTSDATAIO",
+                "providerId": "1"
+              },
+              {
+                "provider": "PROVIDER_SPORTRADAR",
+                "providerId": "de760528-1dc0-416a-a978-b510d20692ff"
+              }
+            ],
+            "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_ArizonaCardinals_L@320x320.png",
+            "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_ArizonaCardinals_R@320x320.png",
+            "color": {
+              "light": "#97233F",
+              "dark": "#A7344C"
+            },
+            "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO"
+          },
+          "quote": {
+            "value": "0.1250",
+            "currency": "USD"
+          },
+          "tradable": true
+        },
+        {
+          "id": "2397313",
+          "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+          "identifier": "aec-nfl-ari-lar-2026-10-18",
+          "createdAt": "2026-10-04T06:00:15Z",
+          "updatedAt": "2026-10-04T06:00:15Z",
+          "description": "Rams",
+          "price": "0.1250",
+          "marketId": 1198915,
+          "long": false,
+          "teamId": 64,
+          "team": {
+            "id": 64,
+            "name": "Los Angeles Rams",
+            "abbreviation": "lar",
+            "league": "nfl",
+            "record": "2-3",
+            "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/NFL+Team+Logos/LAR.png",
+            "alias": "Rams",
+            "safeName": "LA Rams",
+            "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_LosAngelesRams_FacingRight_Icon_VariantB%40160x160.png",
+            "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_LosAngelesRams_FacingLeft_Icon_VariantB%40160x160.png",
+            "colorPrimary": "#003594",
+            "providerId": 32,
+            "ordering": "home",
+            "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_LosAngelesRams_L@320x320.png",
+            "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_LosAngelesRams_R@320x320.png",
+            "displayAbbreviation": "LAR",
+            "conference": "",
+            "providerIds": [
+              {
+                "provider": "PROVIDER_SPORTSDATAIO",
+                "providerId": "32"
+              },
+              {
+                "provider": "PROVIDER_SPORTRADAR",
+                "providerId": "2eff2a03-54d4-46ba-890e-2bc3925548f3"
+              }
+            ],
+            "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_LosAngelesRams_L@320x320.png",
+            "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_LosAngelesRams_R@320x320.png",
+            "color": {
+              "light": "#003594",
+              "dark": "#2C5EBF"
+            },
+            "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO"
+          },
+          "quote": {
+            "value": "0.8775",
+            "currency": "USD"
+          },
+          "tradable": true
+        }
+      ]
+    }
+  }
+]

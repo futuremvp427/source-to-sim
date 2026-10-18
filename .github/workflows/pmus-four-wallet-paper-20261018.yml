@@ -1,0 +1,350 @@
+name: Four Wallet US Sports Paper 2026-10-18
+on:
+  push:
+    branches: [research/pmus-four-wallet-paper-20261018]
+    paths:
+      - experiments/pmus-four-wallet-20261018/**
+      - .github/workflows/pmus-four-wallet-paper-20261018.yml
+permissions:
+  contents: write
+concurrency:
+  group: pmus-four-wallet-forward-20261018-v1
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      terminal: ${{ steps.bootstrap.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Frozen accounting and integrity tests
+        working-directory: experiments/pmus-four-wallet-20261018
+        run: python3 -m unittest discover -v
+      - name: Public-data bootstrap and durable checkpoint
+        id: bootstrap
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --bootstrap --seconds 0 --work paper-work
+  collect_00:
+    needs: validate
+    if: ${{ always() && needs.validate.result == 'success' && needs.validate.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 00
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 0 --seconds 18000 --work paper-work
+  collect_01:
+    needs: collect_00
+    if: ${{ always() && needs.collect_00.result == 'success' && needs.collect_00.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 01
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 1 --seconds 18000 --work paper-work
+  collect_02:
+    needs: collect_01
+    if: ${{ always() && needs.collect_01.result == 'success' && needs.collect_01.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 02
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 2 --seconds 18000 --work paper-work
+  collect_03:
+    needs: collect_02
+    if: ${{ always() && needs.collect_02.result == 'success' && needs.collect_02.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 03
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 3 --seconds 18000 --work paper-work
+  collect_04:
+    needs: collect_03
+    if: ${{ always() && needs.collect_03.result == 'success' && needs.collect_03.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 04
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 4 --seconds 18000 --work paper-work
+  collect_05:
+    needs: collect_04
+    if: ${{ always() && needs.collect_04.result == 'success' && needs.collect_04.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 05
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 5 --seconds 18000 --work paper-work
+  collect_06:
+    needs: collect_05
+    if: ${{ always() && needs.collect_05.result == 'success' && needs.collect_05.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 06
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 6 --seconds 18000 --work paper-work
+  collect_07:
+    needs: collect_06
+    if: ${{ always() && needs.collect_06.result == 'success' && needs.collect_06.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 07
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 7 --seconds 18000 --work paper-work
+  collect_08:
+    needs: collect_07
+    if: ${{ always() && needs.collect_07.result == 'success' && needs.collect_07.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 08
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 8 --seconds 18000 --work paper-work
+  collect_09:
+    needs: collect_08
+    if: ${{ always() && needs.collect_08.result == 'success' && needs.collect_08.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 09
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 9 --seconds 18000 --work paper-work
+  collect_10:
+    needs: collect_09
+    if: ${{ always() && needs.collect_09.result == 'success' && needs.collect_09.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 10
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 10 --seconds 18000 --work paper-work
+  collect_11:
+    needs: collect_10
+    if: ${{ always() && needs.collect_10.result == 'success' && needs.collect_10.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 11
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 11 --seconds 18000 --work paper-work
+  collect_12:
+    needs: collect_11
+    if: ${{ always() && needs.collect_11.result == 'success' && needs.collect_11.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 12
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 12 --seconds 18000 --work paper-work
+  collect_13:
+    needs: collect_12
+    if: ${{ always() && needs.collect_12.result == 'success' && needs.collect_12.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 13
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 13 --seconds 18000 --work paper-work
+  collect_14:
+    needs: collect_13
+    if: ${{ always() && needs.collect_13.result == 'success' && needs.collect_13.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 14
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 14 --seconds 18000 --work paper-work
+  collect_15:
+    needs: collect_14
+    if: ${{ always() && needs.collect_14.result == 'success' && needs.collect_14.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 15
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 15 --seconds 18000 --work paper-work
+  collect_16:
+    needs: collect_15
+    if: ${{ always() && needs.collect_15.result == 'success' && needs.collect_15.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 16
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 16 --seconds 18000 --work paper-work
+  collect_17:
+    needs: collect_16
+    if: ${{ always() && needs.collect_16.result == 'success' && needs.collect_16.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 17
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 17 --seconds 18000 --work paper-work
+  collect_18:
+    needs: collect_17
+    if: ${{ always() && needs.collect_17.result == 'success' && needs.collect_17.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 18
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 18 --seconds 18000 --work paper-work
+  collect_19:
+    needs: collect_18
+    if: ${{ always() && needs.collect_18.result == 'success' && needs.collect_18.outputs.terminal != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    outputs:
+      terminal: ${{ steps.collect.outputs.terminal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exact preceding checkpoint and collection segment 19
+        id: collect
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 experiments/pmus-four-wallet-20261018/collector.py --segment 19 --seconds 18000 --work paper-work
