@@ -74,16 +74,22 @@ class PublicClient:
         self.journal, self.lock = journal, threading.Lock()
         self.next_at, self.cooldown_until, self.rate = 0, 0, rate
         self.deadline = deadline
+        self.denied_reason = None
 
     def get(self, url):
         if not allowed(url):
             raise ValueError("not_public_market_data_GET")
         with self.lock:
+            if self.denied_reason:
+                raise PermissionError(self.denied_reason)
             tick = time.monotonic()
             wait = max(0, self.next_at - tick)
             self.next_at = max(self.next_at, tick) + 1 / self.rate
         if wait:
             time.sleep(wait)
+        with self.lock:
+            if self.denied_reason:
+                raise PermissionError(self.denied_reason)
         if self.deadline is not None and time.time() >= self.deadline:
             raise RuntimeError("probe_time_bound_reached")
         status, data, headers, error = None, b"", {}, None
@@ -114,6 +120,9 @@ class PublicClient:
             self.cooldown_until = time.time() + retry
         if len(data) > 2 * 1024 * 1024:
             error = "response_size_bound"
+        if status in (401, 403):
+            with self.lock:
+                self.denied_reason = f"public_endpoint_access_denied_{status}"
         record = {"url": url, "method": "GET", "authenticated": False, "sent_at": sent,
                   "received_at": time.time(), "status": status, "headers": headers, "error": error,
                   "body_bytes": len(data), "body_sha256": hashlib.sha256(data).hexdigest(),
@@ -121,7 +130,7 @@ class PublicClient:
         reference = self.journal.add("http", record)
         if status in (401, 403):
             # Explicit access denial is a stop, not an invitation to bypass it.
-            raise PermissionError(f"public_endpoint_access_denied_{status}")
+            raise PermissionError(self.denied_reason)
         try:
             body = json.loads(data) if not error else None
         except (ValueError, UnicodeDecodeError):

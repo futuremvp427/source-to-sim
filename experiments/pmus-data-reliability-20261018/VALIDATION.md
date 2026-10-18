@@ -11,7 +11,7 @@ This is an isolated data-quality tool, not a fixed or restarted wallet study.
 
 ## Verified offline
 
-`python3 -m unittest -v test_quality.py`: **36 tests passed**.
+`python3 -m unittest -v test_quality.py`: **37 tests passed**.
 `python3 -m py_compile quality.py probe.py test_quality.py`: passed.
 
 Tests include the fresh-Date/stale-Age bug, stale/future book timestamps,

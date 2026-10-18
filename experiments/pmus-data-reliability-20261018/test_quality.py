@@ -6,11 +6,12 @@ import json
 import tempfile
 import time
 import unittest
+import urllib.error
 from unittest import mock
 from pathlib import Path
 
 from quality import compare_stream, inspect_book, readiness, resolve_catalog, transport
-from probe import Journal, allowed, capture_cycle, catalog, main, refresh_matches, resolve_sources, verify_journal
+from probe import Journal, PublicClient, allowed, capture_cycle, catalog, main, refresh_matches, resolve_sources, verify_journal
 
 NOW = 1792340000.0
 SLUG = "aec-nfl-ari-lar-2026-10-18"
@@ -218,6 +219,20 @@ class QualityTests(unittest.TestCase):
                 main()
             self.assertEqual(exc.exception.code, 2)
             client.assert_not_called()
+
+    def test_access_denial_blocks_all_subsequent_requests(self):
+        with tempfile.TemporaryDirectory() as t:
+            j = Journal(Path(t) / "new")
+            client = PublicClient(j)
+            opener = mock.Mock()
+            opener.open.side_effect = urllib.error.HTTPError(
+                "https://gateway.polymarket.us/v1/markets", 403, "Forbidden", {}, io.BytesIO(b"{}"))
+            with mock.patch("urllib.request.build_opener", return_value=opener):
+                for _ in range(2):
+                    with self.assertRaises(PermissionError):
+                        client.get("https://gateway.polymarket.us/v1/markets")
+            j.close()
+            self.assertEqual(opener.open.call_count, 1)
 
     def test_stream_heartbeat_is_not_book(self):
         x = inspect_book(response(), SLUG)
