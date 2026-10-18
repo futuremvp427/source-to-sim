@@ -1,7 +1,7 @@
 # Five-wallet US sports paper test
 
 Study: `pmus-five-wallet-forward-20261017-v1`
-Measured through: **2026-10-18T06:25:00.707186+00:00**
+Measured through: **2026-10-18T06:35:23.574710+00:00**
 
 Collection ends: 2026-10-19T20:03:43.250398+00:00; settlement hard stop: 2026-10-21T20:03:43.250398+00:00
 
@@ -10,7 +10,7 @@ Each account starts with $1,000 fictional capital. Source account profits are no
 | Wallet | Status | Completed distinct markets | Net after modeled fees | Stress net | Open markets | Contracts bought | Elapsed source coverage |
 |---|---|---:|---:|---:|---:|---:|---:|
 | omnibus-076daa | SCREEN_PENDING | 13 | $9.45 | $8.12 | 1 | 150.03 | 100.0% |
-| mooseborzoii | SCREEN_PENDING | 19 | $-31.28 | $-35.45 | 2 | 350.36 | 100.0% |
+| mooseborzoii | SCREEN_PENDING | 19 | $-31.28 | $-35.45 | 2 | 351.19 | 100.0% |
 | HomeRunHazard | SCREEN_PENDING | 18 | $25.12 | $22.07 | 4 | 270.17 | 100.0% |
 | gmpm2 | SCREEN_PENDING | 3 | $-5.59 | $-6.09 | 0 | 40.00 | 100.0% |
 | ethanaz | SCREEN_PENDING | 6 | $-0.21 | $-0.81 | 1 | 70.09 | 100.0% |
