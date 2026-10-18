@@ -1,0 +1,7 @@
+{
+  "fixture_only": true,
+  "purpose": "Synthetic offline-only shape example. Not a real market or a selected research watchlist.",
+  "source_condition_ids": [
+    "0x0000000000000000000000000000000000000000000000000000000000000000"
+  ]
+}
