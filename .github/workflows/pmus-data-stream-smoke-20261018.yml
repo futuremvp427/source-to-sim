@@ -1,0 +1,35 @@
+name: Polymarket US Data-Only Connection Check
+on:
+  push:
+    branches: [research/pmus-data-reliability-20261018]
+    paths:
+      - experiments/pmus-data-reliability-20261018/stream_smoke.py
+      - experiments/pmus-data-reliability-20261018/test_stream_smoke.py
+      - experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - .github/workflows/pmus-data-stream-smoke-20261018.yml
+permissions:
+  contents: read
+concurrency:
+  group: pmus-isolated-data-stream-smoke-20261018
+  cancel-in-progress: false
+jobs:
+  connection_check:
+    if: ${{ github.repository == 'futuremvp427/source-to-sim' && github.event.repository.private == false && github.ref == 'refs/heads/research/pmus-data-reliability-20261018' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned data-only transport dependencies (no venue keys)
+        run: |
+          python3 -m venv .venv-pmus-stream
+          .venv-pmus-stream/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Offline safety and freshness tests (no venue keys)
+        working-directory: experiments/pmus-data-reliability-20261018
+        run: ../../.venv-pmus-stream/bin/python -m unittest -v test_quality.py test_stream_smoke.py
+      - name: 120-second market-data-only connection and fresh-book check
+        env:
+          PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+          PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+        run: .venv-pmus-stream/bin/python experiments/pmus-data-reliability-20261018/stream_smoke.py --output stream-smoke-evidence --seconds 120 --approved-market-data-only --export-public-evidence-in-log

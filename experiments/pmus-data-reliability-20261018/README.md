@@ -1,5 +1,42 @@
 # Isolated US market-data reliability diagnostic
 
+## Authenticated connection follow-up — October 18, 2026
+
+The user confirmed saving repository secrets PMUS_DATA_KEY_ID and
+PMUS_DATA_SECRET_KEY. The new stream_smoke.py uses those names only to sign
+the fixed GET handshake at wss://api.polymarket.us/v1/ws/markets. Neither key,
+signature, handshake headers nor arbitrary server errors are logged. It cannot
+place orders, read balances/positions, use the private socket, follow redirects
+or select another credential destination. A 401/403 stops the check.
+
+A new branch-specific, public-repository-only, standard Linux CI job runs the
+offline tests without keys, then a bounded 120-second data-only check with the
+keys available only to that step. No schedule, paid runner, artifact upload or
+ChatGPT automation is created. It does not run either study collector or
+change their workflows. It selects at most three actually catalog-listed open
+sports markets nearest kickoff within six hours past / 24 hours future. This
+public generic connection sample is NOT the private 21-condition watchlist and
+does not establish wallet-study coverage or verified actual in-play status.
+
+The check separates missing key configuration, authenticated handshake, actual
+full-book messages, fresh executable depth, fresh REST/stream comparisons and
+missed slots. A heartbeat never resets venue time; stale or conflicting books
+remain invalid. A pass requires a complete short sampling interval and at
+least one fresh exact REST/stream pair for each subscribed market. Even a
+pass is only a connection smoke test: the full 24-hour reliability test has
+NOT been started by this workflow and readiness remains false.
+
+Public market-only evidence is hash-chained and exported as bounded numbered
+base64 ZIP chunks in the job log, with ZIP SHA-256 and byte length in the
+summary. Exports above 512 KiB compressed input are withheld explicitly, not
+silently truncated. Secrets, signing headers and private account data never
+enter that journal. Raw market books are whitelisted to market identity,
+venue timestamp/state and numeric depth. No private research watchlist is
+committed or logged. The historical public-only notes below describe the
+previous probe; this section supersedes only their statements that no stream
+code or branch-specific connection workflow exists. Public probe gates and
+both frozen wallet studies are unchanged.
+
 Authorized October 18, 2026 after the two frozen wallet studies developed
 incomplete executable-mark coverage. This directory is **data-only**, not a new
 follower, wallet cohort, trading strategy, or replay of either study.
