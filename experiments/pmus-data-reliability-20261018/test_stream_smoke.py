@@ -35,6 +35,16 @@ class StreamTests(unittest.TestCase):
             self.assertNotIn("dont-print-this",str(err.exception))
             self.assertNotIn("header",str(err.exception))
 
+    def test_wrapped_base64_matches_official_sdk_format(self):
+        wrapped=KEY[:22]+"\r\n  "+KEY[22:]
+        h=auth_headers("example-key",wrapped,1792340000000)
+        Ed25519PrivateKey.from_private_bytes(SEED).public_key().verify(
+            base64.b64decode(h["X-PM-Signature"]),b"1792340000000GET/v1/ws/markets")
+        from stream_smoke import credential_shape
+        shape=credential_shape("example-key",wrapped)
+        self.assertEqual(shape["secret_decoded_bytes"],32)
+        self.assertNotIn(KEY,json.dumps(shape))
+
     def test_empty_keys_do_not_make_any_network_request(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ,{},clear=True), mock.patch("stream_smoke.PublicClient") as client, contextlib.redirect_stdout(io.StringIO()) as output:
             rc=main(["--output",str(Path(d)/"new"),"--approved-market-data-only"])

@@ -37,7 +37,9 @@ def auth_headers(key_id, secret, timestamp_ms=None):
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,200}", key_id):
         raise ValueError("invalid_key_id_format")
     try:
-        raw = base64.b64decode(secret, validate=True)
+        # Clipboard/line wrapping is not key material. Match the official SDK's
+        # acceptance of Base64 whitespace, without ignoring labels/punctuation.
+        raw = base64.b64decode("".join(secret.split()), validate=True)
         if len(raw) not in (32, 64):
             raise ValueError()
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -58,6 +60,18 @@ def subscription(slugs):
         raise ValueError("invalid_market_slug")
     return {"subscribe": {"requestId": "pmus-data-only-1",
         "subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA", "marketSlugs": slugs}}
+
+
+def credential_shape(key_id, secret):
+    """Booleans/decoded length only. No value, prefix, hash or signature."""
+    out={"key_id_present":bool(key_id),"secret_key_present":bool(secret)}
+    try:
+        raw=base64.b64decode("".join(secret.split()),validate=True)
+        out.update(secret_is_base64=True,secret_decoded_bytes=len(raw),
+                   expected_32_or_64_bytes=len(raw) in (32,64))
+    except Exception:
+        out.update(secret_is_base64=False,expected_32_or_64_bytes=False)
+    return out
 
 
 def safe_market_data(value, slugs):
@@ -256,6 +270,7 @@ def main(argv=None):
     try:
         key=os.environ.get("PMUS_DATA_KEY_ID","").strip()
         secret=os.environ.get("PMUS_DATA_SECRET_KEY","").strip()
+        result["credential_shape"]=credential_shape(key,secret)
         auth_headers(key,secret)  # Validate presence/format before any network use.
         result["credentials_configured"]=True
         journal=Journal(args.output,evidence_limit=16*1024*1024,body_limit=16*1024*1024)
