@@ -79,12 +79,13 @@ class Journal:
         with self.lock:
             record = {"seq": self.seq + 1, "previous_hash": self.head, "kind": kind, "payload": payload}
             encoded = canonical(record)
-            if self.total + len(encoded) > self.limit:
-                raise RuntimeError("evidence_limit_reached")
             head = hashlib.sha256(encoded).hexdigest()
-            self.writer.write(canonical({**record, "hash": head}) + b"\n")
+            line = canonical({**record, "hash": head}) + b"\n"
+            if self.total + len(line) > self.limit:
+                raise RuntimeError("evidence_limit_reached")
+            self.writer.write(line)
             self.seq, self.head = record["seq"], head
-            self.total += len(encoded)
+            self.total += len(line)
             return {"seq": self.seq, "hash": self.head}
 
     def close(self):
@@ -247,6 +248,9 @@ def resolve_sources(client, conditions, listing):
 
 def refresh_matches(client, initial, listing):
     refreshed = resolve_sources(client, list(initial), listing)
+    if not listing["complete"]:
+        # A failed page is not evidence that every watched market retired.
+        return refreshed
     for condition, original in initial.items():
         mapping = original.get("mapping")
         current = refreshed[condition]
@@ -278,8 +282,19 @@ class MetadataRefresher:
             refreshed = self.future.result()
             self.future = None
             # A verified terminal payout cannot be reverted to a tradable book.
-            current = {c: current[c] if current[c]["status"] == "official_us_settled" else m
-                       for c, m in refreshed.items()}
+            applied = {}
+            for c, m in refreshed.items():
+                old = current[c]
+                temporary = m["status"] in ("catalog_incomplete", "source_metadata_unavailable")
+                if old["status"] == "official_us_settled":
+                    applied[c] = old
+                elif temporary and old.get("mapping") and at < old.get("metadata_valid_until", 0):
+                    # Use only the still-valid cached proof. Never reset its
+                    # expiry after a failed refresh or mask the failed request.
+                    applied[c] = {**old, "last_metadata_refresh_error": m}
+                else:
+                    applied[c] = m
+            current = applied
             self.journal.add("metadata_refresh_applied", {"at": at, "matches": current})
         if self.future is None and at >= self.next_at:
             self.next_at = at + self.interval
@@ -350,6 +365,17 @@ def capture_cycle(client, matches, tick, scheduled_at):
                 markets[condition]["issues"] = [*markets[condition]["issues"], "expired_mapping_metadata"]
                 markets[condition]["usable"] = False
     return {"tick": tick, "scheduled_at": scheduled_at, "finished_at": time.time(), "markets": markets}
+
+
+def remember_terminals(matches, initial, markets):
+    """Never mutate the saved bootstrap plan when a final payout arrives."""
+    updated = dict(matches)
+    for condition, sample in markets.items():
+        if sample.get("usable") and sample.get("kind") == "official_us_settlement":
+            updated[condition] = {"status": "official_us_settled",
+                "mapping": initial[condition]["mapping"], "settlement": sample["settlement"],
+                "evidence": sample["evidence"]}
+    return updated
 
 
 def raw_body(path, record):
@@ -429,7 +455,7 @@ def main():
         plan["started_at"] = time.time()
         measurement_started = True
         journal.add("plan", plan)
-        current_matches = plan["matches"]
+        current_matches = dict(plan["matches"])
         stop = plan["started_at"] + args.run_seconds
         client.deadline = stop + 8
         refresher = MetadataRefresher(client, plan["matches"], journal)
@@ -445,11 +471,7 @@ def main():
             cycle = capture_cycle(client, current_matches, tick, scheduled)
             journal.add("cycle", cycle)
             cycles.append(cycle)
-            for condition, sample in cycle["markets"].items():
-                if sample.get("usable") and sample.get("kind") == "official_us_settlement":
-                    current_matches[condition] = {"status": "official_us_settled",
-                        "mapping": plan["matches"][condition]["mapping"],
-                        "settlement": sample["settlement"], "evidence": sample["evidence"]}
+            current_matches = remember_terminals(current_matches, plan["matches"], cycle["markets"])
             # Missed ticks are NOT replaced with fast catch-up requests or dropped.
             tick = max(tick + 1, math.ceil((time.time() - plan["started_at"]) / plan["interval_seconds"]))
     except (Exception, KeyboardInterrupt) as exc:

@@ -11,7 +11,7 @@ This is an isolated data-quality tool, not a fixed or restarted wallet study.
 
 ## Verified offline
 
-`python3 -m unittest -v test_quality.py`: **55 tests passed** after the October 19 repair.
+`python3 -m unittest -v test_quality.py`: **59 tests passed** after the October 19 repair.
 `python3 -m py_compile quality.py probe.py test_quality.py`: passed.
 
 Tests include the fresh-Date/stale-Age bug, stale/future book timestamps,
@@ -31,6 +31,16 @@ replacing book time with receipt time, non-JSON evidence equality, deduplicated
 raw bytes, evidence-cap failure, corruption/path rejection and failed bootstrap
 not being a measured flat interval. An exact bounded evaluation timestamp is
 now persisted; missed slots within that window are still retained.
+Additional checks prevent terminal updates from mutating the saved bootstrap
+plan, stop incomplete catalog pages being interpreted as retirement, enforce
+the journal budget including hash/newline bytes, and prevent transient refresh
+errors from extending cached metadata expiry.
+
+A repair candidate received a bounded 180-second public check with nine
+sampling cycles. That is not a full reliability gate pass. Evidence stayed
+private and was replay-checked offline. The final follow-up changes add the
+regression protections above; no full-day or authenticated-stream validation
+is claimed for either version.
 
 The pinned association/book validation module and its protocol are verified by
 their immutable Git/SHA-256 identities on import. They are not edited.

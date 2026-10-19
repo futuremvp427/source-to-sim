@@ -92,6 +92,10 @@ limiter. A slow refresh cannot occupy the sampling thread, but request budgets
 and network failures can still cause missed slots. Each mapping expires based
 on the original responses' Date/Age and 300-second metadata limit, not on when
 the batch finishes. Expired metadata fails closed even while a refresh runs.
+An incomplete refresh is logged and cannot imply that all markets retired.
+Previously verified mapping metadata may be reused only until its original
+expiry; a failed refresh cannot extend that deadline. Terminal payouts are
+remembered separately without mutating the saved bootstrap plan.
 Bootstrap misses are retained; mapping changes are rejected. If an
 initially matched market retires, only a verified final response from the
 **official US settlement endpoint** can count as terminal data; settlement

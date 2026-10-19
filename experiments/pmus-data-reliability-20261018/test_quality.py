@@ -14,7 +14,7 @@ from unittest import mock
 from pathlib import Path
 
 from quality import compare_stream, inspect_book, inspect_settlement, metadata_deadline, readiness, resolve_catalog, transport
-from probe import Journal, MetadataRefresher, PublicClient, allowed, capture_cycle, catalog, main, raw_body, refresh_matches, resolve_sources, verify_journal
+from probe import Journal, MetadataRefresher, PublicClient, allowed, capture_cycle, catalog, main, raw_body, refresh_matches, remember_terminals, resolve_sources, verify_journal
 
 NOW = 1792340000.0
 SLUG = "aec-nfl-ari-lar-2026-10-18"
@@ -473,6 +473,49 @@ class QualityTests(unittest.TestCase):
             self.assertEqual(summary["actual_cycles"], 0)
             self.assertEqual(summary["measured_elapsed_seconds"], 0)
             self.assertIsNotNone(summary["failure"])
+
+    def test_terminal_update_cannot_mutate_saved_plan(self):
+        initial = {"a": resolve_catalog(source(), [target()], True)}
+        before = copy.deepcopy(initial)
+        current = remember_terminals(initial, initial, {"a": {
+            "usable": True, "kind": "official_us_settlement", "settlement": "0", "evidence": {"seq": 1}}})
+        self.assertEqual(initial, before)
+        self.assertEqual(current["a"]["status"], "official_us_settled")
+
+    def test_incomplete_refresh_does_not_imply_retirement(self):
+        initial = {"a": resolve_catalog(source(), [target()], True)}
+        client = FakeClient([])
+        self.assertEqual(refresh_matches(client, initial, {
+            "complete": False, "issues": ["timeout"], "markets": []})["a"]["status"], "catalog_incomplete")
+        self.assertEqual(client.calls, [])
+
+    def test_transient_refresh_cannot_reset_metadata_expiry(self):
+        m = resolve_catalog(source(), [target()], True)
+        m["metadata_valid_until"] = NOW + 30
+        client = FakeClient([])
+        client.deadline = None
+        with tempfile.TemporaryDirectory() as t:
+            j = Journal(Path(t) / "new")
+            refresh = MetadataRefresher(client, {"a": m}, j)
+            refresh.future = __import__('concurrent.futures').futures.Future()
+            refresh.future.set_result({"a": {"status": "catalog_incomplete", "mapping": None}})
+            refresh.next_at = NOW + 1000
+            current = refresh.poll({"a": m}, NOW)
+            self.assertEqual(current["a"]["metadata_valid_until"], NOW + 30)
+            self.assertIn("last_metadata_refresh_error", current["a"])
+            self.assertFalse(capture_cycle(FakeClient([response(at=NOW + 31)]), current, 2, NOW + 31)["markets"]["a"]["usable"])
+            refresh.close()
+            j.close()
+
+    def test_journal_budget_includes_hash_and_newline(self):
+        with tempfile.TemporaryDirectory() as t:
+            j = Journal(Path(t) / "new", evidence_limit=100)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "evidence_limit"):
+                    j.add("fixture", {})
+                self.assertEqual(j.seq, 0)
+            finally:
+                j.close()
 
 
 if __name__ == "__main__":
