@@ -71,3 +71,42 @@ saved report or review automation was changed. No default/production branch,
 application/database, PR 62 or other experiment was modified. No workflow or
 automation was created or rerun, no paper follower was started, and no real
 order, credential provisioning, funded account or paid service was used.
+
+## Saved-key connection check — October 18, 2026, 9:48 PM ET
+
+The user confirmed saving the two repository secrets. The isolated connection
+workflow was added at code commit 365bc159561d3ebbc3c5d03d0b6f73ed3ecc4cc2.
+Its first run [39186401831](https://github.com/futuremvp427/source-to-sim/actions/runs/39186401831)
+passed dependency installation and 77 offline tests, then stopped on local
+secret-format validation before any public or authenticated venue request.
+
+A parser-only follow-up at c81a45000cdef2505bb543902ef5da883c9fb2cf accepts
+clipboard Base64 whitespace, consistent with the official SDK, but still
+rejects labels/punctuation and decoded lengths other than 32/64 bytes. It
+adds only non-secret presence/format diagnostics. All **78 offline tests**
+passed locally and on GitHub, including fixed-path GET signing, denial stop,
+no redirects, heartbeat/stale-book separation, sanitized evidence, and a
+complete mocked transport/evidence-export run.
+
+The retry [39186991209](https://github.com/futuremvp427/source-to-sim/actions/runs/39186991209),
+job 117851390968, completed at approximately 2026-10-19T01:48:10Z:
+
+- PMUS_DATA_KEY_ID is present.
+- PMUS_DATA_SECRET_KEY is present, but is not valid Base64 after removing
+  whitespace; failure is invalid_secret_key_format.
+- Authenticated handshake: false. No venue request, private account access,
+  order, paper fill, measured market-data interval or 24-hour test occurred.
+- Existing frozen wallet studies, their code/ledgers/workflows and review
+  automation settings remain untouched by this diagnostic.
+
+No credential values, prefixes, hashes, signatures or request headers were
+retrieved or printed. The saved Secret Key must be securely replaced with the
+actual Secret Key value alone in the existing GitHub secret. The Key ID should
+not be substituted for it. No attempt to retrieve secrets from GitHub or
+circumvent the format/permission check was made. No further live retry is
+started until the user confirms correcting that value.
+
+This is a configuration blocker in the separate diagnostic, not proof of a
+Polymarket outage, repaired pricing, a live-feed pass, profitable wallet, or
+new valid observations for either frozen study. Readiness remains false.
+
