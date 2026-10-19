@@ -77,16 +77,26 @@ def transport(response, maximum_age=20):
 
 def inspect_book(response, slug, quantity="10", now=None):
     issues, detail = transport(response)
-    out = {"slug": slug, "usable": False, "issues": issues, **detail}
+    out = {"slug": slug, "usable": False, "issues": issues, **detail,
+           "body_sha256": response.get("body_sha256"),
+           "cache_control": response.get("headers", {}).get("cache-control")}
     if response.get("status") != 200 or response.get("error"):
         return out
     try:
         body = response["body"]
         md = body.get("marketData", {})
+        out["returned_slug"] = md.get("marketSlug")
         out["market_state"] = md.get("state")
+        # Diagnostic fingerprint only: even a rejected payload must be comparable.
+        # This never updates transactTime or makes an old/closed book executable.
+        out["payload_book_fingerprint"] = digest(md)
         out["book_at"] = MODEL.stamp(md.get("transactTime"))
         at = finite(response["received_at"] if now is None else now)
         out["book_age_seconds"] = at - out["book_at"]
+        if md.get("marketSlug") != slug:
+            issues.append("wrong_book_identity")
+        if md.get("state") != "MARKET_STATE_OPEN":
+            issues.append("non_open_book_state")
         # Continue parsing even if cache age fails: retain ALL measured causes.
         value = MODEL.book(body, slug, at, 60)
         q = MODEL.number(quantity)
@@ -108,6 +118,38 @@ def inspect_book(response, slug, quantity="10", now=None):
         issues.append(str(exc) or type(exc).__name__)
     out["issues"] = list(dict.fromkeys(issues))
     out["usable"] = not out["issues"]
+    return out
+
+
+def metadata_deadline(response, maximum_age=300):
+    """Expiry belongs to the response, not to when a slow batch completes."""
+    issues, detail = transport(response, maximum_age)
+    if issues:
+        return response["received_at"]
+    age = max(0, detail.get("http_date_age_seconds", 0),
+              detail.get("http_cache_age_seconds", 0))
+    return response["received_at"] + max(0, maximum_age - age)
+
+
+def inspect_settlement(response, slug):
+    """Only a fresh official US final payout, never a foreign resolution."""
+    issues, detail = transport(response)
+    out = {"slug": slug, "usable": False, "kind": "official_us_settlement",
+           "issues": issues, "evidence": response["evidence"],
+           "sample_received_at": response["received_at"], **detail}
+    try:
+        body = response.get("body")
+        if not isinstance(body, dict) or body.get("slug") != slug:
+            raise ValueError("unverified_us_settlement_identity")
+        if isinstance(body.get("settlement"), bool):
+            raise ValueError("invalid_us_settlement")
+        value = MODEL.number(body["settlement"])
+        if not 0 <= value <= 1:
+            raise ValueError("invalid_us_settlement")
+        out["settlement"] = str(value)
+    except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
+        issues.append(str(exc))
+    out["usable"] = not issues
     return out
 
 
@@ -189,6 +231,8 @@ def readiness(plan, cycles, now):
               and any(x["phase_valid_and_expected"].get("PREGAME", [0, 0])[1] for x in markets.values())
               and any(x["phase_valid_and_expected"].get("IN_PLAY_OR_POSTGAME", [0, 0])[1] for x in markets.values()))
     return {"public_observation_gate_passed": passed, "markets": markets,
+            "evaluated_at": now,
+            "measured_elapsed_seconds": max(0, now - plan["started_at"]),
             "official_stream_validation": "BLOCKED_NO_APPROVED_READ_ONLY_CREDENTIALS",
             "ready_for_new_paper_study": False, "no_orders_or_accounts": True,
             "actual_live_phase_verified": False,

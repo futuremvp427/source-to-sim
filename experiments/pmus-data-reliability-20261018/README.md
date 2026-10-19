@@ -44,8 +44,15 @@ follower, wallet cohort, trading strategy, or replay of either study.
 - No real derived research watchlist or its live evidence is committed here.
 - Independent output must be a new nonexistent directory. No overwrite/resume
   of old evidence. Raw bodies are saved with SHA-256 and a sequence/hash chain.
-- Rate limit: three requests/second, bounded response size, eight-second
-  request timeout and 429 cooldown. Evidence is capped at 512 MiB uncompressed.
+- Rate limit: three requests/second shared by sampling and metadata work,
+  bounded response size, eight-second request timeout and 429 cooldown.
+  The chained metadata journal has a 512 MiB uncompressed limit; exact raw
+  response bodies are SHA-256-addressed, independently compressed and
+  deduplicated under a separate 1 GiB compressed-body cap. Repeated requests
+  retain individual timing/headers/references, not repeated base64 bodies.
+  Either limit fails closed; this is not a guarantee that every watchlist
+  fits a full day. `verify_journal` verifies both body formats, paths, lengths,
+  hashes and linkage without rewriting older evidence.
 - Bootstrap is bounded to 180 seconds; the requested measurement window starts
   only after bootstrap. Exceeding the bound is reported as a failure, never a
   successful empty observation interval.
@@ -73,11 +80,28 @@ not prove live authenticated access, continuity, or reliable real-time data.
 Catalog pagination must reach an empty page and cannot repeat identities. A
 short first page is not taken as proof of complete pagination. Missing detail
 fields are fetched only by a slug actually observed in that catalog, never by
-a constructed foreign slug. Metadata is refreshed every five minutes. A mapping change is rejected. If an
+a constructed foreign slug. Source identifier lookups explicitly request
+`closed=any`, so a closed foreign contract is not hidden by an open-only
+default. Its rules/identity can be checked; its resolution is never a US payout.
+A failed candidate-detail lookup prevents a uniqueness claim.
+
+Metadata work runs in a separate worker, with one refresh in flight at a time
+and a 60-second refresh eligibility interval. Source lookups use four workers;
+book capture uses eight. All workers share the same three-request/second
+limiter. A slow refresh cannot occupy the sampling thread, but request budgets
+and network failures can still cause missed slots. Each mapping expires based
+on the original responses' Date/Age and 300-second metadata limit, not on when
+the batch finishes. Expired metadata fails closed even while a refresh runs.
+Bootstrap misses are retained; mapping changes are rejected. If an
 initially matched market retires, only a verified final response from the
 **official US settlement endpoint** can count as terminal data; settlement
 ticks are separate from valid tradable-book ticks. Foreign resolutions are
 never used. Tick phases are based on scheduled start, not proof of live play.
+An explicitly non-open book triggers this settlement check immediately, even
+when catalog metadata still says OPEN. If no fresh correctly identified final
+US payout is available, it remains an unusable observation, not a zero value.
+Rejected-book payload fingerprints and separate receipt/cache/book timestamps
+are retained for diagnosis; receipt time never overwrites the venue book time.
 
 The overall `ready_for_new_paper_study` remains **false** until approved
 official-stream comparison and actual in-play validation are separately
@@ -108,8 +132,12 @@ python3 probe.py --watchlist /private/approved-watchlist.json --output /absolute
 The default is a **60-second smoke**, not a 24-hour run. A 24-hour process must
 be explicitly started in an approved durable runtime; creating this harness
 does not mean that long-running test has started or passed. Early stops retain
-the full planned 4,320-tick denominator. `summary.json` records blocked stages,
-actual duration/cycles and evidence hashes. Do not attach this output to either
+the full planned 4,320-tick denominator. `summary.json` persists the exact
+evaluation time, excludes shutdown jitter from the requested sampling window,
+and distinguishes failed bootstrap from a measured interval. Incomplete
+bootstrap, no verified matches, or no usable measured observations returns a
+nonzero exit status. Summary records blocked stages, actual duration/cycles
+and evidence hashes. Do not attach this output to either
 existing study as replacement or repaired historical data.
 
 ## Official data-access prerequisite
@@ -127,6 +155,7 @@ Official references checked October 18, 2026:
 - https://docs.polymarket.us/api-reference/markets/get-market-book
 - https://docs.polymarket.us/api-reference/websocket/markets
 - https://docs.polymarket.us/data-guide/onboarding
+- https://docs.polymarket.com/api-reference/markets/list-markets
 
 Future fixes must live in new commits/new protocols. These files do not grant
 permission to modify a frozen study, start another follower trial, or fund it.

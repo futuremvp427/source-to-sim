@@ -4,14 +4,14 @@ This is an isolated data-quality tool, not a fixed or restarted wallet study.
 
 | Requested improvement | Implementation | Real-world validation |
 |---|---|---|
-| Independent market capture and explicit rejection reasons | Implemented; no first-error collection short circuit | Further selected-watchlist live queries require explicit disclosure approval |
+| Independent market capture and explicit rejection reasons | Implemented; no first-error collection short circuit; background metadata and response-based expiry | Bounded public checks authorized; no full-day certification |
 | Official live-feed comparison | Pure normalized full-book comparison helper and safety checks prepared | BLOCKED: no approved read-only stream credentials; no authenticated connection made |
 | Catalog-based event/team matching | Implemented with complete-pagination checks, fresh metadata and ambiguity rejection | Not certified as reliable from a short probe |
 | Data-only reliability gate | Implemented: full 24-hour denominator, 95% per-market/phase gate, missed ticks, separate official US settlement counts | Full 24-hour soak NOT started/completed/passed; actual in-play coverage NOT verified |
 
 ## Verified offline
 
-`python3 -m unittest -v test_quality.py`: **37 tests passed**.
+`python3 -m unittest -v test_quality.py`: **55 tests passed** after the October 19 repair.
 `python3 -m py_compile quality.py probe.py test_quality.py`: passed.
 
 Tests include the fresh-Date/stale-Age bug, stale/future book timestamps,
@@ -23,17 +23,27 @@ rejection, no network without disclosure approval, no short-smoke pass, no
 phase-specific outage hidden by high aggregate coverage, and no automatic
 unlocking of the official-stream gate.
 
+Repair regressions additionally cover nonblocking slow metadata refresh,
+response-age-based metadata expiry, closed-source identifier lookup, failed
+candidate-detail ambiguity, expired-book US-settlement reconciliation, invalid
+or stale settlements, diagnostic fingerprints on rejected books, never
+replacing book time with receipt time, non-JSON evidence equality, deduplicated
+raw bytes, evidence-cap failure, corruption/path rejection and failed bootstrap
+not being a measured flat interval. An exact bounded evaluation timestamp is
+now persisted; missed slots within that window are still retained.
+
 The pinned association/book validation module and its protocol are verified by
 their immutable Git/SHA-256 identities on import. They are not edited.
 
-## Live validation is not claimed
+## Live validation remains bounded and incomplete
 
 A selected research watchlist reveals research intent when its market IDs are
-sent to external API operators. Further live queries were blocked by automated
-safety review pending explicit approval for `gamma-api.polymarket.com` and
-`gateway.polymarket.us`. The block was not retried or bypassed. Real selected
-IDs, private watchlists and live response evidence are not included in this
-commit. The committed example is synthetic and cannot start a live probe.
+sent to external API operators. Live queries initially paused for disclosure
+approval. The user subsequently approved public GET-only checks to
+`gamma-api.polymarket.com` and `gateway.polymarket.us`; the diagnostic repairs
+are being checked within that authorization. Real selected IDs, private
+watchlists and live response evidence are retained privately, not committed.
+The committed example is synthetic and cannot start a live probe.
 
 Any future live run needs BOTH the user's approval and the runtime's permission;
 the acknowledgement flag does not override either. The official stream also

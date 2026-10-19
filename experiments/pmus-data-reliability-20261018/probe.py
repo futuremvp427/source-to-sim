@@ -16,7 +16,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from quality import MODEL, SLUG, canonical, digest, inspect_book, readiness, resolve_catalog, transport
+from quality import (MODEL, SLUG, canonical, digest, inspect_book, inspect_settlement,
+                     metadata_deadline, readiness, resolve_catalog, transport)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -33,7 +34,10 @@ def allowed(url):
     if u.scheme != "https" or u.username or u.password or u.fragment or port is not None:
         return False
     if u.netloc == "gamma-api.polymarket.com":
-        return u.path == "/markets" and set(urllib.parse.parse_qs(u.query)) == {"condition_ids"}
+        query = urllib.parse.parse_qs(u.query)
+        return (u.path == "/markets" and "condition_ids" in query
+                and set(query) <= {"condition_ids", "closed"}
+                and ("closed" not in query or query["closed"] == ["any"]))
     if u.netloc != "gateway.polymarket.us":
         return False
     if u.path == "/v1/markets":
@@ -45,13 +49,31 @@ def allowed(url):
 
 
 class Journal:
-    def __init__(self, directory, evidence_limit=512 * 1024 * 1024):
+    def __init__(self, directory, evidence_limit=512 * 1024 * 1024,
+                 body_limit=1024 * 1024 * 1024):
         self.root = Path(directory)
         self.root.mkdir(parents=True, exist_ok=False)
         self.path = self.root / "raw.jsonl.xz"
         self.writer = lzma.open(self.path, "wb")
+        (self.root / "bodies").mkdir()
+        self.body_limit, self.body_total, self.bodies = body_limit, 0, {}
         self.seq, self.head, self.total, self.limit = 0, "0" * 64, 0, evidence_limit
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+
+    def http(self, record, data):
+        """Store exact bytes once; retain a hashed reference for EVERY request."""
+        with self.lock:
+            sha = hashlib.sha256(data).hexdigest()
+            if sha not in self.bodies:
+                compressed = lzma.compress(data, preset=3)
+                if self.body_total + len(compressed) > self.body_limit:
+                    raise RuntimeError("compressed_body_evidence_limit_reached")
+                path = "bodies/" + sha + ".xz"
+                with (self.root / path).open("xb") as f:
+                    f.write(compressed)
+                self.bodies[sha] = {"body_path": path, "compressed_bytes": len(compressed)}
+                self.body_total += len(compressed)
+            return self.add("http", {**record, **self.bodies[sha]})
 
     def add(self, kind, payload):
         with self.lock:
@@ -123,36 +145,37 @@ class PublicClient:
         if status in (401, 403):
             with self.lock:
                 self.denied_reason = f"public_endpoint_access_denied_{status}"
-        record = {"url": url, "method": "GET", "authenticated": False, "sent_at": sent,
-                  "received_at": time.time(), "status": status, "headers": headers, "error": error,
-                  "body_bytes": len(data), "body_sha256": hashlib.sha256(data).hexdigest(),
-                  "raw_base64": base64.b64encode(data).decode()}
-        reference = self.journal.add("http", record)
-        if status in (401, 403):
-            # Explicit access denial is a stop, not an invitation to bypass it.
-            raise PermissionError(self.denied_reason)
         try:
             body = json.loads(data) if not error else None
         except (ValueError, UnicodeDecodeError):
             body, error = None, "non_json_response"
+        record = {"url": url, "method": "GET", "authenticated": False, "sent_at": sent,
+                  "received_at": time.time(), "status": status, "headers": headers, "error": error,
+                  "body_bytes": len(data), "body_sha256": hashlib.sha256(data).hexdigest()}
+        reference = self.journal.http(record, data)
+        if status in (401, 403):
+            # Explicit access denial is a stop, not an invitation to bypass it.
+            raise PermissionError(self.denied_reason)
         return {**record, "body": body, "error": error, "evidence": reference}
 
 
 def catalog(client, max_pages=50, page_size=100):
-    markets, seen, evidence = [], set(), []
+    markets, seen, evidence, deadlines = [], set(), [], []
     for page in range(max_pages):
         query = urllib.parse.urlencode({"limit": page_size, "offset": page * page_size,
                                        "active": "true", "closed": "false", "categories": "sports",
                                        "marketTypes": "moneyline"})
         response = client.get("https://gateway.polymarket.us/v1/markets?" + query)
         evidence.append(response["evidence"])
+        deadlines.append(metadata_deadline(response))
         issues, _ = transport(response, 300)
         body = response.get("body")
         rows = body.get("markets") if isinstance(body, dict) else None
         if issues or not isinstance(rows, list):
             return {"complete": False, "markets": markets, "issues": issues or ["catalog_shape"], "evidence": evidence}
         if not rows:
-            return {"complete": True, "markets": markets, "issues": [], "evidence": evidence}
+            return {"complete": True, "markets": markets, "issues": [], "evidence": evidence,
+                    "valid_until": min(deadlines)}
         for row in rows:
             identity = row.get("id") or row.get("slug")
             if not identity or identity in seen:
@@ -163,20 +186,26 @@ def catalog(client, max_pages=50, page_size=100):
 
 
 def resolve_sources(client, conditions, listing):
-    matches = {}
     if not listing["complete"]:
         return {c: {"status": "catalog_incomplete", "mapping": None,
                     "issues": listing["issues"]} for c in conditions}
-    detailed = {}
-    for condition in conditions:
-        query = urllib.parse.urlencode({"condition_ids": condition})
+    detailed, detail_lock = {}, threading.Lock()
+
+    def one(condition):
+        # An identifier lookup must include closed source contracts. Their
+        # identity/rules remain useful; their resolution is NOT a US settlement.
+        query = urllib.parse.urlencode({"condition_ids": condition, "closed": "any"})
         response = client.get("https://gamma-api.polymarket.com/markets?" + query)
         issues, _ = transport(response, 300)
         rows = response.get("body")
         if issues or not isinstance(rows, list) or len(rows) != 1 or rows[0].get("conditionId") != condition:
-            matches[condition] = {"status": "source_metadata_unavailable", "mapping": None, "issues": issues}
+            shape = "empty_source_lookup" if rows == [] else "invalid_source_lookup_identity_or_shape"
+            match = {"status": "source_metadata_unavailable", "mapping": None,
+                     "issues": issues or [shape]}
         else:
             candidates = []
+            deadline = min(metadata_deadline(response), listing.get("valid_until", float("inf")))
+            incomplete_candidates = False
             for market in listing["markets"]:
                 try:
                     if MODEL.stamp(market.get("gameStartTime")) != MODEL.stamp(rows[0].get("gameStartTime")):
@@ -187,17 +216,33 @@ def resolve_sources(client, conditions, listing):
                 if not SLUG.fullmatch(slug):
                     continue
                 if market.get("minimumTradeQty") is None or market.get("feeCoefficient") is None:
-                    if slug not in detailed:
-                        detail = client.get("https://gateway.polymarket.us/v1/market/slug/" + slug)
-                        problems, _ = transport(detail, 300)
-                        target = (detail.get("body") or {}).get("market")
-                        detailed[slug] = target if not problems and isinstance(target, dict) and target.get("slug") == slug else None
-                    market = detailed[slug]
+                    with detail_lock:
+                        owner = slug not in detailed
+                        if owner:
+                            detailed[slug] = concurrent.futures.Future()
+                        future = detailed[slug]
+                    if owner:
+                        try:
+                            detail = client.get("https://gateway.polymarket.us/v1/market/slug/" + slug)
+                            problems, _ = transport(detail, 300)
+                            target = (detail.get("body") or {}).get("market")
+                            future.set_result((target, metadata_deadline(detail)) if not problems and isinstance(target, dict) and target.get("slug") == slug else (None, 0))
+                        except BaseException as exc:
+                            future.set_exception(exc)
+                            raise
+                    market, detail_deadline = future.result()
+                    deadline = min(deadline, detail_deadline)
+                    incomplete_candidates |= market is None
                 if market:
                     candidates.append(market)
-            matches[condition] = resolve_catalog(rows[0], candidates, listing["complete"])
-        matches[condition]["source_metadata_evidence"] = response["evidence"]
-    return matches
+            match = resolve_catalog(rows[0], candidates, not incomplete_candidates)
+            match["metadata_valid_until"] = deadline
+            match["source_closed"] = rows[0].get("closed")
+        match["source_metadata_evidence"] = response["evidence"]
+        return condition, match
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        return dict(pool.map(one, conditions))
 
 
 def refresh_matches(client, initial, listing):
@@ -212,20 +257,54 @@ def refresh_matches(client, initial, listing):
             refreshed[condition] = {"status": "mapping_drift", "mapping": None}
         elif not current.get("mapping"):
             # An official final US payout is valid terminal data, not a quote.
-            response = client.get("https://gateway.polymarket.us/v1/markets/" + mapping["us_slug"] + "/settlement")
-            issues, _ = transport(response)
-            body = response.get("body")
-            try:
-                if issues or not isinstance(body, dict) or body.get("slug") != mapping["us_slug"]:
-                    raise ValueError("unverified_us_settlement")
-                value = MODEL.number(body["settlement"])
-                if not 0 <= value <= 1:
-                    raise ValueError("invalid_us_settlement")
+            terminal = inspect_settlement(client.get("https://gateway.polymarket.us/v1/markets/" + mapping["us_slug"] + "/settlement"), mapping["us_slug"])
+            if terminal["usable"]:
                 refreshed[condition] = {"status": "official_us_settled", "mapping": mapping,
-                                        "settlement": str(value), "evidence": response["evidence"]}
-            except (ValueError, KeyError, TypeError, ArithmeticError):
-                pass
+                                        "settlement": terminal["settlement"], "evidence": terminal["evidence"]}
     return refreshed
+
+
+class MetadataRefresher:
+    """A slow catalog refresh must never occupy the book sampling thread."""
+    def __init__(self, client, initial, journal, interval=60):
+        self.client, self.initial, self.journal = client, initial, journal
+        self.interval, self.next_at = interval, time.time() + interval
+        self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.future = None
+
+    def poll(self, current, at):
+        if self.future is not None and self.future.done():
+            # Permission errors and evidence failures propagate, never disappear.
+            refreshed = self.future.result()
+            self.future = None
+            # A verified terminal payout cannot be reverted to a tradable book.
+            current = {c: current[c] if current[c]["status"] == "official_us_settled" else m
+                       for c, m in refreshed.items()}
+            self.journal.add("metadata_refresh_applied", {"at": at, "matches": current})
+        if self.future is None and at >= self.next_at:
+            self.next_at = at + self.interval
+            self.future = self.pool.submit(self._refresh)
+        return current
+
+    def _refresh(self):
+        listing = catalog(self.client)
+        matches = refresh_matches(self.client, self.initial, listing)
+        self.journal.add("metadata_refresh_completed", {"at": time.time(),
+                         "complete": listing["complete"], "matches": matches})
+        return matches
+
+    def close(self):
+        # End outstanding metadata work at the bounded stop, then join before
+        # closing its shared evidence writer. Never leave a background writer.
+        self.client.deadline = min(self.client.deadline or time.time(), time.time())
+        self.pool.shutdown(wait=True, cancel_futures=True)
+        if self.future is not None and self.future.done() and not self.future.cancelled():
+            try:
+                self.future.result()
+            except RuntimeError as exc:
+                if str(exc) != "probe_time_bound_reached":
+                    raise
+                self.journal.add("metadata_refresh_stopped_at_time_bound", {"at": time.time()})
 
 
 def capture_cycle(client, matches, tick, scheduled_at):
@@ -240,14 +319,22 @@ def capture_cycle(client, matches, tick, scheduled_at):
             result["evidence"] = response["evidence"]
             result["kind"] = "book"
             result["sample_received_at"] = response["received_at"]
-            if not scheduled_at <= response["received_at"] < scheduled_at + 20:
+            if (result.get("returned_slug") == slug and result.get("market_state")
+                    and result["market_state"] != "MARKET_STATE_OPEN"):
+                terminal = inspect_settlement(client.get("https://gateway.polymarket.us/v1/markets/" + slug + "/settlement"), slug)
+                if terminal["usable"]:
+                    terminal["rejected_book"] = result
+                    result = terminal
+                else:
+                    result["settlement_check"] = terminal
+            if not scheduled_at <= result["sample_received_at"] < scheduled_at + 20:
                 result["issues"].append("outside_scheduled_observation_slot")
                 result["usable"] = False
             return slug, result
         except (ValueError, TypeError) as exc:
             return slug, {"slug": slug, "usable": False, "issues": [str(exc)]}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         results = dict(pool.map(one, slugs))
     markets = {}
     for condition, match in matches.items():
@@ -257,9 +344,33 @@ def capture_cycle(client, matches, tick, scheduled_at):
                                    "kind": "official_us_settlement", "settlement": match["settlement"],
                                    "evidence": match["evidence"]}
         else:
-            markets[condition] = results[mapping["us_slug"]] if mapping else {
+            markets[condition] = dict(results[mapping["us_slug"]]) if mapping else {
                 "usable": False, "issues": [match["status"]], "slug": None}
+            if mapping and markets[condition].get("sample_received_at", scheduled_at) >= match.get("metadata_valid_until", float("inf")):
+                markets[condition]["issues"] = [*markets[condition]["issues"], "expired_mapping_metadata"]
+                markets[condition]["usable"] = False
     return {"tick": tick, "scheduled_at": scheduled_at, "finished_at": time.time(), "markets": markets}
+
+
+def raw_body(path, record):
+    """Read new deduplicated bodies and old inline journals without alteration."""
+    if "raw_base64" in record:
+        raw = base64.b64decode(record["raw_base64"], validate=True)
+    else:
+        expected = "bodies/" + record["body_sha256"] + ".xz"
+        if record.get("body_path") != expected:
+            raise ValueError("unexpected_body_path")
+        root = Path(path).parent.resolve()
+        body_path = root / expected
+        if body_path.resolve().parent != root / "bodies" or body_path.is_symlink():
+            raise ValueError("unexpected_body_path")
+        if body_path.stat().st_size != record["compressed_bytes"]:
+            raise ValueError("compressed_body_size_mismatch")
+        with lzma.open(body_path, "rb") as f:
+            raw = f.read(2 * 1024 * 1024 + 2)
+    if len(raw) != record["body_bytes"] or hashlib.sha256(raw).hexdigest() != record["body_sha256"]:
+        raise ValueError("http_body_digest_mismatch")
+    return raw
 
 
 def verify_journal(path):
@@ -272,9 +383,7 @@ def verify_journal(path):
                 raise ValueError("journal_linkage_mismatch")
             if row["kind"] == "http":
                 h = row["payload"]
-                raw = base64.b64decode(h["raw_base64"], validate=True)
-                if len(raw) != h["body_bytes"] or hashlib.sha256(raw).hexdigest() != h["body_sha256"]:
-                    raise ValueError("http_body_digest_mismatch")
+                raw_body(path, h)
                 if h["method"] != "GET" or h["authenticated"] is not False or not allowed(h["url"]):
                     raise ValueError("unexpected_request_authority")
             seq, head = row["seq"], claimed
@@ -303,7 +412,8 @@ def main():
         parser.error("invalid condition identity")
     journal = Journal(args.output)
     client = PublicClient(journal, deadline=time.time() + 180)
-    cycles, failure = [], None
+    cycles, failure, refresher = [], None, None
+    bootstrap_started_at, measurement_started, stop = time.time(), False, None
     plan = {"started_at": time.time(), "planned_duration_seconds": 86400, "interval_seconds": 20,
             "watchlist_sha256": hashlib.sha256(args.watchlist.read_bytes()).hexdigest(),
             "diagnostic_code_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
@@ -313,11 +423,16 @@ def main():
         listing = catalog(client)
         plan["catalog"] = {k: v for k, v in listing.items() if k != "markets"}
         plan["matches"] = resolve_sources(client, conditions, listing)
+        if not listing["complete"] or not any(m.get("mapping") for m in plan["matches"].values()):
+            journal.add("bootstrap_rejected", plan)
+            raise RuntimeError("incomplete_catalog_or_no_verified_matches")
         plan["started_at"] = time.time()
+        measurement_started = True
         journal.add("plan", plan)
-        current_matches, metadata_at = plan["matches"], time.time()
+        current_matches = plan["matches"]
         stop = plan["started_at"] + args.run_seconds
         client.deadline = stop + 8
+        refresher = MetadataRefresher(client, plan["matches"], journal)
         tick = 0
         while time.time() < stop:
             scheduled = plan["started_at"] + tick * plan["interval_seconds"]
@@ -326,23 +441,38 @@ def main():
                 time.sleep(min(delay, max(0, stop - time.time())))
             if time.time() >= stop:
                 break
-            if time.time() - metadata_at >= 300:
-                listing = catalog(client)
-                current_matches = refresh_matches(client, plan["matches"], listing)
-                metadata_at = time.time()
-                journal.add("catalog_refresh", {"at": metadata_at, "matches": current_matches,
-                                                  "complete": listing["complete"]})
+            current_matches = refresher.poll(current_matches, time.time())
             cycle = capture_cycle(client, current_matches, tick, scheduled)
             journal.add("cycle", cycle)
             cycles.append(cycle)
+            for condition, sample in cycle["markets"].items():
+                if sample.get("usable") and sample.get("kind") == "official_us_settlement":
+                    current_matches[condition] = {"status": "official_us_settled",
+                        "mapping": plan["matches"][condition]["mapping"],
+                        "settlement": sample["settlement"], "evidence": sample["evidence"]}
             # Missed ticks are NOT replaced with fast catch-up requests or dropped.
             tick = max(tick + 1, math.ceil((time.time() - plan["started_at"]) / plan["interval_seconds"]))
     except (Exception, KeyboardInterrupt) as exc:
         failure = type(exc).__name__ + ":" + str(exc)
     finally:
+        if refresher is not None:
+            try:
+                refresher.close()
+            except Exception as exc:
+                failure = failure or type(exc).__name__ + ":" + str(exc)
         journal.close()
-    result = readiness(plan, cycles, time.time())
+    finished_at = time.time()
+    # Shutdown jitter is not another scheduled observation opportunity. Genuine
+    # missed ticks within the requested interval still count as missing.
+    evaluated_at = min(finished_at, stop) if measurement_started else plan["started_at"]
+    result = readiness(plan, cycles, evaluated_at)
+    if measurement_started and not any(x.get("usable") for c in cycles for x in c["markets"].values()):
+        failure = failure or "no_valid_observations_in_measured_interval"
     result.update({"plan": plan, "actual_cycles": len(cycles), "failure": failure,
+                   "bootstrap_completed": measurement_started,
+                   "bootstrap_started_at": bootstrap_started_at,
+                   "bootstrap_duration_seconds": (plan["started_at"] if measurement_started else finished_at) - bootstrap_started_at,
+                   "finished_at": finished_at,
                    "requested_run_seconds": args.run_seconds,
                    "evidence": verify_journal(journal.path), "new_paper_trial_started": False})
     (journal.root / "summary.json").write_bytes(json.dumps(result, indent=2).encode() + b"\n")

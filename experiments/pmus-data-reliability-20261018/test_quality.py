@@ -3,15 +3,18 @@ import contextlib
 import datetime as dt
 import io
 import json
+import hashlib
+import lzma
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
 from unittest import mock
 from pathlib import Path
 
-from quality import compare_stream, inspect_book, readiness, resolve_catalog, transport
-from probe import Journal, PublicClient, allowed, capture_cycle, catalog, main, refresh_matches, resolve_sources, verify_journal
+from quality import compare_stream, inspect_book, inspect_settlement, metadata_deadline, readiness, resolve_catalog, transport
+from probe import Journal, MetadataRefresher, PublicClient, allowed, capture_cycle, catalog, main, raw_body, refresh_matches, resolve_sources, verify_journal
 
 NOW = 1792340000.0
 SLUG = "aec-nfl-ari-lar-2026-10-18"
@@ -287,6 +290,189 @@ class QualityTests(unittest.TestCase):
         r = readiness(p, rows, NOW + 86400)
         self.assertGreater(r["markets"]["a"]["coverage_elapsed"], .95)
         self.assertFalse(r["public_observation_gate_passed"])
+
+    def test_old_payload_fingerprint_survives_rejection(self):
+        r = response()
+        r["body"]["marketData"]["transactTime"] = iso(NOW - 200)
+        a = inspect_book(r, SLUG)
+        r["received_at"] += 20
+        b = inspect_book(r, SLUG)
+        self.assertEqual(a["payload_book_fingerprint"], b["payload_book_fingerprint"])
+        self.assertEqual(b["book_age_seconds"], 220)
+        self.assertFalse(b["usable"])
+
+    def test_receipt_time_never_replaces_venue_time(self):
+        r = response(at=NOW + 1000)
+        r["body"]["marketData"]["transactTime"] = iso(NOW)
+        self.assertEqual(inspect_book(r, SLUG)["book_at"], NOW)
+        self.assertFalse(inspect_book(r, SLUG)["usable"])
+
+    def test_metadata_expiry_uses_original_age(self):
+        self.assertEqual(metadata_deadline(response(age="250")), NOW + 50)
+
+    def test_expired_mapping_does_not_promote_good_book(self):
+        m = resolve_catalog(source(), [target()], True)
+        m["metadata_valid_until"] = NOW - 1
+        x = capture_cycle(FakeClient([response()]), {"a": m}, 0, NOW)
+        self.assertIn("expired_mapping_metadata", x["markets"]["a"]["issues"])
+        self.assertFalse(x["markets"]["a"]["usable"])
+
+    def test_expired_book_checks_official_us_settlement(self):
+        m = resolve_catalog(source(), [target()], True)
+        r = response()
+        r["body"]["marketData"]["state"] = "MARKET_STATE_EXPIRED"
+        client = FakeClient([r, response({"slug": SLUG, "settlement": "1"})])
+        x = capture_cycle(client, {"a": m}, 0, NOW)["markets"]["a"]
+        self.assertTrue(x["usable"])
+        self.assertEqual(x["kind"], "official_us_settlement")
+        self.assertIn("non_open_book_state", x["rejected_book"]["issues"])
+        self.assertTrue(client.calls[-1].endswith("/settlement"))
+
+    def test_expired_book_without_settlement_stays_unusable(self):
+        m = resolve_catalog(source(), [target()], True)
+        r = response()
+        r["body"]["marketData"]["state"] = "MARKET_STATE_EXPIRED"
+        x = capture_cycle(FakeClient([r, response({"slug": SLUG})]), {"a": m}, 0, NOW)["markets"]["a"]
+        self.assertFalse(x["usable"])
+        self.assertFalse(x["settlement_check"]["usable"])
+
+    def test_wrong_book_does_not_trigger_terminal_assumption(self):
+        m = resolve_catalog(source(), [target()], True)
+        r = response()
+        r["body"]["marketData"].update(marketSlug="aec-other", state="MARKET_STATE_EXPIRED")
+        client = FakeClient([r])
+        self.assertFalse(capture_cycle(client, {"a": m}, 0, NOW)["markets"]["a"]["usable"])
+        self.assertEqual(len(client.calls), 1)
+
+    def test_settlement_rejects_stale_wrong_slug_and_invalid_numbers(self):
+        for body, age in (({"slug": SLUG, "settlement": "1"}, "29"),
+                          ({"slug": "aec-other", "settlement": "1"}, "0"),
+                          ({"slug": SLUG, "settlement": True}, "0"),
+                          ({"slug": SLUG, "settlement": "NaN"}, "0"),
+                          ({"slug": SLUG, "settlement": "1.1"}, "0")):
+            self.assertFalse(inspect_settlement(response(body, age=age), SLUG)["usable"])
+
+    def test_closed_source_lookup_is_identity_not_us_settlement(self):
+        s = source()
+        s["closed"] = True
+        client = FakeClient([response([s])])
+        x = resolve_sources(client, [CONDITION], {"complete": True, "markets": [target()]})[CONDITION]
+        self.assertEqual(x["status"], "matched")
+        self.assertTrue(x["source_closed"])
+        self.assertIn("closed=any", client.calls[0])
+        self.assertNotIn("settlement", x)
+
+    def test_closed_filter_is_bounded_to_identifier_lookup(self):
+        self.assertTrue(allowed("https://gamma-api.polymarket.com/markets?condition_ids=" + CONDITION + "&closed=any"))
+        self.assertFalse(allowed("https://gamma-api.polymarket.com/markets?closed=any"))
+        self.assertFalse(allowed("https://gamma-api.polymarket.com/markets?condition_ids=" + CONDITION + "&closed=anything"))
+
+    def test_empty_source_lookup_has_explicit_reason(self):
+        x = resolve_sources(FakeClient([response([])]), [CONDITION], {"complete": True, "markets": []})[CONDITION]
+        self.assertEqual(x["issues"], ["empty_source_lookup"])
+
+    def test_failed_candidate_detail_blocks_uniqueness_claim(self):
+        partial = target()
+        partial.pop("minimumTradeQty")
+        other = target("aec-second-candidate")
+        bad = response({})
+        bad.update(status=500, error="HTTP_500")
+        x = resolve_sources(FakeClient([response([source()]), bad]), [CONDITION],
+                            {"complete": True, "markets": [partial, other]})[CONDITION]
+        self.assertIsNone(x["mapping"])
+        self.assertEqual(x["status"], "catalog_incomplete")
+
+    def test_slow_background_refresh_does_not_block_book_capture(self):
+        entered, release = threading.Event(), threading.Event()
+        m = resolve_catalog(source(), [target()], True)
+        client = FakeClient([response()])
+        client.deadline = None
+        with tempfile.TemporaryDirectory() as t:
+            j = Journal(Path(t) / "new")
+            refresh = MetadataRefresher(client, {"a": m}, j)
+            def slow():
+                entered.set()
+                release.wait(2)
+                return {"a": m}
+            refresh._refresh = slow
+            refresh.next_at = NOW
+            try:
+                before = time.monotonic()
+                current = refresh.poll({"a": m}, NOW)
+                self.assertTrue(entered.wait(.2))
+                self.assertTrue(capture_cycle(client, current, 0, NOW)["markets"]["a"]["usable"])
+                self.assertLess(time.monotonic() - before, .5)
+            finally:
+                release.set()
+                refresh.close()
+                j.close()
+
+    def test_non_json_error_is_in_saved_http_record(self):
+        with tempfile.TemporaryDirectory() as t:
+            j = Journal(Path(t) / "new")
+            fake = mock.MagicMock()
+            fake.__enter__.return_value = fake
+            fake.status, fake.headers = 200, {}
+            fake.read.return_value = b"not json"
+            opener = mock.Mock()
+            opener.open.return_value = fake
+            with mock.patch("urllib.request.build_opener", return_value=opener):
+                self.assertEqual(PublicClient(j).get("https://gateway.polymarket.us/v1/markets")["error"], "non_json_response")
+            j.close()
+            with lzma.open(j.path, "rt") as f:
+                self.assertEqual(json.loads(next(f))["payload"]["error"], "non_json_response")
+            self.assertTrue(verify_journal(j.path)["verified"])
+
+    def test_body_storage_deduplicates_exact_bytes_without_losing_requests(self):
+        with tempfile.TemporaryDirectory() as t:
+            j = Journal(Path(t) / "new")
+            data = b'{"same":"body"}'
+            r = {"url": "https://gateway.polymarket.us/v1/markets", "method": "GET", "authenticated": False,
+                 "body_bytes": len(data), "body_sha256": hashlib.sha256(data).hexdigest()}
+            j.http(r, data)
+            j.http(r, data)
+            j.close()
+            self.assertEqual(len(list((j.root / "bodies").iterdir())), 1)
+            self.assertEqual(verify_journal(j.path)["records"], 2)
+            with self.assertRaises(ValueError):
+                raw_body(j.path, {**r, "body_path": "../not-allowed"})
+
+    def test_body_evidence_cap_fails_closed(self):
+        with tempfile.TemporaryDirectory() as t:
+            j = Journal(Path(t) / "new", body_limit=1)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "compressed_body_evidence_limit"):
+                    j.http({}, b"example")
+                self.assertEqual(j.seq, 0)
+            finally:
+                j.close()
+
+    def test_corrupt_body_is_detected(self):
+        with tempfile.TemporaryDirectory() as t:
+            j = Journal(Path(t) / "new")
+            data = b"example"
+            r = {"url": "https://gateway.polymarket.us/v1/markets", "method": "GET", "authenticated": False,
+                 "body_bytes": len(data), "body_sha256": hashlib.sha256(data).hexdigest()}
+            j.http(r, data)
+            j.close()
+            list((j.root / "bodies").iterdir())[0].write_bytes(lzma.compress(b"wrong"))
+            with self.assertRaises(ValueError):
+                verify_journal(j.path)
+
+    def test_incomplete_bootstrap_is_failure_not_flat_measured_interval(self):
+        with tempfile.TemporaryDirectory() as t:
+            watch = Path(t) / "watch.json"
+            watch.write_text(json.dumps({"source_condition_ids": [CONDITION]}))
+            out = Path(t) / "out"
+            args = ["probe.py", "--watchlist", str(watch), "--output", str(out), "--approved-public-watchlist-queries"]
+            with mock.patch("sys.argv", args), mock.patch("probe.catalog", return_value={
+                "complete": False, "markets": [], "issues": ["HTTP_500"]}), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(), 1)
+            summary = json.loads((out / "summary.json").read_bytes())
+            self.assertFalse(summary["bootstrap_completed"])
+            self.assertEqual(summary["actual_cycles"], 0)
+            self.assertEqual(summary["measured_elapsed_seconds"], 0)
+            self.assertIsNotNone(summary["failure"])
 
 
 if __name__ == "__main__":
