@@ -1,7 +1,7 @@
 # Five-wallet US sports paper test
 
 Study: `pmus-five-wallet-forward-20261017-v1`
-Measured through: **2026-10-19T06:22:50.844329+00:00**
+Measured through: **2026-10-19T06:33:19.153917+00:00**
 
 Collection ends: 2026-10-19T20:03:43.250398+00:00; settlement hard stop: 2026-10-21T20:03:43.250398+00:00
 
