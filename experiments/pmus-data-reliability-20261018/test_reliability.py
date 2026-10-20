@@ -250,6 +250,18 @@ class PublicationTests(unittest.TestCase):
             self.assertFalse(result['passed']);self.assertEqual(result['venue_or_account_requests'],0)
             self.assertEqual(result['market_cycles'],0)
 
+    def test_save_path_retries_use_distinct_namespaces(self):
+        from publication_smoke import main as smoke
+        ids=[]
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ,{},clear=True), contextlib.redirect_stdout(io.StringIO()):
+            for attempt in (1,2):
+                root=Path(d)/str(attempt)
+                smoke(['--output',str(root),'--run-id','123456789','--code-sha','a'*40,'--attempt',str(attempt)])
+                result=json.loads((root/'result.json').read_bytes());ids.append(result['evidence_id'])
+                self.assertEqual(result['workflow_run_id'],'123456789')
+                self.assertEqual(result['workflow_attempt'],attempt)
+        self.assertNotEqual(*ids)
+
     def test_save_path_check_cannot_replace_an_existing_result(self):
         from publication_smoke import main as smoke
         with tempfile.TemporaryDirectory() as d:

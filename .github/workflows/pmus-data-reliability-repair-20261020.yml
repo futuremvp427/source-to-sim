@@ -56,6 +56,7 @@ jobs:
         run: >-
           .venv-data/bin/python experiments/pmus-data-reliability-20261018/publication_smoke.py
           --output publication-preflight --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+          --attempt '${{ github.run_attempt }}'
       - name: Public market-data diagnostics, independent of venue credentials
         id: public
         continue-on-error: true

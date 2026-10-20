@@ -143,6 +143,7 @@ class StreamState:
         self.slugs, self.journal = slugs, journal
         self.lock = threading.RLock()
         self.latest, self.counts = {}, collections.Counter()
+        self.history = {slug: collections.deque(maxlen=1024) for slug in slugs}
         self.last_transport_at, self.connected, self.failure = None, False, None
 
     def ingest(self, data, at):
@@ -185,9 +186,40 @@ class StreamState:
             ref = self.journal.add("stream_book", {"received_at":at, "market_data":md})
             self.latest[slug] = {"body":md, "received_at":at, "evidence":ref,
                                 "integrity_issue": conflict or bool(old and old.get("integrity_issue") and book_at == old_at)}
+            if conflict:
+                for prior in self.history[slug]:
+                    if MODEL.stamp(prior["body"]["transactTime"]) == book_at:
+                        prior["integrity_issue"] = True
+            self.history[slug].append(copy.deepcopy(self.latest[slug]))
+            while self.history[slug] and at - self.history[slug][0]["received_at"] > 120:
+                self.history[slug].popleft()
             self.counts["full_book_messages"] += 1
             if inspect_stream(md, slug, at)["usable"] and not self.latest[slug]["integrity_issue"]:
                 self.counts["fresh_executable_book_messages"] += 1
+
+    def compare_rest(self, rest, at):
+        """Compare already-received books at the SAME venue time; never value from history."""
+        slug = rest["slug"]
+        latest = self.snapshot(slug, at)
+        fallback = compare_stream(rest, latest)
+        fallback.update(pairing="latest_snapshot", compared_at=at)
+        if not rest.get("usable") or not latest.get("usable"):
+            return fallback
+        with self.lock:
+            rows = copy.deepcopy(list(self.history.get(slug, ())))
+        for row in reversed(rows):
+            if row["integrity_issue"] or not 0 <= at - row["received_at"] <= 120:
+                continue
+            candidate = inspect_stream(row["body"], slug, at)
+            comparison = compare_stream(rest, candidate, maximum_skew_seconds=0)
+            if comparison["matched"]:
+                return {**comparison, "pairing": "same_venue_timestamp", "compared_at": at,
+                        "stream_evidence": row["evidence"],
+                        "stream_received_at": row["received_at"], "book_at": candidate["book_at"]}
+        # Only an eligible already-received history row can prove alignment.
+        if fallback["matched"]:
+            fallback.update(matched=False, reason="no_prior_received_matching_book")
+        return fallback
 
     def snapshot(self, slug, at):
         with self.lock:
@@ -347,7 +379,7 @@ def main(argv=None):
                 at=time.time()
                 rest=inspect_book(rest_response,slug,now=at)
                 stream=state.snapshot(slug,at)
-                observations[slug]={"rest":rest,"stream":stream,"comparison":compare_stream(rest,stream)}
+                observations[slug]={"rest":rest,"stream":stream,"comparison":state.compare_rest(rest,at)}
                 if not scheduled<=rest_response["received_at"]<scheduled+20:
                     observations[slug]["outside_observation_slot"]=True
             row={"tick":tick,"scheduled_at":scheduled,"finished_at":time.time(),"markets":observations}

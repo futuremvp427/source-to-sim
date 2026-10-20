@@ -15,11 +15,14 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--code-sha", required=True)
+    parser.add_argument("--attempt", type=int, default=1)
     args = parser.parse_args(argv)
+    if not 1 <= args.attempt <= 99:
+        parser.error("attempt must be between 1 and 99")
     args.output.mkdir(parents=True, exist_ok=False)
-    evidence_id = args.run_id + "00"  # Distinct from the actual data soak.
+    evidence_id = args.run_id + f"{args.attempt:02d}00"  # Distinct run AND retry evidence.
     result = {"kind": "checkpoint_mirror_smoke", "passed": False,
-              "workflow_run_id": args.run_id, "evidence_id": evidence_id,
+              "workflow_run_id": args.run_id, "workflow_attempt": args.attempt, "evidence_id": evidence_id,
               "code_sha": args.code_sha, "market_cycles": 0,
               "data_gate_passed": False, "strategy_result": False,
               "venue_or_account_requests": 0}

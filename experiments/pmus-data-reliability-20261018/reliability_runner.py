@@ -102,6 +102,8 @@ class ReconnectingStream:
                 self.connection = conn
                 with self.state.lock:
                     self.state.latest.clear()
+                    for history in self.state.history.values():
+                        history.clear()
                     self.state.last_transport_at = None
                     self.state.failure = None
                     self.state.connected = True
@@ -203,7 +205,7 @@ def observe(client, slug, identity, stream, scheduled, terminal=None):
     return {"kind": "book", "slug": slug, "usable": not issues,
             "issues": issues, "rest": rest, "stream": ws,
             "metadata_evidence": meta_response["evidence"],
-            "comparison": compare_stream(rest, ws),
+            "comparison": stream.state.compare_rest(rest, at) if stream else compare_stream(rest, ws),
             "http_latency_seconds": response["received_at"] - response["sent_at"]}
 
 

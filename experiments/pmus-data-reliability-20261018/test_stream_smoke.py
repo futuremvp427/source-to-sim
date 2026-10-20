@@ -139,6 +139,42 @@ class StreamTests(unittest.TestCase):
             self.assertFalse(s.snapshot(SLUG,NOW+1)["usable"])
             j.close()
 
+    def test_cached_rest_matches_prior_received_venue_book_not_latest(self):
+        from quality import inspect_book
+        with tempfile.TemporaryDirectory() as d:
+            j=Journal(Path(d)/"new");s=StreamState([SLUG],j);s.connected=True
+            old=response();s.ingest(old["body"],NOW)
+            new=response(at=NOW+10);new["body"]["marketData"]["bids"][0]["qty"]="25"
+            s.ingest(new["body"],NOW+10)
+            match=s.compare_rest(inspect_book(old,SLUG,now=NOW+11),NOW+11)
+            self.assertTrue(match["matched"])
+            self.assertEqual(match["pairing"],"same_venue_timestamp")
+            self.assertEqual(match["book_at"],NOW-1)
+            self.assertEqual(s.snapshot(SLUG,NOW+11)["book_at"],NOW+9)
+            j.close()
+
+    def test_alignment_refuses_stale_http_future_receipt_and_disconnect(self):
+        from quality import inspect_book
+        with tempfile.TemporaryDirectory() as d:
+            j=Journal(Path(d)/"new");s=StreamState([SLUG],j);s.connected=True
+            r=response();s.ingest(r["body"],NOW+2)
+            self.assertFalse(s.compare_rest(inspect_book(r,SLUG,now=NOW),NOW)["matched"])
+            stale=response(age="30")
+            self.assertFalse(s.compare_rest(inspect_book(stale,SLUG,now=NOW+3),NOW+3)["matched"])
+            s.connected=False
+            self.assertFalse(s.compare_rest(inspect_book(r,SLUG,now=NOW+3),NOW+3)["matched"])
+            j.close()
+
+    def test_alignment_refuses_conflicted_history_after_new_book(self):
+        from quality import inspect_book
+        with tempfile.TemporaryDirectory() as d:
+            j=Journal(Path(d)/"new");s=StreamState([SLUG],j);s.connected=True
+            r=response();s.ingest(r["body"],NOW)
+            bad=copy.deepcopy(r["body"]);bad["marketData"]["bids"][0]["qty"]="21"
+            s.ingest(bad,NOW+1);s.ingest(response(at=NOW+5)["body"],NOW+5)
+            self.assertFalse(s.compare_rest(inspect_book(r,SLUG,now=NOW+6),NOW+6)["matched"])
+            j.close()
+
     def test_subscription_error_body_not_persisted(self):
         with tempfile.TemporaryDirectory() as d:
             j=Journal(Path(d)/"new");s=StreamState([SLUG],j)
