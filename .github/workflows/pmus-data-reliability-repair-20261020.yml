@@ -5,6 +5,7 @@ on:
     paths:
       - experiments/pmus-data-reliability-20261018/durable.py
       - experiments/pmus-data-reliability-20261018/publication.py
+      - experiments/pmus-data-reliability-20261018/publication_smoke.py
       - experiments/pmus-data-reliability-20261018/reliability_runner.py
       - experiments/pmus-data-reliability-20261018/test_reliability.py
       - experiments/pmus-data-reliability-20261018/stream_smoke.py
@@ -33,6 +34,8 @@ jobs:
         run: ../../.venv-data/bin/python -m unittest -v test_quality.py test_stream_smoke.py test_reliability.py
   preflight:
     needs: verify
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -45,6 +48,14 @@ jobs:
         run: |
           python3 -m venv .venv-data
           .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Round-trip the isolated save path without any venue request
+        id: mirror
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/publication_smoke.py
+          --output publication-preflight --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
       - name: Public market-data diagnostics, independent of venue credentials
         id: public
         continue-on-error: true
@@ -66,6 +77,7 @@ jobs:
         id: gates
         if: always()
         env:
+          MIRROR_OUTCOME: ${{ steps.mirror.outcome }}
           PUBLIC_OUTCOME: ${{ steps.public.outcome }}
           STREAM_OUTCOME: ${{ steps.stream.outcome }}
         run: |
@@ -74,11 +86,13 @@ jobs:
           def read(path):
               try:return json.loads(pathlib.Path(path).read_bytes())
               except (OSError,ValueError):return {}
-          public=read('public-preflight/summary.json');stream=read('stream-preflight/summary.json')
+          public=read('public-preflight/summary.json');stream=read('stream-preflight/summary.json');mirror=read('publication-preflight/result.json')
           ready=bool(os.environ['PUBLIC_OUTCOME']=='success' and os.environ['STREAM_OUTCOME']=='success'
+                     and os.environ['MIRROR_OUTCOME']=='success' and mirror.get('passed')
                      and public.get('public_preflight_passed') and stream.get('passed'))
           result={'preflight_ready':ready,'full_day_gate_passed':False,
                    'public_problem':public.get('failure'),'stream_problem':stream.get('failure'),
+                   'checkpoint_mirror_passed':mirror.get('passed',False),'mirror_problem':mirror.get('failure'),
                    'orders_or_private_account_requests':0}
           pathlib.Path('preflight-gates.json').write_text(json.dumps(result,sort_keys=True)+'\n')
           with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write('ready='+str(ready).lower()+'\n')
@@ -91,6 +105,7 @@ jobs:
         with:
           name: pmus-data-preflight-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            publication-preflight/
             public-preflight/
             stream-preflight/
             preflight-gates.json

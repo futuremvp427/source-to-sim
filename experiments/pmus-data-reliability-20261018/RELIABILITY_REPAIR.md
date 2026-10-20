@@ -9,7 +9,7 @@ in an earlier trial or establish that a wallet is profitable.
 
 The five-wallet job stopped when GitHub returned HTTP 500 during checkpoint
 publication. Its exception path then attempted to append to a closed LZMA
-journal. The separately reviewed publication correction is draft PR 63.
+journal. The separately tested publication correction is draft PR 63.
 
 A fresh public-only diagnostic on October 20, 2026, 11:38:28–11:39:34 UTC
 captured six full-book responses for three already known sports markets.
@@ -54,7 +54,7 @@ the venue book timestamp.
 
 ## Validation and launch gates
 
-The three offline suites currently contain 104 passing tests. They include an
+The three offline suites currently contain 108 passing tests. They include an
 abrupt subprocess exit after an acknowledged write, restart with skipped time,
 corrupt/partial evidence, exact remote reconstruction, transient HTTP 500,
 permission denial, pending publication, ambiguous ref update, continued
@@ -64,7 +64,10 @@ The isolated workflow first runs those tests, then a 120-second public check
 and a 120-second authenticated market-data-only check against the same public
 market plan. A present but malformed secret is a configuration failure and is
 never treated as a successful connection. Public endpoints do not need a key.
-The full-day check is skipped unless both preflight gates pass.
+The workflow also round-trips a labelled synthetic save-test row through a new
+run-specific GitHub branch and validates the restored bytes. It is not a market
+observation or a strategy result. The full-day check is skipped unless all three
+preflight gates pass.
 
 If preflight passes, six bounded segments cover one fixed 24-hour window.
 The initial segment alone may establish its epoch. Later segments restore the
@@ -79,6 +82,23 @@ official settlement observations are reported separately. A short check cannot
 pass the full-day gate. This diagnostic does not certify source-wallet coverage
 or actual game-in-progress phase coverage, and does not automatically authorize
 a new wallet trial.
+
+## First live preflight and selection correction
+
+Run 39418063104 at commit 174f460bcce5c77efe88f284dad4e69cbb50e0eb
+passed all 104 tests on GitHub and saved an artifact after its preflight failed.
+The artifact digest was independently checked against GitHub's recorded SHA-256.
+The authenticated check rejected the saved Secret Key's Base64 format locally,
+before any authenticated handshake or private request. The full-day segments
+were correctly skipped.
+
+The public selector also exposed a scope bug: it chose the nearest sports
+moneylines, which were tennis matches outside the frozen study's supported
+league list. The selection correction requires a supported league slug prefix
+and the full-game-winner market type before choosing from the observed catalog.
+It neither changes the original study rules nor searches for more profitable
+wallets. Two regression tests cover unsupported nearer matches and partial games.
+The failed preflight remains an immutable failed attempt, not a replaced result.
 
 ## Remaining limits
 

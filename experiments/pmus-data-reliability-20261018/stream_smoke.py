@@ -19,7 +19,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from quality import MODEL, SLUG, canonical, compare_stream, digest, inspect_book
+from quality import MODEL, PROTOCOL, SLUG, canonical, compare_stream, digest, inspect_book
 from probe import Journal, PublicClient, catalog, verify_journal
 
 WS_URL = "wss://api.polymarket.us/v1/ws/markets"
@@ -264,7 +264,15 @@ def select_markets(listing, now):
     for row in listing["markets"]:
         try:
             at=MODEL.stamp(row.get("gameStartTime"))
-            if MODEL.valid_open_market(row) and SLUG.fullmatch(row.get("slug","")) and now-21600 <= at <= now+86400:
+            slug=row.get("slug","")
+            prefix=re.match(r"^aec-([a-z0-9]+)-",slug)
+            # Test the sports used by the frozen study; nearer tennis matches
+            # must not silently replace the intended football/basketball/hockey
+            # and baseball market-data sample.
+            supported=bool(prefix and prefix.group(1) in PROTOCOL["supported_leagues"])
+            kind=row.get("sportsMarketType","")
+            full_game=kind=="moneyline" or kind.endswith("_full_game_winner")
+            if supported and full_game and MODEL.valid_open_market(row) and SLUG.fullmatch(slug) and now-21600 <= at <= now+86400:
                 eligible.append((abs(at-now),row["slug"]))
         except (ValueError, TypeError, AttributeError):
             continue

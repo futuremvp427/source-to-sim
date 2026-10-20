@@ -161,6 +161,20 @@ class StreamTests(unittest.TestCase):
         for listing in [{"complete":False,"markets":[target()]},{"complete":True,"markets":[]}]:
             with self.assertRaises(ValueError): select_markets(listing,NOW)
 
+    def test_nearer_unsupported_sport_does_not_replace_the_study_sports(self):
+        tennis=target(slug="aec-itfwo-example-match-2026-10-20")
+        tennis.update(sportsMarketType="tennis_match_winner",gameStartTime=__import__('datetime').datetime.fromtimestamp(NOW,__import__('datetime').timezone.utc).isoformat())
+        self.assertEqual(select_markets({"complete":True,"markets":[tennis,target()]},NOW),[SLUG])
+        with self.assertRaises(ValueError):
+            select_markets({"complete":True,"markets":[tennis]},NOW)
+
+    def test_partial_game_market_does_not_enter_the_diagnostic_plan(self):
+        partial=target();partial['sportsMarketType']='nfl_first_half_winner'
+        with self.assertRaises(ValueError):
+            select_markets({"complete":True,"markets":[partial]},NOW)
+        full=target();full['sportsMarketType']='moneyline'
+        self.assertEqual(select_markets({"complete":True,"markets":[full]},NOW),[SLUG])
+
     def test_auth_denial_stops_without_public_fallback(self):
         fake_listing={"complete":True,"markets":[target()]}
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ,{"PMUS_DATA_KEY_ID":"example-key","PMUS_DATA_SECRET_KEY":KEY},clear=True), mock.patch("stream_smoke.catalog",return_value=fake_listing), mock.patch("stream_smoke.select_markets",return_value=[SLUG]), mock.patch("stream_smoke.connect_market_stream") as dial, mock.patch("stream_smoke.PublicClient") as client, contextlib.redirect_stdout(io.StringIO()) as output:

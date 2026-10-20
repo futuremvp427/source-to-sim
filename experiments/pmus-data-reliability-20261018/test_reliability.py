@@ -239,6 +239,25 @@ class QualityRecoveryTests(unittest.TestCase):
 
 
 class PublicationTests(unittest.TestCase):
+    def test_save_path_check_fails_without_token_and_makes_no_network_request(self):
+        from publication_smoke import main as smoke
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"PMUS_DATA_SECRET_KEY":"DO_NOT_ECHO"}, clear=True), mock.patch("publication.urllib.request.build_opener") as network, contextlib.redirect_stdout(io.StringIO()) as out:
+            root=Path(d)/'new'
+            self.assertEqual(smoke(['--output',str(root),'--run-id','123456789','--code-sha','a'*40]),1)
+            network.assert_not_called()
+            self.assertNotIn('DO_NOT_ECHO',out.getvalue())
+            result=json.loads((root/'result.json').read_bytes())
+            self.assertFalse(result['passed']);self.assertEqual(result['venue_or_account_requests'],0)
+            self.assertEqual(result['market_cycles'],0)
+
+    def test_save_path_check_cannot_replace_an_existing_result(self):
+        from publication_smoke import main as smoke
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)/'existing';root.mkdir();result=root/'result.json';result.write_text('preserve')
+            with self.assertRaises(FileExistsError):
+                smoke(['--output',str(root),'--run-id','123456789','--code-sha','a'*40])
+            self.assertEqual(result.read_text(),'preserve')
+
     def mirror(self, root):
         with mock.patch.dict(os.environ, {"GH_TOKEN": "synthetic-token"}):
             return GitMirror("123456789", "a" * 40, root)

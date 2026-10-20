@@ -1,4 +1,4 @@
-"""Dedicated data-only checkpoint mirror; retry core from reviewed PR 63."""
+"""Dedicated data-only checkpoint mirror; retry core shared with draft PR 63."""
 from __future__ import annotations
 import base64, hashlib, json, os, re, tempfile, urllib.error, urllib.parse, urllib.request, time
 from pathlib import Path
