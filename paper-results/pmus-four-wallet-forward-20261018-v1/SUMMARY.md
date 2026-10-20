@@ -1,7 +1,7 @@
 # Four-wallet US sports paper test
 
 Study: `pmus-four-wallet-forward-20261018-v1`
-Measured through: **2026-10-20T08:49:25.712263+00:00**
+Measured through: **2026-10-20T08:59:42.470314+00:00**
 
 Collection ends: 2026-10-20T15:34:35.330497+00:00; settlement hard stop: 2026-10-22T15:34:35.330497+00:00
 
@@ -11,7 +11,7 @@ Each account starts with $1,000 fictional capital. Source account profits are no
 |---|---|---:|---:|---:|---:|---:|---:|
 | ic4cream | SCREEN_PENDING | 0 | $0.00 | $0.00 | 1 | 10.00 | 100.0% |
 | para-Vision | SCREEN_PENDING | 2 | $-0.34 | $-0.54 | 2 | 40.00 | 100.0% |
-| monkeymashingkeyboard | SCREEN_PENDING | 4 | $4.53 | $3.83 | 3 | 80.00 | 100.0% |
+| monkeymashingkeyboard | SCREEN_PENDING | 4 | $4.53 | $3.83 | 4 | 90.00 | 100.0% |
 | alwaysfade | SCREEN_PENDING | 2 | $-3.85 | $-4.05 | 1 | 30.00 | 100.0% |
 
 `summary.json` contains cash, marks, mark coverage, observed drawdown, fees, timing, quantities and skip reasons.
