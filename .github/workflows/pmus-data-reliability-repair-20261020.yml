@@ -67,6 +67,7 @@ jobs:
         id: stream
         continue-on-error: true
         env:
+          # Key ID identifies the API key; Secret Key signs market-data requests.
           PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
           PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
         run: >-
