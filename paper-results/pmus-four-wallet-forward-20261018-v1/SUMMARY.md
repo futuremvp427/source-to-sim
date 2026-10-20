@@ -1,7 +1,7 @@
 # Four-wallet US sports paper test
 
 Study: `pmus-four-wallet-forward-20261018-v1`
-Measured through: **2026-10-20T00:11:10.050700+00:00**
+Measured through: **2026-10-20T00:21:30.781550+00:00**
 
 Collection ends: 2026-10-20T15:34:35.330497+00:00; settlement hard stop: 2026-10-22T15:34:35.330497+00:00
 
