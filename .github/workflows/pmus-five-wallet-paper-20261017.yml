@@ -22,12 +22,21 @@ jobs:
           persist-credentials: false
       - name: Frozen accounting and integrity tests
         working-directory: experiments/pmus-five-wallet-20261017
-        run: python3 -m unittest -v test_study.py
+        run: python3 -m unittest -v test_study.py test_publication_reliability.py
       - name: Public-data bootstrap and durable checkpoint
         id: bootstrap
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --bootstrap --seconds 0 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_00:
     needs: validate
     if: ${{ always() && needs.validate.result == 'success' && needs.validate.outputs.terminal != 'true' }}
@@ -44,6 +53,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 0 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_01:
     needs: collect_00
     if: ${{ always() && needs.collect_00.result == 'success' && needs.collect_00.outputs.terminal != 'true' }}
@@ -60,6 +78,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 1 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_02:
     needs: collect_01
     if: ${{ always() && needs.collect_01.result == 'success' && needs.collect_01.outputs.terminal != 'true' }}
@@ -76,6 +103,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 2 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_03:
     needs: collect_02
     if: ${{ always() && needs.collect_02.result == 'success' && needs.collect_02.outputs.terminal != 'true' }}
@@ -92,6 +128,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 3 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_04:
     needs: collect_03
     if: ${{ always() && needs.collect_03.result == 'success' && needs.collect_03.outputs.terminal != 'true' }}
@@ -108,6 +153,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 4 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_05:
     needs: collect_04
     if: ${{ always() && needs.collect_04.result == 'success' && needs.collect_04.outputs.terminal != 'true' }}
@@ -124,6 +178,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 5 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_06:
     needs: collect_05
     if: ${{ always() && needs.collect_05.result == 'success' && needs.collect_05.outputs.terminal != 'true' }}
@@ -140,6 +203,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 6 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_07:
     needs: collect_06
     if: ${{ always() && needs.collect_06.result == 'success' && needs.collect_06.outputs.terminal != 'true' }}
@@ -156,6 +228,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 7 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_08:
     needs: collect_07
     if: ${{ always() && needs.collect_07.result == 'success' && needs.collect_07.outputs.terminal != 'true' }}
@@ -172,6 +253,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 8 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_09:
     needs: collect_08
     if: ${{ always() && needs.collect_08.result == 'success' && needs.collect_08.outputs.terminal != 'true' }}
@@ -188,6 +278,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 9 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_10:
     needs: collect_09
     if: ${{ always() && needs.collect_09.result == 'success' && needs.collect_09.outputs.terminal != 'true' }}
@@ -204,6 +303,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 10 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_11:
     needs: collect_10
     if: ${{ always() && needs.collect_10.result == 'success' && needs.collect_10.outputs.terminal != 'true' }}
@@ -220,6 +328,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 11 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_12:
     needs: collect_11
     if: ${{ always() && needs.collect_11.result == 'success' && needs.collect_11.outputs.terminal != 'true' }}
@@ -236,6 +353,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 12 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_13:
     needs: collect_12
     if: ${{ always() && needs.collect_12.result == 'success' && needs.collect_12.outputs.terminal != 'true' }}
@@ -252,6 +378,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 13 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_14:
     needs: collect_13
     if: ${{ always() && needs.collect_13.result == 'success' && needs.collect_13.outputs.terminal != 'true' }}
@@ -268,6 +403,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 14 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_15:
     needs: collect_14
     if: ${{ always() && needs.collect_14.result == 'success' && needs.collect_14.outputs.terminal != 'true' }}
@@ -284,6 +428,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 15 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_16:
     needs: collect_15
     if: ${{ always() && needs.collect_15.result == 'success' && needs.collect_15.outputs.terminal != 'true' }}
@@ -300,6 +453,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 16 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_17:
     needs: collect_16
     if: ${{ always() && needs.collect_16.result == 'success' && needs.collect_16.outputs.terminal != 'true' }}
@@ -316,6 +478,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 17 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_18:
     needs: collect_17
     if: ${{ always() && needs.collect_17.result == 'success' && needs.collect_17.outputs.terminal != 'true' }}
@@ -332,6 +503,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 18 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
   collect_19:
     needs: collect_18
     if: ${{ always() && needs.collect_18.result == 'success' && needs.collect_18.outputs.terminal != 'true' }}
@@ -348,3 +528,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 experiments/pmus-five-wallet-20261017/collector.py --segment 19 --seconds 18000 --work paper-work
+      - name: Preserve sealed checkpoints independently of Git publication
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-five-wallet-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+          path: paper-work/output/
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6

@@ -5,6 +5,8 @@ import base64
 import json
 import lzma
 import os
+import tempfile
+import time
 import threading
 import urllib.error
 import urllib.parse
@@ -12,6 +14,36 @@ import urllib.request
 from pathlib import Path
 
 from model import canonical, sha, verify_account
+
+
+class PublicationError(RuntimeError):
+    """Publication failed; the sealed local evidence must remain untouched."""
+
+
+def atomic_write(path, data, immutable=False):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if immutable and path.exists():
+        if path.read_bytes() != data:
+            raise ValueError("refusing to replace an immutable checkpoint")
+        return
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".checkpoint-", delete=False) as out:
+            temporary = Path(out.name)
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 class Journal:
@@ -99,7 +131,7 @@ def checkpoint(state, protocol, journal, summary, directory):
     for name, content in files.items():
         p = directory / name
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(content)
+        atomic_write(p, content, immutable=name.startswith("checkpoints/"))
     return files, manifest
 
 
@@ -122,28 +154,50 @@ class Publisher:
             raise ValueError("checkpoint branch outside dedicated research scope")
         self.folder = "paper-results/" + protocol["study_id"] + "/"
         self.head = None
+        self.pending_commit = None
+        self.last_published_fingerprint = None
 
     def request(self, path, method="GET", value=None, missing_ok=False):
         if not path.startswith(("/git/", "/contents/")):
             raise ValueError("GitHub checkpoint endpoint outside allowlist")
-        request = urllib.request.Request(
-            self.base + path, data=canonical(value) if value is not None else None,
-            method=method, headers={"Authorization": "Bearer " + self.token,
-                "Accept": "application/vnd.github+json", "User-Agent": "US-paper-checkpoints/1.0",
-                "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"})
-        try:
-            with urllib.request.build_opener(NoRedirect()).open(request, timeout=35) as response:
-                return json.load(response)
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404 and missing_ok:
-                return None
-            raise RuntimeError(f"GitHub checkpoint request failed: HTTP {exc.code}") from None
+        # Blobs/trees are content addressed; repeating the same ref PATCH is
+        # idempotent. Do not blindly retry branch creation after an uncertain POST.
+        retry_allowed = not (path == "/git/refs" and method == "POST")
+        for attempt in range(5):
+            request = urllib.request.Request(
+                self.base + path, data=canonical(value) if value is not None else None,
+                method=method, headers={"Authorization": "Bearer " + self.token,
+                    "Accept": "application/vnd.github+json", "User-Agent": "US-paper-checkpoints/1.0",
+                    "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"})
+            retry, delay = False, min(2 ** attempt, 16)
+            try:
+                with urllib.request.build_opener(NoRedirect()).open(request, timeout=35) as response:
+                    return json.load(response)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404 and missing_ok:
+                    return None
+                rate_limited = exc.code == 403 and (
+                    exc.headers.get("X-RateLimit-Remaining") == "0" or exc.headers.get("Retry-After"))
+                retry = exc.code in (408, 429, 500, 502, 503, 504) or bool(rate_limited)
+                failure = f"GitHub checkpoint request failed: HTTP {exc.code}"
+                wait = exc.headers.get("Retry-After")
+                if wait is not None:
+                    try:
+                        delay = max(delay, float(wait))
+                    except (TypeError, ValueError):
+                        retry = False
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                retry = True
+                failure = "GitHub checkpoint transport failed: " + type(exc).__name__
+            if not retry or not retry_allowed or attempt == 4 or delay > 30:
+                raise PublicationError(failure) from None
+            time.sleep(delay)
 
     def ref(self):
         return self.request("/git/ref/heads/" + self.branch, missing_ok=True)
 
     def content(self, path):
-        item = self.request("/contents/" + self.folder + path + "?ref=" + urllib.parse.quote(self.branch, safe=""))
+        item = self.request("/contents/" + self.folder + path + "?ref=" + urllib.parse.quote(self.head or self.branch, safe=""))
         if item.get("encoding") != "base64":
             blob = self.request("/git/blobs/" + item["sha"])
             return base64.b64decode(blob["content"])
@@ -175,8 +229,41 @@ class Publisher:
             verify_account(account, self.p["starting_capital_usd"])
         return state
 
+    def _finish_pending(self):
+        pending = self.pending_commit
+        try:
+            self.request("/git/refs/heads/" + self.branch, "PATCH",
+                         {"sha": pending["sha"], "force": False})
+        except PublicationError:
+            # A timeout/500 may occur after GitHub moved the ref. Read it back
+            # before deciding that this exact sealed checkpoint was lost.
+            observed = self.ref()
+            if not observed or observed["object"]["sha"] != pending["sha"]:
+                raise
+        self.head = pending["sha"]
+        self.last_published_fingerprint = pending["fingerprint"]
+        self.pending_commit = None
+        return self.head
+
     def publish(self, files, state, bootstrap=False):
+        if any(Path(path).is_absolute() or ".." in Path(path).parts for path in files):
+            raise ValueError("checkpoint file path outside study folder")
+        fingerprint = sha(canonical({path: sha(data) for path, data in sorted(files.items())}))
         ref = self.ref()
+        if (ref and ref["object"]["sha"] == self.head
+                and fingerprint == self.last_published_fingerprint):
+            return self.head
+        if self.pending_commit is not None:
+            if fingerprint != self.pending_commit["fingerprint"]:
+                raise ValueError("pending checkpoint bytes changed")
+            if ref and ref["object"]["sha"] == self.pending_commit["sha"]:
+                self.head = self.pending_commit["sha"]
+                self.last_published_fingerprint = fingerprint
+                self.pending_commit = None
+                return self.head
+            if not ref or ref["object"]["sha"] != self.head:
+                raise ValueError("checkpoint branch changed concurrently; refusing overwrite")
+            return self._finish_pending()
         if bootstrap:
             if ref:
                 raise ValueError("study checkpoint branch already exists; duplicate bootstrap forbidden")
@@ -196,7 +283,7 @@ class Publisher:
         new_commit = self.request("/git/commits", "POST", {
             "message": f"Paper checkpoint {state['checkpoint_number']} [{self.p['study_id']}]",
             "tree": new_tree["sha"], "parents": [self.head]})
-        # A normal fast-forward can never overwrite a concurrent sibling commit.
-        self.request("/git/refs/heads/" + self.branch, "PATCH", {"sha": new_commit["sha"], "force": False})
-        self.head = new_commit["sha"]
-        return self.head
+        # Keep the exact commit for an ambiguous PATCH response or an explicit
+        # retry. A normal fast-forward still rejects a concurrent sibling.
+        self.pending_commit = {"sha": new_commit["sha"], "fingerprint": fingerprint}
+        return self._finish_pending()

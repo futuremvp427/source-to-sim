@@ -6,6 +6,7 @@ import argparse
 import base64
 import concurrent.futures
 import json
+import lzma
 import math
 import os
 import signal
@@ -20,7 +21,7 @@ from pathlib import Path
 from model import (GAME, ONE, QUANTUM, ROUND_DOWN, ZERO, apply_fill, associate, book,
                    canonical, execute, iso, metrics, new_account, number, settle, sha,
                    stamp, valid_open_market, verify_account)
-from persistence import Journal, NoRedirect, Publisher, checkpoint
+from persistence import Journal, NoRedirect, Publisher, atomic_write, checkpoint
 
 ROOT = Path(__file__).resolve().parent
 STOP = False
@@ -195,6 +196,7 @@ class Collector:
     def __init__(self, state, protocol, work):
         self.s, self.p, self.work = state, protocol, Path(work)
         self.journal = Journal(self.work, state)
+        self.pending_checkpoint = None
         self.net = Network(protocol, self.journal)
         self.source_cache, self.us_cache, self.book_cache = {}, {}, {}
 
@@ -492,15 +494,33 @@ class Collector:
             self.s["terminal"] = True
 
     def publish(self, publisher, bootstrap=False):
-        files, manifest = checkpoint(self.s, self.p, self.journal, {}, self.work / "output")
-        value = summary(self.s, self.p)
-        files["summary.json"] = canonical(value)
-        files["SUMMARY.md"] = render_summary(value)
-        (self.work / "output" / "summary.json").write_bytes(files["summary.json"])
-        (self.work / "output" / "SUMMARY.md").write_bytes(files["SUMMARY.md"])
+        if self.pending_checkpoint is None:
+            files, manifest = checkpoint(self.s, self.p, self.journal, {}, self.work / "output")
+            value = summary(self.s, self.p)
+            files["summary.json"] = canonical(value)
+            files["SUMMARY.md"] = render_summary(value)
+            atomic_write(self.work / "output" / "summary.json", files["summary.json"])
+            atomic_write(self.work / "output" / "SUMMARY.md", files["SUMMARY.md"])
+            self.pending_checkpoint = (files, manifest, value)
+            atomic_write(self.work / "output" / "PENDING_PUBLICATION.json", canonical({
+                "study_id": self.s["study_id"], "checkpoint": manifest["checkpoint"],
+                "manifest_sha256": sha(canonical(manifest)),
+                "expected_previous_head": getattr(publisher, "head", None),
+                "files": {path: sha(data) for path, data in sorted(files.items())},
+                "recovery_requires_full_chain_verification": True,
+                "automatic_rewind_allowed": False}))
+        files, manifest, value = self.pending_checkpoint
+        saved = json.loads(lzma.decompress(files[manifest["state_path"]]))
+        if canonical(saved) != canonical(self.s):
+            raise ValueError("state changed while a sealed checkpoint is pending")
         commit = publisher.publish(files, self.s, bootstrap=bootstrap)
+        atomic_write(self.work / "output" / "PUBLICATION_RECEIPT.json", canonical({
+            "checkpoint": manifest["checkpoint"], "commit": commit,
+            "manifest_sha256": sha(canonical(manifest))}))
         self.s["last_manifest_sha256"] = sha(canonical(manifest))
         self.journal.reset()
+        self.pending_checkpoint = None
+        (self.work / "output" / "PENDING_PUBLICATION.json").unlink(missing_ok=True)
         print(json.dumps({"checkpoint": self.s["checkpoint_number"], "commit": commit,
                           "measured_through": value["measured_through"], "cycles": self.s["cycles"],
                           "accounts": [{k: a[k] for k in ("name", "completed_distinct_markets", "open_distinct_markets", "simulated_contracts_bought")} for a in value["accounts"]]}), flush=True)
@@ -605,6 +625,12 @@ def main():
             with open(os.environ["GITHUB_OUTPUT"], "a") as output:
                 output.write("terminal=" + str(s["terminal"]).lower() + "\n")
     except Exception as exc:
+        if c.pending_checkpoint is not None or c.journal.file.closed:
+            # checkpoint() already sealed the evidence. Writing a fatal-error
+            # row into that closed journal masks the original publication error.
+            print("Sealed checkpoint preserved locally; publication failed. "
+                  "No rewind or new checkpoint was attempted.", flush=True)
+            raise
         s["fatal_error"] = f"{type(exc).__name__}: {exc}"
         s["terminal"] = True
         s["last_cycle_at"] = time.time()
