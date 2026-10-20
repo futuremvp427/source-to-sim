@@ -52,7 +52,8 @@ class StreamTests(unittest.TestCase):
             self.assertEqual(rc,1)
             self.assertEqual(result["failure"],"missing_key_id")
             client.assert_not_called()
-            self.assertFalse((Path(d)/"new").exists())
+            saved=json.loads((Path(d)/"new/summary.json").read_bytes())
+            self.assertEqual(saved,result)
 
     def test_only_three_full_market_subscriptions(self):
         self.assertEqual(subscription([SLUG])["subscribe"]["subscriptionType"],"SUBSCRIPTION_TYPE_MARKET_DATA")

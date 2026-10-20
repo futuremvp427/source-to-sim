@@ -103,6 +103,23 @@ def safe_market_data(value, slugs):
     return out
 
 
+def normalize_market_message(data):
+    """Accept the two documented wire spellings; reject conflicting aliases."""
+    if not isinstance(data, dict):
+        return data
+    if "market_data" not in data:
+        return data
+    if "marketData" in data:
+        raise ValueError("conflicting_wire_aliases")
+    md = dict(data["market_data"])
+    for snake, camel in (("market_slug", "marketSlug"), ("transact_time", "transactTime")):
+        if snake in md:
+            if camel in md:
+                raise ValueError("conflicting_wire_aliases")
+            md[camel] = md.pop(snake)
+    return {**{k: v for k, v in data.items() if k != "market_data"}, "marketData": md}
+
+
 def inspect_stream(md, slug, now):
     """Venue time is never replaced by receipt, heartbeat or HTTP timestamps."""
     result = {"slug": slug, "usable": False, "issues": [], "transport": "authenticated_markets_websocket"}
@@ -132,6 +149,11 @@ class StreamState:
         with self.lock:
             self.last_transport_at = at
             self.counts["messages"] += 1
+            try:
+                data = normalize_market_message(data)
+            except (ValueError, TypeError):
+                self.counts["rejected_book_messages"] += 1
+                return
             if not isinstance(data, dict):
                 self.counts["invalid_messages"] += 1
                 return
@@ -256,6 +278,7 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output",type=Path,required=True)
     parser.add_argument("--seconds",type=int,default=120)
+    parser.add_argument("--market-plan",type=Path)
     parser.add_argument("--approved-market-data-only",action="store_true")
     parser.add_argument("--export-public-evidence-in-log",action="store_true")
     args=parser.parse_args(argv)
@@ -277,6 +300,13 @@ def main(argv=None):
         client=PublicClient(journal,deadline=time.time()+180)
         listing=catalog(client)
         slugs=select_markets(listing,time.time())
+        if args.market_plan is not None:
+            requested=list(json.loads(args.market_plan.read_bytes())["markets"])
+            eligible={row["slug"] for row in listing["markets"] if MODEL.valid_open_market(row)}
+            subscription(requested)  # Enforce the same bounded public market set.
+            if not set(requested) <= eligible:
+                raise ValueError("watch_plan_not_in_current_catalog")
+            slugs=requested
         result["market_slugs"]=slugs
         # Secrets are used solely here. They are not journaled or printed.
         try:
@@ -334,7 +364,8 @@ def main(argv=None):
     except ValueError as exc:
         # Only known static validation codes are emitted, never input values.
         allowed_codes={"missing_key_id","missing_secret_key","invalid_key_id_format",
-            "invalid_secret_key_format","incomplete_public_catalog","no_open_catalog_sports_markets"}
+            "invalid_secret_key_format","incomplete_public_catalog","no_open_catalog_sports_markets",
+            "watch_plan_not_in_current_catalog"}
         result["failure"]=str(exc) if str(exc) in allowed_codes else "validation_failed"
     except Exception as exc:
         result["failure"]=safe_error(exc)
@@ -353,6 +384,11 @@ def main(argv=None):
 
 def finish(args,result,journal):
     chunks=[]
+    if journal is None:
+        # Configuration failures are evidence too. Never write key material.
+        args.output.mkdir(parents=True, exist_ok=False)
+        from durable import atomic_write
+        atomic_write(args.output/"summary.json",canonical(result)+b"\n",immutable=True)
     if journal is not None:
         journal.close()
         result["evidence"]=verify_journal(journal.path)
