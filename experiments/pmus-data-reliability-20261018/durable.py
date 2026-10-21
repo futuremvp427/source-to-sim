@@ -110,8 +110,46 @@ class DurableJournal:
             raise ValueError("checkpoint_differs_from_durable_journal")
         self.sealed_seq, self.checkpoint = checked["seq"], checked["checkpoints"]
         self.previous_manifest = checked["manifest_sha256"]
+        self.stream_captures = {}
+        for row in self.rows:
+            if row["kind"] == "stream_book" and "receipt_evidence" in row["payload"]:
+                payload = row["payload"]
+                if payload["receipt_evidence"].get("seq", row["seq"]) >= row["seq"]:
+                    raise ValueError("stream_capture_precedes_receipt")
+                self._verify_stream_receipt(payload["market_data"], payload["received_at"], payload["receipt_evidence"])
+                self.stream_captures[payload["receipt_evidence"]["seq"]] = {"seq": row["seq"], "hash": row["hash"]}
         self.writer = self.path.open("ab", buffering=0)
         self.closed = False
+
+    def stream_receipt(self, market_data, received_at):
+        """Hash every receipt; persist full books when selected for evaluation.
+
+        Repeated full depth in every incoming message exhausted the 1 GiB WAL.
+        Receipt hashes preserve arrival order and bind any subsequently captured
+        decision book to the exact bytes already received before the decision.
+        """
+        return self.add("stream_book_receipt", {
+            "received_at": received_at, "slug": market_data["marketSlug"],
+            "book_at": market_data["transactTime"], "book_sha256": digest(market_data)})
+
+    def _verify_stream_receipt(self, market_data, received_at, evidence):
+        seq = evidence.get("seq")
+        if type(seq) is not int or not 1 <= seq <= len(self.rows):
+            raise ValueError("invalid_stream_receipt_reference")
+        row = self.rows[seq - 1]
+        if (row["hash"] != evidence.get("hash") or row["kind"] != "stream_book_receipt"
+                or row["payload"]["received_at"] != received_at
+                or row["payload"]["book_sha256"] != digest(market_data)):
+            raise ValueError("stream_book_receipt_mismatch")
+
+    def capture_stream_book(self, market_data, received_at, evidence):
+        with self.lock:
+            self._verify_stream_receipt(market_data, received_at, evidence)
+            if evidence["seq"] not in self.stream_captures:
+                self.stream_captures[evidence["seq"]] = self.add("stream_book", {
+                    "market_data": market_data, "received_at": received_at,
+                    "receipt_evidence": evidence})
+            return self.stream_captures[evidence["seq"]]
 
     def add(self, kind, payload):
         with self.lock:

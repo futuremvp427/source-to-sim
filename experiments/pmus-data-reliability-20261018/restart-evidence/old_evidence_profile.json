@@ -1,0 +1,114 @@
+{
+  "wal_bytes": 1073740035,
+  "wal_limit_bytes": 1073741824,
+  "remaining_before_limit_bytes": 1789,
+  "counts": {
+    "plan": 1,
+    "segment_started": 3,
+    "http": 10866,
+    "stream_connected": 10,
+    "stream_book": 210642,
+    "cycle": 1975,
+    "stream_disconnected": 10,
+    "stream_reconnect_wait": 7,
+    "segment_finished": 3
+  },
+  "bytes_by_kind": {
+    "plan": 788,
+    "segment_started": 739,
+    "http": 7754744,
+    "stream_connected": 2326,
+    "stream_book": 1055304840,
+    "cycle": 10671419,
+    "stream_disconnected": 2675,
+    "stream_reconnect_wait": 1750,
+    "segment_finished": 754
+  },
+  "largest_line_bytes": 7544,
+  "tail": [
+    {
+      "seq": 223506,
+      "kind": "stream_book",
+      "bytes": 6927,
+      "at": 1792542435.02467,
+      "failure": null
+    },
+    {
+      "seq": 223507,
+      "kind": "stream_book",
+      "bytes": 6581,
+      "at": 1792542435.1258337,
+      "failure": null
+    },
+    {
+      "seq": 223508,
+      "kind": "stream_book",
+      "bytes": 6577,
+      "at": 1792542435.1290596,
+      "failure": null
+    },
+    {
+      "seq": 223509,
+      "kind": "stream_disconnected",
+      "bytes": 270,
+      "at": 1792542435.5120587,
+      "failure": null
+    },
+    {
+      "seq": 223510,
+      "kind": "stream_reconnect_wait",
+      "bytes": 251,
+      "at": 1792542435.5125163,
+      "failure": null
+    },
+    {
+      "seq": 223511,
+      "kind": "http",
+      "bytes": 666,
+      "at": 1792542436.69918,
+      "failure": null
+    },
+    {
+      "seq": 223512,
+      "kind": "http",
+      "bytes": 670,
+      "at": 1792542437.0223129,
+      "failure": null
+    },
+    {
+      "seq": 223513,
+      "kind": "http",
+      "bytes": 765,
+      "at": 1792542437.3352437,
+      "failure": null
+    },
+    {
+      "seq": 223514,
+      "kind": "stream_connected",
+      "bytes": 234,
+      "at": 1792542437.6077404,
+      "failure": null
+    },
+    {
+      "seq": 223515,
+      "kind": "http",
+      "bytes": 767,
+      "at": 1792542437.6750672,
+      "failure": null
+    },
+    {
+      "seq": 223516,
+      "kind": "stream_disconnected",
+      "bytes": 269,
+      "at": 1792542437.684549,
+      "failure": null
+    },
+    {
+      "seq": 223517,
+      "kind": "segment_finished",
+      "bytes": 258,
+      "at": 1792542437.684936,
+      "failure": "RuntimeError"
+    }
+  ]
+}

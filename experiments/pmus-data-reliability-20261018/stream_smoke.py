@@ -183,8 +183,11 @@ class StreamState:
                     self.journal.add("stream_out_of_order", {"slug":slug, "received_at":at, "book_at":book_at})
                     return
                 conflict = book_at == old_at and md != old["body"]
-            ref = self.journal.add("stream_book", {"received_at":at, "market_data":md})
+            compact = hasattr(self.journal, "stream_receipt")
+            ref = (self.journal.stream_receipt(md, at) if compact else
+                   self.journal.add("stream_book", {"received_at":at, "market_data":md}))
             self.latest[slug] = {"body":md, "received_at":at, "evidence":ref,
+                                "receipt_only": compact,
                                 "integrity_issue": conflict or bool(old and old.get("integrity_issue") and book_at == old_at)}
             if conflict:
                 for prior in self.history[slug]:
@@ -213,13 +216,19 @@ class StreamState:
             candidate = inspect_stream(row["body"], slug, at)
             comparison = compare_stream(rest, candidate, maximum_skew_seconds=0)
             if comparison["matched"]:
+                evidence = self._capture(row)
                 return {**comparison, "pairing": "same_venue_timestamp", "compared_at": at,
-                        "stream_evidence": row["evidence"],
+                        "stream_evidence": evidence,
                         "stream_received_at": row["received_at"], "book_at": candidate["book_at"]}
         # Only an eligible already-received history row can prove alignment.
         if fallback["matched"]:
             fallback.update(matched=False, reason="no_prior_received_matching_book")
         return fallback
+
+    def _capture(self, row):
+        if row.get("receipt_only"):
+            return self.journal.capture_stream_book(row["body"], row["received_at"], row["evidence"])
+        return row["evidence"]
 
     def snapshot(self, slug, at):
         with self.lock:
@@ -228,7 +237,7 @@ class StreamState:
         if row is None:
             return {"slug":slug,"usable":False,"issues":["no_full_stream_book"]}
         result = inspect_stream(row["body"], slug, at)
-        result.update(evidence=row["evidence"],sample_received_at=row["received_at"])
+        result.update(evidence=self._capture(row),sample_received_at=row["received_at"])
         if row["integrity_issue"]:
             result["issues"].append("conflicting_book_at_same_venue_time")
         if not live:

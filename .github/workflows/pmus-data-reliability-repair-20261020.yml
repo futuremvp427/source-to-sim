@@ -8,6 +8,8 @@ on:
       - experiments/pmus-data-reliability-20261018/publication_smoke.py
       - experiments/pmus-data-reliability-20261018/reliability_runner.py
       - experiments/pmus-data-reliability-20261018/test_reliability.py
+      - experiments/pmus-data-reliability-20261018/recover_backup.py
+      - experiments/pmus-data-reliability-20261018/test_restart.py
       - experiments/pmus-data-reliability-20261018/stream_smoke.py
       - experiments/pmus-data-reliability-20261018/test_stream_smoke.py
       - .github/workflows/pmus-data-reliability-repair-20261020.yml
@@ -31,7 +33,7 @@ jobs:
           .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
       - name: Offline freshness, recovery and failure-injection checks
         working-directory: experiments/pmus-data-reliability-20261018
-        run: ../../.venv-data/bin/python -m unittest -v test_quality.py test_stream_smoke.py test_reliability.py
+        run: ../../.venv-data/bin/python -m unittest -v test_quality.py test_stream_smoke.py test_reliability.py test_restart.py
   preflight:
     needs: verify
     permissions:
@@ -174,12 +176,18 @@ jobs:
         with:
           name: pmus-data-preflight-${{ github.run_id }}-${{ github.run_attempt }}
           path: frozen-preflight
-      - name: Recover the previous segment's durable local backup when available
+      - name: Download available same-run segment backups
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_00
-          path: data-soak
+          pattern: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_*
+          path: recovery-backups
+          merge-multiple: false
+      - name: Recover the newest available backup without resetting its epoch
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/recover_backup.py
+          --source recovery-backups --output data-soak
+          --run-id '${{ github.run_id }}' --attempt '${{ github.run_attempt }}' --code-sha '${{ github.sha }}'
       - name: Collect data only, preserving scheduled gaps and final US settlements
         env:
           PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
@@ -220,12 +228,18 @@ jobs:
         with:
           name: pmus-data-preflight-${{ github.run_id }}-${{ github.run_attempt }}
           path: frozen-preflight
-      - name: Recover the previous segment's durable local backup when available
+      - name: Download available same-run segment backups
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_01
-          path: data-soak
+          pattern: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_*
+          path: recovery-backups
+          merge-multiple: false
+      - name: Recover the newest available backup without resetting its epoch
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/recover_backup.py
+          --source recovery-backups --output data-soak
+          --run-id '${{ github.run_id }}' --attempt '${{ github.run_attempt }}' --code-sha '${{ github.sha }}'
       - name: Collect data only, preserving scheduled gaps and final US settlements
         env:
           PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
@@ -266,12 +280,18 @@ jobs:
         with:
           name: pmus-data-preflight-${{ github.run_id }}-${{ github.run_attempt }}
           path: frozen-preflight
-      - name: Recover the previous segment's durable local backup when available
+      - name: Download available same-run segment backups
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_02
-          path: data-soak
+          pattern: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_*
+          path: recovery-backups
+          merge-multiple: false
+      - name: Recover the newest available backup without resetting its epoch
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/recover_backup.py
+          --source recovery-backups --output data-soak
+          --run-id '${{ github.run_id }}' --attempt '${{ github.run_attempt }}' --code-sha '${{ github.sha }}'
       - name: Collect data only, preserving scheduled gaps and final US settlements
         env:
           PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
@@ -312,12 +332,18 @@ jobs:
         with:
           name: pmus-data-preflight-${{ github.run_id }}-${{ github.run_attempt }}
           path: frozen-preflight
-      - name: Recover the previous segment's durable local backup when available
+      - name: Download available same-run segment backups
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_03
-          path: data-soak
+          pattern: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_*
+          path: recovery-backups
+          merge-multiple: false
+      - name: Recover the newest available backup without resetting its epoch
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/recover_backup.py
+          --source recovery-backups --output data-soak
+          --run-id '${{ github.run_id }}' --attempt '${{ github.run_attempt }}' --code-sha '${{ github.sha }}'
       - name: Collect data only, preserving scheduled gaps and final US settlements
         env:
           PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
@@ -358,12 +384,18 @@ jobs:
         with:
           name: pmus-data-preflight-${{ github.run_id }}-${{ github.run_attempt }}
           path: frozen-preflight
-      - name: Recover the previous segment's durable local backup when available
+      - name: Download available same-run segment backups
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_04
-          path: data-soak
+          pattern: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_*
+          path: recovery-backups
+          merge-multiple: false
+      - name: Recover the newest available backup without resetting its epoch
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/recover_backup.py
+          --source recovery-backups --output data-soak
+          --run-id '${{ github.run_id }}' --attempt '${{ github.run_attempt }}' --code-sha '${{ github.sha }}'
       - name: Collect data only, preserving scheduled gaps and final US settlements
         env:
           PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}

@@ -34,10 +34,11 @@ class BackgroundMirror:
         if self.future is not None and self.future.done():
             try:
                 self.future.result()
-            except PublicationError:
+            except PublicationError as exc:
                 self.errors += 1
                 self.mirror.save()
-                self.journal.add("publication_delayed", {"at": time.time(), "checkpoint": self.journal.checkpoint})
+                self.journal.add("publication_delayed", {"at": time.time(), "checkpoint": self.journal.checkpoint,
+                                                       "diagnostic": getattr(exc, "details", {})})
             self.future = None
 
     def submit(self):
@@ -280,14 +281,13 @@ def main(argv=None):
             args.output.mkdir(parents=True, exist_ok=True)
             if args.mirror:
                 mirror = GitMirror(args.run_id, args.code_sha, args.output)
-                try:
+                # The artifact has the complete local WAL and pending-publication
+                # record. Validate it below instead of downloading thousands of
+                # already saved Git blobs through the authenticated REST quota.
+                local_backup = all((args.output / name).is_file()
+                                   for name in ("events.jsonl", "plan.json", "publication.json"))
+                if not local_backup:
                     mirror.restore()
-                except PublicationError:
-                    # A valid local backup outranks an unavailable remote read.
-                    # With no backup, stop instead of quietly resetting the clock.
-                    if not (args.output / "events.jsonl").exists() or not (args.output / "plan.json").exists():
-                        raise
-                    publication_errors += 1
         journal = DurableJournal(args.output, resume=args.resume)
         if args.mirror and mirror is None:
             mirror = GitMirror(args.run_id, args.code_sha, args.output)
@@ -380,7 +380,10 @@ def main(argv=None):
                     next_save = time.time() + 600
                 tick = max(tick + 1, math.ceil((time.time() - plan["started_at"]) / INTERVAL))
     except Exception as exc:
-        known = {"missing_key_id", "missing_secret_key", "invalid_key_id_format", "invalid_secret_key_format"}
+        known = {"missing_key_id", "missing_secret_key", "invalid_key_id_format", "invalid_secret_key_format",
+                 "evidence_limit_reached", "compressed_body_evidence_limit_reached",
+                 "missing_prior_plan_refuse_restart", "publication_identity_mismatch",
+                 "resume_plan_identity_mismatch", "stream_book_receipt_mismatch"}
         failure = str(exc) if str(exc) in known or isinstance(exc, PermissionError) else type(exc).__name__
     finally:
         if stream is not None:

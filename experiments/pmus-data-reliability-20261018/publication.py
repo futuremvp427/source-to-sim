@@ -1,11 +1,14 @@
 """Dedicated data-only checkpoint mirror; retry core shared with draft PR 63."""
 from __future__ import annotations
-import base64, hashlib, json, os, re, tempfile, urllib.error, urllib.parse, urllib.request, time
+import base64, hashlib, json, math, os, re, tempfile, urllib.error, urllib.parse, urllib.request, time
 from pathlib import Path
 from durable import atomic_write, restore_events, verify_checkpoints
 from quality import canonical
 sha=lambda data:hashlib.sha256(data).hexdigest()
-class PublicationError(RuntimeError): pass
+class PublicationError(RuntimeError):
+    def __init__(self, message, details=None):
+        super().__init__(message)
+        self.details = details or {}
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*args,**kwargs): raise ValueError('redirect_refused')
 class GitMirror:
@@ -25,16 +28,17 @@ class GitMirror:
         self.last_published_fingerprint=None
         self.published={}
         self.pending_files=None
+        self.retry_not_before=0
         record=self.root/'publication.json'
         if record.exists():
             saved=json.loads(record.read_bytes())
             if saved['run_id']!=str(run_id) or saved['code_sha']!=code_sha:
                 raise ValueError('publication_identity_mismatch')
-            for k in ('head','pending_commit','last_published_fingerprint','published','pending_files'):
-                setattr(self,k,saved[k])
+            for k in ('head','pending_commit','last_published_fingerprint','published','pending_files','retry_not_before'):
+                setattr(self,k,saved.get(k,getattr(self,k)))
 
     def save(self):
-        value={k:getattr(self,k) for k in ('head','pending_commit','last_published_fingerprint','published','pending_files')}
+        value={k:getattr(self,k) for k in ('head','pending_commit','last_published_fingerprint','published','pending_files','retry_not_before')}
         value.update(run_id=self.p['study_id'],code_sha=self.code_sha)
         atomic_write(self.root/'publication.json',canonical(value)+b'\n')
 
@@ -113,6 +117,9 @@ class GitMirror:
     def request(self, path, method="GET", value=None, missing_ok=False):
         if not path.startswith(("/git/", "/contents/")):
             raise ValueError("GitHub checkpoint endpoint outside allowlist")
+        if time.time() < self.retry_not_before:
+            raise PublicationError("GitHub publication waiting for rate-limit reset",
+                                   {"classification":"rate_limit_cooldown", "retry_not_before":self.retry_not_before})
         # Blobs/trees are content addressed; repeating the same ref PATCH is
         # idempotent. Do not blindly retry branch creation after an uncertain POST.
         retry_allowed = not (path == "/git/refs" and method == "POST")
@@ -122,28 +129,54 @@ class GitMirror:
                 method=method, headers={"Authorization": "Bearer " + self.token,
                     "Accept": "application/vnd.github+json", "User-Agent": "US-paper-checkpoints/1.0",
                     "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json"})
-            retry, delay = False, min(2 ** attempt, 16)
+            retry, delay, details = False, min(2 ** attempt, 16), {}
             try:
                 with urllib.request.build_opener(NoRedirect()).open(request, timeout=35) as response:
                     return json.load(response)
             except urllib.error.HTTPError as exc:
                 if exc.code == 404 and missing_ok:
                     return None
-                rate_limited = exc.code == 403 and (
-                    exc.headers.get("X-RateLimit-Remaining") == "0" or exc.headers.get("Retry-After"))
+                body = exc.read(65536)
+                try:
+                    message = json.loads(body).get("message", "").lower()
+                except (ValueError, TypeError, AttributeError):
+                    message = ""
+                rate_limited = exc.code in (403,429) and (
+                    exc.headers.get("X-RateLimit-Remaining") == "0" or exc.headers.get("Retry-After")
+                    or "rate limit" in message)
                 retry = exc.code in (408, 429, 500, 502, 503, 504) or bool(rate_limited)
                 failure = f"GitHub checkpoint request failed: HTTP {exc.code}"
                 wait = exc.headers.get("Retry-After")
                 if wait is not None:
                     try:
-                        delay = max(delay, float(wait))
+                        parsed_wait = float(wait)
+                        if not math.isfinite(parsed_wait) or parsed_wait < 0: raise ValueError("invalid_retry_delay")
+                        delay = max(delay, parsed_wait)
                     except (TypeError, ValueError):
                         retry = False
+                elif rate_limited:
+                    try:
+                        reset = float(exc.headers.get("X-RateLimit-Reset", "0"))
+                        if not math.isfinite(reset): raise ValueError("invalid_reset")
+                        delay = max(60, reset-time.time())
+                    except (TypeError,ValueError):
+                        delay = 60
+                details={"status":exc.code,"method":method,"path":path,
+                         "classification": "rate_limit" if rate_limited else "http_rejection",
+                         "github_request_id":re.sub(r'[^a-zA-Z0-9:-]', '', exc.headers.get('X-GitHub-Request-Id',''))[:100],
+                         "response_body_sha256":sha(body)}
+                for name, header in (("remaining","X-RateLimit-Remaining"),("reset","X-RateLimit-Reset"),("retry_after","Retry-After")):
+                    raw=exc.headers.get(header,"")
+                    details[name]=raw if re.fullmatch(r'[0-9.]{1,24}',raw) else None
+                if rate_limited and delay>30 and retry:
+                    self.retry_not_before=time.time()+delay
+                    details['retry_not_before']=self.retry_not_before
+                atomic_write(self.root/'publication-diagnostic.json',canonical(details)+b'\n')
             except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
                 retry = True
                 failure = "GitHub checkpoint transport failed: " + type(exc).__name__
             if not retry or not retry_allowed or attempt == 4 or delay > 30:
-                raise PublicationError(failure) from None
+                raise PublicationError(failure,details) from None
             time.sleep(delay)
 
 
