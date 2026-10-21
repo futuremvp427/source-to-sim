@@ -19,7 +19,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from quality import MODEL, SLUG, canonical, compare_stream, digest, inspect_book
+from quality import MODEL, PROTOCOL, SLUG, canonical, compare_stream, digest, inspect_book
 from probe import Journal, PublicClient, catalog, verify_journal
 
 WS_URL = "wss://api.polymarket.us/v1/ws/markets"
@@ -103,6 +103,23 @@ def safe_market_data(value, slugs):
     return out
 
 
+def normalize_market_message(data):
+    """Accept the two documented wire spellings; reject conflicting aliases."""
+    if not isinstance(data, dict):
+        return data
+    if "market_data" not in data:
+        return data
+    if "marketData" in data:
+        raise ValueError("conflicting_wire_aliases")
+    md = dict(data["market_data"])
+    for snake, camel in (("market_slug", "marketSlug"), ("transact_time", "transactTime")):
+        if snake in md:
+            if camel in md:
+                raise ValueError("conflicting_wire_aliases")
+            md[camel] = md.pop(snake)
+    return {**{k: v for k, v in data.items() if k != "market_data"}, "marketData": md}
+
+
 def inspect_stream(md, slug, now):
     """Venue time is never replaced by receipt, heartbeat or HTTP timestamps."""
     result = {"slug": slug, "usable": False, "issues": [], "transport": "authenticated_markets_websocket"}
@@ -126,12 +143,18 @@ class StreamState:
         self.slugs, self.journal = slugs, journal
         self.lock = threading.RLock()
         self.latest, self.counts = {}, collections.Counter()
+        self.history = {slug: collections.deque(maxlen=1024) for slug in slugs}
         self.last_transport_at, self.connected, self.failure = None, False, None
 
     def ingest(self, data, at):
         with self.lock:
             self.last_transport_at = at
             self.counts["messages"] += 1
+            try:
+                data = normalize_market_message(data)
+            except (ValueError, TypeError):
+                self.counts["rejected_book_messages"] += 1
+                return
             if not isinstance(data, dict):
                 self.counts["invalid_messages"] += 1
                 return
@@ -160,12 +183,52 @@ class StreamState:
                     self.journal.add("stream_out_of_order", {"slug":slug, "received_at":at, "book_at":book_at})
                     return
                 conflict = book_at == old_at and md != old["body"]
-            ref = self.journal.add("stream_book", {"received_at":at, "market_data":md})
+            compact = hasattr(self.journal, "stream_receipt")
+            ref = (self.journal.stream_receipt(md, at) if compact else
+                   self.journal.add("stream_book", {"received_at":at, "market_data":md}))
             self.latest[slug] = {"body":md, "received_at":at, "evidence":ref,
+                                "receipt_only": compact,
                                 "integrity_issue": conflict or bool(old and old.get("integrity_issue") and book_at == old_at)}
+            if conflict:
+                for prior in self.history[slug]:
+                    if MODEL.stamp(prior["body"]["transactTime"]) == book_at:
+                        prior["integrity_issue"] = True
+            self.history[slug].append(copy.deepcopy(self.latest[slug]))
+            while self.history[slug] and at - self.history[slug][0]["received_at"] > 120:
+                self.history[slug].popleft()
             self.counts["full_book_messages"] += 1
             if inspect_stream(md, slug, at)["usable"] and not self.latest[slug]["integrity_issue"]:
                 self.counts["fresh_executable_book_messages"] += 1
+
+    def compare_rest(self, rest, at):
+        """Compare already-received books at the SAME venue time; never value from history."""
+        slug = rest["slug"]
+        latest = self.snapshot(slug, at)
+        fallback = compare_stream(rest, latest)
+        fallback.update(pairing="latest_snapshot", compared_at=at)
+        if not rest.get("usable") or not latest.get("usable"):
+            return fallback
+        with self.lock:
+            rows = copy.deepcopy(list(self.history.get(slug, ())))
+        for row in reversed(rows):
+            if row["integrity_issue"] or not 0 <= at - row["received_at"] <= 120:
+                continue
+            candidate = inspect_stream(row["body"], slug, at)
+            comparison = compare_stream(rest, candidate, maximum_skew_seconds=0)
+            if comparison["matched"]:
+                evidence = self._capture(row)
+                return {**comparison, "pairing": "same_venue_timestamp", "compared_at": at,
+                        "stream_evidence": evidence,
+                        "stream_received_at": row["received_at"], "book_at": candidate["book_at"]}
+        # Only an eligible already-received history row can prove alignment.
+        if fallback["matched"]:
+            fallback.update(matched=False, reason="no_prior_received_matching_book")
+        return fallback
+
+    def _capture(self, row):
+        if row.get("receipt_only"):
+            return self.journal.capture_stream_book(row["body"], row["received_at"], row["evidence"])
+        return row["evidence"]
 
     def snapshot(self, slug, at):
         with self.lock:
@@ -174,7 +237,7 @@ class StreamState:
         if row is None:
             return {"slug":slug,"usable":False,"issues":["no_full_stream_book"]}
         result = inspect_stream(row["body"], slug, at)
-        result.update(evidence=row["evidence"],sample_received_at=row["received_at"])
+        result.update(evidence=self._capture(row),sample_received_at=row["received_at"])
         if row["integrity_issue"]:
             result["issues"].append("conflicting_book_at_same_venue_time")
         if not live:
@@ -242,7 +305,15 @@ def select_markets(listing, now):
     for row in listing["markets"]:
         try:
             at=MODEL.stamp(row.get("gameStartTime"))
-            if MODEL.valid_open_market(row) and SLUG.fullmatch(row.get("slug","")) and now-21600 <= at <= now+86400:
+            slug=row.get("slug","")
+            prefix=re.match(r"^aec-([a-z0-9]+)-",slug)
+            # Test the sports used by the frozen study; nearer tennis matches
+            # must not silently replace the intended football/basketball/hockey
+            # and baseball market-data sample.
+            supported=bool(prefix and prefix.group(1) in PROTOCOL["supported_leagues"])
+            kind=row.get("sportsMarketType","")
+            full_game=kind=="moneyline" or kind.endswith("_full_game_winner")
+            if supported and full_game and MODEL.valid_open_market(row) and SLUG.fullmatch(slug) and now-21600 <= at <= now+86400:
                 eligible.append((abs(at-now),row["slug"]))
         except (ValueError, TypeError, AttributeError):
             continue
@@ -256,6 +327,7 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output",type=Path,required=True)
     parser.add_argument("--seconds",type=int,default=120)
+    parser.add_argument("--market-plan",type=Path)
     parser.add_argument("--approved-market-data-only",action="store_true")
     parser.add_argument("--export-public-evidence-in-log",action="store_true")
     args=parser.parse_args(argv)
@@ -277,6 +349,13 @@ def main(argv=None):
         client=PublicClient(journal,deadline=time.time()+180)
         listing=catalog(client)
         slugs=select_markets(listing,time.time())
+        if args.market_plan is not None:
+            requested=list(json.loads(args.market_plan.read_bytes())["markets"])
+            eligible={row["slug"] for row in listing["markets"] if MODEL.valid_open_market(row)}
+            subscription(requested)  # Enforce the same bounded public market set.
+            if not set(requested) <= eligible:
+                raise ValueError("watch_plan_not_in_current_catalog")
+            slugs=requested
         result["market_slugs"]=slugs
         # Secrets are used solely here. They are not journaled or printed.
         try:
@@ -309,7 +388,7 @@ def main(argv=None):
                 at=time.time()
                 rest=inspect_book(rest_response,slug,now=at)
                 stream=state.snapshot(slug,at)
-                observations[slug]={"rest":rest,"stream":stream,"comparison":compare_stream(rest,stream)}
+                observations[slug]={"rest":rest,"stream":stream,"comparison":state.compare_rest(rest,at)}
                 if not scheduled<=rest_response["received_at"]<scheduled+20:
                     observations[slug]["outside_observation_slot"]=True
             row={"tick":tick,"scheduled_at":scheduled,"finished_at":time.time(),"markets":observations}
@@ -334,7 +413,8 @@ def main(argv=None):
     except ValueError as exc:
         # Only known static validation codes are emitted, never input values.
         allowed_codes={"missing_key_id","missing_secret_key","invalid_key_id_format",
-            "invalid_secret_key_format","incomplete_public_catalog","no_open_catalog_sports_markets"}
+            "invalid_secret_key_format","incomplete_public_catalog","no_open_catalog_sports_markets",
+            "watch_plan_not_in_current_catalog"}
         result["failure"]=str(exc) if str(exc) in allowed_codes else "validation_failed"
     except Exception as exc:
         result["failure"]=safe_error(exc)
@@ -353,6 +433,11 @@ def main(argv=None):
 
 def finish(args,result,journal):
     chunks=[]
+    if journal is None:
+        # Configuration failures are evidence too. Never write key material.
+        args.output.mkdir(parents=True, exist_ok=False)
+        from durable import atomic_write
+        atomic_write(args.output/"summary.json",canonical(result)+b"\n",immutable=True)
     if journal is not None:
         journal.close()
         result["evidence"]=verify_journal(journal.path)

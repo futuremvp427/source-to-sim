@@ -1,0 +1,417 @@
+name: Isolated Polymarket Data Reliability Repair
+on:
+  push:
+    branches: [research/pmus-reliability-repair-20261020]
+    paths:
+      - experiments/pmus-data-reliability-20261018/durable.py
+      - experiments/pmus-data-reliability-20261018/publication.py
+      - experiments/pmus-data-reliability-20261018/publication_smoke.py
+      - experiments/pmus-data-reliability-20261018/reliability_runner.py
+      - experiments/pmus-data-reliability-20261018/test_reliability.py
+      - experiments/pmus-data-reliability-20261018/recover_backup.py
+      - experiments/pmus-data-reliability-20261018/test_restart.py
+      - experiments/pmus-data-reliability-20261018/stream_smoke.py
+      - experiments/pmus-data-reliability-20261018/test_stream_smoke.py
+      - .github/workflows/pmus-data-reliability-repair-20261020.yml
+permissions:
+  contents: read
+concurrency:
+  group: pmus-data-reliability-repair-20261020
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: ${{ github.repository == 'futuremvp427/source-to-sim' && github.event.repository.private == false && github.ref == 'refs/heads/research/pmus-reliability-repair-20261020' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned data-only dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Offline freshness, recovery and failure-injection checks
+        working-directory: experiments/pmus-data-reliability-20261018
+        run: ../../.venv-data/bin/python -m unittest -v test_quality.py test_stream_smoke.py test_reliability.py test_restart.py
+  preflight:
+    needs: verify
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      ready: ${{ steps.gates.outputs.ready }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned data-only dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Round-trip the isolated save path without any venue request
+        id: mirror
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/publication_smoke.py
+          --output publication-preflight --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+          --attempt '${{ github.run_attempt }}'
+      - name: Public market-data diagnostics, independent of venue credentials
+        id: public
+        continue-on-error: true
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/reliability_runner.py
+          --output public-preflight --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+          --duration-seconds 120 --segment-seconds 120 --approved-data-only
+      - name: Bounded authenticated market-data check only
+        id: stream
+        continue-on-error: true
+        env:
+          # Key ID identifies the API key; Secret Key signs market-data requests.
+          PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+          PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/stream_smoke.py
+          --output stream-preflight --seconds 120 --market-plan public-preflight/plan.json --approved-market-data-only
+          --export-public-evidence-in-log
+      - name: Gate the full-day data-only check
+        id: gates
+        if: always()
+        env:
+          MIRROR_OUTCOME: ${{ steps.mirror.outcome }}
+          PUBLIC_OUTCOME: ${{ steps.public.outcome }}
+          STREAM_OUTCOME: ${{ steps.stream.outcome }}
+        run: |
+          python3 - <<'PYCODE'
+          import json,os,pathlib
+          def read(path):
+              try:return json.loads(pathlib.Path(path).read_bytes())
+              except (OSError,ValueError):return {}
+          public=read('public-preflight/summary.json');stream=read('stream-preflight/summary.json');mirror=read('publication-preflight/result.json')
+          ready=bool(os.environ['PUBLIC_OUTCOME']=='success' and os.environ['STREAM_OUTCOME']=='success'
+                     and os.environ['MIRROR_OUTCOME']=='success' and mirror.get('passed')
+                     and public.get('public_preflight_passed') and stream.get('passed'))
+          result={'preflight_ready':ready,'full_day_gate_passed':False,
+                   'public_problem':public.get('failure'),'stream_problem':stream.get('failure'),
+                   'checkpoint_mirror_passed':mirror.get('passed',False),'mirror_problem':mirror.get('failure'),
+                   'orders_or_private_account_requests':0}
+          pathlib.Path('preflight-gates.json').write_text(json.dumps(result,sort_keys=True)+'\n')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write('ready='+str(ready).lower()+'\n')
+          print('PMUS_PREFLIGHT_GATES='+json.dumps(result,sort_keys=True))
+          raise SystemExit(0 if ready else 1)
+          PYCODE
+      - name: Save preflight evidence even after a configuration or data failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-data-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            publication-preflight/
+            public-preflight/
+            stream-preflight/
+            preflight-gates.json
+          if-no-files-found: error
+          retention-days: 14
+  soak_00:
+    needs: [preflight]
+    if: ${{ always() && !cancelled() && needs.preflight.outputs.ready == 'true' }}
+    permissions:
+      contents: write
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 270
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned data-only dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Load the frozen public preflight market plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: pmus-data-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frozen-preflight
+      - name: Collect data only, preserving scheduled gaps and final US settlements
+        env:
+          PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+          PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/reliability_runner.py
+          --output data-soak --watch-plan frozen-preflight/public-preflight/plan.json
+          --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+          --duration-seconds 86400 --segment-seconds 14400
+          --stream --mirror --resume --initialize --approved-data-only
+      - name: Preserve the WAL and unpublished evidence after success or failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_00
+          path: data-soak/
+          if-no-files-found: warn
+          retention-days: 14
+  soak_01:
+    needs: [preflight, soak_00]
+    if: ${{ always() && !cancelled() && needs.preflight.outputs.ready == 'true' }}
+    permissions:
+      contents: write
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 270
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned data-only dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Load the frozen public preflight market plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: pmus-data-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frozen-preflight
+      - name: Download available same-run segment backups
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_*
+          path: recovery-backups
+          merge-multiple: false
+      - name: Recover the newest available backup without resetting its epoch
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/recover_backup.py
+          --source recovery-backups --output data-soak
+          --run-id '${{ github.run_id }}' --attempt '${{ github.run_attempt }}' --code-sha '${{ github.sha }}'
+      - name: Collect data only, preserving scheduled gaps and final US settlements
+        env:
+          PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+          PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/reliability_runner.py
+          --output data-soak --watch-plan frozen-preflight/public-preflight/plan.json
+          --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+          --duration-seconds 86400 --segment-seconds 14400
+          --stream --mirror --resume --approved-data-only
+      - name: Preserve the WAL and unpublished evidence after success or failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_01
+          path: data-soak/
+          if-no-files-found: warn
+          retention-days: 14
+  soak_02:
+    needs: [preflight, soak_01]
+    if: ${{ always() && !cancelled() && needs.preflight.outputs.ready == 'true' }}
+    permissions:
+      contents: write
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 270
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned data-only dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Load the frozen public preflight market plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: pmus-data-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frozen-preflight
+      - name: Download available same-run segment backups
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_*
+          path: recovery-backups
+          merge-multiple: false
+      - name: Recover the newest available backup without resetting its epoch
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/recover_backup.py
+          --source recovery-backups --output data-soak
+          --run-id '${{ github.run_id }}' --attempt '${{ github.run_attempt }}' --code-sha '${{ github.sha }}'
+      - name: Collect data only, preserving scheduled gaps and final US settlements
+        env:
+          PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+          PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/reliability_runner.py
+          --output data-soak --watch-plan frozen-preflight/public-preflight/plan.json
+          --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+          --duration-seconds 86400 --segment-seconds 14400
+          --stream --mirror --resume --approved-data-only
+      - name: Preserve the WAL and unpublished evidence after success or failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_02
+          path: data-soak/
+          if-no-files-found: warn
+          retention-days: 14
+  soak_03:
+    needs: [preflight, soak_02]
+    if: ${{ always() && !cancelled() && needs.preflight.outputs.ready == 'true' }}
+    permissions:
+      contents: write
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 270
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned data-only dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Load the frozen public preflight market plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: pmus-data-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frozen-preflight
+      - name: Download available same-run segment backups
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_*
+          path: recovery-backups
+          merge-multiple: false
+      - name: Recover the newest available backup without resetting its epoch
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/recover_backup.py
+          --source recovery-backups --output data-soak
+          --run-id '${{ github.run_id }}' --attempt '${{ github.run_attempt }}' --code-sha '${{ github.sha }}'
+      - name: Collect data only, preserving scheduled gaps and final US settlements
+        env:
+          PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+          PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/reliability_runner.py
+          --output data-soak --watch-plan frozen-preflight/public-preflight/plan.json
+          --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+          --duration-seconds 86400 --segment-seconds 14400
+          --stream --mirror --resume --approved-data-only
+      - name: Preserve the WAL and unpublished evidence after success or failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_03
+          path: data-soak/
+          if-no-files-found: warn
+          retention-days: 14
+  soak_04:
+    needs: [preflight, soak_03]
+    if: ${{ always() && !cancelled() && needs.preflight.outputs.ready == 'true' }}
+    permissions:
+      contents: write
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 270
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned data-only dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Load the frozen public preflight market plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: pmus-data-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frozen-preflight
+      - name: Download available same-run segment backups
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_*
+          path: recovery-backups
+          merge-multiple: false
+      - name: Recover the newest available backup without resetting its epoch
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/recover_backup.py
+          --source recovery-backups --output data-soak
+          --run-id '${{ github.run_id }}' --attempt '${{ github.run_attempt }}' --code-sha '${{ github.sha }}'
+      - name: Collect data only, preserving scheduled gaps and final US settlements
+        env:
+          PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+          PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/reliability_runner.py
+          --output data-soak --watch-plan frozen-preflight/public-preflight/plan.json
+          --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+          --duration-seconds 86400 --segment-seconds 14400
+          --stream --mirror --resume --approved-data-only
+      - name: Preserve the WAL and unpublished evidence after success or failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_04
+          path: data-soak/
+          if-no-files-found: warn
+          retention-days: 14
+  soak_05:
+    needs: [preflight, soak_04]
+    if: ${{ always() && !cancelled() && needs.preflight.outputs.ready == 'true' }}
+    permissions:
+      contents: write
+      actions: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 270
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned data-only dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Load the frozen public preflight market plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: pmus-data-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: frozen-preflight
+      - name: Download available same-run segment backups
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_*
+          path: recovery-backups
+          merge-multiple: false
+      - name: Recover the newest available backup without resetting its epoch
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/recover_backup.py
+          --source recovery-backups --output data-soak
+          --run-id '${{ github.run_id }}' --attempt '${{ github.run_attempt }}' --code-sha '${{ github.sha }}'
+      - name: Collect data only, preserving scheduled gaps and final US settlements
+        env:
+          PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+          PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-data-reliability-20261018/reliability_runner.py
+          --output data-soak --watch-plan frozen-preflight/public-preflight/plan.json
+          --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+          --duration-seconds 86400 --segment-seconds 14400
+          --stream --mirror --resume --approved-data-only
+      - name: Preserve the WAL and unpublished evidence after success or failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-data-soak-${{ github.run_id }}-${{ github.run_attempt }}-soak_05
+          path: data-soak/
+          if-no-files-found: warn
+          retention-days: 14

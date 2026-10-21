@@ -52,7 +52,8 @@ class StreamTests(unittest.TestCase):
             self.assertEqual(rc,1)
             self.assertEqual(result["failure"],"missing_key_id")
             client.assert_not_called()
-            self.assertFalse((Path(d)/"new").exists())
+            saved=json.loads((Path(d)/"new/summary.json").read_bytes())
+            self.assertEqual(saved,result)
 
     def test_only_three_full_market_subscriptions(self):
         self.assertEqual(subscription([SLUG])["subscribe"]["subscriptionType"],"SUBSCRIPTION_TYPE_MARKET_DATA")
@@ -138,6 +139,42 @@ class StreamTests(unittest.TestCase):
             self.assertFalse(s.snapshot(SLUG,NOW+1)["usable"])
             j.close()
 
+    def test_cached_rest_matches_prior_received_venue_book_not_latest(self):
+        from quality import inspect_book
+        with tempfile.TemporaryDirectory() as d:
+            j=Journal(Path(d)/"new");s=StreamState([SLUG],j);s.connected=True
+            old=response();s.ingest(old["body"],NOW)
+            new=response(at=NOW+10);new["body"]["marketData"]["bids"][0]["qty"]="25"
+            s.ingest(new["body"],NOW+10)
+            match=s.compare_rest(inspect_book(old,SLUG,now=NOW+11),NOW+11)
+            self.assertTrue(match["matched"])
+            self.assertEqual(match["pairing"],"same_venue_timestamp")
+            self.assertEqual(match["book_at"],NOW-1)
+            self.assertEqual(s.snapshot(SLUG,NOW+11)["book_at"],NOW+9)
+            j.close()
+
+    def test_alignment_refuses_stale_http_future_receipt_and_disconnect(self):
+        from quality import inspect_book
+        with tempfile.TemporaryDirectory() as d:
+            j=Journal(Path(d)/"new");s=StreamState([SLUG],j);s.connected=True
+            r=response();s.ingest(r["body"],NOW+2)
+            self.assertFalse(s.compare_rest(inspect_book(r,SLUG,now=NOW),NOW)["matched"])
+            stale=response(age="30")
+            self.assertFalse(s.compare_rest(inspect_book(stale,SLUG,now=NOW+3),NOW+3)["matched"])
+            s.connected=False
+            self.assertFalse(s.compare_rest(inspect_book(r,SLUG,now=NOW+3),NOW+3)["matched"])
+            j.close()
+
+    def test_alignment_refuses_conflicted_history_after_new_book(self):
+        from quality import inspect_book
+        with tempfile.TemporaryDirectory() as d:
+            j=Journal(Path(d)/"new");s=StreamState([SLUG],j);s.connected=True
+            r=response();s.ingest(r["body"],NOW)
+            bad=copy.deepcopy(r["body"]);bad["marketData"]["bids"][0]["qty"]="21"
+            s.ingest(bad,NOW+1);s.ingest(response(at=NOW+5)["body"],NOW+5)
+            self.assertFalse(s.compare_rest(inspect_book(r,SLUG,now=NOW+6),NOW+6)["matched"])
+            j.close()
+
     def test_subscription_error_body_not_persisted(self):
         with tempfile.TemporaryDirectory() as d:
             j=Journal(Path(d)/"new");s=StreamState([SLUG],j)
@@ -159,6 +196,20 @@ class StreamTests(unittest.TestCase):
         self.assertEqual(select_markets({"complete":True,"markets":[target()]},NOW),[SLUG])
         for listing in [{"complete":False,"markets":[target()]},{"complete":True,"markets":[]}]:
             with self.assertRaises(ValueError): select_markets(listing,NOW)
+
+    def test_nearer_unsupported_sport_does_not_replace_the_study_sports(self):
+        tennis=target(slug="aec-itfwo-example-match-2026-10-20")
+        tennis.update(sportsMarketType="tennis_match_winner",gameStartTime=__import__('datetime').datetime.fromtimestamp(NOW,__import__('datetime').timezone.utc).isoformat())
+        self.assertEqual(select_markets({"complete":True,"markets":[tennis,target()]},NOW),[SLUG])
+        with self.assertRaises(ValueError):
+            select_markets({"complete":True,"markets":[tennis]},NOW)
+
+    def test_partial_game_market_does_not_enter_the_diagnostic_plan(self):
+        partial=target();partial['sportsMarketType']='nfl_first_half_winner'
+        with self.assertRaises(ValueError):
+            select_markets({"complete":True,"markets":[partial]},NOW)
+        full=target();full['sportsMarketType']='moneyline'
+        self.assertEqual(select_markets({"complete":True,"markets":[full]},NOW),[SLUG])
 
     def test_auth_denial_stops_without_public_fallback(self):
         fake_listing={"complete":True,"markets":[target()]}

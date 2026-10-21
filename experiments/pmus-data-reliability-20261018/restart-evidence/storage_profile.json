@@ -1,0 +1,11 @@
+{
+  "mode": "offline_storage_profile_not_a_quality_or_profitability_result",
+  "source_artifact_id": 12310909398,
+  "source_zip_sha256": "ae0b136395d8bfca7d7ac38df29e15ae3ab72958b7764ff3cda03a45232a6013",
+  "source_messages_profiled": 10000,
+  "old_full_book_wal_bytes": 32851960,
+  "compact_wal_bytes": 4621610,
+  "full_selected_books_preserved": 178,
+  "all_receipt_hashes_recorded": true,
+  "byte_reduction_fraction": 0.8593201136248796
+}
