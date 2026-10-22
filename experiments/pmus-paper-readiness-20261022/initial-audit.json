@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "assessed_at": "2026-10-22T09:36:35Z",
+  "collector_code_sha": null,
+  "paper_protocol_sha256": null,
+  "reference_protocol_sha256": "1be659edf8286da821eacd314f81fee3c46f8a5ff52a16c4bb5d56cfb02f108f",
+  "requirements_sha256": "74432bb54c13637cc2bcc3ec3096b910ac0c5b4e3f12aaccaf9db44a4d8166d7",
+  "wallets": {
+    "ic4cream": "0x27f738fe203827445690339104aae35b20bc44b0",
+    "alwaysfade": "0xe5b70fd855af9258d9463992e4f1ed7987905ee3",
+    "monkeymashingkeyboard": "0x684baa57c338c2549aec0aa3f034f695d72a8409",
+    "para-Vision": "0x676c1bb692c76b57b06f1b93817515acfa5ce139"
+  },
+  "entry_collection_hours": 48,
+  "maximum_settlement_drain_hours": 48,
+  "proofs_are_test_fixtures": false,
+  "final_columns_demonstrated": [],
+  "checks": {},
+  "live_gate": {
+    "live_gate_passed": false,
+    "completed_full_window": false,
+    "planned_ticks_per_market": 90,
+    "actual_elapsed_seconds": 0,
+    "run_id": null,
+    "markets": {},
+    "source_valid_ticks": {},
+    "proof": null
+  },
+  "sample_plan": {
+    "independently_reviewed": false,
+    "proof": null,
+    "forecasts_are_not_guarantees": true,
+    "conservative_completed_distinct_market_estimates": {},
+    "historical_completed_distinct_markets_after_supplemental_us_reconciliation": {
+      "ic4cream": 0,
+      "alwaysfade": 3,
+      "monkeymashingkeyboard": 8,
+      "para-Vision": 4
+    },
+    "historical_report_library_file_id": "libfile_d8cd8440ca2c819193c2b2a84b51583f",
+    "historical_last_original_state_commit": "d5d6305389843e5f06e48a1479fa07e5ada9a747",
+    "note": "Historical counts are not new forecasts; source/price recovery could change throughput but cannot guarantee 30 completed markets per wallet in 48 hours."
+  },
+  "preflight_only": {
+    "run_id": 39753058350,
+    "state_commit": "0aaccf778733d7ceb81b99b316c4a66a2c6a62e3",
+    "preflight_passed": true,
+    "actual_cycles": 6,
+    "actual_elapsed_seconds": 120.0519506931305,
+    "live_gate_passed": false,
+    "paper_entries": 0
+  },
+  "explanation": "No repaired paper collector or launch workflow has been implemented and independently verified. All required implementation checks are pending. This packet deliberately blocks launch and is not a profitability result.",
+  "real_orders": 0,
+  "private_account_requests": 0
+}
+
