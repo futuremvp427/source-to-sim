@@ -40,6 +40,7 @@ class FakeNetwork:
     def __init__(self, log, buy_at):
         self.journal, self.p = log, P
         self.buy_at, self.resolved, self.positions_fail = buy_at, False, False
+        self.foreign_closed, self.stale_http = False, False
         self.buy = {'proxy_wallet': P['wallets'][0]['address'], 'timestamp': buy_at,
             'side': 'BUY', 'condition_id': FIXTURE['source']['conditionId'],
             'token_id': json.loads(FIXTURE['source']['clobTokenIds'])[0],
@@ -62,6 +63,10 @@ class FakeNetwork:
                 'current_size': '100', 'last_event_at': self.buy_at}], 'pagination': {'has_more': False}}
         elif u.netloc == 'gamma-api.polymarket.com':
             body = [copy.deepcopy(FIXTURE['source'])]
+            if self.foreign_closed:
+                body = body if q.get('closed') == ['any'] else []
+                if body:
+                    body[0].update(closed=True, active=False)
         elif '/market/slug/' in u.path:
             market = copy.deepcopy(FIXTURE['us'])
             if self.resolved:
@@ -76,7 +81,7 @@ class FakeNetwork:
         raw = core.canonical(body)
         self.journal.add('http', {'url': url, 'method': 'GET', 'authenticated': False,
             'sent_at': now, 'received_at': now, 'http_status': 200,
-            'headers': {'date': formatdate(now, usegmt=True), 'age': '0'},
+            'headers': {'date': formatdate(now - (400 if self.stale_http else 0), usegmt=True), 'age': '0'},
             'body_bytes': len(raw), 'body_sha256': hashlib.sha256(raw).hexdigest(),
             'raw_base64': base64.b64encode(raw).decode(), 'error': None})
         self.journal.state['http_calls'] += 1
@@ -144,6 +149,32 @@ class IntegratedTests(unittest.TestCase):
         account = self.buy()
         self.cycle(5, self.now + 40)
         self.assertEqual(len(account['ledger']), 1)
+
+    def test_closed_source_metadata_is_found_but_never_used_as_us_settlement(self):
+        account = self.buy()
+        self.collector.net.foreign_closed = True
+        self.collector.source_cache.clear()
+        with patch('time.time', return_value=self.now + 40):
+            self.assertTrue(self.collector.source_market(FIXTURE['source']['conditionId'])['closed'])
+        self.cycle(5, self.now + 40)
+        self.assertEqual(len(account['ledger']), 1)
+        self.assertGreater(core.MODEL.number(account['positions'][FIXTURE['source']['conditionId']]['quantity']), 0)
+
+    def test_independent_replay_rejects_stale_http_used_for_a_fill(self):
+        self.collector.net.stale_http = True
+        self.buy()
+        with self.assertRaisesRegex(ValueError, 'unqualified_used_http_evidence'):
+            self.saved()
+
+    def test_preparation_sample_saves_observation_time_and_stale_result(self):
+        self.stream.update(self.now)
+        with patch('time.time', return_value=self.now + 80):
+            result = run.capture_preparation_sample(self.stream, self.journal,
+                                                   [{'market_slug': FIXTURE['us']['slug']}])
+        self.assertFalse(result[FIXTURE['us']['slug']]['usable'])
+        row = self.journal.rows[-1]
+        self.assertEqual(row['kind'], 'preparation_stream_sample')
+        self.assertEqual(row['payload'], {'observed_at': self.now + 80, 'markets': result})
 
     def test_crash_before_cycle_commit_discards_only_uncommitted_state(self):
         self.buy()
@@ -311,6 +342,15 @@ class IntegratedTests(unittest.TestCase):
     def test_prepared_collector_code_and_workflow_bundle_is_deterministic(self):
         self.assertEqual(run.bundle_digest(), run.bundle_digest())
         self.assertEqual(len(run.bundle_digest()), 64)
+
+    def test_dependency_lock_is_part_of_the_qualified_code_bundle(self):
+        original = Path.read_bytes
+        before = run.bundle_digest()
+        def changed(path):
+            value = original(path)
+            return value + b'\n# changed dependency\n' if path.name == 'requirements-stream.txt' else value
+        with patch.object(Path, 'read_bytes', changed):
+            self.assertNotEqual(run.bundle_digest(), before)
 
     def test_single_workflow_has_explicit_order_and_bounded_segments(self):
         repo = core.ROOT.parents[1]

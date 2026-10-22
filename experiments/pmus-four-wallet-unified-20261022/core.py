@@ -31,6 +31,16 @@ def protocol():
     return json.loads((ROOT / 'protocol.json').read_bytes())
 
 
+def source_market_document(network, condition):
+    # Exact-identifier metadata lookup must include both open and closed records.
+    # This does not authorize entries from old holdings or foreign settlement.
+    body, at = network.get(frozen.query('https://gamma-api.polymarket.com/markets',
+                                      {'condition_ids': condition, 'closed': 'any'}))
+    if not isinstance(body, list) or len(body) != 1 or body[0].get('conditionId') != condition:
+        raise ValueError('source_market_identity')
+    return body[0], at
+
+
 def delta(old, new):
     """Small deterministic state patches avoid persisting the full ledger per tick."""
     if old == new:
@@ -192,7 +202,8 @@ class DynamicStream:
                 if time.time() - connected_at > 60:
                     failures = 0
             except Exception as error:
-                reason = safe_error(error)
+                reason = ('stream_transport_timeout' if isinstance(error, TimeoutError)
+                          and str(error) == 'stream_transport_timeout' else safe_error(error))
             finally:
                 with self.state.lock:
                     self.state.connected = False
@@ -283,6 +294,14 @@ class IntegratedCollector(frozen.Collector):
         self.source_cache, self.us_cache, self.book_cache, self.quote_refs = {}, {}, {}, {}
         self.us_evidence = {}
         self.committed = copy.deepcopy(state)
+
+    def source_market(self, condition, fresh=False):
+        cached = self.source_cache.get(condition)
+        if not fresh and cached and time.time() - cached[1] < self.p['metadata_cache_seconds']:
+            return cached[0]
+        body, at = source_market_document(self.net, condition)
+        self.source_cache[condition] = (body, at)
+        return body
 
     def verified_feed(self, account):
         self.journal.local.poll_records = []

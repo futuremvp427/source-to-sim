@@ -21,7 +21,7 @@ from pathlib import Path
 from core import (ROOT, MODEL, PaperJournal, DynamicStream, IntegratedCollector, CollectorLog,
                   StrictNetwork, atomic_write, canonical, digest, evaluation, frozen,
                   initial_state, protocol, replay, verify_checkpoints)
-from core import render_report
+from core import render_report, source_market_document
 from publication import GitMirror, PublicationError, NoRedirect
 from reliability_runner import BackgroundMirror
 from verify import verify
@@ -63,7 +63,8 @@ def bundle_digest():
     files = []
     for folder in (ROOT, ROOT.parent / 'pmus-data-reliability-20261018',
                    ROOT.parent / 'pmus-four-wallet-20261018', READINESS):
-        files.extend(p for p in folder.iterdir() if p.suffix == '.py' or p.name in ('protocol.json', 'requirements.json'))
+        files.extend(p for p in folder.iterdir() if p.suffix == '.py' or p.name in
+                     ('protocol.json', 'requirements.json', 'requirements-stream.txt'))
     files.extend((repo / '.github/workflows').glob('pmus-four-wallet-unified-*.yml'))
     return digest({str(p.relative_to(repo)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(files)})
 
@@ -264,6 +265,13 @@ def collect(args):
     return 1 if failure else 0
 
 
+def capture_preparation_sample(stream, journal, markets):
+    observed_at = time.time()
+    sample = {m['market_slug']: stream.state.snapshot(m['market_slug'], observed_at) for m in markets}
+    journal.add('preparation_stream_sample', {'observed_at': observed_at, 'markets': sample})
+    return sample
+
+
 def prepare(args):
     """Read-only bounded sample audit. No paper account or entry epoch is initialized."""
     p, journal = protocol(), PaperJournal(args.output)
@@ -300,11 +308,9 @@ def prepare(args):
                     continue
                 if condition not in joined:
                     try:
-                        source, _ = net.get(frozen.query('https://gamma-api.polymarket.com/markets', {'condition_ids': condition}))
-                        if not isinstance(source, list) or len(source) != 1 or source[0]['conditionId'] != condition:
-                            raise ValueError('source_market_identity')
+                        source, _ = source_market_document(net, condition)
                         target = None
-                        for slug in frozen.destination_slugs(source[0], p):
+                        for slug in frozen.destination_slugs(source, p):
                             try:
                                 body, _ = net.get('https://gateway.polymarket.us/v1/market/slug/' + slug)
                                 target = body['market']
@@ -314,7 +320,7 @@ def prepare(args):
                                     raise
                         if target is None:
                             raise ValueError('no_verified_us_counterpart')
-                        joined[condition] = {'mapping': MODEL.associate(source[0], target, p), 'error': None}
+                        joined[condition] = {'mapping': MODEL.associate(source, target, p), 'error': None}
                     except ValueError as error:
                         joined[condition] = {'mapping': None, 'error': str(error)}
                 item = joined[condition]
@@ -339,8 +345,7 @@ def prepare(args):
             if stream.fatal:
                 raise PermissionError(stream.fatal)
             stream.stop.wait(10)
-            samples.append({m['market_slug']: stream.state.snapshot(m['market_slug'], time.time())
-                            for m in watch['markets']})
+            samples.append(capture_preparation_sample(stream, journal, watch['markets']))
         summary['prepared_dynamic_stream_fresh_samples'] = {
             m['market_slug']: sum(bool(t[m['market_slug']].get('usable')) for t in samples)
             for m in watch['markets']}

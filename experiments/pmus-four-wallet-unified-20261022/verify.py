@@ -5,10 +5,11 @@ import copy
 import hashlib
 import json
 import lzma
+import urllib.parse
 from pathlib import Path
 
 from core import (MODEL, canonical, evaluation, frozen, protocol, replay,
-                  verify_checkpoints, verify_target_identity, render_report)
+                  verify_checkpoints, verify_target_identity, render_report, transport)
 
 
 def verify(root):
@@ -32,11 +33,17 @@ def verify(root):
             raise ValueError('paper_evidence_reference_mismatch')
         return row['payload']
 
-    def http(ref):
+    def http(ref, require_fresh=False):
         record = reference(ref, 'paper_http')
         if (record['method'] != 'GET' or record['authenticated'] is not False
                 or not frozen.allowed(record['url'])):
             raise ValueError('unapproved_paper_http_authority')
+        if require_fresh:
+            metadata = (urllib.parse.urlsplit(record['url']).netloc == 'gamma-api.polymarket.com'
+                        or '/market/slug/' in record['url'])
+            issues, _ = transport({**record, 'status': record['http_status']}, 300 if metadata else 20)
+            if issues:
+                raise ValueError('unqualified_used_http_evidence:' + ','.join(issues))
         if record['body_sha256'] not in bodies:
             name = 'bodies/' + record['body_sha256'] + '.xz'
             if record['body_path'] != name:
@@ -90,7 +97,7 @@ def verify(root):
                 if any(value[k] != v for k, v in computed.items()):
                     raise ValueError('captured_book_execution_replay_mismatch')
                 if value['action'] == 'BUY':
-                    source_record, source = http(value['source_execution_evidence'])
+                    source_record, source = http(value['source_execution_evidence'], require_fresh=True)
                     execution = value['source_execution']
                     if (execution not in source['data'] or execution['proxy_wallet'].lower() != value['wallet']
                             or execution['side'] != 'BUY' or execution['token_id'] != mapping['sides'][value['side']]['token']
@@ -104,8 +111,8 @@ def verify(root):
                                  value['at'], p['stress_cost_per_contract_per_trade'])
                 fills += 1
             else:
-                meta_record, body = http(value['metadata_evidence'])
-                settlement_record, settlement = http(value['settlement_evidence'])
+                meta_record, body = http(value['metadata_evidence'], require_fresh=True)
+                settlement_record, settlement = http(value['settlement_evidence'], require_fresh=True)
                 meta = body['market']
                 verify_target_identity(mapping, meta)
                 long = next(s for s in meta['marketSides'] if s['long'])
