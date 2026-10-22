@@ -1,0 +1,122 @@
+{
+  "study_id": "pmus-four-wallet-unified-20261022-v1",
+  "repository": "futuremvp427/source-to-sim",
+  "code_branch": "research/pmus-four-wallet-unified-20261022",
+  "state_branch": "research/pmus-four-wallet-unified-state-20261022",
+  "mode": "PAPER_ONLY_PUBLIC_GETS_AND_AUTHENTICATED_MARKET_DATA_WS",
+  "mapping_mode": "SAME_EVENT_TEAM_FOLLOW_US_RULES_KNOWN_DIFFERENCES_ACCEPTED",
+  "wallets": [
+    {
+      "name": "ic4cream",
+      "address": "0x27f738fe203827445690339104aae35b20bc44b0"
+    },
+    {
+      "name": "alwaysfade",
+      "address": "0xe5b70fd855af9258d9463992e4f1ed7987905ee3"
+    },
+    {
+      "name": "monkeymashingkeyboard",
+      "address": "0x684baa57c338c2549aec0aa3f034f695d72a8409"
+    },
+    {
+      "name": "para-Vision",
+      "address": "0x676c1bb692c76b57b06f1b93817515acfa5ce139"
+    }
+  ],
+  "entry_collection_hours": 48,
+  "maximum_settlement_drain_hours": 48,
+  "starting_capital_usd": "1000",
+  "maximum_contracts_per_market": "10",
+  "maximum_open_markets_per_account": 20,
+  "minimum_source_net_quantity": "1",
+  "taker_fee_coefficient": "0.0695",
+  "fee_model": "round_half_even(sum(theta*q*p*(1-p)), 0.01), conservative cumulative aggressive-order commission cap; no maker or taker rebates",
+  "stress_cost_per_contract_per_trade": "0.01",
+  "maximum_worse_entry_price": "0.03",
+  "minimum_observation_delay_seconds": 5,
+  "maximum_signal_age_seconds": 120,
+  "maximum_book_age_seconds": 60,
+  "maximum_http_cache_age_seconds": 20,
+  "poll_seconds": 20,
+  "feed_overlap_seconds": 600,
+  "checkpoint_seconds": 600,
+  "metadata_cache_seconds": 60,
+  "network_timeout_seconds": 12,
+  "maximum_response_bytes": 10000000,
+  "maximum_pages_per_read": 10,
+  "maximum_requests_per_second": 4,
+  "maximum_compressed_evidence_bytes": 524288000,
+  "startup_maximum_last_trade_age_seconds": 86400,
+  "minimum_completed_distinct_markets": 30,
+  "minimum_coverage": 0.95,
+  "maximum_drawdown_fraction": "0.20",
+  "bootstrap_seed": 20261018,
+  "bootstrap_samples": 3000,
+  "supported_leagues": [
+    "nfl",
+    "cfb",
+    "nba",
+    "nhl",
+    "mlb",
+    "wnba"
+  ],
+  "eligible_market_type": "full_game_binary_moneyline_only",
+  "game_phases": "pregame and in-play, tagged by scheduled start; actual game clock is not inferred",
+  "position_policy": "Fresh post-epoch executed BUY corroborated by current same-condition net inventory; open at most 10 contracts; target quantity = 10 * abs(current leader net) / peak abs(leader net) since that modeled opening. Fresh additions may restore the capped amount. Mirror net reductions and flips at current US bid/ask; a flip entry separately requires a fresh BUY on its actual token. No old holdings are imported and no previously consumed BUY is reused. This is a capped net-side signal follower, not a dollar-for-dollar replica.",
+  "foreign_resolution_policy": "Never infer a US settlement or paper SELL from a foreign resolution, redemption, absent metadata or a missing quote. Preserve held US contracts for verified US settlement.",
+  "us_settlement_policy": "Only when exact target status is MARKET_STATUS_RESOLVED and closed=true, official settlement slug and price are valid in [0,1], and the US long-side resolution price agrees. No modeled settlement trading commission.",
+  "stress_policy": "Additional $0.01 per actually simulated contract on each BUY/SELL; no extra settlement execution cost. This is an execution-cost sensitivity, not a prediction of price impact.",
+  "coverage_policy": "Original source coverage plus scheduled complete liquidation marks including missed slots; additionally disclose and gate held-inventory mark coverage at the same 95% threshold. Flat/settled periods cannot hide missing exposed-period marks.",
+  "status_precedence": [
+    "SCREEN_PENDING while nonterminal",
+    "UNRESOLVED_SETTLEMENTS when held markets remain",
+    "INSUFFICIENT_TRADES/COVERAGE below 30 completed distinct markets or 95% planned source/complete-mark coverage",
+    "FAILED_SCREEN if base or stress net <= 0 or observed drawdown >20% starting capital",
+    "POSITIVE_BUT_UNCERTAIN if positive base/stress but event-cluster bootstrap lower percentile <=0",
+    "PROMISING_SCREEN_ONLY if all other gates pass and event-cluster bootstrap lower percentile >0"
+  ],
+  "statistics_limits": "Resample completed US event markets as clusters. This does not account for cross-game/day dependence, recent-winner selection or four simultaneous comparisons. A promising result is only a short screen, not durable-profit evidence.",
+  "portfolio_policy": "Four independent fictional accounts; report separately, never sum into a realizable portfolio.",
+  "slug_team_aliases": {
+    "nba": {
+      "nyk": "ny",
+      "sas": "sa"
+    },
+    "nhl": {
+      "tbl": "tb",
+      "utah": "uta"
+    },
+    "nfl": {
+      "la": "lar"
+    }
+  },
+  "team_aliases": {
+    "nhl": {
+      "utah": "mammoth"
+    }
+  },
+  "readiness_conditions": [
+    "0x4bf48ea200ba9d253d5445ff5522f2e90ac4970d82da5a9fff6621308b5beeac",
+    "0x340c1c3ad87ec9d60450284665ba1a386a213d818a9042fdfcc8e20e0521f624",
+    "0x4fed9ede15018d3a9b1f9c889716c8ac9a2a0f714b8941e83f7b9075ee9456c0",
+    "0x074b42abd259c29c1d0b35d6216713d0af4015ceb19fb35f7b39746e59467a01"
+  ],
+  "frozen_before_forward_start": true,
+  "live_trading": false,
+  "venue_credentials": false,
+  "application_deployment": false,
+  "prior_experiments_unchanged": true,
+  "quantity_step_policy": "Read minimumTradeQty and require either 0.01 fractional-contract steps or 1 whole-contract steps; round target reductions/additions down to that verified step; unsupported values block entries.",
+  "maximum_metadata_http_cache_age_seconds": 300,
+  "destination_calendar_timezone": "America/New_York",
+  "destination_lookup_policy": "Try the reviewed team aliases with the source slug date first. Only an HTTP 404 permits a second candidate using the structured kickoff date in America/New_York. Every successful candidate still requires matching kickoff, league, team bijection, rules and fees; identity or schedule mismatch and other errors fail closed.",
+  "reference_code_sha": "130c37763b2d8d7766ea181e398056a50e4a6c66",
+  "reference_protocol_sha256": "1be659edf8286da821eacd314f81fee3c46f8a5ff52a16c4bb5d56cfb02f108f",
+  "transport_policy": "Only authenticated /v1/ws/markets; no private account/order API; every used book is durably referenced before decision; fresh public metadata and US settlement independent of foreign inventory.",
+  "readiness_contract_sha256": "74432bb54c13637cc2bcc3ec3096b910ac0c5b4e3f12aaccaf9db44a4d8166d7",
+  "maximum_wal_bytes": 2147483648,
+  "maximum_stream_markets": 84,
+  "credentials_scope": "MARKET_DATA_ONLY",
+  "crash_policy": "Atomic durable paper state patches, same-run newest artifact mandatory after a prior segment, no unacknowledged fill, no older-checkpoint fallback, preserved epoch and inventory.",
+  "real_orders": false
+}

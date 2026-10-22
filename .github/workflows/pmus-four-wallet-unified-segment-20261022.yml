@@ -1,0 +1,68 @@
+name: Integrated paper segment
+on:
+  workflow_call:
+    inputs:
+      segment:
+        type: number
+        required: true
+      slot:
+        type: number
+        required: true
+      previous_slot:
+        type: number
+        required: true
+    secrets:
+      PMUS_DATA_KEY_ID:
+        required: true
+      PMUS_DATA_SECRET_KEY:
+        required: true
+permissions:
+  contents: read
+jobs:
+  collect:
+    if: ${{ github.repository == 'futuremvp427/source-to-sim' && github.event.repository.private == false && github.ref == 'refs/heads/research/pmus-four-wallet-unified-20261022' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Pinned market-data dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Restore exactly the preceding same-run segment
+        if: ${{ inputs.segment > 0 }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: pmus-unified-${{ github.run_id }}-slot-${{ inputs.previous_slot }}
+          path: previous-backup/
+      - name: Verify backup identity and full chain before resuming
+        if: ${{ inputs.segment > 0 }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-four-wallet-unified-20261022/run.py
+          --mode recover --source previous-backup --output paper --run-id '${{ github.run_id }}'
+          --code-sha '${{ github.sha }}' --segment '${{ inputs.segment }}' --approved-paper-only
+      - name: Gated paper collection, bounded US settlement drain and final evaluator
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+          PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-four-wallet-unified-20261022/run.py
+          --mode collect --output paper --run-id '${{ github.run_id }}'
+          --code-sha '${{ github.sha }}' --segment '${{ inputs.segment }}'
+          --seconds 18000 --approved-paper-only
+      - name: Preserve current and preceding backup slots, originals stay in immutable Git
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-unified-${{ github.run_id }}-slot-${{ inputs.slot }}
+          path: paper/
+          retention-days: 1
+          compression-level: 9
+          overwrite: true
+          if-no-files-found: warn

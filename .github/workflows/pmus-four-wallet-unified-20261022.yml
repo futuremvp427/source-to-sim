@@ -1,0 +1,360 @@
+name: Integrated Four Wallet Paper Study
+on:
+  push:
+    branches: [research/pmus-four-wallet-unified-20261022]
+    paths:
+      - experiments/pmus-four-wallet-unified-20261022/**
+      - .github/workflows/pmus-four-wallet-unified-*.yml
+permissions:
+  contents: read
+concurrency:
+  group: pmus-four-wallet-unified-20261022
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: ${{ github.repository == 'futuremvp427/source-to-sim' && github.event.repository.private == false && github.ref == 'refs/heads/research/pmus-four-wallet-unified-20261022' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.launch.outputs.mode }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Pinned market-data dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Frozen accounting and signal regressions
+        working-directory: experiments/pmus-four-wallet-20261018
+        run: ../../.venv-data/bin/python -m unittest -v test_study.py test_four_wallet.py
+      - name: Transport, freshness, recovery and publication fault injection
+        working-directory: experiments/pmus-data-reliability-20261018
+        run: ../../.venv-data/bin/python -m unittest -v test_quality.py test_stream_smoke.py test_reliability.py test_restart.py
+      - name: Actual live gate rules
+        run: .venv-data/bin/python -m unittest discover -s experiments/pmus-live-gate-20261022 -p test_live_gate.py -v
+      - name: Readiness and evaluator precedence regressions
+        run: .venv-data/bin/python -m unittest discover -s experiments/pmus-paper-readiness-20261022 -p test_readiness.py -v
+      - name: Integrated source-fill-settlement-save-restore-evaluate and failures
+        run: .venv-data/bin/python -m unittest discover -s experiments/pmus-four-wallet-unified-20261022 -p test_unified.py -v
+      - name: Read explicit launch mode
+        id: launch
+        run: |
+          python3 - <<'PY'
+          import json,os,pathlib
+          mode=json.loads(pathlib.Path('experiments/pmus-four-wallet-unified-20261022/launch.json').read_bytes())['mode']
+          assert mode in ('prepare','collect')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('mode='+mode+'\n')
+          PY
+  prepare:
+    needs: verify
+    if: ${{ needs.verify.outputs.mode == 'prepare' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Pinned market-data dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Recent complete source activity and verified US mapping audit, no entries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+          PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-four-wallet-unified-20261022/run.py
+          --mode prepare --output preparation --run-id '${{ github.run_id }}'
+          --code-sha '${{ github.sha }}' --approved-paper-only
+      - name: Preserve audit evidence without starting accounts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-unified-preparation-${{ github.run_id }}
+          path: preparation/
+          retention-days: 1
+          compression-level: 9
+  collect_00:
+    needs: [verify]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 0
+      slot: 0
+      previous_slot: 0
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_01:
+    needs: [verify, collect_00]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 1
+      slot: 1
+      previous_slot: 0
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_02:
+    needs: [verify, collect_01]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 2
+      slot: 0
+      previous_slot: 1
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_03:
+    needs: [verify, collect_02]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 3
+      slot: 1
+      previous_slot: 0
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_04:
+    needs: [verify, collect_03]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 4
+      slot: 0
+      previous_slot: 1
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_05:
+    needs: [verify, collect_04]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 5
+      slot: 1
+      previous_slot: 0
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_06:
+    needs: [verify, collect_05]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 6
+      slot: 0
+      previous_slot: 1
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_07:
+    needs: [verify, collect_06]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 7
+      slot: 1
+      previous_slot: 0
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_08:
+    needs: [verify, collect_07]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 8
+      slot: 0
+      previous_slot: 1
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_09:
+    needs: [verify, collect_08]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 9
+      slot: 1
+      previous_slot: 0
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_10:
+    needs: [verify, collect_09]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 10
+      slot: 0
+      previous_slot: 1
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_11:
+    needs: [verify, collect_10]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 11
+      slot: 1
+      previous_slot: 0
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_12:
+    needs: [verify, collect_11]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 12
+      slot: 0
+      previous_slot: 1
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_13:
+    needs: [verify, collect_12]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 13
+      slot: 1
+      previous_slot: 0
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_14:
+    needs: [verify, collect_13]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 14
+      slot: 0
+      previous_slot: 1
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_15:
+    needs: [verify, collect_14]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 15
+      slot: 1
+      previous_slot: 0
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_16:
+    needs: [verify, collect_15]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 16
+      slot: 0
+      previous_slot: 1
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_17:
+    needs: [verify, collect_16]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 17
+      slot: 1
+      previous_slot: 0
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_18:
+    needs: [verify, collect_17]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 18
+      slot: 0
+      previous_slot: 1
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+  collect_19:
+    needs: [verify, collect_18]
+    if: ${{ needs.verify.outputs.mode == 'collect' }}
+    uses: ./.github/workflows/pmus-four-wallet-unified-segment-20261022.yml
+    permissions:
+      contents: write
+      actions: read
+    with:
+      segment: 19
+      slot: 1
+      previous_slot: 0
+    secrets:
+      PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+      PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
