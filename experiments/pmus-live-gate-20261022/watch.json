@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "protocol_sha256": "1be659edf8286da821eacd314f81fee3c46f8a5ff52a16c4bb5d56cfb02f108f",
+  "selection": "Two earliest simultaneous Oct 22 NHL full-game moneylines, ordered by US event slug; no outcome-based selection",
+  "markets": [
+    {
+      "event_slug": "nhl-ana-nj-2026-10-22",
+      "event_id": "168916",
+      "market_slug": "aec-nhl-ana-nj-2026-10-22",
+      "market_identity": "5dbc8486380997f799a2047862c10d7d9035c8e5215d923ee7cf8143be3ef2ec",
+      "start_at": 1792710000.0
+    },
+    {
+      "event_slug": "nhl-fla-pit-2026-10-22",
+      "event_id": "168918",
+      "market_slug": "aec-nhl-fla-pit-2026-10-22",
+      "market_identity": "67a676a8348006090a6c9ba819f3573eca7364b824bb9cc91e00a0ac0dc12c1b",
+      "start_at": 1792710000.0
+    }
+  ]
+}

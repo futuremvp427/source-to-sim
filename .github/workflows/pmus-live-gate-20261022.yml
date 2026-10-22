@@ -1,0 +1,70 @@
+name: Polymarket Fresh Live-Book Gate
+on:
+  push:
+    branches: [research/pmus-live-gate-20261022]
+    paths:
+      - experiments/pmus-live-gate-20261022/**
+      - .github/workflows/pmus-live-gate-20261022.yml
+permissions:
+  contents: read
+concurrency:
+  group: pmus-live-gate-20261022
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: ${{ github.repository == 'futuremvp427/source-to-sim' && github.event.repository.private == false && github.ref == 'refs/heads/research/pmus-live-gate-20261022' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned market-data dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Existing freshness, recovery and failure-injection regressions
+        working-directory: experiments/pmus-data-reliability-20261018
+        run: ../../.venv-data/bin/python -m unittest -v test_quality.py test_stream_smoke.py test_reliability.py test_restart.py
+      - name: Fixed-denominator live-phase and no-settlement-credit tests
+        run: .venv-data/bin/python -m unittest discover -s experiments/pmus-live-gate-20261022 -p test_live_gate.py -v
+  capture:
+    needs: verify
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned market-data dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Read the bounded launch mode
+        id: mode
+        run: |
+          python3 - <<'PY'
+          import json,os,pathlib
+          mode=json.loads(pathlib.Path('experiments/pmus-live-gate-20261022/launch.json').read_bytes())['mode']
+          assert mode in ('preflight','live')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('mode='+mode+'\n')
+          PY
+      - name: Validate fresh market data and the four source feeds only
+        env:
+          PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+          PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-live-gate-20261022/live_gate.py
+          --output live-gate --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+          --mode '${{ steps.mode.outputs.mode }}' --approved-readonly-check
+      - name: Preserve evidence and exact failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pmus-live-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: live-gate/
+          if-no-files-found: warn
+          retention-days: 1
