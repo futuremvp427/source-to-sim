@@ -7,6 +7,7 @@ import collections
 import concurrent.futures
 import hashlib
 import json
+import lzma
 import math
 import os
 import re
@@ -36,6 +37,21 @@ EVENT = re.compile(r'^nhl-[a-z0-9]+-[a-z0-9]+-2026-10-22$')
 EVENT_SLUGS = frozenset(m['event_slug'] for m in json.loads((ROOT / 'watch.json').read_bytes())['markets'])
 EVENT_IDS = frozenset(m['event_id'] for m in json.loads((ROOT / 'watch.json').read_bytes())['markets']) | {'168916','168918'}
 PHASE_BUDGET_SECONDS = 16
+EVENT_BODY_LIMIT = 4 * 1024**2
+
+
+def supplemental_body(record):
+    if 'raw_xz_base64' in record:
+        encoded = base64.b64decode(record['raw_xz_base64'], validate=True)
+        if (len(encoded) != record['compressed_bytes']
+                or hashlib.sha256(encoded).hexdigest() != record['compressed_sha256']):
+            raise ValueError('supplemental_compressed_body_digest_mismatch')
+        decoder = lzma.LZMADecompressor()
+        data = decoder.decompress(encoded, max_length=EVENT_BODY_LIMIT + 1)
+        if len(data) > EVENT_BODY_LIMIT or not decoder.eof or decoder.unused_data:
+            raise ValueError('supplemental_body_size_or_encoding_bound')
+        return data
+    return base64.b64decode(record['raw_base64'], validate=True)
 
 
 def verify_extra_http(rows):
@@ -43,7 +59,7 @@ def verify_extra_http(rows):
         if row['kind'] not in ('event_http', 'source_http'):
             continue
         p = row['payload']
-        body = base64.b64decode(p['raw_base64'], validate=True)
+        body = supplemental_body(p)
         if len(body) != p['body_bytes'] or hashlib.sha256(body).hexdigest() != p['body_sha256']:
             raise ValueError('supplemental_http_body_digest_mismatch')
         if p['method'] != 'GET' or p['authenticated'] is not False:
@@ -82,20 +98,26 @@ class EventClient:
                 'Cache-Control': 'no-cache, max-age=0', 'Pragma': 'no-cache'})
             with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
                 status, headers = response.status, dict(response.headers.items())
-                data = response.read(2 * 1024**2 + 1)
+                data = response.read(EVENT_BODY_LIMIT + 1)
         except urllib.error.HTTPError as exc:
             status, headers, error = exc.code, dict(exc.headers.items()), 'HTTP_' + str(exc.code)
-            data = exc.read(2 * 1024**2 + 1)
+            data = exc.read(EVENT_BODY_LIMIT + 1)
         except Exception as exc:
             error = type(exc).__name__
-        if len(data) > 2 * 1024**2:
+        if len(data) > EVENT_BODY_LIMIT:
             raise ValueError('event_response_size_bound')
         headers = {k.lower(): v for k, v in headers.items() if k.lower() in
             ('date', 'age', 'last-modified', 'etag', 'cache-control', 'retry-after')}
+        # NBA events include hundreds of props although only the pinned moneyline
+        # is eligible. Preserve every byte, compressed, without repeating multi-MB
+        # base64 bodies in the wait/live WAL. This changes no eligibility gate.
+        compressed = lzma.compress(data, preset=3)
         row = {'url': url, 'method': 'GET', 'authenticated': False, 'sent_at': sent,
             'received_at': time.time(), 'status': status, 'headers': headers, 'error': error,
             'body_bytes': len(data), 'body_sha256': hashlib.sha256(data).hexdigest(),
-            'raw_base64': base64.b64encode(data).decode()}
+            'raw_xz_base64': base64.b64encode(compressed).decode(),
+            'compressed_bytes': len(compressed),
+            'compressed_sha256': hashlib.sha256(compressed).hexdigest()}
         reference = self.journal.add('event_http', row)
         if status in (401, 403):
             raise PermissionError('event_access_denied_' + str(status))

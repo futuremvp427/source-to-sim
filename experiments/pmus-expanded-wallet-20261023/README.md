@@ -23,3 +23,16 @@ Free-resource bounds: only public-repository standard `ubuntu-latest`; no artifa
 The original experiments, default branch, production/database, credentials, PR62, earlier paused tasks and funded orders remain outside this work. Only the existing configured market-data websocket keys may be used by Actions; they are never read out or printed. No new automation is created; the existing paused follow-through may be updated for this authorized prospective stage.
 
 Primary operational references: [GitHub standard public runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners), [GitHub storage billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions), [US market-data subscriptions](https://docs.polymarket.us/api-reference/websocket/markets), [US rate limit](https://docs.polymarket.us/api-reference/rate-limits), [source API family limits](https://docs.polymarket.com/api-reference/rate-limits).
+# Measured NBA metadata transport repair
+
+The preparation-only attempt 39985218925 stopped before any live gate or paper
+epoch: the DAL–IND public event response exceeded the inherited 2 MiB bound.
+Two direct public GET captures measured 2,049,438 and 2,098,782 bytes (406/415
+markets including props); only the previously pinned full-game moneylines remain
+eligible. Event GETs now have a fixed 4 MiB bound and preserve the complete body
+as `raw_xz_base64` with compressed SHA-256/length plus original SHA-256/length.
+The offline verifier checks both layers. This also keeps repeated full event
+bodies from exhausting the bounded waiting/live journal. No freshness, phase,
+identity, source, market or profitability threshold changes. Failed evidence is
+preserved; there was no collection clock, holding, or live epoch to rewind.
+

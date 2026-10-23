@@ -1,6 +1,9 @@
 """Regressions for bounded cache recovery without changing qualification gates."""
 import copy
 import json
+import base64
+import hashlib
+import lzma
 import unittest
 from email.utils import formatdate
 from unittest.mock import patch
@@ -15,6 +18,24 @@ class Clock:
 
 
 class PhaseCacheTests(unittest.TestCase):
+    def test_multi_megabyte_event_is_losslessly_recorded_without_wal_growth(self):
+        data = b'{"padding":"' + b'x' * (2 * 1024**2) + b'"}'
+        compressed = lzma.compress(data, preset=3)
+        record = {'raw_xz_base64': base64.b64encode(compressed).decode(),
+            'compressed_bytes': len(compressed), 'compressed_sha256': hashlib.sha256(compressed).hexdigest()}
+        self.assertEqual(g.supplemental_body(record), data)
+        self.assertLess(len(compressed), len(data) // 100)
+        record['compressed_sha256'] = '0' * 64
+        with self.assertRaisesRegex(ValueError, 'compressed_body_digest'):
+            g.supplemental_body(record)
+
+    def test_compressed_body_bound_rejects_larger_than_frozen_transport_limit(self):
+        compressed = lzma.compress(b'x' * (g.EVENT_BODY_LIMIT + 1), preset=0)
+        record = {'raw_xz_base64': base64.b64encode(compressed).decode(),
+            'compressed_bytes': len(compressed), 'compressed_sha256': hashlib.sha256(compressed).hexdigest()}
+        with self.assertRaisesRegex(ValueError, 'body_size_or_encoding_bound'):
+            g.supplemental_body(record)
+
     def setUp(self):
         self.clock = Clock()
         meta = {'slug': 'aec-nhl-ana-nj-2026-10-22', 'gameStartTime': '2026-10-22T23:00:00Z',
