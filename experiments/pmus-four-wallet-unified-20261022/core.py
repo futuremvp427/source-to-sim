@@ -335,6 +335,28 @@ class IntegratedCollector(frozen.Collector):
     def trade(self, account, condition, mapping, side, action, q, signal=None):
         if action == 'BUY' and self.s.get('entries_stopped_reason'):
             raise ValueError('new_entries_stopped_preserving_inventory')
+        if action == 'BUY' and signal:
+            # A pending SELL (or a BUY on the other token) cannot start the
+            # observation delay for this executed BUY. Bind it to this BUY's
+            # original durable HTTP receipt, without resetting that receipt on
+            # repeated source polls or weakening the frozen delay.
+            now = time.time()
+            buys = [r for r in signal['rows'] if r['side'] == 'BUY'
+                    and r['token_id'] == mapping['sides'][side]['token']
+                    and 0 <= now - float(r['timestamp']) <= self.p['maximum_signal_age_seconds']]
+            if buys:
+                reference = max(buys, key=lambda r: r['timestamp'])
+                ref = reference['_source_http_evidence']
+                seq = ref.get('seq')
+                if type(seq) is not int or not 1 <= seq <= len(self.evidence.rows):
+                    raise ValueError('source_buy_observation_reference_mismatch')
+                raw = self.evidence.rows[seq - 1]
+                if raw['hash'] != ref['hash'] or raw['kind'] != 'paper_http':
+                    raise ValueError('source_buy_observation_reference_mismatch')
+                observed_at = float(raw['payload']['received_at'])
+                if observed_at > now:
+                    raise ValueError('future_source_buy_observation')
+                signal = {**signal, 'first_seen': max(float(signal['first_seen']), observed_at)}
         # Refresh identity/rules/fee metadata before every actual modeled transaction.
         target = self.us_market(mapping['us_slug'], fresh=True)
         verify_target_identity(mapping, target)
@@ -362,7 +384,9 @@ class IntegratedCollector(frozen.Collector):
                 buys = [r for r in signal['rows'] if r['side'] == 'BUY'
                         and r['token_id'] == mapping['sides'][side]['token']
                         and r['timestamp'] == row['source_trade_at']]
-                reference = buys[-1]
+                # Match frozen.trade()'s stable first maximum, including when
+                # several different executions share the same timestamp.
+                reference = buys[0]
                 row['source_execution'] = {k: v for k, v in reference.items() if k != '_source_http_evidence'}
                 row['source_execution_evidence'] = reference['_source_http_evidence']
             self.journal.buffer[-1]['payload'] = {'wallet': account['wallet'], **copy.deepcopy(row)}

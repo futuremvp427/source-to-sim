@@ -41,6 +41,7 @@ class FakeNetwork:
         self.journal, self.p = log, P
         self.buy_at, self.resolved, self.positions_fail = buy_at, False, False
         self.foreign_closed, self.stale_http = False, False
+        self.extra_buys = []
         self.buy = {'proxy_wallet': P['wallets'][0]['address'], 'timestamp': buy_at,
             'side': 'BUY', 'condition_id': FIXTURE['source']['conditionId'],
             'token_id': json.loads(FIXTURE['source']['clobTokenIds'])[0],
@@ -53,7 +54,7 @@ class FakeNetwork:
         q = urllib.parse.parse_qs(u.query)
         now = time.time()
         if u.path == '/v2/trades':
-            data = [self.buy] if q['user'] == [P['wallets'][0]['address']] else []
+            data = [self.buy, *self.extra_buys] if q['user'] == [P['wallets'][0]['address']] else []
             body = {'data': copy.deepcopy(data), 'pagination': {'has_more': False}}
         elif u.path == '/v2/positions':
             if self.positions_fail:
@@ -144,6 +145,32 @@ class IntegratedTests(unittest.TestCase):
         result = self.saved()
         self.assertEqual(result['us_settlements_replayed'], 1)
         self.assertEqual(result['evaluation']['accounts'][0]['completed_distinct_markets'], 1)
+
+    def test_earlier_sell_cannot_start_observation_delay_for_later_buy(self):
+        network = self.collector.net
+        network.buy['side'] = 'SELL'
+        self.cycle(3)
+        self.cycle(4, self.now + 20)
+        account = self.collector.s['accounts'][P['wallets'][0]['address']]
+        self.assertFalse(account['ledger'])
+        network.buy = {**network.buy, 'side': 'BUY', 'timestamp': self.now + 30,
+                       'transaction_hash': 'fixture-later-buy'}
+        network.buy_at = self.now + 30
+        self.cycle(5, self.now + 40)
+        self.assertFalse(account['ledger'])
+        self.cycle(6, self.now + 60)
+        self.assertEqual(len(account['ledger']), 1)
+        self.assertEqual(account['ledger'][0]['signal_first_seen_at'], self.now + 40)
+        self.assertEqual(self.saved()['paper_fills_reexecuted_from_captured_books'], 1)
+
+    def test_same_timestamp_buy_evidence_matches_the_price_gated_execution(self):
+        network = self.collector.net
+        network.extra_buys = [{**network.buy, 'price': '.50',
+                               'transaction_hash': 'fixture-second-same-timestamp'}]
+        account = self.buy()
+        self.assertEqual(account['ledger'][0]['source_execution']['price'], '.60')
+        self.assertEqual(account['ledger'][0]['source_execution']['transaction_hash'], 'fixture-transaction')
+        self.assertEqual(self.saved()['paper_fills_reexecuted_from_captured_books'], 1)
 
     def test_existing_holdings_or_consumed_buy_do_not_create_new_entries(self):
         account = self.buy()
