@@ -1,8 +1,8 @@
 {
-  "study_id": "pmus-four-wallet-unified-20261022-v1",
+  "study_id": "pmus-expanded-wallet-forward-20261023-v1",
   "repository": "futuremvp427/source-to-sim",
-  "code_branch": "research/pmus-four-wallet-unified-20261022",
-  "state_branch": "research/pmus-four-wallet-unified-state-20261022",
+  "code_branch": "research/pmus-expanded-wallet-paper-20261023",
+  "state_branch": "research/pmus-expanded-wallet-state-20261023",
   "mode": "PAPER_ONLY_PUBLIC_GETS_AND_AUTHENTICATED_MARKET_DATA_WS",
   "mapping_mode": "SAME_EVENT_TEAM_FOLLOW_US_RULES_KNOWN_DIFFERENCES_ACCEPTED",
   "wallets": [
@@ -21,6 +21,38 @@
     {
       "name": "para-Vision",
       "address": "0x676c1bb692c76b57b06f1b93817515acfa5ce139"
+    },
+    {
+      "name": "omnibus-076daa",
+      "address": "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c"
+    },
+    {
+      "name": "38791873984189",
+      "address": "0x0d2d845a6ff64e31e04a70afce8a573940767ff5"
+    },
+    {
+      "name": "mooseborzoii",
+      "address": "0x1f3a646ce5cbe2c70270e7a46161d89b7c7b895d"
+    },
+    {
+      "name": "HomeRunHazard",
+      "address": "0x5268527977f700f9bf9b6d5cd843859e4e70135d"
+    },
+    {
+      "name": "VeryLucky888",
+      "address": "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294"
+    },
+    {
+      "name": "6512395314597884",
+      "address": "0x796fc6fda8f8e03c03e2a2d012155989960300f6"
+    },
+    {
+      "name": "Flaznorp",
+      "address": "0x821dab0565ebf5b327f51db06223fdcfe01acf16"
+    },
+    {
+      "name": "nigiri99",
+      "address": "0xdc41c39b95453c943174f369926018f6963bdd7e"
     }
   ],
   "entry_collection_hours": 48,
@@ -44,8 +76,8 @@
   "network_timeout_seconds": 12,
   "maximum_response_bytes": 10000000,
   "maximum_pages_per_read": 10,
-  "maximum_requests_per_second": 4,
-  "maximum_compressed_evidence_bytes": 524288000,
+  "maximum_requests_per_second": 12,
+  "maximum_compressed_evidence_bytes": 1610612736,
   "startup_maximum_last_trade_age_seconds": 86400,
   "minimum_completed_distinct_markets": 30,
   "minimum_coverage": 0.95,
@@ -75,8 +107,8 @@
     "POSITIVE_BUT_UNCERTAIN if positive base/stress but event-cluster bootstrap lower percentile <=0",
     "PROMISING_SCREEN_ONLY if all other gates pass and event-cluster bootstrap lower percentile >0"
   ],
-  "statistics_limits": "Resample completed US event markets as clusters. This does not account for cross-game/day dependence, recent-winner selection or four simultaneous comparisons. A promising result is only a short screen, not durable-profit evidence.",
-  "portfolio_policy": "Four independent fictional accounts; report separately, never sum into a realizable portfolio.",
+  "statistics_limits": "Resample completed US games as clusters. Game/day dependence, volume-based selection and twelve simultaneous comparisons remain. A positive screen is not durable-profit evidence.",
+  "portfolio_policy": "Twelve independent fictional accounts; report separately, never sum as a realizable portfolio.",
   "slug_team_aliases": {
     "nba": {
       "nyk": "ny",
@@ -113,10 +145,18 @@
   "reference_code_sha": "130c37763b2d8d7766ea181e398056a50e4a6c66",
   "reference_protocol_sha256": "1be659edf8286da821eacd314f81fee3c46f8a5ff52a16c4bb5d56cfb02f108f",
   "transport_policy": "Only authenticated /v1/ws/markets; no private account/order API; every used book is durably referenced before decision; fresh public metadata and US settlement independent of foreign inventory.",
-  "readiness_contract_sha256": "74432bb54c13637cc2bcc3ec3096b910ac0c5b4e3f12aaccaf9db44a4d8166d7",
+  "readiness_contract_sha256": "4b8fdb677a514c14e838f0bd94a49d9823cd1d6c0d976d54c828f9d59d4954ee",
   "maximum_wal_bytes": 2147483648,
-  "maximum_stream_markets": 84,
+  "maximum_stream_markets": 244,
   "credentials_scope": "MARKET_DATA_ONLY",
   "crash_policy": "Atomic durable paper state patches, same-run newest artifact mandatory after a prior segment, no unacknowledged fill, no older-checkpoint fallback, preserved epoch and inventory.",
-  "real_orders": false
+  "real_orders": false,
+  "readiness_requirements_path": "experiments/pmus-expanded-wallet-20261023/requirements.json",
+  "preliminary_reporting_milestones": [
+    10,
+    20
+  ],
+  "pre_entry_sample_policy": "EXPLORATORY_HISTORY_REVIEW_NO_FUTURE_VOLUME_PROMISE",
+  "backup_policy": "Restore only the latest immutable published same-run generation after the immediately previous segment is sealed complete. Verify observed Git blob SHA1/length, compressed/raw hash chains, plan and evaluator before continuing; no artifacts, caches, older fallback or epoch reset.",
+  "metadata_prefetch_policy": "Concurrent read-only warming of already held shared source/US contract metadata; accounting, US settlement, source inventory and fills remain serial and all original per-decision gates apply."
 }

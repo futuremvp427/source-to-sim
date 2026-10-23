@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "user_authorization": "User approved the preceding eight-candidate/10-20-game reporting proposal by saying: Ok then start everything.",
+  "approval_scope": "Prepare and qualify existing collector for12 independent fictional accounts; initiate48h entries once independently qualified. Earlier studies unchanged.",
+  "wallets": [
+    {
+      "name": "ic4cream",
+      "address": "0x27f738fe203827445690339104aae35b20bc44b0"
+    },
+    {
+      "name": "alwaysfade",
+      "address": "0xe5b70fd855af9258d9463992e4f1ed7987905ee3"
+    },
+    {
+      "name": "monkeymashingkeyboard",
+      "address": "0x684baa57c338c2549aec0aa3f034f695d72a8409"
+    },
+    {
+      "name": "para-Vision",
+      "address": "0x676c1bb692c76b57b06f1b93817515acfa5ce139"
+    },
+    {
+      "name": "omnibus-076daa",
+      "address": "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c"
+    },
+    {
+      "name": "38791873984189",
+      "address": "0x0d2d845a6ff64e31e04a70afce8a573940767ff5"
+    },
+    {
+      "name": "mooseborzoii",
+      "address": "0x1f3a646ce5cbe2c70270e7a46161d89b7c7b895d"
+    },
+    {
+      "name": "HomeRunHazard",
+      "address": "0x5268527977f700f9bf9b6d5cd843859e4e70135d"
+    },
+    {
+      "name": "VeryLucky888",
+      "address": "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294"
+    },
+    {
+      "name": "6512395314597884",
+      "address": "0x796fc6fda8f8e03c03e2a2d012155989960300f6"
+    },
+    {
+      "name": "Flaznorp",
+      "address": "0x821dab0565ebf5b327f51db06223fdcfe01acf16"
+    },
+    {
+      "name": "nigiri99",
+      "address": "0xdc41c39b95453c943174f369926018f6963bdd7e"
+    }
+  ],
+  "entry_collection_hours": 48,
+  "maximum_drain_hours": 48,
+  "final_minimum_completed_games": 30,
+  "minimum_coverage": 0.95,
+  "preliminary_reporting": [
+    10,
+    20
+  ],
+  "future_count_or_profit_guarantee": false,
+  "old_gate_or_epoch_restarted": false,
+  "new_automation_created": false,
+  "paper_protocol_sha256": "1a56537a106d64f7f83e5aa425851712060e92f607714d18b7c9366bd8c8f36d",
+  "requirements_sha256": "4b8fdb677a514c14e838f0bd94a49d9823cd1d6c0d976d54c828f9d59d4954ee",
+  "transport_changes": {
+    "read_request_cap_per_second": 12,
+    "official_us_limit_per_second": 25,
+    "max_stream_markets": 244,
+    "one_market_per_subscription": true,
+    "metadata_prefetch": "read-only; accounting and fills serial",
+    "paid_artifact_or_cache_uploads": false
+  }
+}

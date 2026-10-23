@@ -20,7 +20,7 @@ permissions:
   contents: read
 jobs:
   collect:
-    if: ${{ github.repository == 'futuremvp427/source-to-sim' && github.event.repository.private == false && github.ref == 'refs/heads/research/pmus-four-wallet-unified-20261022' }}
+    if: ${{ github.repository == 'futuremvp427/source-to-sim' && github.event.repository.private == false && github.ref == 'refs/heads/research/pmus-expanded-wallet-paper-20261023' }}
     runs-on: ubuntu-latest
     timeout-minutes: 330
     permissions:
@@ -34,18 +34,20 @@ jobs:
         run: |
           python3 -m venv .venv-data
           .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
-      - name: Restore exactly the preceding same-run segment
+      - name: Restore the latest completed published same-run segment with immutable-byte replay
         if: ${{ inputs.segment > 0 }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: pmus-unified-${{ github.run_id }}-slot-${{ inputs.previous_slot }}
-          path: previous-backup/
-      - name: Verify backup identity and full chain before resuming
-        if: ${{ inputs.segment > 0 }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: >-
           .venv-data/bin/python experiments/pmus-four-wallet-unified-20261022/run.py
-          --mode recover --source previous-backup --output paper --run-id '${{ github.run_id }}'
+          --mode recover --output paper --run-id '${{ github.run_id }}'
           --code-sha '${{ github.sha }}' --segment '${{ inputs.segment }}' --approved-paper-only
+      - name: Pinned readiness checker must pass before any accounts or entry epoch
+        run: >-
+          .venv-data/bin/python experiments/pmus-expanded-wallet-20261023/readiness.py
+          --packet experiments/pmus-four-wallet-unified-20261022/qualification/packet.json
+          --evidence-root experiments/pmus-four-wallet-unified-20261022/qualification
+          --expected-requirements-sha256 4b8fdb677a514c14e838f0bd94a49d9823cd1d6c0d976d54c828f9d59d4954ee
       - name: Gated paper collection, bounded US settlement drain and final evaluator
         env:
           GH_TOKEN: ${{ github.token }}
@@ -56,13 +58,3 @@ jobs:
           --mode collect --output paper --run-id '${{ github.run_id }}'
           --code-sha '${{ github.sha }}' --segment '${{ inputs.segment }}'
           --seconds 18000 --approved-paper-only
-      - name: Preserve current and preceding backup slots, originals stay in immutable Git
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: pmus-unified-${{ github.run_id }}-slot-${{ inputs.slot }}
-          path: paper/
-          retention-days: 1
-          compression-level: 9
-          overwrite: true
-          if-no-files-found: warn

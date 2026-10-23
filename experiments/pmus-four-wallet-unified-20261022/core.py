@@ -466,6 +466,21 @@ class IntegratedCollector(frozen.Collector):
                 except ValueError as error:
                     account['source_poll_failures'] += 1
                     frozen.skip(account, 'source_feed_error:' + str(error))
+        # Read shared contract documents concurrently. Accounting, inventory
+        # decisions and fills remain serial, preserving original ledger order.
+        needed = {c for a in accounts for c,p in a['positions'].items()
+                  if MODEL.number(p['quantity']) > 0 and c in self.s['mappings']}
+        jobs=[]
+        for condition in sorted(needed):
+            jobs.append((self.source_market, condition))
+        for slug in sorted({self.s['mappings'][c]['us_slug'] for c in needed}):
+            jobs.append((self.us_market, slug))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            reads=[pool.submit(function, key) for function,key in jobs]
+            for future in reads:
+                try:future.result()
+                except PermissionError:raise
+                except ValueError:pass  # The original per-account gate records the actual skip.
         for account in accounts:
             account['source_missed_ticks'] += self.tick_gap
             self.service_account(account)
@@ -564,11 +579,14 @@ def evaluation(state, p, now=None):
                 (complete_cov < .95 or (held_cov is not None and held_cov < .95))):
             metrics['status'] = 'INSUFFICIENT_TRADES/COVERAGE'
         latencies = [float(row['source_to_paper_seconds']) for row in a['ledger'] if 'source_to_paper_seconds' in row]
+        metrics['preliminary_reporting_milestones_reached'] = [n for n in p.get('preliminary_reporting_milestones', []) if metrics['completed_distinct_markets'] >= n]
+        metrics['preliminary_results_are_not_statistical_passes'] = True
         metrics['source_to_fill_latency_seconds'] = {'count': len(latencies),
             'minimum': min(latencies, default=None), 'maximum': max(latencies, default=None),
             'mean': sum(latencies) / len(latencies) if latencies else None}
         accounts.append(metrics)
     return {'schema': 1, 'study_id': state['study_id'], 'code_sha': state['code_sha'],
+        'synthetic_fixture_only': state.get('synthetic_fixture_only', False),
         'protocol_sha256': state['protocol_sha256'], 'started_at': state['started_at'],
         'entry_end': state['entry_end'], 'hard_stop': state['hard_stop'], 'measured_through': now,
         'cycles': state['cycles'], 'terminal': state['terminal'], 'entries_stopped_reason': state.get('entries_stopped_reason'),
@@ -581,13 +599,14 @@ def render_report(value, run_id):
     iso = lambda t: datetime.fromtimestamp(t, timezone.utc).isoformat()
     money = lambda x: 'N/A' if x is None else '$' + format(MODEL.number(x), '.2f')
     pct = lambda x: 'N/A (no held exposure)' if x is None else format(x, '.2%')
-    lines = ['# Integrated four-wallet paper study', '',
+    lines = ['# Expanded wallet paper study', '',
+        '**SYNTHETIC FIXTURE ONLY — not actual paper trading or wallet profitability.**' if value.get('synthetic_fixture_only') else '',
         'Stage: ' + ('TERMINAL' if value['terminal'] else 'PARTIAL / NOT FINAL'),
         'Exact run: https://github.com/futuremvp427/source-to-sim/actions/runs/' + str(run_id),
         'Code: `' + value['code_sha'] + '`; protocol SHA-256: `' + value['protocol_sha256'] + '`.',
         'Actual measured interval: ' + iso(value['started_at']) + ' to ' + iso(value['measured_through']) + '.',
         'Planned entries end ' + iso(value['entry_end']) + '; bounded drain ends ' + iso(value['hard_stop']) + '.', '',
-        'Four independent fictional $1,000 accounts; no combined realizable portfolio. Source profits are not follower returns.', '',
+        'Twelve independent fictional $1,000 accounts; no combined realizable portfolio. Source profits are not follower returns.', '',
         '| Wallet | Completed net after modeled fees | Stress net | Completed distinct US markets | Open markets | Screen |',
         '| --- | ---: | ---: | ---: | ---: | --- |']
     for a in value['accounts']:
@@ -606,6 +625,6 @@ def render_report(value, run_id):
             'Fill/skip reasons: `' + json.dumps(a['skips_by_reason'], sort_keys=True) + '`.',
             'Event-cluster bootstrap lower 2.5% stress-mean percentile: ' + str(a['event_cluster_bootstrap_stress_mean_lower_2_5pct']) + '.',
             'Unresolved positions and scheduled dates: `' + json.dumps(a['open_positions'], sort_keys=True) + '`.']
-    lines += ['', 'Short screen only: same-game/day dependence, recent-winner selection and four simultaneous comparisons remain limitations. '
+    lines += ['', 'Short screen only: same-game/day dependence, recent-winner selection and twelve simultaneous comparisons remain limitations. '
               'A positive sample is not proof of a lasting edge; fewer than 30 markets or inadequate coverage remains insufficient.']
     return '\n'.join(lines) + '\n'

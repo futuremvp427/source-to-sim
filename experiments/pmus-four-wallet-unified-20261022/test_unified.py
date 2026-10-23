@@ -358,7 +358,9 @@ class IntegratedTests(unittest.TestCase):
 
     def test_protocol_preserves_all_frozen_trading_and_screen_parameters(self):
         original = json.loads((core.REFERENCE / 'protocol.json').read_bytes())
-        for name in ('wallets', 'entry_collection_hours', 'maximum_settlement_drain_hours',
+        self.assertEqual(P['wallets'][:4], original['wallets'])
+        self.assertEqual(len(P['wallets']), 12)
+        for name in ('entry_collection_hours', 'maximum_settlement_drain_hours',
                      'starting_capital_usd', 'maximum_contracts_per_market', 'maximum_open_markets_per_account',
                      'taker_fee_coefficient', 'stress_cost_per_contract_per_trade', 'maximum_worse_entry_price',
                      'minimum_observation_delay_seconds', 'maximum_signal_age_seconds', 'maximum_book_age_seconds',
@@ -393,9 +395,11 @@ class IntegratedTests(unittest.TestCase):
         self.assertIn('runs-on: ubuntu-latest', segment)
         self.assertNotIn('secrets: inherit', text)
 
-    def test_initial_launch_is_preparation_not_paper_entries(self):
+    def test_explicit_launch_mode_cannot_create_unqualified_paper_entries(self):
         launch = json.loads((core.ROOT / 'launch.json').read_bytes())
-        self.assertEqual(launch['mode'], 'prepare')
+        self.assertIn(launch['mode'], ('qualify', 'collect'))
+        if launch['mode'] == 'collect':
+            self.assertTrue(run.require_qualification(core.ROOT/'qualification'))
 
 
 if __name__ == '__main__':

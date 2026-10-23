@@ -1,5 +1,6 @@
 {
-  "mode": "prepare",
-  "request": "user-complete-integrated-audit-20261022-v1",
-  "paper_entries_authorized_only_after_verified_live_and_full_readiness": true
+  "schema": 2,
+  "mode": "qualify",
+  "request_marker": "user-start-expanded-exploratory-20261023",
+  "paper_entries_authorized_only_after_independent_qualification": true
 }

@@ -1,18 +1,20 @@
-name: Integrated Four Wallet Paper Study
+name: Expanded Wallet Paper Qualification and Study
 on:
   push:
-    branches: [research/pmus-four-wallet-unified-20261022]
+    branches: [research/pmus-expanded-wallet-paper-20261023]
     paths:
       - experiments/pmus-four-wallet-unified-20261022/**
       - .github/workflows/pmus-four-wallet-unified-*.yml
+      - experiments/pmus-expanded-wallet-20261023/**
+      - experiments/pmus-live-gate-20261022/**
 permissions:
   contents: read
 concurrency:
-  group: pmus-four-wallet-unified-20261022
+  group: pmus-expanded-wallet-20261023
   cancel-in-progress: false
 jobs:
   verify:
-    if: ${{ github.repository == 'futuremvp427/source-to-sim' && github.event.repository.private == false && github.ref == 'refs/heads/research/pmus-four-wallet-unified-20261022' }}
+    if: ${{ github.repository == 'futuremvp427/source-to-sim' && github.event.repository.private == false && github.ref == 'refs/heads/research/pmus-expanded-wallet-paper-20261023' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -37,20 +39,25 @@ jobs:
         run: .venv-data/bin/python -m unittest discover -s experiments/pmus-paper-readiness-20261022 -p test_readiness.py -v
       - name: Integrated source-fill-settlement-save-restore-evaluate and failures
         run: .venv-data/bin/python -m unittest discover -s experiments/pmus-four-wallet-unified-20261022 -p test_unified.py -v
+      - name: Expanded qualification, reporting and remote restoration regressions
+        run: .venv-data/bin/python -m unittest discover -s experiments/pmus-expanded-wallet-20261023 -p test_expanded.py -v
+      - name: Cache repair regression tests
+        run: .venv-data/bin/python -m unittest discover -s experiments/pmus-live-gate-20261022 -p test_phase_cache.py -v
       - name: Read explicit launch mode
         id: launch
         run: |
           python3 - <<'PY'
           import json,os,pathlib
           mode=json.loads(pathlib.Path('experiments/pmus-four-wallet-unified-20261022/launch.json').read_bytes())['mode']
-          assert mode in ('prepare','collect')
+          assert mode in ('qualify','prepare','collect')
+          assert os.environ.get('GITHUB_RUN_ATTEMPT','1') == '1', 'No implicit workflow reruns or epoch resets'
           with open(os.environ['GITHUB_OUTPUT'],'a') as f:f.write('mode='+mode+'\n')
           PY
-  prepare:
+  qualification_preflight:
     needs: verify
-    if: ${{ needs.verify.outputs.mode == 'prepare' }}
+    if: ${{ needs.verify.outputs.mode == 'qualify' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
@@ -61,23 +68,101 @@ jobs:
         run: |
           python3 -m venv .venv-data
           .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
-      - name: Recent complete source activity and verified US mapping audit, no entries
+      - name: Existing collector lifecycle fixture, explicitly synthetic
+        run: >-
+          .venv-data/bin/python experiments/pmus-expanded-wallet-20261023/lifecycle_fixture.py
+          --code-root . --code-sha '${{ github.sha }}' --run-id '${{ github.run_id }}' --output fixture-proof
+      - name: Actual publication and independent public-byte restoration of the synthetic collector fixture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-expanded-wallet-20261023/publish_fixture.py
+          --source fixture-proof --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+      - name: Actual public source latency and bounded free-runner resource measurement, no entries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-four-wallet-unified-20261022/qualification.py
+          --phase resources --output qualification --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+      - name: Actual twelve-source and authenticated market-data diagnostic, no paper epoch
         env:
           GH_TOKEN: ${{ github.token }}
           PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
           PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
         run: >-
-          .venv-data/bin/python experiments/pmus-four-wallet-unified-20261022/run.py
-          --mode prepare --output preparation --run-id '${{ github.run_id }}'
-          --code-sha '${{ github.sha }}' --approved-paper-only
-      - name: Preserve audit evidence without starting accounts
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          .venv-data/bin/python experiments/pmus-four-wallet-unified-20261022/qualification.py
+          --phase preflight --output qualification --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+  wait_00:
+    needs: [verify, qualification_preflight]
+    if: ${{ needs.verify.outputs.mode == 'qualify' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    permissions:
+      contents: write
+    outputs:
+      ready: ${{ steps.wait.outputs.ready }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          name: pmus-unified-preparation-${{ github.run_id }}
-          path: preparation/
-          retention-days: 1
-          compression-level: 9
+          persist-credentials: false
+      - name: Pinned market-data dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Wait for the two frozen games to be positively live, no entry clock
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-four-wallet-unified-20261022/qualification.py
+          --phase wait_00 --seconds 18000 --output qualification --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+  wait_01:
+    needs: [verify, wait_00]
+    if: ${{ needs.verify.outputs.mode == 'qualify' && needs.wait_00.outputs.ready != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    permissions:
+      contents: write
+    outputs:
+      ready: ${{ steps.wait.outputs.ready }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Pinned market-data dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Wait for the two frozen games to be positively live, no entry clock
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-four-wallet-unified-20261022/qualification.py
+          --phase wait_01 --seconds 18000 --output qualification --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
+  qualify_live:
+    needs: [verify, qualification_preflight, wait_00, wait_01]
+    if: ${{ always() && !cancelled() && needs.verify.outputs.mode == 'qualify' && needs.qualification_preflight.result == 'success' && (needs.wait_00.outputs.ready == 'true' || needs.wait_01.outputs.ready == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Pinned market-data dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Once-only full30-minute LIVE qualification; never paper entries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PMUS_DATA_KEY_ID: ${{ secrets.PMUS_DATA_KEY_ID }}
+          PMUS_DATA_SECRET_KEY: ${{ secrets.PMUS_DATA_SECRET_KEY }}
+        run: >-
+          .venv-data/bin/python experiments/pmus-four-wallet-unified-20261022/qualification.py
+          --phase live --output qualification --run-id '${{ github.run_id }}' --code-sha '${{ github.sha }}'
   collect_00:
     needs: [verify]
     if: ${{ needs.verify.outputs.mode == 'collect' }}

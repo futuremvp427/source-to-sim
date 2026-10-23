@@ -26,16 +26,16 @@ from publication import GitMirror, PublicationError, NoRedirect
 from reliability_runner import BackgroundMirror
 from verify import verify
 
-READINESS = ROOT.parent / 'pmus-paper-readiness-20261022'
+READINESS = ROOT.parent / 'pmus-expanded-wallet-20261023'
 sys.path.insert(0, str(READINESS))
 import readiness
-CONTRACT = '74432bb54c13637cc2bcc3ec3096b910ac0c5b4e3f12aaccaf9db44a4d8166d7'
+CONTRACT = '4b8fdb677a514c14e838f0bd94a49d9823cd1d6c0d976d54c828f9d59d4954ee'
 
 
 class PaperMirror(GitMirror):
     def __init__(self, run_id, code_sha, root):
         super().__init__(run_id, code_sha, root)
-        self.branch = 'research/pmus-four-wallet-unified-state-20261022'
+        self.branch = protocol()['state_branch']
         self.folder = 'paper-results/' + protocol()['study_id'] + '/'
         self.denied, self.last_ack_at = False, time.time()
 
@@ -57,14 +57,62 @@ class PaperMirror(GitMirror):
             self.last_ack_at = time.time()
         return result
 
+    def restore(self):
+        """Restore only observed immutable public bytes, without metered artifacts."""
+        from durable import restore_events
+        observed = self.ref()
+        if not observed:
+            return False
+        head = observed['object']['sha']
+        commit = self.request('/git/commits/' + head)
+        tree = self.request('/git/trees/' + commit['tree']['sha'] + '?recursive=1')
+        if tree.get('truncated'):
+            raise ValueError('truncated_remote_evidence_tree')
+        entries = [x for x in tree['tree'] if x['type'] == 'blob' and x['path'].startswith(self.folder)]
+        if not entries:
+            raise ValueError('missing_latest_published_same_run_checkpoint')
+        allowed = re.compile(r'(?:plan.json|summary.json|bodies/[0-9a-f]{64}\.xz|checkpoints/[0-9]{6}/(?:manifest.json|raw.jsonl.xz|summary.json))')
+        if any(not allowed.fullmatch(x['path'][len(self.folder):]) or x['size'] > 8*1024**2 for x in entries):
+            raise ValueError('unexpected_remote_evidence_path_or_size')
+        needed = sum(x['size'] for x in entries)
+        self.root.mkdir(parents=True, exist_ok=True)
+        if shutil.disk_usage(self.root).free < 2*needed + 2*1024**3:
+            raise ValueError('insufficient_free_standard_runner_disk_for_verified_restore')
+        def download(item):
+            name = item['path'][len(self.folder):]
+            url = 'https://raw.githubusercontent.com/futuremvp427/source-to-sim/' + head + '/' + item['path']
+            req = urllib.request.Request(url, method='GET', headers={'User-Agent':'pmus-published-same-run-restore'})
+            with urllib.request.build_opener(NoRedirect()).open(req, timeout=20) as response:
+                data = response.read(8*1024**2 + 1)
+            if len(data) != item['size'] or hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest() != item['sha']:
+                raise ValueError('remote_git_blob_identity_mismatch')
+            atomic_write(self.root/name, data, immutable=True)
+            return name, hashlib.sha256(data).hexdigest()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            published = dict(pool.map(download, entries))
+        plan = json.loads((self.root/'plan.json').read_bytes())
+        if plan['run_id'] != self.p['study_id'] or plan['code_sha'] != self.code_sha:
+            raise ValueError('latest_published_plan_run_or_code_mismatch')
+        checked = verify(self.root)
+        if (checked['evaluation']['study_id'] != protocol()['study_id']
+                or checked['evaluation']['protocol_sha256'] != hashlib.sha256((ROOT/'protocol.json').read_bytes()).hexdigest()):
+            raise ValueError('latest_published_study_or_protocol_mismatch')
+        if (self.root/'events.jsonl').exists():
+            raise ValueError('refuse_overwriting_local_journal_during_remote_restore')
+        restore_events(self.root)
+        self.head, self.published = head, published
+        self.pending_commit = self.pending_files = None
+        self.save()
+        return True
+
 
 def bundle_digest():
     repo = ROOT.parents[1]
     files = []
     for folder in (ROOT, ROOT.parent / 'pmus-data-reliability-20261018',
-                   ROOT.parent / 'pmus-four-wallet-20261018', READINESS):
+                   ROOT.parent / 'pmus-four-wallet-20261018', ROOT.parent / 'pmus-live-gate-20261022', READINESS):
         files.extend(p for p in folder.iterdir() if p.suffix == '.py' or p.name in
-                     ('protocol.json', 'requirements.json', 'requirements-stream.txt'))
+                     ('protocol.json', 'requirements.json', 'requirements-stream.txt', 'watch.json'))
     files.extend((repo / '.github/workflows').glob('pmus-four-wallet-unified-*.yml'))
     return digest({str(p.relative_to(repo)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(files)})
 
@@ -77,6 +125,8 @@ def require_qualification(folder):
     req = json.loads(data)
     req['requirements_sha256'] = CONTRACT
     packet = json.loads((folder / 'packet.json').read_bytes())
+    if packet.get('paper_protocol_sha256') != hashlib.sha256((ROOT / 'protocol.json').read_bytes()).hexdigest():
+        raise ValueError('prepared_protocol_changed_since_readiness_review')
     if packet.get('code_bundle_sha256') != bundle_digest():
         raise ValueError('prepared_code_or_workflow_changed_since_readiness_review')
     result = readiness.assess(req, packet, folder)
@@ -367,6 +417,19 @@ def prepare(args):
 
 
 def recover(args):
+    if args.source is None:
+        if args.output.exists():
+            raise ValueError('refuse_existing_restore_output')
+        mirror = PaperMirror(args.run_id, args.code_sha, args.output)
+        if not mirror.restore():
+            raise ValueError('latest_published_same_run_checkpoint_required')
+        summary = json.loads((args.output/'summary.json').read_bytes())
+        if summary.get('segment') != args.segment-1 or summary.get('segment_complete') is not True:
+            raise ValueError('latest_published_preceding_segment_not_complete_no_rewind')
+        journal = PaperJournal(args.output, resume=True)
+        replay(journal.rows, protocol())
+        journal.close()
+        return 0
     choices = []
     if (args.source / 'plan.json').is_file():
         choices.append((args.segment - 1, 1, args.source))

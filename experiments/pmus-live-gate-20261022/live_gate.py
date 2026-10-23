@@ -33,7 +33,8 @@ from reliability_runner import BackgroundMirror, ReconnectingStream, market_iden
 INTERVAL = 20
 DURATION = 1800
 EVENT = re.compile(r'^nhl-[a-z0-9]+-[a-z0-9]+-2026-10-22$')
-EVENT_IDS = frozenset(m['event_id'] for m in json.loads((ROOT / 'watch.json').read_bytes())['markets'])
+EVENT_SLUGS = frozenset(m['event_slug'] for m in json.loads((ROOT / 'watch.json').read_bytes())['markets'])
+EVENT_IDS = frozenset(m['event_id'] for m in json.loads((ROOT / 'watch.json').read_bytes())['markets']) | {'168916','168918'}
 PHASE_BUDGET_SECONDS = 16
 
 
@@ -58,7 +59,8 @@ def event_url_allowed(url):
     if u.scheme != 'https' or u.netloc != 'gateway.polymarket.us' or u.query or u.fragment:
         return False
     if u.path.startswith('/v1/events/slug/'):
-        return EVENT.fullmatch(u.path[len('/v1/events/slug/'):]) is not None
+        return (EVENT.fullmatch(u.path[len('/v1/events/slug/'):]) is not None
+                or u.path[len('/v1/events/slug/'):] in EVENT_SLUGS)
     return u.path.startswith('/v1/events/') and u.path[len('/v1/events/'):] in EVENT_IDS
 
 
@@ -258,7 +260,7 @@ def summarize(plan, rows, now):
             'live_quote_coverage_full_planned': counts['valid_live_quote_ticks'] / planned,
             'fresh_stream_coverage_elapsed': counts['fresh_stream_quote_ticks'] / max(1, expected),
             'problems': dict(problems)}
-    for wallet in PROTOCOL['wallets']:
+    for wallet in plan.get('source_wallets', PROTOCOL['wallets']):
         address = wallet['address']
         good = sum(bool(cycles.get(t, {}).get('sources', {}).get(address, {}).get('usable')) for t in range(expected))
         sources[address] = {'name': wallet['name'], 'valid_source_poll_ticks': good,
@@ -292,13 +294,17 @@ def run(args):
     if protocol_hash != watch['protocol_sha256']:
         raise ValueError('frozen_wallet_protocol_identity_changed')
     journal = DurableJournal(args.output)
+    for captured in getattr(args, 'initial_http_rows', []):
+        if captured['kind'] != 'event_http':
+            raise ValueError('unexpected_prelaunch_evidence_kind')
+        journal.add('event_http', captured['payload'])
     stop = threading.Event()
     stream, mirror, background = None, None, None
     failure, publication_errors = None, 0
     duration = 120 if args.mode == 'preflight' else DURATION
     plan = {'run_id': args.run_id, 'code_sha': args.code_sha, 'mode': args.mode,
         'duration_seconds': duration, 'interval_seconds': INTERVAL, 'watch': watch,
-        'started_at': time.time() + 5, 'source_wallets': PROTOCOL['wallets']}
+        'started_at': time.time() + 5, 'source_wallets': watch.get('source_wallets', PROTOCOL['wallets'])}
     try:
         atomic_write(args.output / 'plan.json', canonical(plan) + b'\n', immutable=True)
         journal.add('live_gate_plan', plan)
@@ -313,7 +319,7 @@ def run(args):
         source_network = frozen.Network(PROTOCOL, source_log)
         next_seal = time.time()
         end = plan['started_at'] + duration
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(6, len(plan['source_wallets']) + 2)) as pool:
             tick = 0
             while time.time() < end:
                 scheduled = plan['started_at'] + tick * INTERVAL
@@ -323,7 +329,7 @@ def run(args):
                 if stream.fatal:
                     raise PermissionError(stream.fatal)
                 futures = {w['address']: pool.submit(source_check, source_network, source_log, w['address'], scheduled)
-                    for w in PROTOCOL['wallets']}
+                    for w in plan['source_wallets']}
                 def sample(item):
                     event = phase(events.fresh(item, scheduled), item)
                     book = observe(client, item['market_slug'], item['market_identity'], stream, scheduled)
