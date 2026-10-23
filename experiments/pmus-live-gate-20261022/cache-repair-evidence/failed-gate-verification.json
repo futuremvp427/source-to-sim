@@ -1,0 +1,258 @@
+{
+  "run_id": "39871608024",
+  "code_sha": "c5992e8318ac8188a7f0a35843a2c3905f995e41",
+  "state_commit": "4861a335e69d1cff9e74fac9340fc902a5fc0725",
+  "immutable_git_blobs_verified": 39,
+  "git_bytes": 707235,
+  "checkpoints_verified": 3,
+  "raw_records": 2286,
+  "raw_hash": "88a3d85cc44c64f575937eb256774db64703d3c36a97f84b69a55ad11ee729bb",
+  "summary_recomputed_equal": true,
+  "http_body_digests_and_stream_receipt_references_verified": true,
+  "phase_decisions_recomputed_equal": true,
+  "event_http_records": 32,
+  "source_http_records": 64,
+  "stale_phase_responses": [
+    {
+      "seq": 558,
+      "url": "https://gateway.polymarket.us/v1/events/slug/nhl-ana-nj-2026-10-22",
+      "headers": {
+        "age": "25",
+        "cache-control": "public, max-age=30",
+        "date": "Thu, 22 Oct 2026 23:26:22 GMT",
+        "last-modified": "Thu, 22 Oct 2026 23:26:02 GMT"
+      },
+      "received_at": 1792711582.901027,
+      "issues": [
+        "stale_http_cache"
+      ],
+      "body_sha256": "0deb0d3ceb5cf3b081c081ea9f5f0001ff689ce40e0e933d410a223da2f2e331"
+    },
+    {
+      "seq": 559,
+      "url": "https://gateway.polymarket.us/v1/events/slug/nhl-fla-pit-2026-10-22",
+      "headers": {
+        "age": "23",
+        "cache-control": "public, max-age=30",
+        "date": "Thu, 22 Oct 2026 23:26:22 GMT",
+        "last-modified": "Thu, 22 Oct 2026 23:26:02 GMT"
+      },
+      "received_at": 1792711582.9063869,
+      "issues": [
+        "stale_http_cache"
+      ],
+      "body_sha256": "d5ded3f17ea67dac95fec49f56d4d8da5ba0bdc6c7d2997cf390920500c259fb"
+    },
+    {
+      "seq": 1089,
+      "url": "https://gateway.polymarket.us/v1/events/slug/nhl-ana-nj-2026-10-22",
+      "headers": {
+        "age": "24",
+        "cache-control": "public, max-age=30",
+        "date": "Thu, 22 Oct 2026 23:27:22 GMT",
+        "last-modified": "Thu, 22 Oct 2026 23:27:02 GMT"
+      },
+      "received_at": 1792711642.9026952,
+      "issues": [
+        "stale_http_cache"
+      ],
+      "body_sha256": "206b370f64fc978ae0bbc281732b70c6582342f267e1dbe472c0dff6b816a348"
+    },
+    {
+      "seq": 1090,
+      "url": "https://gateway.polymarket.us/v1/events/slug/nhl-fla-pit-2026-10-22",
+      "headers": {
+        "age": "23",
+        "cache-control": "public, max-age=30",
+        "date": "Thu, 22 Oct 2026 23:27:22 GMT",
+        "last-modified": "Thu, 22 Oct 2026 23:27:02 GMT"
+      },
+      "received_at": 1792711642.9082325,
+      "issues": [
+        "stale_http_cache"
+      ],
+      "body_sha256": "7003a6be8e8b1cdaf137e2fc7aba97dafdbe217d7900fb1e7d709291523ee8ae"
+    },
+    {
+      "seq": 1553,
+      "url": "https://gateway.polymarket.us/v1/events/slug/nhl-ana-nj-2026-10-22",
+      "headers": {
+        "age": "24",
+        "cache-control": "public, max-age=30",
+        "date": "Thu, 22 Oct 2026 23:28:22 GMT",
+        "last-modified": "Thu, 22 Oct 2026 23:28:02 GMT"
+      },
+      "received_at": 1792711702.90413,
+      "issues": [
+        "stale_http_cache"
+      ],
+      "body_sha256": "3e2b14ff7dd4bb73a0522a0b2c6d208657e6d7d71789ac5ba070e04bacc12474"
+    },
+    {
+      "seq": 1554,
+      "url": "https://gateway.polymarket.us/v1/events/slug/nhl-fla-pit-2026-10-22",
+      "headers": {
+        "age": "23",
+        "cache-control": "public, max-age=30",
+        "date": "Thu, 22 Oct 2026 23:28:22 GMT",
+        "last-modified": "Thu, 22 Oct 2026 23:28:02 GMT"
+      },
+      "received_at": 1792711702.909424,
+      "issues": [
+        "stale_http_cache"
+      ],
+      "body_sha256": "5c399add18cb49490ddb760244f8887fafa8a7ddf7528b53e0a942be20bc6399"
+    },
+    {
+      "seq": 1968,
+      "url": "https://gateway.polymarket.us/v1/events/slug/nhl-ana-nj-2026-10-22",
+      "headers": {
+        "age": "23",
+        "cache-control": "public, max-age=30",
+        "date": "Thu, 22 Oct 2026 23:29:22 GMT",
+        "last-modified": "Thu, 22 Oct 2026 23:29:02 GMT"
+      },
+      "received_at": 1792711762.90306,
+      "issues": [
+        "stale_http_cache"
+      ],
+      "body_sha256": "ae1931d8f382380775168ee51f59ba3ee5af18a61ca5a857da45a78f326c5090"
+    },
+    {
+      "seq": 1969,
+      "url": "https://gateway.polymarket.us/v1/events/slug/nhl-fla-pit-2026-10-22",
+      "headers": {
+        "age": "22",
+        "cache-control": "public, max-age=30",
+        "date": "Thu, 22 Oct 2026 23:29:22 GMT",
+        "last-modified": "Thu, 22 Oct 2026 23:29:02 GMT"
+      },
+      "received_at": 1792711762.9085853,
+      "issues": [
+        "stale_http_cache"
+      ],
+      "body_sha256": "9977f69b33410c2bae726eb5564231d32736c6956ac9192c8706038bced1e95f"
+    },
+    {
+      "seq": 2265,
+      "url": "https://gateway.polymarket.us/v1/events/slug/nhl-ana-nj-2026-10-22",
+      "headers": {
+        "age": "23",
+        "cache-control": "public, max-age=30",
+        "date": "Thu, 22 Oct 2026 23:30:22 GMT",
+        "last-modified": "Thu, 22 Oct 2026 23:30:02 GMT"
+      },
+      "received_at": 1792711822.9005342,
+      "issues": [
+        "stale_http_cache"
+      ],
+      "body_sha256": "74be6851a654354f4414fa41e7a6674c80c77e6604ca6ee5fc027a563b293dac"
+    },
+    {
+      "seq": 2266,
+      "url": "https://gateway.polymarket.us/v1/events/slug/nhl-fla-pit-2026-10-22",
+      "headers": {
+        "age": "22",
+        "cache-control": "public, max-age=30",
+        "date": "Thu, 22 Oct 2026 23:30:22 GMT",
+        "last-modified": "Thu, 22 Oct 2026 23:30:02 GMT"
+      },
+      "received_at": 1792711822.9198916,
+      "issues": [
+        "stale_http_cache"
+      ],
+      "body_sha256": "e4dbe142bcd8e29c4ee0bda1de9bb8a2324e6bbb9dc5f59e70524551dbf9238d"
+    }
+  ],
+  "actual_start_utc": "2026-10-22T23:25:22.826667+00:00",
+  "actual_end_utc": "2026-10-22T23:30:24.009540+00:00",
+  "summary": {
+    "actual_cycles": 16,
+    "actual_elapsed_seconds": 301.1828730106354,
+    "actual_in_play_phase_certified": false,
+    "cannot_reach_95_percent": true,
+    "code_sha": "c5992e8318ac8188a7f0a35843a2c3905f995e41",
+    "completed_full_window": false,
+    "evaluated_at": 1792711824.0095398,
+    "failure": "RuntimeError:live_or_source_coverage_cannot_reach_frozen_95_percent",
+    "live_gate_passed": false,
+    "markets": {
+      "aec-nhl-ana-nj-2026-10-22": {
+        "expected_elapsed_ticks": 16,
+        "fresh_stream_coverage_elapsed": 1.0,
+        "fresh_stream_quote_ticks": 16,
+        "live_quote_coverage_full_planned": 0.12222222222222222,
+        "matched_distinct_book_timestamps": 10,
+        "matched_fresh_pairs": 10,
+        "planned_ticks": 90,
+        "problems": {
+          "stale_http_cache": 5
+        },
+        "valid_live_quote_ticks": 11,
+        "verified_live_phase_ticks": 11
+      },
+      "aec-nhl-fla-pit-2026-10-22": {
+        "expected_elapsed_ticks": 16,
+        "fresh_stream_coverage_elapsed": 1.0,
+        "fresh_stream_quote_ticks": 16,
+        "live_quote_coverage_full_planned": 0.12222222222222222,
+        "matched_distinct_book_timestamps": 10,
+        "matched_fresh_pairs": 11,
+        "planned_ticks": 90,
+        "problems": {
+          "stale_http_cache": 5
+        },
+        "valid_live_quote_ticks": 11,
+        "verified_live_phase_ticks": 11
+      }
+    },
+    "mode": "live",
+    "paper_entries": 0,
+    "paper_start_authorized_by_this_file": false,
+    "planned_end": 1792713322.8266668,
+    "preflight_passed": false,
+    "private_account_requests": 0,
+    "publication_errors": 0,
+    "real_orders": 0,
+    "run_id": "39871608024",
+    "schema": 1,
+    "settlement_ticks_credited_as_live_quotes": 0,
+    "sources": {
+      "0x27f738fe203827445690339104aae35b20bc44b0": {
+        "coverage_elapsed": 1.0,
+        "coverage_full_planned": 0.17777777777777778,
+        "expected_elapsed_ticks": 16,
+        "name": "ic4cream",
+        "planned_ticks": 90,
+        "valid_source_poll_ticks": 16
+      },
+      "0x676c1bb692c76b57b06f1b93817515acfa5ce139": {
+        "coverage_elapsed": 1.0,
+        "coverage_full_planned": 0.17777777777777778,
+        "expected_elapsed_ticks": 16,
+        "name": "para-Vision",
+        "planned_ticks": 90,
+        "valid_source_poll_ticks": 16
+      },
+      "0x684baa57c338c2549aec0aa3f034f695d72a8409": {
+        "coverage_elapsed": 1.0,
+        "coverage_full_planned": 0.17777777777777778,
+        "expected_elapsed_ticks": 16,
+        "name": "monkeymashingkeyboard",
+        "planned_ticks": 90,
+        "valid_source_poll_ticks": 16
+      },
+      "0xe5b70fd855af9258d9463992e4f1ed7987905ee3": {
+        "coverage_elapsed": 1.0,
+        "coverage_full_planned": 0.17777777777777778,
+        "expected_elapsed_ticks": 16,
+        "name": "alwaysfade",
+        "planned_ticks": 90,
+        "valid_source_poll_ticks": 16
+      }
+    },
+    "stage": "FAILED_NO_PAPER_START",
+    "started_at": 1792711522.8266668,
+    "wallet_profitability_evaluated": false
+  }
+}

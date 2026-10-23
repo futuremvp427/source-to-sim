@@ -33,6 +33,8 @@ from reliability_runner import BackgroundMirror, ReconnectingStream, market_iden
 INTERVAL = 20
 DURATION = 1800
 EVENT = re.compile(r'^nhl-[a-z0-9]+-[a-z0-9]+-2026-10-22$')
+EVENT_IDS = frozenset(m['event_id'] for m in json.loads((ROOT / 'watch.json').read_bytes())['markets'])
+PHASE_BUDGET_SECONDS = 16
 
 
 def verify_extra_http(rows):
@@ -53,25 +55,30 @@ def verify_extra_http(rows):
 
 def event_url_allowed(url):
     u = urllib.parse.urlsplit(url)
-    return (u.scheme == 'https' and u.netloc == 'gateway.polymarket.us' and not u.query and
-            not u.fragment and u.path.startswith('/v1/events/slug/') and
-            EVENT.fullmatch(u.path[len('/v1/events/slug/'):]) is not None)
+    if u.scheme != 'https' or u.netloc != 'gateway.polymarket.us' or u.query or u.fragment:
+        return False
+    if u.path.startswith('/v1/events/slug/'):
+        return EVENT.fullmatch(u.path[len('/v1/events/slug/'):]) is not None
+    return u.path.startswith('/v1/events/') and u.path[len('/v1/events/'):] in EVENT_IDS
 
 
 class EventClient:
     def __init__(self, journal):
         self.journal = journal
 
-    def get(self, slug):
-        url = 'https://gateway.polymarket.us/v1/events/slug/' + slug
+    def get(self, slug, event_id=None, deadline=None):
+        url = 'https://gateway.polymarket.us/v1/events/' + ('slug/' + slug if event_id is None else str(event_id))
         if not event_url_allowed(url):
             raise ValueError('unapproved_event_endpoint')
         sent, data, status, headers, error = time.time(), b'', None, {}, None
+        timeout = 8 if deadline is None else min(4, deadline - sent)
+        if timeout <= 0:
+            raise ValueError('phase_read_deadline_elapsed')
         try:
             request = urllib.request.Request(url, method='GET', headers={
                 'User-Agent': 'pmus-live-gate/1.0', 'Accept': 'application/json',
-                'Cache-Control': 'no-cache', 'Pragma': 'no-cache'})
-            with urllib.request.build_opener(NoRedirect()).open(request, timeout=8) as response:
+                'Cache-Control': 'no-cache, max-age=0', 'Pragma': 'no-cache'})
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
                 status, headers = response.status, dict(response.headers.items())
                 data = response.read(2 * 1024**2 + 1)
         except urllib.error.HTTPError as exc:
@@ -96,24 +103,80 @@ class EventClient:
             body = None
         return {**row, 'body': body, 'evidence': reference}
 
+    def fresh(self, item, scheduled_at):
+        """At most three public reads, all within the original scheduled tick.
+
+        A cached slug response may be followed by the documented exact-ID route.
+        If both routes are still cached, one retry may wait for the advertised
+        TTL, but only inside a 16-second budget. No query nonce, new host,
+        credentials, stale allowance, or retry after an access/rate-limit error.
+        This returns HTTP evidence only; phase() must still certify live/open.
+        """
+        deadline = scheduled_at + PHASE_BUDGET_SECONDS
+        attempts = []
+
+        def read(by_id):
+            response = self.get(item['event_slug'], event_id=item['event_id'] if by_id else None,
+                                deadline=deadline)
+            attempts.append(response['evidence'])
+            return response
+
+        def cached(response):
+            issues, detail = transport(response, 20)
+            # Fail closed on wrong identity, missing/invalid/future dates, access
+            # denial, throttling and errors. These are never cache fallbacks.
+            return (issues and set(issues) <= {'stale_http_cache'}
+                    and not event_identity_issues(response, item))
+
+        response = read(False)
+        if cached(response) and time.time() + 1 < deadline:
+            response = read(True)
+            if cached(response):
+                headers = {k.lower(): v for k, v in response['headers'].items()}
+                match = re.search(r'(?:^|,)\s*max-age=(\d+)(?:\s*,|\s*$)', headers.get('cache-control', ''))
+                if match:
+                    ttl, age = int(match[1]), float(headers['age'])
+                    delay = max(0, ttl - age) + .25
+                    if 0 <= ttl <= 60 and time.time() + delay + 1 < deadline:
+                        time.sleep(delay)
+                        response = read(True)
+        return {**response, 'attempt_evidence': attempts, 'scheduled_at': scheduled_at,
+                'phase_read_deadline': deadline}
+
+
+def event_identity_issues(response, item):
+    issues = []
+    try:
+        event = response['body']['event']
+        if (event.get('slug') != item['event_slug'] or str(event.get('id')) != item['event_id']
+                or MODEL.stamp(event.get('startTime')) != item['start_at']):
+            issues.append('event_identity_or_start_changed')
+        markets = event.get('markets', [])
+        market = [m for m in markets if isinstance(m, dict) and m.get('slug') == item['market_slug']]
+        if len(market) != 1 or market_identity(market[0]) != item['market_identity']:
+            issues.append('event_market_identity_changed')
+    except (ValueError, TypeError, KeyError, AttributeError, ArithmeticError):
+        issues.append('malformed_event_identity')
+    return issues
+
 
 def phase(response, item):
-    issues, _ = transport(response, 20)
-    event = (response.get('body') or {}).get('event', {})
-    if (event.get('slug') != item['event_slug'] or str(event.get('id')) != item['event_id']
-            or MODEL.stamp(event.get('startTime')) != item['start_at']):
-        issues.append('event_identity_or_start_changed')
-    market = [m for m in event.get('markets', []) if m.get('slug') == item['market_slug']]
-    if len(market) != 1 or market_identity(market[0]) != item['market_identity']:
-        issues.append('event_market_identity_changed')
+    issues, detail = transport(response, 20)
+    issues.extend(event_identity_issues(response, item))
+    body = response.get('body')
+    event = body.get('event') if isinstance(body, dict) else None
+    event = event if isinstance(event, dict) else {}
     # Explicit documented live flag; scheduled start and a nonempty score are NOT proof.
     if event.get('live') is not True or event.get('ended') is True:
         issues.append('official_live_flag_not_confirmed')
     if event.get('closed') is not False or event.get('active') is not True:
         issues.append('event_not_open_active')
+    if response.get('phase_read_deadline') is not None and response['received_at'] > response['phase_read_deadline']:
+        issues.append('phase_read_deadline_elapsed')
     return {'usable': not issues, 'issues': issues, 'live': event.get('live'),
         'ended': event.get('ended'), 'period': event.get('period'),
-        'evidence': response['evidence'], 'received_at': response['received_at']}
+        'evidence': response['evidence'], 'received_at': response['received_at'],
+        'transport': detail, 'attempt_evidence': response.get('attempt_evidence', [response['evidence']])}
 
 
 class SourceLog:
@@ -262,7 +325,7 @@ def run(args):
                 futures = {w['address']: pool.submit(source_check, source_network, source_log, w['address'], scheduled)
                     for w in PROTOCOL['wallets']}
                 def sample(item):
-                    event = phase(events.get(item['event_slug']), item)
+                    event = phase(events.fresh(item, scheduled), item)
                     book = observe(client, item['market_slug'], item['market_identity'], stream, scheduled)
                     return {'phase': event, 'book': book}
                 market_futures = {m['market_slug']: pool.submit(sample, m) for m in watch['markets']}

@@ -1,0 +1,35 @@
+test_accounts_do_not_share_capital (test_study.AccountingAndAssociation.test_accounts_do_not_share_capital) ... ok
+test_depth_failure_cannot_mutate_account (test_study.AccountingAndAssociation.test_depth_failure_cannot_mutate_account) ... ok
+test_documented_fee_example_and_half_even (test_study.AccountingAndAssociation.test_documented_fee_example_and_half_even) ... ok
+test_fee_and_quantity_metadata_drift_rejected (test_study.AccountingAndAssociation.test_fee_and_quantity_metadata_drift_rejected) ... ok
+test_four_captured_outcome_joins_and_scheduled_times (test_study.AccountingAndAssociation.test_four_captured_outcome_joins_and_scheduled_times) ... ok
+test_nonbinary_us_settlement_and_opposite_orientation (test_study.AccountingAndAssociation.test_nonbinary_us_settlement_and_opposite_orientation) ... ok
+test_opposite_side_buy_and_sell_use_complementary_depth (test_study.AccountingAndAssociation.test_opposite_side_buy_and_sell_use_complementary_depth) ... ok
+test_oversell_rejected_before_cash_mutation (test_study.AccountingAndAssociation.test_oversell_rejected_before_cash_mutation) ... ok
+test_partial_exit_roundtrip_cash_stress_and_independent_replay (test_study.AccountingAndAssociation.test_partial_exit_roundtrip_cash_stress_and_independent_replay) ... ok
+test_stale_future_crossed_and_missing_timestamps_rejected (test_study.AccountingAndAssociation.test_stale_future_crossed_and_missing_timestamps_rejected) ... ok
+test_wrong_start_and_nonbijective_sides_rejected (test_study.AccountingAndAssociation.test_wrong_start_and_nonbijective_sides_rejected) ... ok
+test_evidence_tampering_and_checkpoint_identity_change_rejected (test_study.CheckpointAndStatuses.test_evidence_tampering_and_checkpoint_identity_change_rejected) ... ok
+test_private_and_order_endpoints_outside_venue_get_allowlist (test_study.CheckpointAndStatuses.test_private_and_order_endpoints_outside_venue_get_allowlist) ... ok
+test_terminal_status_precedence_and_no_partial_window_success (test_study.CheckpointAndStatuses.test_terminal_status_precedence_and_no_partial_window_success) ... ok
+test_empty_open_inventory_without_closed_confirmation_preserved (test_study.CollectorBehavior.test_empty_open_inventory_without_closed_confirmation_preserved) ... ok
+test_foreign_resolution_never_settles_or_sells_us_position (test_study.CollectorBehavior.test_foreign_resolution_never_settles_or_sells_us_position) ... ok
+test_full_pagination_retains_anchor_and_filter (test_study.CollectorBehavior.test_full_pagination_retains_anchor_and_filter) ... ok
+test_incomplete_pagination_cannot_be_used_as_complete_inventory (test_study.CollectorBehavior.test_incomplete_pagination_cannot_be_used_as_complete_inventory) ... ok
+test_inventory_index_lag_blocks_entry (test_study.CollectorBehavior.test_inventory_index_lag_blocks_entry) ... ok
+test_new_buy_consumed_once_and_net_reductions_followed (test_study.CollectorBehavior.test_new_buy_consumed_once_and_net_reductions_followed) ... ok
+test_old_fill_never_becomes_new_entry (test_study.CollectorBehavior.test_old_fill_never_becomes_new_entry) ... ok
+test_wrong_us_settlement_slug_cannot_close_position (test_study.CollectorBehavior.test_wrong_us_settlement_slug_cannot_close_position) ... ok
+test_404_calendar_fallback_uses_captured_matching_fixture (test_four_wallet.FourWalletLookup.test_404_calendar_fallback_uses_captured_matching_fixture) ... ok
+test_captured_sides_and_kickoffs_still_required (test_four_wallet.FourWalletLookup.test_captured_sides_and_kickoffs_still_required) ... ok
+test_four_wallet_identity_and_capital (test_four_wallet.FourWalletLookup.test_four_wallet_identity_and_capital) ... ok
+test_matching_slug_with_wrong_kickoff_fails_closed (test_four_wallet.FourWalletLookup.test_matching_slug_with_wrong_kickoff_fails_closed) ... ok
+test_only_two_reviewed_calendar_candidates (test_four_wallet.FourWalletLookup.test_only_two_reviewed_calendar_candidates) ... ok
+test_publisher_cannot_write_original_study_or_default_branch (test_four_wallet.FourWalletLookup.test_publisher_cannot_write_original_study_or_default_branch) ... ok
+test_rate_limit_does_not_trigger_calendar_retry (test_four_wallet.FourWalletLookup.test_rate_limit_does_not_trigger_calendar_retry) ... ok
+test_reviewed_rams_alias (test_four_wallet.FourWalletLookup.test_reviewed_rams_alias) ... ok
+
+----------------------------------------------------------------------
+Ran 30 tests in 0.073s
+
+OK

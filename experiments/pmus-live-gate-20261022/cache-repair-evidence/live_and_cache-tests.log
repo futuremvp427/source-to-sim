@@ -1,0 +1,32 @@
+test_allowlist_rejects_orders_and_redirect_authority (test_live_gate.LiveGateTests.test_allowlist_rejects_orders_and_redirect_authority) ... ok
+test_duplicate_tick_is_invalid (test_live_gate.LiveGateTests.test_duplicate_tick_is_invalid) ... ok
+test_event_response_does_not_mutate_already_fsynced_payload (test_live_gate.LiveGateTests.test_event_response_does_not_mutate_already_fsynced_payload) ... ok
+test_extra_http_digest_is_replayed_and_corruption_rejected (test_live_gate.LiveGateTests.test_extra_http_digest_is_replayed_and_corruption_rejected) ... ok
+test_five_missing_ticks_cannot_meet_95_percent (test_live_gate.LiveGateTests.test_five_missing_ticks_cannot_meet_95_percent) ... ok
+test_four_missing_ticks_still_meet_95_percent (test_live_gate.LiveGateTests.test_four_missing_ticks_still_meet_95_percent) ... ok
+test_full_valid_live_window_passes (test_live_gate.LiveGateTests.test_full_valid_live_window_passes) ... ok
+test_phase_requires_explicit_live_not_just_scheduled_start (test_live_gate.LiveGateTests.test_phase_requires_explicit_live_not_just_scheduled_start) ... ok
+test_preflight_never_certifies_in_play (test_live_gate.LiveGateTests.test_preflight_never_certifies_in_play) ... ok
+test_repeating_one_matching_snapshot_does_not_supply_three_pairs (test_live_gate.LiveGateTests.test_repeating_one_matching_snapshot_does_not_supply_three_pairs) ... ok
+test_settlements_never_count_as_live_quotes (test_live_gate.LiveGateTests.test_settlements_never_count_as_live_quotes) ... ok
+test_source_failures_stay_in_full_planned_denominator (test_live_gate.LiveGateTests.test_source_failures_stay_in_full_planned_denominator) ... ok
+test_stream_heartbeat_or_receipt_without_usable_book_fails (test_live_gate.LiveGateTests.test_stream_heartbeat_or_receipt_without_usable_book_fails) ... ok
+test_waiting_before_end_cannot_pass (test_live_gate.LiveGateTests.test_waiting_before_end_cannot_pass) ... ok
+test_after_deadline_receipt_is_rejected (test_phase_cache.PhaseCacheTests.test_after_deadline_receipt_is_rejected) ... ok
+test_foreign_identity_cannot_trigger_fallback (test_phase_cache.PhaseCacheTests.test_foreign_identity_cannot_trigger_fallback) ... ok
+test_fresh_ended_response_can_never_certify_live (test_phase_cache.PhaseCacheTests.test_fresh_ended_response_can_never_certify_live) ... ok
+test_fresh_primary_uses_one_read (test_phase_cache.PhaseCacheTests.test_fresh_primary_uses_one_read) ... ok
+test_future_date_cannot_be_cured_by_fresh_age (test_phase_cache.PhaseCacheTests.test_future_date_cannot_be_cured_by_fresh_age) ... ok
+test_id_allowlist_rejects_unwatched_private_and_query_urls (test_phase_cache.PhaseCacheTests.test_id_allowlist_rejects_unwatched_private_and_query_urls) ... ok
+test_missing_date_and_malformed_body_fail_without_retry (test_phase_cache.PhaseCacheTests.test_missing_date_and_malformed_body_fail_without_retry) ... ok
+test_no_wait_or_retry_beyond_tick_budget (test_phase_cache.PhaseCacheTests.test_no_wait_or_retry_beyond_tick_budget) ... ok
+test_permission_failure_is_not_retried (test_phase_cache.PhaseCacheTests.test_permission_failure_is_not_retried) ... ok
+test_rate_limit_does_not_switch_routes (test_phase_cache.PhaseCacheTests.test_rate_limit_does_not_switch_routes) ... ok
+test_stale_primary_uses_only_exact_documented_id (test_phase_cache.PhaseCacheTests.test_stale_primary_uses_only_exact_documented_id) ... ok
+test_stale_retry_stays_stale_and_does_not_loop (test_phase_cache.PhaseCacheTests.test_stale_retry_stays_stale_and_does_not_loop) ... ok
+test_two_cached_routes_wait_for_ttl_within_original_tick (test_phase_cache.PhaseCacheTests.test_two_cached_routes_wait_for_ttl_within_original_tick) ... ok
+
+----------------------------------------------------------------------
+Ran 27 tests in 0.022s
+
+OK

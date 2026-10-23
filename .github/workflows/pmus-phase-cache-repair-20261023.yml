@@ -1,0 +1,37 @@
+name: Verify bounded event cache repair
+on:
+  push:
+    branches: [research/pmus-phase-cache-repair-20261023]
+    paths:
+      - experiments/pmus-live-gate-20261022/**
+      - .github/workflows/pmus-phase-cache-repair-20261023.yml
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: ${{ github.repository == 'futuremvp427/source-to-sim' && github.event.repository.private == false && github.ref == 'refs/heads/research/pmus-phase-cache-repair-20261023' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned market-data dependencies
+        run: |
+          python3 -m venv .venv-data
+          .venv-data/bin/python -m pip install --disable-pip-version-check -r experiments/pmus-data-reliability-20261018/requirements-stream.txt
+      - name: Frozen accounting and strategy rules
+        working-directory: experiments/pmus-four-wallet-20261018
+        run: ../../.venv-data/bin/python -m unittest -v test_study.py test_four_wallet.py
+      - name: Existing data, recovery, and publication regressions
+        working-directory: experiments/pmus-data-reliability-20261018
+        run: ../../.venv-data/bin/python -m unittest -v test_quality.py test_stream_smoke.py test_reliability.py test_restart.py
+      - name: Frozen paper readiness gates
+        working-directory: experiments/pmus-paper-readiness-20261022
+        run: ../../.venv-data/bin/python -m unittest -v test_readiness.py
+      - name: Integrated collector, publication, evaluator, and crash fixtures
+        working-directory: experiments/pmus-four-wallet-unified-20261022
+        run: ../../.venv-data/bin/python -m unittest -v test_unified.py
+      - name: Live phase and bounded cache recovery regressions
+        working-directory: experiments/pmus-live-gate-20261022
+        run: ../../.venv-data/bin/python -m unittest -v test_live_gate.py test_phase_cache.py
