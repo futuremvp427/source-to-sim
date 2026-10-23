@@ -1,0 +1,44 @@
+{
+  "baseline_code_commit": "0f2793749ce3bc069476f7e2ad80b18c07bf2384",
+  "two_new_regressions_failed_on_original_core": true,
+  "candidate_core_sha256": "e59f904a5cdd365fbfc133077aa146d6e07e668d82648361228f74b3a5d13815",
+  "groups": [
+    {
+      "group": "frozen",
+      "exit_code": 0,
+      "tests": 30,
+      "log_bytes": 4402,
+      "log_sha256": "66d965cc3a1a0da6ffe135666e6a2de753746c5c3f2f1dbf632ea0878d70f356"
+    },
+    {
+      "group": "reliability",
+      "exit_code": 0,
+      "tests": 122,
+      "log_bytes": 16669,
+      "log_sha256": "0f829cfc91cb13fbd77f4bd2612cc21f50c8afa3568145dc75ee745c87f0c9a3"
+    },
+    {
+      "group": "readiness",
+      "exit_code": 0,
+      "tests": 28,
+      "log_bytes": 3830,
+      "log_sha256": "0c7d7dacd3ffca616166ac845c69af9d7e08ffd30d9f48d2bc80588212d53dfb"
+    },
+    {
+      "group": "integration",
+      "exit_code": 0,
+      "tests": 33,
+      "log_bytes": 5219,
+      "log_sha256": "915bd206f97b46faca20508c1e6c64f150108c0d7b0ad97141de18ff30409d2b"
+    },
+    {
+      "group": "live_cache",
+      "exit_code": 0,
+      "tests": 27,
+      "log_bytes": 3753,
+      "log_sha256": "66c29f4e99d73fe3f62136394bb5d0abaa3f5851ad2915fe108a153ef989b36f"
+    }
+  ],
+  "total_passed": 240,
+  "fixtures_are_not_live_qualification_or_profitability": true
+}

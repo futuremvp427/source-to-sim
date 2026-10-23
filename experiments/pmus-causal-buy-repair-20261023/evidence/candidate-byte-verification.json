@@ -1,0 +1,350 @@
+[
+  {
+    "path": ".github/workflows/pmus-four-wallet-unified-20261022.yml",
+    "git_sha1": "3d5a935d06b4d98ffafc2b2b274238e7f5c8e0e5",
+    "bytes": 12501,
+    "sha256": "dd402d502d753885731eaf05b4b742301564ebfe10b53e3ad46ead2f1a9c4ed6"
+  },
+  {
+    "path": ".github/workflows/pmus-four-wallet-unified-segment-20261022.yml",
+    "git_sha1": "653ab022193599b60c9e7a681ef33f9b73ddd23a",
+    "bytes": 2767,
+    "sha256": "07cb279edacf6178ffa5cc1e55d583163ed5a668b82673f29e4b2f8fda5f2a7f"
+  },
+  {
+    "path": ".github/workflows/pmus-live-gate-20261022.yml",
+    "git_sha1": "0922c0c1d3ccfdc6a45f167512ce052c59c8b18c",
+    "bytes": 3164,
+    "sha256": "d47e3eab83e85a766295bd9b3750c92e80b055ad6f20595d03262c99316a0f18"
+  },
+  {
+    "path": "AGENTS.md",
+    "git_sha1": "36eb109884244365c74c416af1644fcdb9bcc9a3",
+    "bytes": 480,
+    "sha256": "4e96b38f10a0bbf0f105f51e6d2c39a889baec12b3386ae3facec4f076714d60"
+  },
+  {
+    "path": "experiments/pmus-causal-buy-repair-20261023/README.md",
+    "git_sha1": "a7904d5ac67922a445989827e72195718f6a81d3",
+    "bytes": 2984,
+    "sha256": "fe8e5f8ca5d93b446959d4036ffcb8e5ddc668c11281250c993ace7862783199"
+  },
+  {
+    "path": "experiments/pmus-causal-buy-repair-20261023/lifecycle_fixture.py",
+    "git_sha1": "7a4b0889d16cc24f0fedc1a095c35e67addc3857",
+    "bytes": 10259,
+    "sha256": "80ea0cb1ea23d50d7c11692e5337f80790cc3ab78dd7ea1ce3089b622c9abf60"
+  },
+  {
+    "path": "experiments/pmus-causal-buy-repair-20261023/verify_fixture.py",
+    "git_sha1": "47252c42e74424d4ab59340f5a4ba0b3f5e9ccd2",
+    "bytes": 3317,
+    "sha256": "68d5782220b6dbc58a0eae711645e0899f241721a56770894a93d5380051378d"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/ALIGNMENT_REPAIR.md",
+    "git_sha1": "45f9eca40f0363a188372b1e66d5f31908331c1a",
+    "bytes": 2575,
+    "sha256": "5840c7868d3a41190ce26b74fd7b442efb0d962b21eab5a07ff30beda70a2fe7"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/README.md",
+    "git_sha1": "9ca2483eb01d29d81ee543d23e6f14c8933b405f",
+    "bytes": 12361,
+    "sha256": "46f78b0631dde77994e78dc906d6c7d44a70be31fc14ed2f915462520d488981"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/RELIABILITY_REPAIR.md",
+    "git_sha1": "fbf664fc69b8eb58882ea6f023aee8ea1e5f0d6b",
+    "bytes": 7255,
+    "sha256": "82a696da250510a23f5f8fac1a9932e3effd8b27fc0f8ada874f1dd7316cfd02"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/RESTART_REPAIR.md",
+    "git_sha1": "b80d1af2f4272c8e9b6c01f680aa4feb6ab4d1a3",
+    "bytes": 5537,
+    "sha256": "89f4d3e0f734abfde783643bbdf131d2c92b66487ee67edbd6e3bc04ee262df9"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/VALIDATION.md",
+    "git_sha1": "c93096b3fac4121a13a5f52cad4ef4597cd965be",
+    "bytes": 6902,
+    "sha256": "c99e414fac3c1885673cf454e5732e774eb5b2ad2cca80cd28e82ebc7af9bcec"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/durable.py",
+    "git_sha1": "a30fbb489c28b88cf72ba5ac8c9e2002e31ac3f7",
+    "bytes": 11351,
+    "sha256": "bf993c816855a797ae9cc951288d1f7ac4640f487b4fe0124ed88f993ba148da"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/probe.py",
+    "git_sha1": "9e724a28c840e12b56cb1ddfa97ed039c8be8c48",
+    "bytes": 26143,
+    "sha256": "75fb1a75b84b03bb110b927626ebb236827b65b56951d7d209ade07df479436e"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/publication.py",
+    "git_sha1": "2e03cb14ab680610c13a1ab1231f2da3988e0eb7",
+    "bytes": 14607,
+    "sha256": "37451195c4b7318b231180e582c9ad897fafa08a35e36d5f618df7328d167165"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/publication_smoke.py",
+    "git_sha1": "609d620a86d01cd3e8b2b4a922fbecee8e575782",
+    "bytes": 3170,
+    "sha256": "51be3171ffdb97b4cb52254d5412f980201052097c8f7731c269d470c7eb615a"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/quality.py",
+    "git_sha1": "b723cf9bd142622611c6ee6de32370876b96044a",
+    "bytes": 11855,
+    "sha256": "7a0ea4ea55bc6bf546793434ec214dbf97e00241cf0cb3060528aaa52c1fddbe"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/recover_backup.py",
+    "git_sha1": "ae19c83606ce0cb4bf85180663b614b7f9c31503",
+    "bytes": 2400,
+    "sha256": "3bd8b418436af2f05a521aead3c704f787845c3b46187faa47fbe10bdffcec80"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/reliability_runner.py",
+    "git_sha1": "76e24f8c2bacc5f799398aeff113b2cd984da0bf",
+    "bytes": 22820,
+    "sha256": "d3aad26d2aa67022339b8de2756355eaf3547e8650035fd1858d42ec9dde1b8a"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/requirements-stream.txt",
+    "git_sha1": "8858789de448c542bb66e777143a025722c80de4",
+    "bytes": 45,
+    "sha256": "cd69cfe108a30e947290b525e65b8215956f0531135d89fd91fabe5f070d4f23"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/stream_smoke.py",
+    "git_sha1": "a5a79d9ca2be821c5a0de4be45b7b719e88d1f89",
+    "bytes": 22375,
+    "sha256": "feae329852d0448001dedbf2034c2dc26859abe01c12eb280fd414ff5ad90b66"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/test_quality.py",
+    "git_sha1": "b14fec895be32dd51cf02b4e7ac0e364bf25501e",
+    "bytes": 25638,
+    "sha256": "2bde883fb19611a0a346379d224cf498998f8f2faa266ac0aa73575d52bd61f7"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/test_reliability.py",
+    "git_sha1": "2acac1bb0ed3e9f716dbe3d34aec294702759393",
+    "bytes": 20756,
+    "sha256": "688c852767339a8bf0b5096f3ffd5d70c8e240f30151d1dba9f179721efdb5d2"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/test_restart.py",
+    "git_sha1": "181691804921f5b4f9a50509be3ee26110dfecfc",
+    "bytes": 9153,
+    "sha256": "7870c185851c8dec26ccc427c06e820934cea9408f73bbc73a158eaf1f01f0d5"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/test_stream_smoke.py",
+    "git_sha1": "dc7d5c638ba45a0c124318361b22ecb2c3ac3290",
+    "bytes": 14642,
+    "sha256": "e101f8335f7f747fa7fd78e4080109de3639ba49485c551a2ad0c7a63d82c40b"
+  },
+  {
+    "path": "experiments/pmus-data-reliability-20261018/watchlist.example.json",
+    "git_sha1": "2ff71a7efdd2c5d71cfbdc49fcd30f1bc869029c",
+    "bytes": 239,
+    "sha256": "fb6a0f36ad53866e4e275abd6fa395631f1db5b26521143bdc1f46adda033866"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-20261018/README.md",
+    "git_sha1": "a73e02f4137a8753ab7e3d07e7fa6d712daeecdd",
+    "bytes": 5477,
+    "sha256": "2e53bdd584eef2790c100616978fe3aa697db3caf0d87aabc05459f38aeca403"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-20261018/additional_mapping_fixtures.json",
+    "git_sha1": "f375222fa3b0afd1af4388a631cfd1e1a3b01440",
+    "bytes": 19592,
+    "sha256": "bd46f264fae3ef9715028cc58be304b1e48dfb11a06bfcccdd08a3e31153686c"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-20261018/collector.py",
+    "git_sha1": "4a2cf62b30b66d51618a492d1b8258886559c5d8",
+    "bytes": 35500,
+    "sha256": "4e62811d899825be5a3e9c8f6baf4151b640c3511cd8d85eae884afb12988c6d"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-20261018/mapping_fixtures.json",
+    "git_sha1": "7e55af1d17e84f67da7ebbb0cb7819bb8e8b20c6",
+    "bytes": 27583,
+    "sha256": "aa4ed5114cc31940ce2cf58e67a549e9372c2f782efa2b59f55196e3576d09a4"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-20261018/model.py",
+    "git_sha1": "bbb94f5f9ac6f826660cd35eafa135eb115e5cfa",
+    "bytes": 15105,
+    "sha256": "d1a96f67362ea09c14b9a585661a4528225cbb9a404419426c8081e664b7a257"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-20261018/persistence.py",
+    "git_sha1": "eab35605881f16fc1c65695d045d35d3b2a2b5b9",
+    "bytes": 10171,
+    "sha256": "624fb96633ef69d79d7966c6be8c3442b6bc4f94023e5edb387ad077371bfa7a"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-20261018/protocol.json",
+    "git_sha1": "11b5e7bb62b33a86a5eef9b12c9d246db1db81a8",
+    "bytes": 6087,
+    "sha256": "1be659edf8286da821eacd314f81fee3c46f8a5ff52a16c4bb5d56cfb02f108f"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-20261018/readiness.py",
+    "git_sha1": "120282ffb5ba78e6b0303a5ac5036d40541233e9",
+    "bytes": 3110,
+    "sha256": "b8c93d2699f4a4df0a04d6abd6cf71ba90523259e4d70e5e2f652889992f2878"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-20261018/selection.json",
+    "git_sha1": "87cbb3f3b6cf014ca475d51b3d381fcaf688c506",
+    "bytes": 1475,
+    "sha256": "b7c2bd77dd24c9244e0ca437b3a0f2c799af0ec0d356501942fec0d1fd9dc007"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-20261018/test_four_wallet.py",
+    "git_sha1": "7f9642dc9a4500beb701c5fcdcd5147679cc23e7",
+    "bytes": 4447,
+    "sha256": "6854548867009448ed21d854fc8540df795a46b87e1ef0bd5cfadc93b1515655"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-20261018/test_study.py",
+    "git_sha1": "1ceedaf8195335c12200f19699883e917ca9c2bb",
+    "bytes": 15056,
+    "sha256": "bd0c7708a688b2fd470d99345ce8a7c1b6f46cce5af63be0ecf5b5e5270551c3"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-20261018/verify_checkpoints.py",
+    "git_sha1": "5c2f31421691df52353dab32d492adce9e7bfa81",
+    "bytes": 2085,
+    "sha256": "4229202bad521e76758d897852ffa4e15ca4e9bed734c0b2ce9802585bc4be77"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-unified-20261022/README.md",
+    "git_sha1": "e59024b3a319e5307a5c8fcd0dd4e0277e5a8912",
+    "bytes": 7084,
+    "sha256": "4b114f8d0ebd656450ed3bfa676d5b499c2ecdbabe1ab62686426e59f83919fa"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-unified-20261022/core.py",
+    "git_sha1": "e3c10e371f061623335ea872bba9c3241a37b7ab",
+    "bytes": 33030,
+    "sha256": "e59f904a5cdd365fbfc133077aa146d6e07e668d82648361228f74b3a5d13815"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-unified-20261022/launch.json",
+    "git_sha1": "82ad0a30308dca13687a9af8fa3b57ce4157fc67",
+    "bytes": 163,
+    "sha256": "da54849c25edd6b8da1038fa45fb581b4b033c6d1ff4cff9a662683bb7d10358"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-unified-20261022/protocol.json",
+    "git_sha1": "91ba926f6c560ef92dc9aa0de38b9aedcc6aefb9",
+    "bytes": 6884,
+    "sha256": "f66cb42c7006238fb4155ed455dda8a18007116f401fd6cfbeca671199cb1adf"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-unified-20261022/run.py",
+    "git_sha1": "80f00b62e46f04afbe74700fe64b3ce52270d308",
+    "bytes": 21848,
+    "sha256": "e767b93ef54494f01b14c1957815e21885a5d160270734aa0ed0ef5a79370a93"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-unified-20261022/test_unified.py",
+    "git_sha1": "984a7b773238039551f620429269e672539fd694",
+    "bytes": 19939,
+    "sha256": "c3fbcb84468eb5659a3cd6debc43b011e7d97199bfc3087be0a38914a11aaa12"
+  },
+  {
+    "path": "experiments/pmus-four-wallet-unified-20261022/verify.py",
+    "git_sha1": "07b5ddcf93901fa847704b1d3067aad03b65cf42",
+    "bytes": 8779,
+    "sha256": "5a098212a4ff40aa4c760fdba6e935a7356c7adb5e533ab7fb01e79f81de5b09"
+  },
+  {
+    "path": "experiments/pmus-live-gate-20261022/CACHE_REPAIR_20261023.md",
+    "git_sha1": "876fc41730f3d8f586382552fcac22edfffabb69",
+    "bytes": 3852,
+    "sha256": "5a49c0a8a92371fda91d519e149d7cbe6e0b9e4c99d040fe222c7d5cd28810da"
+  },
+  {
+    "path": "experiments/pmus-live-gate-20261022/README.md",
+    "git_sha1": "f5ba49a23922c413c4c5645e710438f0a263cd38",
+    "bytes": 3760,
+    "sha256": "53e3763aba55ab41131acd470b5a963bb9b60064763074c94ef254489afd915a"
+  },
+  {
+    "path": "experiments/pmus-live-gate-20261022/diagnose_phase_cache.py",
+    "git_sha1": "c21e32be79124a25aabe72d816cc5e0d4ce6c2f4",
+    "bytes": 3281,
+    "sha256": "4c2564f8cdfacae83e376e4c205bae32a5c1488f822b59a91e79d162321011ba"
+  },
+  {
+    "path": "experiments/pmus-live-gate-20261022/launch.json",
+    "git_sha1": "913c6ca58450366fe23f862af1d067cffdc12883",
+    "bytes": 77,
+    "sha256": "bf249ecf053554138a8177e78f645dfe54fa320b29cd540fca0070555e7c3aa1"
+  },
+  {
+    "path": "experiments/pmus-live-gate-20261022/live_gate.py",
+    "git_sha1": "e2f1c60c35007efc5814f1fbb98902792d337eb9",
+    "bytes": 21759,
+    "sha256": "42c034a1f0e599ae8b7dfad9b021336a9c82cce6725dc709ba7bb126973f9e6b"
+  },
+  {
+    "path": "experiments/pmus-live-gate-20261022/test_live_gate.py",
+    "git_sha1": "62af2c20cc0aee338cf55ded570b9f0a3a21a3f3",
+    "bytes": 7240,
+    "sha256": "302b061ab8d5c81de802b65cf59db7c9f64a2da4b193459e34dd3c7446f5d19c"
+  },
+  {
+    "path": "experiments/pmus-live-gate-20261022/test_phase_cache.py",
+    "git_sha1": "33af4d0629f04467b0d4ea645d161d845efb0b52",
+    "bytes": 6425,
+    "sha256": "e4a4938fdc5207e1592a56e44a642fe9d7fc7d39a0931edbaa8832559004f7ed"
+  },
+  {
+    "path": "experiments/pmus-live-gate-20261022/watch.json",
+    "git_sha1": "5a24df7257b7f069c8df364960c0638b6a9d2d1a",
+    "bytes": 778,
+    "sha256": "ff0b27d5e80bbeb7a3b0449634a729e3322a231c1c9efffffdd9355cfdd459bc"
+  },
+  {
+    "path": "experiments/pmus-paper-readiness-20261022/README.md",
+    "git_sha1": "e17313dd296d3a3d7e4edf7fea4787a315f2b467",
+    "bytes": 4184,
+    "sha256": "f2c83f554f53b8a0f54c55aa9a83dc0afdc360f17fcf3b44f84e15423b07ef5b"
+  },
+  {
+    "path": "experiments/pmus-paper-readiness-20261022/initial-audit.json",
+    "git_sha1": "aef5829c9cce4cebde66dbf295e013f24d37355e",
+    "bytes": 2287,
+    "sha256": "4f742e3ccc5037b58104c39d068c15724eac088fe069de22db6d0d9481db4ec2"
+  },
+  {
+    "path": "experiments/pmus-paper-readiness-20261022/readiness.py",
+    "git_sha1": "0f71ec1e61288c994686e3854a4b9100960b6ad5",
+    "bytes": 6766,
+    "sha256": "73a33b8708f90c8eb2be2b993d5156b634f19922dcd1ca653474806844b083ea"
+  },
+  {
+    "path": "experiments/pmus-paper-readiness-20261022/requirements.json",
+    "git_sha1": "99ee8eb022a2d770873c6757ae67dbcc3e218765",
+    "bytes": 2654,
+    "sha256": "74432bb54c13637cc2bcc3ec3096b910ac0c5b4e3f12aaccaf9db44a4d8166d7"
+  },
+  {
+    "path": "experiments/pmus-paper-readiness-20261022/test_readiness.py",
+    "git_sha1": "05cfca9cead2d1f7dfcf7bc159cb383a740fe8ab",
+    "bytes": 10768,
+    "sha256": "9aedeba4627eb5a3581be7b85fc935a56da5b7128030b79c6e99b08b0a905e8c"
+  }
+]

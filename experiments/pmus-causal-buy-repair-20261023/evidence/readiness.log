@@ -1,0 +1,33 @@
+test_29_distinct_events_even_if_positive_are_insufficient (test_readiness.FrozenEvaluatorSmokeTests.test_29_distinct_events_even_if_positive_are_insufficient) ... ok
+test_complete_positive_fixture_is_screen_only (test_readiness.FrozenEvaluatorSmokeTests.test_complete_positive_fixture_is_screen_only) ... ok
+test_cost_stress_can_fail_a_base_positive_fixture (test_readiness.FrozenEvaluatorSmokeTests.test_cost_stress_can_fail_a_base_positive_fixture) ... ok
+test_drawdown_over_200_fails (test_readiness.FrozenEvaluatorSmokeTests.test_drawdown_over_200_fails) ... ok
+test_missing_marks_are_not_flat_profit (test_readiness.FrozenEvaluatorSmokeTests.test_missing_marks_are_not_flat_profit) ... ok
+test_missing_planned_source_time_cannot_be_erased (test_readiness.FrozenEvaluatorSmokeTests.test_missing_planned_source_time_cannot_be_erased) ... ok
+test_nonterminal_green_results_are_not_a_final_screen (test_readiness.FrozenEvaluatorSmokeTests.test_nonterminal_green_results_are_not_a_final_screen) ... ok
+test_open_inventory_takes_precedence (test_readiness.FrozenEvaluatorSmokeTests.test_open_inventory_takes_precedence) ... ok
+test_positive_mean_with_uncertain_event_lower_bound_is_uncertain (test_readiness.FrozenEvaluatorSmokeTests.test_positive_mean_with_uncertain_event_lower_bound_is_uncertain) ... ok
+test_85_of_90_is_not_95_percent (test_readiness.ReadinessTests.test_85_of_90_is_not_95_percent) ... ok
+test_boolean_cannot_impersonate_sample_count (test_readiness.ReadinessTests.test_boolean_cannot_impersonate_sample_count) ... ok
+test_complete_schema_fixture_exercises_ready_branch_only (test_readiness.ReadinessTests.test_complete_schema_fixture_exercises_ready_branch_only) ... ok
+test_different_collector_code_invalidates_proofs (test_readiness.ReadinessTests.test_different_collector_code_invalidates_proofs) ... ok
+test_each_source_has_its_own_denominator (test_readiness.ReadinessTests.test_each_source_has_its_own_denominator) ... ok
+test_empty_packet_fails_closed (test_readiness.ReadinessTests.test_empty_packet_fails_closed) ... ok
+test_every_required_check_is_individually_required (test_readiness.ReadinessTests.test_every_required_check_is_individually_required) ... ok
+test_horizon_must_not_silently_change (test_readiness.ReadinessTests.test_horizon_must_not_silently_change) ... ok
+test_missing_final_column_blocks_launch (test_readiness.ReadinessTests.test_missing_final_column_blocks_launch) ... ok
+test_missing_forecast_is_not_zero_risk_or_a_guarantee (test_readiness.ReadinessTests.test_missing_forecast_is_not_zero_risk_or_a_guarantee) ... ok
+test_new_protocol_must_be_frozen (test_readiness.ReadinessTests.test_new_protocol_must_be_frozen) ... ok
+test_original_small_sample_does_not_qualify_new_design (test_readiness.ReadinessTests.test_original_small_sample_does_not_qualify_new_design) ... ok
+test_other_or_finished_game_cannot_replace_frozen_live_game (test_readiness.ReadinessTests.test_other_or_finished_game_cannot_replace_frozen_live_game) ... ok
+test_pooling_four_wallets_does_not_meet_each_wallet_minimum (test_readiness.ReadinessTests.test_pooling_four_wallets_does_not_meet_each_wallet_minimum) ... ok
+test_preflight_is_not_a_live_gate (test_readiness.ReadinessTests.test_preflight_is_not_a_live_gate) ... ok
+test_proof_cannot_escape_evidence_root (test_readiness.ReadinessTests.test_proof_cannot_escape_evidence_root) ... ok
+test_reference_wallets_cannot_change (test_readiness.ReadinessTests.test_reference_wallets_cannot_change) ... ok
+test_tampered_or_missing_proof_fails (test_readiness.ReadinessTests.test_tampered_or_missing_proof_fails) ... ok
+test_test_fixtures_must_not_claim_live_readiness (test_readiness.ReadinessTests.test_test_fixtures_must_not_claim_live_readiness) ... ok
+
+----------------------------------------------------------------------
+Ran 28 tests in 0.397s
+
+OK

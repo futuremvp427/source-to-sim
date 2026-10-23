@@ -1,0 +1,28 @@
+test_earlier_sell_cannot_start_observation_delay_for_later_buy (test_unified.IntegratedTests.test_earlier_sell_cannot_start_observation_delay_for_later_buy) ... FAIL
+test_same_timestamp_buy_evidence_matches_the_price_gated_execution (test_unified.IntegratedTests.test_same_timestamp_buy_evidence_matches_the_price_gated_execution) ... FAIL
+
+======================================================================
+FAIL: test_earlier_sell_cannot_start_observation_delay_for_later_buy (test_unified.IntegratedTests.test_earlier_sell_cannot_start_observation_delay_for_later_buy)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/pmus-workaround-20261023/baseline/experiments/pmus-four-wallet-unified-20261022/test_unified.py", line 160, in test_earlier_sell_cannot_start_observation_delay_for_later_buy
+    self.assertFalse(account['ledger'])
+AssertionError: [{'at': 1792351540.0, 'condition': '0xa70da744210533416edb26fb4ee19ea7a7acdaef6daabb5077c4dec89494b546', 'us_slug': 'aec-nfl-lac-kc-2026-10-18', 'side': 0, 'action': 'BUY', 'cash_delta': '-6.2700', 'quantity': '10.00', 'gross': '6.1000', 'fee': '0.17', 'average_price': '0.61', 'levels': [['0.61', '10.00']], 'book_at': 1792351540.0, 'source_trade_at': 1792351530.0, 'signal_first_seen_at': 1792351500.0, 'source_to_paper_seconds': 10.0, 'game_phase_by_scheduled_time': 'PREGAME', 'quote_evidence': {'seq': 25, 'hash': 'a3c17963e1896452b078e10cb6ba8a686ebc1ce5375624f87316648f3c3919d0'}, 'source_signal_rows_sha256': '29ffe391bf9537d63e5bf25fda3f1df4659282e9c7796df08ba2b4ffb8f3c28c', 'source_execution': {'proxy_wallet': '0x27f738fe203827445690339104aae35b20bc44b0', 'timestamp': 1792351530.0, 'side': 'BUY', 'condition_id': '0xa70da744210533416edb26fb4ee19ea7a7acdaef6daabb5077c4dec89494b546', 'token_id': '25975613657668487250673927756557799100593582472155421789800705293576427824049', 'slug': 'nfl-lac-kc-2026-10-18', 'event_slug': 'nfl-lac-kc-2026-10-18', 'transaction_hash': 'fixture-later-buy', 'size': '100', 'price': '.60'}, 'source_execution_evidence': {'seq': 18, 'hash': '7743f45520192b17c3f6be4d1b8a9aea989ace8a26b15ea442cc55fa9e159991'}}] is not false
+
+======================================================================
+FAIL: test_same_timestamp_buy_evidence_matches_the_price_gated_execution (test_unified.IntegratedTests.test_same_timestamp_buy_evidence_matches_the_price_gated_execution)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/pmus-workaround-20261023/baseline/experiments/pmus-four-wallet-unified-20261022/test_unified.py", line 171, in test_same_timestamp_buy_evidence_matches_the_price_gated_execution
+    self.assertEqual(account['ledger'][0]['source_execution']['price'], '.60')
+AssertionError: '.50' != '.60'
+- .50
+?  ^
++ .60
+?  ^
+
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.091s
+
+FAILED (failures=2)
