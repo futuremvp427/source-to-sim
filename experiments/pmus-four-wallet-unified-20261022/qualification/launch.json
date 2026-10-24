@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "mode": "collect",
+  "request_marker": "verified-expanded-paper-launch-20261024",
+  "qualification_run_id": "39986646854",
+  "requirements_sha256": "4b8fdb677a514c14e838f0bd94a49d9823cd1d6c0d976d54c828f9d59d4954ee",
+  "prepared_collector_code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3",
+  "runtime_bundle_sha256": "5db3001c917f1115b6e038f10943bc75f642f0197dc2c72fd0dd52bde8e39972"
+}

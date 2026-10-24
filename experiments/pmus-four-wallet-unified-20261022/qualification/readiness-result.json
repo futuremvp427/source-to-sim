@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "blockers": [],
+  "collector_code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3",
+  "future_profit_or_sample_size_guaranteed": false,
+  "launch_ready": true,
+  "private_account_requests": 0,
+  "profitability_evaluated": false,
+  "real_orders": 0,
+  "requirements_sha256": "4b8fdb677a514c14e838f0bd94a49d9823cd1d6c0d976d54c828f9d59d4954ee",
+  "stage": "READY_FOR_PAPER_ONLY",
+  "checker_exit_code": 0,
+  "independently_executed_at_utc": "2026-10-24T00:54:00Z"
+}

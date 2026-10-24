@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "collector_code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3",
+  "code_bundle_sha256": "5db3001c917f1115b6e038f10943bc75f642f0197dc2c72fd0dd52bde8e39972",
+  "paper_protocol_sha256": "1a56537a106d64f7f83e5aa425851712060e92f607714d18b7c9366bd8c8f36d",
+  "reference_protocol_sha256": "1be659edf8286da821eacd314f81fee3c46f8a5ff52a16c4bb5d56cfb02f108f",
+  "requirements_sha256": "4b8fdb677a514c14e838f0bd94a49d9823cd1d6c0d976d54c828f9d59d4954ee",
+  "entry_collection_hours": 48,
+  "maximum_settlement_drain_hours": 48,
+  "wallets": {
+    "ic4cream": "0x27f738fe203827445690339104aae35b20bc44b0",
+    "alwaysfade": "0xe5b70fd855af9258d9463992e4f1ed7987905ee3",
+    "monkeymashingkeyboard": "0x684baa57c338c2549aec0aa3f034f695d72a8409",
+    "para-Vision": "0x676c1bb692c76b57b06f1b93817515acfa5ce139",
+    "omnibus-076daa": "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c",
+    "38791873984189": "0x0d2d845a6ff64e31e04a70afce8a573940767ff5",
+    "mooseborzoii": "0x1f3a646ce5cbe2c70270e7a46161d89b7c7b895d",
+    "HomeRunHazard": "0x5268527977f700f9bf9b6d5cd843859e4e70135d",
+    "VeryLucky888": "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294",
+    "6512395314597884": "0x796fc6fda8f8e03c03e2a2d012155989960300f6",
+    "Flaznorp": "0x821dab0565ebf5b327f51db06223fdcfe01acf16",
+    "nigiri99": "0xdc41c39b95453c943174f369926018f6963bdd7e"
+  },
+  "checks": {
+    "completed_live_gate_independently_verified": {"status": "passed", "code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3", "proof": {"file": "proof/live-gate-proof.json", "sha256": "bed2b103ced9bf0acf74300dfe999a6f770c111d73df1ab5b5306e9ac7be5e20", "bytes": 2043, "independently_verified": true}},
+    "fresh_complete_source_polling_and_causal_signals": {"status": "passed", "code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3", "proof": {"file": "proof/readiness-proof.json", "sha256": "2df08aac9e03b1780e58a438634566d1e5bc667f89ee9f877381bf727c6530f3", "bytes": 3286, "independently_verified": true}},
+    "current_quote_depth_and_execution_replay": {"status": "passed", "code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3", "proof": {"file": "proof/readiness-proof.json", "sha256": "2df08aac9e03b1780e58a438634566d1e5bc667f89ee9f877381bf727c6530f3", "bytes": 3286, "independently_verified": true}},
+    "cash_inventory_fees_stress_reductions_and_flips": {"status": "passed", "code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3", "proof": {"file": "proof/readiness-proof.json", "sha256": "2df08aac9e03b1780e58a438634566d1e5bc667f89ee9f877381bf727c6530f3", "bytes": 3286, "independently_verified": true}},
+    "same_event_team_us_rules_and_settlement_orientation": {"status": "passed", "code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3", "proof": {"file": "proof/readiness-proof.json", "sha256": "2df08aac9e03b1780e58a438634566d1e5bc667f89ee9f877381bf727c6530f3", "bytes": 3286, "independently_verified": true}},
+    "planned_source_and_held_inventory_mark_denominators": {"status": "passed", "code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3", "proof": {"file": "proof/readiness-proof.json", "sha256": "2df08aac9e03b1780e58a438634566d1e5bc667f89ee9f877381bf727c6530f3", "bytes": 3286, "independently_verified": true}},
+    "crash_resume_idempotent_publication_and_remote_restore": {"status": "passed", "code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3", "proof": {"file": "proof/readiness-proof.json", "sha256": "2df08aac9e03b1780e58a438634566d1e5bc667f89ee9f877381bf727c6530f3", "bytes": 3286, "independently_verified": true}},
+    "end_to_end_final_evaluator_and_status_precedence": {"status": "passed", "code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3", "proof": {"file": "proof/readiness-proof.json", "sha256": "2df08aac9e03b1780e58a438634566d1e5bc667f89ee9f877381bf727c6530f3", "bytes": 3286, "independently_verified": true}},
+    "workflow_enforces_this_gate_and_preserves_old_studies": {"status": "passed", "code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3", "proof": {"file": "proof/readiness-proof.json", "sha256": "2df08aac9e03b1780e58a438634566d1e5bc667f89ee9f877381bf727c6530f3", "bytes": 3286, "independently_verified": true}},
+    "bounded_drain_and_unresolved_holdings_preservation": {"status": "passed", "code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3", "proof": {"file": "proof/readiness-proof.json", "sha256": "2df08aac9e03b1780e58a438634566d1e5bc667f89ee9f877381bf727c6530f3", "bytes": 3286, "independently_verified": true}},
+    "coverage_failure_and_sample_accrual_alerts": {"status": "passed", "code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3", "proof": {"file": "proof/readiness-proof.json", "sha256": "2df08aac9e03b1780e58a438634566d1e5bc667f89ee9f877381bf727c6530f3", "bytes": 3286, "independently_verified": true}},
+    "bounded_public_runner_storage_and_published_restoration": {"status": "passed", "code_sha": "293ae7cb73625081b55290b7cef734f08faab7e3", "proof": {"file": "proof/readiness-proof.json", "sha256": "2df08aac9e03b1780e58a438634566d1e5bc667f89ee9f877381bf727c6530f3", "bytes": 3286, "independently_verified": true}}
+  },
+  "final_columns_demonstrated": ["net_after_modeled_fees", "stress_net", "completed_distinct_us_markets", "contracts_bought_sold_settled", "open_contracts_and_unresolved_markets", "drawdown_and_complete_mark_coverage", "held_inventory_mark_coverage", "source_coverage_elapsed_and_full_planned", "latency_and_fill_skip_counts", "event_cluster_bootstrap_lower_percentile", "exact_run_code_protocol_and_actual_interval"],
+  "proofs_are_test_fixtures": false,
+  "live_gate": {
+    "run_id": "39986646854",
+    "live_gate_passed": true,
+    "completed_full_window": true,
+    "planned_ticks_per_market": 90,
+    "actual_elapsed_seconds": 1800.0833780765533,
+    "markets": {
+      "aec-nba-atl-cha-2026-10-23": {"valid_live_quote_ticks": 90, "matched_distinct_book_timestamps": 60},
+      "aec-nba-dal-ind-2026-10-23": {"valid_live_quote_ticks": 90, "matched_distinct_book_timestamps": 60}
+    },
+    "source_valid_ticks": {
+      "0x27f738fe203827445690339104aae35b20bc44b0": 90, "0xe5b70fd855af9258d9463992e4f1ed7987905ee3": 90, "0x684baa57c338c2549aec0aa3f034f695d72a8409": 90, "0x676c1bb692c76b57b06f1b93817515acfa5ce139": 90,
+      "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c": 90, "0x0d2d845a6ff64e31e04a70afce8a573940767ff5": 90, "0x1f3a646ce5cbe2c70270e7a46161d89b7c7b895d": 90, "0x5268527977f700f9bf9b6d5cd843859e4e70135d": 90,
+      "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294": 90, "0x796fc6fda8f8e03c03e2a2d012155989960300f6": 90, "0x821dab0565ebf5b327f51db06223fdcfe01acf16": 90, "0xdc41c39b95453c943174f369926018f6963bdd7e": 90
+    },
+    "proof": {"file": "proof/live-gate-proof.json", "sha256": "bed2b103ced9bf0acf74300dfe999a6f770c111d73df1ab5b5306e9ac7be5e20", "bytes": 2043, "independently_verified": true}
+  },
+  "sample_plan": {
+    "independently_reviewed": true,
+    "forecasts_are_not_guarantees": true,
+    "policy": "EXPLORATORY_HISTORY_REVIEW_NO_FUTURE_VOLUME_PROMISE",
+    "prospective_completed_market_counts_unknown": true,
+    "no_guaranteed_30_or_profit": true,
+    "historical_us_associations": {
+      "0x27f738fe203827445690339104aae35b20bc44b0": {"complete_history_reviewed": true, "distinct_us_associations": 10}, "0xe5b70fd855af9258d9463992e4f1ed7987905ee3": {"complete_history_reviewed": true, "distinct_us_associations": 8}, "0x684baa57c338c2549aec0aa3f034f695d72a8409": {"complete_history_reviewed": true, "distinct_us_associations": 8}, "0x676c1bb692c76b57b06f1b93817515acfa5ce139": {"complete_history_reviewed": true, "distinct_us_associations": 4},
+      "0x076daa87c4fe1a85402a9b6b8e0a866224388d4c": {"complete_history_reviewed": true, "distinct_us_associations": 32}, "0x0d2d845a6ff64e31e04a70afce8a573940767ff5": {"complete_history_reviewed": true, "distinct_us_associations": 98}, "0x1f3a646ce5cbe2c70270e7a46161d89b7c7b895d": {"complete_history_reviewed": true, "distinct_us_associations": 32}, "0x5268527977f700f9bf9b6d5cd843859e4e70135d": {"complete_history_reviewed": true, "distinct_us_associations": 43},
+      "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294": {"complete_history_reviewed": true, "distinct_us_associations": 58}, "0x796fc6fda8f8e03c03e2a2d012155989960300f6": {"complete_history_reviewed": true, "distinct_us_associations": 39}, "0x821dab0565ebf5b327f51db06223fdcfe01acf16": {"complete_history_reviewed": true, "distinct_us_associations": 32}, "0xdc41c39b95453c943174f369926018f6963bdd7e": {"complete_history_reviewed": true, "distinct_us_associations": 42}
+    },
+    "proof": {"file": "proof/sample-plan-proof.json", "sha256": "fcda913cd8836dd72b93e6ee6a204809a3120946ee0f4cae6a0179a2ccea5d21", "bytes": 2430, "independently_verified": true}
+  }
+}
