@@ -1,0 +1,31 @@
+name: Kalshi multi-coin data feasibility probe
+
+# Read-only: public unauthenticated GETs (plus one Hyperliquid info POST).
+# No secrets, no order endpoints. Runs only on this research branch.
+on:
+  push:
+    branches: [claude/admiring-cori-gs4nph]
+    paths:
+      - .github/workflows/kalshi-multicoin-feasibility-20261107.yml
+      - experiments/kalshi-multicoin-feasibility-20261107/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Probe public Kalshi + spot data availability
+        run: python3 experiments/kalshi-multicoin-feasibility-20261107/probe.py --out feasibility.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: feasibility
+          path: feasibility.json
+          retention-days: 7
