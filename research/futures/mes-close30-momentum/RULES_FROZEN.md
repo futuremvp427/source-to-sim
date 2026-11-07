@@ -79,3 +79,18 @@ C3/C4 and the 15:30-entry disclosure are reported but are not decision inputs.
 ## Benchmarks
 - No trade: $0.
 - Passive: always LONG 1 MES, 15:31 open → 15:59 open on every eligible session, C2 costs.
+
+## Clarification 1 (added 2026-11-07 after the data audit, BEFORE any signal or P&L was computed)
+Rule 6 as written is self-referential: a roll-day session would be ineligible as a reference, so every later session
+would also fail the same-contract test, cascading until the next roll. Clarification, which changes no parameter:
+- **Reference eligibility** = rules 1–5 (the session's own data is complete and valid).
+- **Trade eligibility** = rules 1–5 for today's session AND rule 6 (reference on the same contract, no RTH roll).
+So each roll excludes exactly one trade session (the first session on the new contract).
+Everything else is unchanged, including the decision rule, its INSUFFICIENT-DATA precedence and the full-period
+session denominator in criterion 5.
+
+## Roll points identified in the data audit (before results)
+Contract switches occur at 00:00 ET on expiry day: 2025-09-19, 2025-12-19, 2026-03-20, 2026-06-18, 2026-09-18.
+2026 switches are confirmed against IBKR per-contract files (day before: stitched = expiring contract, ≈50–69 pt from
+next; expiry day: stitched = next contract exactly). 2025 switches are inferred from same-pattern overnight jumps
+(+58.75, +52.75 pts) on expiry days. No per-contract 2025 file exists.
