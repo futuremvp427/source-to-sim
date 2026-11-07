@@ -112,10 +112,11 @@ def list_markets(path: str, series: str):
 def candle_quote(c, side):
     """Return (close_bid, close_ask) for YES from a candlestick, tolerant of schema."""
     blk = c.get(side) or {}
+    # Live candles use "close_dollars"; /historical candles use "close", which is
+    # ALSO a dollar string (e.g. "0.8800"), not integer cents.
     if blk.get("close_dollars") is not None:
         return num(blk["close_dollars"])
-    v = num(blk.get("close"))  # legacy integer cents
-    return v / 100 if v is not None else None
+    return num(blk.get("close"))
 
 
 def probe_candles(series: str, ticker: str, open_ts: int, close_ts: int, historical: bool):
@@ -222,7 +223,37 @@ def probe_series(coin: str, series: str):
                 "trades": probe_trades(m["ticker"], hist_flag),
             })
         r["samples"] = samples
+        r["spread_survey"] = spread_survey(series, merged)
     return r
+
+
+def spread_survey(series: str, merged, n: int = 24):
+    """Pooled minute-level YES spread and volume across n markets spread evenly over history."""
+    idx = sorted({round(i * (len(merged) - 1) / (n - 1)) for i in range(n)})
+    spreads, vols, per_month = [], [], {}
+    for i in idx:
+        src, m = merged[i]
+        o, c = parse_ts(m.get("open_time")), parse_ts(m.get("close_time"))
+        res = probe_candles(series, m["ticker"], o, c, src == "historical")
+        month = (m.get("close_time") or "")[:7]
+        v = num(m.get("volume_fp") or m.get("volume"))
+        if v is not None:
+            vols.append(v)
+        cs = res.get("n_candles") or 0
+        if res.get("status") != 200 or not cs:
+            continue
+        # re-fetching per-minute spreads would double calls; use the summary fields
+        if "median_spread" in res:
+            spreads.append(res["median_spread"])
+            per_month.setdefault(month, []).append(res["median_spread"])
+    out = {"markets_sampled": len(idx), "with_quotes": len(spreads)}
+    if spreads:
+        out["median_of_market_median_spread"] = statistics.median(spreads)
+        out["share_markets_median_spread_le_1c"] = round(sum(x <= 0.0101 for x in spreads) / len(spreads), 3)
+    if vols:
+        out["median_market_volume_contracts"] = statistics.median(vols)
+    out["median_spread_by_month"] = {k: statistics.median(v) for k, v in sorted(per_month.items())}
+    return out
 
 
 # ---------------- underlying spot data ----------------
