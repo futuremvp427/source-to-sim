@@ -322,3 +322,10 @@ orders = 0, source feed still null/inert, no cron/schedule/publish changes.
 Remaining blocker: a verified external Kalshi trader activity feed. Everything downstream
 of it — admission, dedupe, lifecycle, sizing, fee gating, paper positions, settlement P&L —
 now exists and is tested.
+
+## 2026-11-07 — Futures research: 15-min ORB MNQ 2026 OOS validation (separate from Sports Shadow)
+
+- Scope: one frozen-rule out-of-sample test; no app code touched. Files: `research/futures/orb15-mnq-2026-oos/`.
+- Rules frozen in commit `cfab0f6` before data was loaded; data = `kfccolonel1/BARS@b8f2d8ab` NQ 1-min (MNQ proxy).
+- Result: FAIL → NO BUILD. S2 conservative costs: P1 Jan–May +$2,059 (PF 1.16, CI spans 0, negative ex top-3); P2 Jun–Oct 8 −$7,588 (PF 0.55, gross also negative).
+- Publisher page and its risk-gate failures were not retrievable from the session network; they remain in force unreviewed.
