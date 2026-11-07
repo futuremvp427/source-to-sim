@@ -322,3 +322,10 @@ orders = 0, source feed still null/inert, no cron/schedule/publish changes.
 Remaining blocker: a verified external Kalshi trader activity feed. Everything downstream
 of it — admission, dedupe, lifecycle, sizing, fee gating, paper positions, settlement P&L —
 now exists and is tested.
+
+## 2026-11-07 — Kalshi multi-coin 15m data-feasibility screen (RESEARCH, NO BACKTEST RUN)
+
+- Branch `claude/admiring-cori-gs4nph`; details in `experiments/kalshi-multicoin-feasibility-20261107/SCREEN.md`.
+- Free public data verified (Actions run 42410771360, 627/627 HTTP 200): Kalshi settled markets plus 1-minute YES bid/ask candles plus trades for BTC, ETH, SOL, XRP, DOGE, BNB and HYPE from at least 2026-04-01, and for NEAR and ZEC from 2026-06-30. Binance.US 1-minute spot is complete for all nine coins. Coinbase has gaps for alts. Hyperliquid has no history.
+- Limits: no historical orderbook depth, so there is no capacity or queue model. Official settlement uses the CF Benchmarks RTI, which needs credentials; per-market `floor_strike` and `expiration_value` give free RTI anchors. Alt spreads were 2–13¢ from April to July and about 1¢ from August on, so the clean altcoin window is about 3 months.
+- No strategy is validated. Live execution is unchanged.
