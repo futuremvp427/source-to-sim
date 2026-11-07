@@ -329,3 +329,9 @@ now exists and is tested.
 - Rules frozen in commit `cfab0f6` before data was loaded; data = `kfccolonel1/BARS@b8f2d8ab` NQ 1-min (MNQ proxy).
 - Result: FAIL → NO BUILD. S2 conservative costs: P1 Jan–May +$2,059 (PF 1.16, CI spans 0, negative ex top-3); P2 Jun–Oct 8 −$7,588 (PF 0.55, gross also negative).
 - Publisher page and its risk-gate failures were not retrievable from the session network; they remain in force unreviewed.
+
+## 2026-11-07 — Futures research: MES closing-half-hour momentum (trial MES-CLOSE30-MOM-01)
+
+- Files: `research/futures/mes-close30-momentum/`. Rules frozen `c5fc1fb`; pre-results clarification `dc5d38c`. ORB15 MNQ trial preserved unchanged.
+- Frozen-rule verdict: INSUFFICIENT DATA (P1 coverage 86.6% < 90%; ES data starts 2025-06-20). Every performance criterion fails in both periods; P2 (sufficient data) fails, so the trial cannot pass → NO BUILD.
+- C2 ($9/trade hypothetical): P1 −$908.50 (129 trades, PF 0.67); P2 −$2,902.75 (191 trades, PF 0.45, CI of mean entirely < 0). P2 is negative even gross.
